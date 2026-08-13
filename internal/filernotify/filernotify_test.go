@@ -141,24 +141,64 @@ func TestAFilerThatIsAlsoTheWorkerIsNotMailedAndTheSkipIsReported(t *testing.T) 
 	}
 }
 
-// The coordinator already gets the refinery's MERGED mail, so a merge does not
-// earn it a second one — but a NON-merge close does, because nothing else
-// reports that at all.
-func TestTheCoordinatorIsSparedADuplicateOnMergeButNotOnSelfClose(t *testing.T) {
+// THE COORDINATOR IS TOLD ON THE MERGE ROUTE (mg-da12).
+//
+// A skip here spared it one, on the grounds that "the refinery already mails
+// the coordinator on every merge". The refinery mails a MERGE — branch, target,
+// merged SHA — and this mails a VERDICT, and no merge mail carries what the
+// worker concluded. The two were treated as substitutes, which made the
+// coordinator the single filer this never reached: measured on 2026-08-13, its
+// mailbox held zero COMPLETED notices while all three the fleet had gone to
+// non-coordinators.
+//
+// The assertion that matters is not that a mail arrives — it is that the mail
+// carries the half a merge notice cannot.
+func TestTheCoordinatorIsToldOnTheMergeRouteBecauseAMergeMailIsNotAVerdict(t *testing.T) {
 	rec := &recorder{}
-	n := New("mayor", rec.send, filing("mayor", "a mayor-filed item"), resultOf(""), knownSet("mayor"))
+	sidecar := `{"verdict":"pass","summary":"disposition of both branches established by content, not patch-id"}`
+	n := New("mayor", rec.send, filing("mayor", "a mayor-filed item"), resultOf(sidecar), knownSet("mayor"))
 
-	merge := n.Notify(Completion{Closed: true, ItemID: "mg-aaaa", Route: RouteMerge, Worker: "paaaa", MergedSHA: "1111111"})
-	if merge.Sent() {
-		t.Errorf("the refinery already mailed the coordinator about this merge; a second mail is noise: %+v", merge)
+	merge := n.Notify(Completion{Closed: true, ItemID: "mg-aaaa", Route: RouteMerge, Worker: "paaaa",
+		Branch: "polecat-paaaa", MergedSHA: "1111111"})
+	if !merge.Sent() {
+		t.Fatalf("the refinery's merge mail reports a MERGE and this reports a VERDICT; the coordinator is owed "+
+			"this one: %+v", merge)
 	}
-	if merge.Skipped == "" {
-		t.Errorf("the skip must state its reason: %+v", merge)
+	if merge.To != "mayor" {
+		t.Errorf("mail went to %q, want the coordinator that filed it", merge.To)
+	}
+	if merge.Redirected {
+		t.Errorf("the coordinator filed this item; standing in for itself is not a redirect: %+v", merge)
+	}
+	m := rec.last()
+	if !strings.Contains(m.body, "disposition of both branches") {
+		t.Errorf("the verdict is the whole reason this mail is not a duplicate of the refinery's:\n%s", m.body)
+	}
+	if !strings.Contains(m.subject, "COMPLETED") {
+		t.Errorf("subject must report the completion: %q", m.subject)
 	}
 
 	self := n.Notify(Completion{Closed: true, ItemID: "mg-bbbb", Route: RouteSelfClose, Worker: "pbbbb"})
 	if !self.Sent() || self.To != "mayor" {
 		t.Errorf("a coordinator-filed item that closes with no merge is reported by nothing else; expected a mail, got %+v", self)
+	}
+}
+
+// The removed skip was keyed on the creator being the coordinator BY NAME, so
+// the regression is name-shaped: whatever the coordinator is called, a
+// merge-route item it filed must still be reported to it.
+func TestNoFilerIsSkippedForBeingTheCoordinator(t *testing.T) {
+	for _, coord := range []string{"mayor", "MAYOR", "pm-pogo", "architect"} {
+		rec := &recorder{}
+		n := New(coord, rec.send, filing(coord, "t"), resultOf(`{"verdict":"pass"}`), knownSet(coord))
+		o := n.Notify(Completion{Closed: true, ItemID: "mg-cccc", Route: RouteMerge, Worker: "pcccc",
+			Branch: "polecat-pcccc", MergedSHA: "2222222"})
+		if !o.Sent() {
+			t.Errorf("coordinator %q was skipped on the merge route: %+v", coord, o)
+		}
+		if rec.count() != 1 {
+			t.Errorf("coordinator %q: got %d mails, want 1", coord, rec.count())
+		}
 	}
 }
 
@@ -407,11 +447,12 @@ func TestAMergeThatDidNotCloseItsItemIsNotMailedAsACompletion(t *testing.T) {
 	}
 }
 
-// The two "they already know" skips are claims about a message that was
-// actually sent, and no message says this. The coordinator's own MERGED mail
-// reports the merge and nothing about the item's state; the worker was stopped
-// before it could see the refusal.
-func TestNeitherSkipSwallowsAMergeThatLeftTheItemOpen(t *testing.T) {
+// A "they already know" skip is a claim about a message that was actually sent,
+// and no message says this. The worker was stopped before it could see the
+// refusal; the coordinator's own MERGED mail reports the merge and nothing about
+// the item's state — which is the same substitution mg-da12 removed the
+// coordinator skip for, one field over.
+func TestNoSkipSwallowsAMergeThatLeftTheItemOpen(t *testing.T) {
 	t.Run("coordinator filed it", func(t *testing.T) {
 		rec := &recorder{}
 		n := New("mayor", rec.send, filing("mayor", "t"), resultOf(""), knownSet("mayor"))
