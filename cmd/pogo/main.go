@@ -3544,8 +3544,19 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						for _, d := range installable {
 							names = append(names, fmt.Sprintf("%s (%s)", d.Path, d.Reason))
 						}
+						// Name the owner and the cadence, not just the manual
+						// remedy. Act 3 is NOT a step somebody has to remember:
+						// pogod's boot runs InstallPrompts before it auto-starts
+						// any crew, so the nightly deploy's kickstart installs
+						// prompts every night. Drift showing up HERE therefore
+						// means the binary embeds something newer than the last
+						// restart propagated — a restart is the standing fix and
+						// the CLI call is the way to not wait for one. mg-b6bd
+						// was filed believing nothing installed prompts at all;
+						// a remedy that names only the manual command is how a
+						// reader arrives at that belief.
 						fail("agent prompts up-to-date",
-							fmt.Sprintf("%d prompt(s) drifted from embedded source: %s — run 'pogo agent prompt install', then restart affected agents",
+							fmt.Sprintf("%d prompt(s) drifted from embedded source: %s — run 'pogo agent prompt install', then restart affected agents. (pogod's boot installs prompts on every restart, so the nightly deploy clears this by itself; running it now is how you avoid waiting for that. `pogo events list --type=prompt_refresh` is the record of what each restart installed.)",
 								len(installable), strings.Join(names, ", ")))
 					}
 					if len(edited) > 0 {

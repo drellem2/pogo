@@ -2685,6 +2685,94 @@ grep -q 'refuse_drain_precondition "\$disp" "\$dp_body"' "$HERE/pogo-self-deploy
     && pass "cmd_redeploy forwards the captured body to the refusal — it is not captured and dropped" \
     || fail "cmd_redeploy captures the body but does not hand it to refuse_drain_precondition"
 
+# --- mg-b6bd: the deploy REPORTS act 3 (the prompt install the restart does) --
+# The ticket was filed because `grep -c 'prompt install' pogo-self-deploy` is 0,
+# and nothing in the script or its transcript said that the kickstart performs
+# the install via pogod's boot. These cases pin the report, not the install.
+PR_OK='{"schema_version":1,"timestamp":"2026-08-13T02:01:29Z","event_type":"prompt_refresh","agent":"pogod","details":{"changed":3,"conflicts":[],"installed":["crew/pm-new.md"],"ok":true,"revision":"d27ecc1abcdef0123456789abcdef0123456789a","skipped":["architect.md"],"updated":["crew/doctor.md","mayor.md"]}}'
+
+OUT="$(printf '%s' "$PR_OK" | format_prompt_refresh)"
+# WHICH agents. "updated=9" was the whole defect; a report that repeats the
+# count without the names has not fixed anything.
+{ grep -q 'crew/doctor.md' <<<"$OUT" && grep -q 'mayor.md' <<<"$OUT" && grep -q 'crew/pm-new.md' <<<"$OUT"; } \
+    && pass "prompt report NAMES every changed prompt (mg-b6bd: the counts-only line is the defect)" \
+    || fail "prompt report does not name the changed prompts: $OUT"
+# FROM WHAT revision.
+grep -q 'd27ecc1abcde' <<<"$OUT" \
+    && pass "prompt report names the revision the prompts came from" \
+    || fail "prompt report has no revision: $OUT"
+# A skipped file is not news; listing it buries the ones that moved.
+grep -q 'architect.md' <<<"$OUT" \
+    && fail "prompt report lists SKIPPED files by name — that is padding, and it buries the changed ones" \
+    || pass "prompt report omits skipped files"
+# Act 4. Installing under a running agent changes nothing until it re-reads.
+grep -qi 'restart' <<<"$OUT" \
+    && pass "prompt report points at the restart that makes an update take effect (act 4)" \
+    || fail "prompt report never mentions the restart: $OUT"
+
+# The no-op boot: the MOST COMMON outcome, and the one whose silence made a
+# nightly install look like an unattributable one. It must produce a line.
+PR_NOOP='{"event_type":"prompt_refresh","details":{"changed":0,"conflicts":[],"installed":[],"ok":true,"revision":"082ec38b0159db6ae552202c626fa2d5955a37f0","skipped":["mayor.md","crew/doctor.md"],"updated":[]}}'
+OUT="$(printf '%s' "$PR_NOOP" | format_prompt_refresh)"
+[ -n "$OUT" ] \
+    && pass "an all-current refresh still REPORTS (silence is what made act 3 look unowned)" \
+    || fail "all-current refresh reported nothing"
+grep -q '082ec38b0159' <<<"$OUT" \
+    && pass "the all-current report says WHICH revision everything is current at" \
+    || fail "all-current report has no revision: $OUT"
+# json_arr on an empty array must not spill the next key's value into the list.
+grep -q 'INSTALLED' <<<"$OUT" \
+    && fail "all-current report claims an INSTALLED list from an empty array: $OUT" \
+    || pass "empty arrays produce no name lists (json_arr does not cross a bracket)"
+
+# No record at all. The deploy must say so rather than print nothing, because
+# "nothing printed" is indistinguishable from "everything was fine".
+OUT="$(printf '' | format_prompt_refresh)"
+grep -q 'NO REFRESH RECORD' <<<"$OUT" \
+    && pass "a missing prompt_refresh record is REPORTED, not passed over in silence" \
+    || fail "empty event produced no report: $OUT"
+
+# A failed refresh must not read as a clean boot.
+PR_FAIL='{"event_type":"prompt_refresh","details":{"error":"mkdir /ro: read-only file system","ok":false,"revision":"082ec38b0159db6ae552202c626fa2d5955a37f0"}}'
+OUT="$(printf '%s' "$PR_FAIL" | format_prompt_refresh)"
+{ grep -q 'REFRESH FAILED' <<<"$OUT" && grep -q 'read-only file system' <<<"$OUT"; } \
+    && pass "a failed refresh reports FAILED with the reason" \
+    || fail "failed refresh under-reported: $OUT"
+grep -q 'all current' <<<"$OUT" \
+    && fail "a FAILED refresh reported as 'all current' — this is the false-success mg-f86c fixed in the log" \
+    || pass "a failed refresh is not reported as all-current"
+
+# A declined sync (hand-edited canonical) must be named and must not be counted
+# as changed by the report.
+PR_CONFLICT='{"event_type":"prompt_refresh","details":{"changed":1,"conflicts":["mayor.md"],"installed":[],"ok":true,"revision":"082ec38b0159db6ae552202c626fa2d5955a37f0","skipped":[],"updated":["architect.md"]}}'
+OUT="$(printf '%s' "$PR_CONFLICT" | format_prompt_refresh)"
+{ grep -q 'DECLINED' <<<"$OUT" && grep -q 'mayor.md' <<<"$OUT" && grep -q '\.dist' <<<"$OUT"; } \
+    && pass "a declined prompt sync is named loudly with its .dist remedy" \
+    || fail "declined sync under-reported: $OUT"
+
+# json_arr itself, since three of the assertions above rest on it.
+[ "$(printf '%s' "$PR_OK" | json_arr updated)" = "crew/doctor.md, mayor.md" ] \
+    && pass "json_arr renders a string array as a comma-space list" \
+    || fail "json_arr updated: $(printf '%s' "$PR_OK" | json_arr updated)"
+[ -z "$(printf '%s' "$PR_OK" | json_arr conflicts)" ] \
+    && pass "json_arr yields empty for an empty array" \
+    || fail "json_arr on [] should be empty, got: $(printf '%s' "$PR_OK" | json_arr conflicts)"
+[ -z "$(printf '%s' "$PR_OK" | json_arr nosuchkey)" ] \
+    && pass "json_arr yields empty for an absent key" \
+    || fail "json_arr on absent key should be empty"
+
+# --- the wiring, again asserted against the source (mg-b6bd) ---------------
+# format_prompt_refresh could be perfect while nothing ever called it.
+grep -q '^    report_prompt_refresh$' "$HERE/pogo-self-deploy" \
+    && pass "cmd_redeploy actually calls report_prompt_refresh — the report is wired, not just written" \
+    || fail "report_prompt_refresh is defined but never called from cmd_redeploy"
+# And the script must SAY that the kickstart is the install, since a grep for
+# 'prompt install' returning 0 is what started this ticket.
+sed -n '/^do_restart() {/,$p' "$HERE/pogo-self-deploy" >/dev/null
+grep -q 'agent.InstallPrompts' "$HERE/pogo-self-deploy" \
+    && pass "the script names pogod's boot as the thing that installs prompts (a grep for 'prompt install' finds 0 for a REASON, now stated)" \
+    || fail "nothing in the script explains that the restart performs the prompt install"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)

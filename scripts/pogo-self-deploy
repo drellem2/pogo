@@ -263,6 +263,15 @@ json_num() { sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p"; }
 # asserts `json_str draining` is empty. BRE only — this runs under BSD sed on
 # macOS, where GNU's \| alternation silently matches nothing.
 json_bool() { sed -n "s/.*\"$1\":\([tf][a-z]*\).*/\1/p"; }
+# json_arr — a flat array of strings, rendered as a comma-space list with the
+# quotes stripped ("a", "b" -> a, b). Empty for an absent field AND for an empty
+# array, which are the same thing to every caller here: nothing to name.
+#
+# [^]]* is what keeps the greedy leading .* from swallowing a later key's
+# bracket. BRE only, BSD sed: no \| and no + — see json_bool above.
+json_arr() {
+    sed -n "s/.*\"$1\":\[\([^]]*\)\].*/\1/p" | sed 's/"//g; s/,/, /g'
+}
 
 base_url() { echo "http://127.0.0.1:${PORT}"; }
 
@@ -3007,12 +3016,110 @@ do_prove() {
     log "proven on this artifact: detector goes RED on a broken fleet and GREEN on an intact one"
 }
 
+# ---------------------------------------------------------------------------
+# The restart IS the prompt install (mg-b6bd). Read this before grepping.
+# ---------------------------------------------------------------------------
+# `grep -c 'prompt install' scripts/pogo-self-deploy` is 0, and has been since
+# this script was written. That is the correct result and it does NOT mean
+# prompts never get installed, which is the conclusion mg-b6bd drew from it —
+# reasonably, because nothing in here said otherwise until now.
+#
+# The four acts of getting a merged prompt fix in front of a running agent:
+#
+#   1. merge the prompt fix                   the refinery
+#   2. ship the new binary                    do_build + go install, above
+#   3. install the prompts onto disk          do_restart, below, INDIRECTLY
+#   4. restart the agent so it re-reads       do_restart for auto_start = true;
+#                                             the mail-check alert at the end of
+#                                             cmd_redeploy names the others
+#
+# Act 3 is performed by pogod's own boot: cmd/pogod/main.go calls
+# agent.InstallPrompts before it auto-starts any crew (40b60c1, 2026-04-27), so
+# the kickstart below propagates every prompt the new binary embeds. This script
+# has no business shelling out to `pogo agent prompt install` on top of that —
+# it would be a second installer racing the first, with no way to say which one
+# wrote a given file.
+#
+# So act 3 IS automatic and its cadence IS nightly. What it was missing until
+# mg-b6bd is a record: the boot logged a counts-only line ("updated=9") to
+# pogod.log, from which nobody could tell WHICH prompts moved or FROM WHAT
+# revision. report_prompt_refresh below reads the record pogod now emits and
+# puts it in this transcript, which is the artifact an operator actually reads.
 do_restart() {
     local target="gui/$(id -u)/$DAEMON_LABEL"
     log "restarting pogod: launchctl kickstart -k $target"
     # ALWAYS kickstart — never rely on KeepAlive to pick up a stopped job
     # (mg-6afa mechanism 2 / mg-50e0). -k kills the running instance first.
     $LAUNCHCTL kickstart -k "$target" || { err "launchctl kickstart failed"; exit 5; }
+}
+
+# format_prompt_refresh — render ONE prompt_refresh event (raw JSONL on stdin)
+# into the lines this deploy should log. Pure: no daemon, no CLI, no clock.
+#
+# Empty input means no record at all, and that gets a line of its own rather
+# than silence. Three things produce it and they are not distinguishable from
+# here — the restarted pogod predates the record (any build before mg-b6bd),
+# the events log is unwritable, or act 3 genuinely did not run. All three are
+# worth a word; none of them is worth failing a deploy whose daemon is up and
+# answering, so this reports and never sets an exit code.
+format_prompt_refresh() {
+    local ev; ev="$(cat)"
+    if [ -z "$ev" ]; then
+        echo "prompts: NO REFRESH RECORD from this restart — cannot say whether act 3 ran, which prompts moved, or from what revision. Either the new pogod predates the prompt_refresh event, or the refresh did not happen. Check: pogo events list --since=1h --type=prompt_refresh --json"
+        return 0
+    fi
+    local ok rev changed installed updated conflicts errmsg
+    ok="$(printf '%s' "$ev" | json_bool ok)"
+    rev="$(printf '%s' "$ev" | json_str revision)"
+    changed="$(printf '%s' "$ev" | json_num changed)"
+    installed="$(printf '%s' "$ev" | json_arr installed)"
+    updated="$(printf '%s' "$ev" | json_arr updated)"
+    conflicts="$(printf '%s' "$ev" | json_arr conflicts)"
+
+    if [ "$ok" = "false" ]; then
+        errmsg="$(printf '%s' "$ev" | json_str error)"
+        echo "prompts: REFRESH FAILED at $(short "${rev:-?}") — every live prompt is still at its previous content. ${errmsg:-no reason recorded}"
+        return 0
+    fi
+
+    # ok=true. Say what moved, by name, or say plainly that nothing did — the
+    # no-op is the answer to "is the fleet current", not an absence of one.
+    if [ "${changed:-0}" = "0" ] || [ -z "$changed" ]; then
+        echo "prompts: all current at $(short "${rev:-?}") — nothing to install (this is the normal outcome; the record is what makes it distinguishable from a refresh that never ran)"
+    else
+        echo "prompts: ${changed} changed at $(short "${rev:-?}")"
+        [ -n "$installed" ] && echo "prompts: INSTALLED (new): $installed"
+        [ -n "$updated" ] && echo "prompts: UPDATED: $updated — agents that were NOT restarted by this bounce are still running the old text until they are"
+    fi
+    if [ -n "$conflicts" ]; then
+        echo "prompts: ⚠ DECLINED (hand-edited canonical preserved, shipped copy went to <name>.dist): $conflicts"
+    fi
+    return 0
+}
+
+# report_prompt_refresh — the impure half: ask the freshly-restarted pogod's
+# event log what act 3 did, and put it in this transcript.
+#
+# --since is generous on purpose. It is bounded by the fact that we only ever
+# read the LAST matching record, and this runs seconds after a restart that
+# emits one; a wide window costs nothing and survives a slow boot, where a tight
+# one would report "NO REFRESH RECORD" for a refresh that was merely late.
+report_prompt_refresh() {
+    local cli; cli="$(installed_bin pogo)"
+    local ev=""
+    if [ -x "$cli" ]; then
+        ev="$("$cli" events list --since="${PROMPT_REFRESH_WINDOW:-15m}" --type=prompt_refresh --json 2>/dev/null | grep . | tail -1)"
+    fi
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case "$line" in
+            *"NO REFRESH RECORD"*|*"REFRESH FAILED"*|*DECLINED*) err "$line" ;;
+            *) log "$line" ;;
+        esac
+    done <<EOF
+$(printf '%s' "$ev" | format_prompt_refresh)
+EOF
 }
 
 verify_running() {
@@ -3318,6 +3425,13 @@ cmd_redeploy() {
     # back?". Only the second is the question this deploy exists to close, and
     # for its whole life the script asked only the first (mg-6d2f).
     verify_orchestration || exit 11
+
+    # 3b. Report act 3 (mg-b6bd). AFTER verify_orchestration, because a pogod
+    #     that has not finished booting has not finished refreshing prompts
+    #     either, and reading the log before then would report a stale record or
+    #     none. Reports only — the fleet is up; a missing prompt record is a
+    #     thing to say, not a reason to call a completed deploy failed.
+    report_prompt_refresh
 
     # 4. If a forced bounce killed active polecats, clean up the wreckage.
     if [ "$leftover" != "0" ] && [ "$leftover" != "?" ]; then
