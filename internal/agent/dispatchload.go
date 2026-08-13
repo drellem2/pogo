@@ -168,6 +168,17 @@ type HostLoadResponse struct {
 	// named a repo (GET /agents/hostload?repo=...). Served from the same counter the
 	// spawn path consults, for the reason above.
 	RepoOccupancy *RepoOccupancy `json:"repo_occupancy,omitempty"`
+
+	// WorkerBudget is the share of this host the NEXT worker spawned here will
+	// be told it may use. Served from the same derivation the spawn path
+	// injects, for the reason WouldRefuseDispatch is: a coordinator reasoning
+	// about how much of the box one more worker can take must read the number
+	// pogod will actually hand out.
+	//
+	// Unlike everything above it, this is not a measurement — it is a policy
+	// division of the core count, unaffected by what the host is doing right
+	// now. See WorkerBudgetFor.
+	WorkerBudget WorkerBudget `json:"worker_budget"`
 }
 
 // handleHostLoad serves the host's current fleet-attributable CPU.
@@ -183,7 +194,7 @@ func (r *Registry) handleHostLoad(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	s, ok := r.getLoadGate().DispatchLoad()
-	resp := HostLoadResponse{Sample: s, Measured: ok}
+	resp := HostLoadResponse{Sample: s, Measured: ok, WorkerBudget: r.WorkerBudget()}
 	// The per-repo cap is independent of the sample: it is a count, and it
 	// answers even when the host could not be measured. Attached whenever a repo
 	// is named so a coordinator planning several dispatches into one repository

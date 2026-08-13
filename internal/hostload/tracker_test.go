@@ -171,6 +171,37 @@ func TestFleetHeavySeesOneAgentAsManyProcesses(t *testing.T) {
 	}
 }
 
+// TestHoldAdviceNamesTheShareNotTheCount. The refusal used to say it cleared
+// "when the work in flight finishes", which reads as "when an agent exits" —
+// and a coordinator that acted on that reading burned two spawn attempts on
+// 2026-08-13 (mg-eb47). It waited for the fleet to shrink, the fleet shrank
+// from 6 agents to 5, and the core share ROSE from 6.1 to 7.0 of 10 because two
+// refinery gates that self-parallelise outweighed the agents that left. The
+// retry condition is the SHARE, and the advice has to say which one.
+func TestHoldAdviceNamesTheShareNotTheCount(t *testing.T) {
+	ours := Sample{Cores: 10, FleetCores: 7.0, ExternalCores: 0.7, FleetProcs: 21, Attributed: true}
+	a := ours.DispatchAdvice()
+	if !strings.HasPrefix(a, "HOLD") {
+		t.Fatalf("advice = %q, want HOLD", a)
+	}
+	for _, want := range []string{
+		"rather than the agent count",
+		"core share falls below",
+		"not the same",
+		"fewer agents, MORE cores",
+		"pogo host load",
+	} {
+		if !strings.Contains(a, want) {
+			t.Errorf("HOLD advice is missing %q; got:\n%s", want, a)
+		}
+	}
+	// The retired sentence, named so a future edit cannot quietly restore the
+	// reading that cost the retries.
+	if strings.Contains(a, "clears when the work in flight finishes") {
+		t.Errorf("the count-shaped retry condition is back; got:\n%s", a)
+	}
+}
+
 // TestUnattributedDispatchAdviceProceeds: missing attribution must not stall
 // dispatch. An unmeasurable fleet share is missing information, and refusing
 // work on missing information starves the queue for a reason nobody can check.

@@ -436,3 +436,36 @@ func refusalFor(t *testing.T, reg *Registry, repo string) string {
 	}
 	return msg
 }
+
+// TestRefusalDoesNotPromiseAnotherRepoIsUsable. The refusal offers "dispatch
+// elsewhere" as a third action, and on 2026-08-13 that advice was wrong:
+// the host gate was refusing every spawn regardless of repo, so a per-repo slot
+// freed by a merge was unusable and so was every other repo (mg-eb47). The
+// message keeps the offer — this cap really does not refuse another repo — but
+// it may no longer state it as an unconditional fact, and it must name the
+// retry condition as the core share rather than a worker exiting.
+func TestRefusalDoesNotPromiseAnotherRepoIsUsable(t *testing.T) {
+	reg := capRegistry(t, 3)
+	msg := refusalFor(t, reg, goRepo)
+
+	for _, want := range []string{
+		"THIS cap does not refuse a dispatch into a DIFFERENT repo",
+		"HOST gate",
+		"regardless of repo",
+		"not capacity",
+		"CORE share",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal is missing %q; got:\n%s", want, msg)
+		}
+	}
+	// The retired claim, named so a future edit cannot quietly restore it.
+	if strings.Contains(msg, "DIFFERENT repo is unaffected") {
+		t.Errorf("the unconditional 'unaffected' promise is back; got:\n%s", msg)
+	}
+	// It is still a LATER: withdrawing the promise must not turn a throttle
+	// into something a coordinator reads as "abandon this item".
+	if !strings.Contains(msg, "LATER") {
+		t.Errorf("refusal stopped saying it is retryable; got:\n%s", msg)
+	}
+}

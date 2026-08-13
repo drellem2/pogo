@@ -278,6 +278,20 @@ type TemplateVars struct {
 	// agent.SetClaimRestampCommand and claimrestamp.go. Left empty by callers, it
 	// is filled from the process-wide ClaimRestampCommand() at expansion time.
 	ClaimRestampCmd string
+
+	// WorkerCores is the share of this host, in whole cores, that this worker is
+	// told it may take, and HostCores is the denominator. They are the same
+	// numbers the spawn path puts in $POGO_WORKER_CORES / $POGO_HOST_CORES —
+	// carried as template vars too so the prompt can state the share in prose
+	// rather than only exporting a variable nobody is told to read (mg-eb47).
+	//
+	// ZERO MEANS NO BUDGET WAS DERIVED, which is a real state (an unknown core
+	// count) and not a share of nothing. Templates gate the guidance behind
+	// `{{if .WorkerCores}}`, so a worker is never told it may use zero cores.
+	// See WorkerBudgetFor for how the number is arrived at and what it does not
+	// claim.
+	WorkerCores int
+	HostCores   int
 }
 
 // withDefaults returns vars with Coordinator (and CoordinatorTitle) defaulted
