@@ -21,6 +21,13 @@
 #   Test 5  The sweep RECLAIMS. Nesting alone would only rename the problem;
 #           repeated runs must not grow the root's own contents either.
 #
+# Tests 6-13 are mg-60eb's, and they are about scripts/tmpdir-leak-guard.sh —
+# the wrapper that puts the measurement above on the WHOLE tree instead of on
+# the slice named below. Their own load-bearing cases are Test 6 (the positive
+# control for the wrapper's allowlist), Test 9 (a failing suite reports ITS
+# status, never the leak's) and Test 11 (a read-only Go module cache is
+# reclaimed, which is where 120 MB was sitting unremovable).
+#
 # WHAT IS NOT COVERED, AND WHY IT IS NAMED HERE RATHER THAN LEFT QUIET
 #
 #   config.AgentSocketDir's fallback is FIXED, and not here. It is not in the
@@ -206,6 +213,159 @@ else
         fail "root contents grew $inner -> $grown across one run; the sweep is not reclaiming:"
         list_entries "$cold/$ROOT_NAME" | sed 's/^/        /' >&2
     fi
+fi
+
+# =============================================================================
+# THE WHOLE-TREE GUARD (mg-60eb)
+# =============================================================================
+# Everything above measures a SLICE — five packages plus three test names — and
+# that slice was chosen as "every internal/testtmp caller", which is the set of
+# packages mg-de3c's own fix had just touched. Its coverage was therefore a
+# property of the fix rather than of the tree, and two TestMains outside it
+# (cmd/pogo, internal/refinery) went on leaking one directory per run until
+# $TMPDIR reached ~5,000 fixture directories, the volume hit 100% with 204 MiB
+# free, and ./build.sh died with Errno 28 in the refinery gate — failing every
+# merge on the host and presenting as a defect in whichever branch was running.
+#
+# scripts/tmpdir-leak-guard.sh closes that by wrapping the whole-tree `go test`
+# the gate already runs, so a new leak anywhere in the tree is reported the day
+# it is written. The cases below are about the WRAPPER, and the load-bearing one
+# is Test 6 for the same reason Test 2 is above: an allowlist that has only ever
+# been seen letting things through is not known to stop anything.
+#
+# Test 9 is the one that keeps this ticket from recreating its own defect. The
+# incident was an environmental failure — a full disk — read as a verdict about
+# a branch. A wrapper that reported a leak in place of the wrapped suite's own
+# failure would be the same substitution with the arrow reversed, so the suite's
+# status has to win.
+echo ""
+echo "Test 6: POSITIVE CONTROL — the wrapper FAILS on a planted leak, and names it"
+guard_log="$WORK/guard-leak.log"
+if bash "$HERE/tmpdir-leak-guard.sh" bash -c \
+        'mktemp -d "$TMPDIR/pogo-leaked-fixture.XXXXXX" >/dev/null' >"$guard_log" 2>&1; then
+    fail "the wrapper exited 0 with a directory abandoned in its \$TMPDIR; every wrapper assertion below is vacuous"
+elif grep -q "pogo-leaked-fixture" "$guard_log"; then
+    pass "a planted leak fails the wrapper and is named in the report"
+else
+    fail "the wrapper failed but did not name the leaked entry:"
+    sed -n '1,20p' "$guard_log" >&2
+fi
+
+echo ""
+echo "Test 7: a run that leaves nothing passes"
+if bash "$HERE/tmpdir-leak-guard.sh" true >"$WORK/guard-clean.log" 2>&1; then
+    pass "a clean run exits 0"
+else
+    fail "a run that created nothing was reported as a leak:"
+    sed -n '1,20p' "$WORK/guard-clean.log" >&2
+fi
+
+echo ""
+echo "Test 8: the allowlisted one-per-host entries do not fail the wrapper"
+# Named individually rather than in one command: an allowlist entry that stopped
+# matching would otherwise hide behind the others.
+allow_fail=0
+for name in "$ROOT_NAME" pogo-prompts pogo-agents go-build9999; do
+    if ! bash "$HERE/tmpdir-leak-guard.sh" bash -c "mkdir -p \"\$TMPDIR/$name\"" >"$WORK/guard-allow.log" 2>&1; then
+        fail "the allowlisted entry $name was reported as a leak:"
+        sed -n '1,20p' "$WORK/guard-allow.log" >&2
+        allow_fail=1
+    fi
+done
+[ "$allow_fail" -eq 0 ] && pass "pogo-test-tmp, pogo-prompts, pogo-agents and go-build* pass the allowlist"
+
+echo ""
+echo "Test 9: a FAILING wrapped command reports its OWN status, not the leak's"
+# `|| guard_status=$?` rather than a bare call: this file runs under `set -e`,
+# and the whole point of the case is a command that exits nonzero.
+guard_status=0
+bash "$HERE/tmpdir-leak-guard.sh" bash -c \
+    'mktemp -d "$TMPDIR/pogo-leaked-fixture.XXXXXX" >/dev/null; exit 3' >"$WORK/guard-both.log" 2>&1 \
+    || guard_status=$?
+if [ "$guard_status" -eq 3 ]; then
+    pass "the wrapped command's status 3 survives a simultaneous leak finding"
+else
+    fail "a wrapped command that exited 3 while leaking was reported as $guard_status; a leak is not a verdict about the branch"
+    sed -n '1,20p' "$WORK/guard-both.log" >&2
+fi
+
+echo ""
+echo "Test 10: the wrapper RECLAIMS — its private \$TMPDIR is gone afterwards"
+# The guard exists to stop disk growth; one that measured the leak and left it
+# on the volume would be adding to the pile it reports.
+bash "$HERE/tmpdir-leak-guard.sh" bash -c \
+    'mktemp -d "$TMPDIR/pogo-leaked-fixture.XXXXXX" >/dev/null; echo "$TMPDIR" >"'"$WORK"'/guard-path"' \
+    >/dev/null 2>&1 || true
+used="$(cat "$WORK/guard-path" 2>/dev/null || true)"
+if [ -z "$used" ]; then
+    fail "could not read back the private \$TMPDIR the wrapper used"
+elif [ -e "$used" ]; then
+    fail "the wrapper left its private \$TMPDIR behind: $used"
+else
+    pass "the private \$TMPDIR ($(basename "$used")) was removed"
+fi
+
+echo ""
+echo "Test 11: the wrapper reclaims a READ-ONLY Go module cache"
+# The bytes are here and `rm -rf` cannot touch them. A suite under this $TMPDIR
+# can stand up a fake $HOME and shell out to `go build`, and Go writes its module
+# cache READ-ONLY — 0444 files inside 0555 directories. Measured on this box:
+# $TMPDIR/pogo-test-tmp held 148 such roots and 120 MB, each already selected for
+# removal and removable by nothing. A reclaim that stops at the first EACCES is a
+# reclaim that misses exactly the largest thing it was pointed at.
+guard_ro_log="$WORK/guard-ro.log"
+bash "$HERE/tmpdir-leak-guard.sh" bash -c '
+    d="$TMPDIR/pogo-test-tmp/home/go/pkg/mod/example.com/dep@v1.0.0"
+    mkdir -p "$d"
+    printf "package dep\n" >"$d/dep.go"
+    chmod 0444 "$d/dep.go"
+    chmod 0555 "$d"
+    echo "$TMPDIR" >"'"$WORK"'/guard-ro-path"
+' >"$guard_ro_log" 2>&1 || true
+ro_used="$(cat "$WORK/guard-ro-path" 2>/dev/null || true)"
+if [ -z "$ro_used" ]; then
+    fail "could not read back the private \$TMPDIR used for the read-only case"
+elif [ -e "$ro_used" ]; then
+    fail "a read-only module cache survived the wrapper's reclaim: $ro_used"
+    chmod -R u+w "$ro_used" 2>/dev/null; rm -rf "$ro_used" 2>/dev/null
+else
+    pass "a 0444-in-0555 module cache was reclaimed with the private \$TMPDIR"
+fi
+
+echo ""
+echo "Test 12: the wrapper REAPS a killed run's private \$TMPDIR"
+# The wrapper's own removal rides on a trap, and nothing rides through SIGKILL —
+# which the refinery does use on a gate it has given up on. That abandoned
+# directory holds an ENTIRE suite's fixtures, so it is a worse leak than any this
+# file reports, and it is the form this ticket's defect takes in the remedy.
+#
+# A dead pid is chosen rather than a killed child so the case is deterministic:
+# the sweep's rule is ownership, and what has to be shown is that an entry whose
+# owner is gone is removed while a LIVE owner's entry survives — both directions,
+# because a sweep that removed everything would pass the first alone and would
+# delete a concurrent gate's fixtures.
+reap_base="$WORK/reap"
+mkdir -p "$reap_base"
+dead_pid="$(bash -c 'echo $$')"   # exited before this line was read
+mkdir -p "$reap_base/pogo-gate-tmp.$dead_pid.DEAD00" "$reap_base/pogo-gate-tmp.$$.LIVE00"
+POGO_TMPDIR_GUARD_BASE="$reap_base" bash "$HERE/tmpdir-leak-guard.sh" true >/dev/null 2>&1 || true
+if [ -e "$reap_base/pogo-gate-tmp.$dead_pid.DEAD00" ]; then
+    fail "a dead owner's abandoned \$TMPDIR survived the sweep"
+elif [ ! -e "$reap_base/pogo-gate-tmp.$$.LIVE00" ]; then
+    fail "the sweep removed a LIVE owner's \$TMPDIR — a concurrent gate's fixtures would go with it"
+else
+    pass "the dead owner's entry was reaped and the live owner's was kept"
+fi
+
+echo ""
+echo "Test 13: the wrapper is WIRED — test.sh's whole-tree run goes through it"
+# The property mg-de3c's slice did not have. Asserted on the file rather than by
+# running the gate: a guard present in the tree and called by nothing is the
+# limiting case of coverage-by-list.
+if grep -q 'tmpdir-leak-guard.sh bash scripts/go-test-budget.sh \./\.\.\.' "$REPO_ROOT/test.sh"; then
+    pass "test.sh runs the whole-tree suite through tmpdir-leak-guard.sh"
+else
+    fail "test.sh's whole-tree suite does not go through tmpdir-leak-guard.sh; the guard covers nothing"
 fi
 
 echo ""

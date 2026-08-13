@@ -453,7 +453,15 @@ func Main(label string) (*Sandbox, func()) {
 			fmt.Fprintf(os.Stderr, "\n%s\n%v\nRefusing to remove it.\n", FailPrefix, err)
 			return
 		}
-		os.RemoveAll(sb.Root)
+		// testtmp.RemoveAll, not os.RemoveAll. This root is a fake $HOME, and any
+		// test under it that shells out to `go build` populates $HOME/go/pkg/mod
+		// — which Go writes READ-ONLY. os.RemoveAll returns EACCES on the first
+		// such file and stops, and this teardown ignores the error, so the root
+		// survived every clean run: 148 sandbox-agent.* roots and 120 MB measured
+		// in $TMPDIR/pogo-test-tmp on 2026-08-13, each one already selected for
+		// removal by both this line and testtmp's sweep, and unremovable by
+		// either (mg-60eb).
+		testtmp.RemoveAll(sb.Root)
 	}
 }
 

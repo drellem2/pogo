@@ -262,11 +262,26 @@ func renderOrphanReport(rep orphanwatch.Report, all bool) string {
 // A probe that could not be BUILT exits as an instrument failure, never as a
 // pass. A detector reported as healthy on the strength of a fixture that no
 // longer constructs is the failure this whole family keeps rediscovering.
+// The os.Exit calls live HERE and the temp directory lives in the callee, so
+// the callee's defer is reached on every verdict. Deferred functions do not run
+// on os.Exit, and until mg-60eb this function exited past its own
+// `defer os.RemoveAll` on all four of its failure arms — leaking the probe's
+// store exactly when the probe failed, which is the only time anyone runs it
+// twice. That is this ticket's defect in production code rather than in a test
+// helper: a cleanup that runs only when nothing went wrong.
 func runOrphanProbe(jsonOutput bool) {
+	if code := orphanProbeVerdict(jsonOutput); code != 0 {
+		os.Exit(code)
+	}
+}
+
+// orphanProbeVerdict conducts the probe and returns the exit code its verdict
+// calls for, 0 meaning pass. It never calls os.Exit, which is the whole point.
+func orphanProbeVerdict(jsonOutput bool) int {
 	dir, err := os.MkdirTemp("", "orphanprobe")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "INSTRUMENT FAILURE — probe could not be built: %v\n", err)
-		os.Exit(exitInstrumentFailure)
+		return exitInstrumentFailure
 	}
 	defer os.RemoveAll(dir)
 
@@ -303,7 +318,7 @@ func runOrphanProbe(jsonOutput bool) {
 	}
 	if res.Err != nil {
 		fmt.Fprintf(os.Stderr, "INSTRUMENT FAILURE — probe could not be conducted: %v\n", res.Err)
-		os.Exit(exitInstrumentFailure)
+		return exitInstrumentFailure
 	}
 	if res.Blind != "" {
 		// The probe was BUILT and its arms were not conducted. That is the same
@@ -312,9 +327,10 @@ func runOrphanProbe(jsonOutput bool) {
 		// lsof refusal got classed as a branch DEFECT on 2026-08-10 (mg-db12).
 		fmt.Fprintf(os.Stderr, "INSTRUMENT FAILURE — the probe was built but this host would not let it be\n"+
 			"observed, after %d attempt(s): %s\n", res.Attempts, res.Blind)
-		os.Exit(exitInstrumentFailure)
+		return exitInstrumentFailure
 	}
 	if !res.Passed() {
-		os.Exit(cli.ExitError)
+		return cli.ExitError
 	}
+	return 0
 }

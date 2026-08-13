@@ -242,18 +242,31 @@ func shortDur(d time.Duration) string {
 // pass — the check-* family keeps rediscovering that a detector reported healthy
 // on the strength of a fixture that no longer constructs is worse than one
 // reported broken.
+// The os.Exit calls live HERE and the temp directory lives in the callee, so
+// the callee's defer is reached on every verdict — deferred functions do not run
+// on os.Exit, and until mg-60eb this function exited past its own
+// `defer os.RemoveAll` on both failure arms, leaking the probe's store exactly
+// when the probe failed.
 func runTurnProbe(jsonOutput bool) {
+	if code := turnProbeVerdict(jsonOutput); code != 0 {
+		os.Exit(code)
+	}
+}
+
+// turnProbeVerdict conducts the probe and returns the exit code its verdict
+// calls for, 0 meaning pass. It never calls os.Exit, which is the whole point.
+func turnProbeVerdict(jsonOutput bool) int {
 	dir, err := os.MkdirTemp("", "turnprobe")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "INSTRUMENT FAILURE — probe could not be built: %v\n", err)
-		os.Exit(exitInstrumentFailure)
+		return exitInstrumentFailure
 	}
 	defer os.RemoveAll(dir)
 
 	res, err := turnlog.Probe(dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "INSTRUMENT FAILURE — probe could not be built: %v\n", err)
-		os.Exit(exitInstrumentFailure)
+		return exitInstrumentFailure
 	}
 	if jsonOutput {
 		cli.PrintJSON(res)
@@ -265,6 +278,7 @@ func runTurnProbe(jsonOutput bool) {
 		fmt.Printf("\n%s: %s\n", map[bool]string{true: "PASS", false: "FAIL"}[res.Passed], res.Detail)
 	}
 	if !res.Passed {
-		os.Exit(cli.ExitError)
+		return cli.ExitError
 	}
+	return 0
 }
