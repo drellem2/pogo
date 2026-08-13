@@ -4163,6 +4163,12 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// question of every open item on a clock, and reports the merged-but-open row
 	// the guard cannot see at all.
 	rootCmd.AddCommand(newCheckStrandedCmd(&jsonOutput))
+	// check-memdirs (mg-a9b3): per-agent memory stores holding notes nothing
+	// loads. Sibling of the memory rows in `pogo doctor`, and the complement of
+	// them: those judge a store some session is still using, this one finds a
+	// store that has quietly stopped having a reader — the case no session can
+	// report, because every surviving store looks healthy.
+	rootCmd.AddCommand(newCheckMemdirsCmd(&jsonOutput))
 	// investigations (mg-22c7): search docs/investigations/ by file CONTENTS.
 	// Not a check-* detector — it answers a question a person or agent asks,
 	// and it is the only pogo subcommand that records its own invocation,

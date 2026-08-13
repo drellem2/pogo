@@ -1168,6 +1168,97 @@ third opinion on a settled question, paid for on every tick. Run it by hand when
 you want the item-side view (especially the `landed_not_closed` residue, which
 neither reporter can see), and rely on the mail for the rest.
 
+## Does a memory store still have a reader? (`pogo check-memdirs`)
+
+`pogo doctor` already judges every auto-memory index on the machine three ways:
+over the load cap, holding notes the index does not name, and carrying a hook
+whose item has moved on. All three are properties of a store some session is
+still using. **`pogo check-memdirs` answers the question none of them can: has
+this store quietly stopped having a reader at all?**
+
+```
+$ pogo check-memdirs
+check-memdirs: 153 note(s) in 5 per-agent store(s) that nothing loads.
+
+  pm-pogo           62 note(s)   newest 2026-07-08T04:33Z
+                    ~/.claude/projects/-Users-daniel--pogo-agents-pm-pogo/memory
+                    e.g. feedback_always_on_pm.md, feedback_block_on_human.md, ...
+```
+
+### How a store stops having a reader
+
+A harness keys its per-session memory store on the session's **project**, and for
+a directory inside a git repo the project is the repo, not the directory. So
+making a parent directory a git repo re-keys every agent underneath it onto one
+shared store.
+
+That is usually an improvement — it is how this fleet's crew came to share one
+corpus. What it does not do is move the notes already written. `~/.pogo` became a
+git repo on 2026-07-07; **153 notes across five per-agent stores stopped
+participating in recall that day, and it took five weeks and a duplicated
+investigation to notice.** One stranded note had recorded a finding that two
+agents later re-derived from scratch and filed as new work (mg-b6bd, then
+mg-a9b3).
+
+Nothing was misconfigured and no write ever failed. Every file was on disk and
+readable the whole time. **The failure is invisible from inside every session**,
+which is what separates it from the three `pogo doctor` already covers: the
+agents that used to write there have healthy recall against a different store and
+indexes at exact parity, so no instrument is pointed anywhere that hurts.
+
+### Why it is not an age check
+
+"A store nothing has written to in N days" fires on every legitimately dormant
+per-repo store on the machine, and still cannot see a store stranded five minutes
+ago. The signal is not staleness — it is that the store is keyed to a directory
+**pogo itself owns**. pogo creates the agent working directory and runs the agent
+in it, so a store hanging off it has exactly one possible reader by construction,
+while a shared store has many. Once the fleet's memories live in one shared
+store, a populated per-agent store is a store with no reader whatever its mtime
+says.
+
+### An empty store is not a finding
+
+A retired store is deliberately left holding its index and no notes, so the
+tombstone explaining the retirement survives for the next reader. Deleting the
+directory outright would only mean the next session on that project root
+re-creates it silently — which is the failure this replaces. So a store holding
+only `MEMORY.md` reports clean, by design, and that is what makes the remedy
+converge.
+
+### The remedy is a triage, not a copy
+
+This is the part the command's `--help` says at length, because the obvious
+remedy is the harmful one. The batch that motivated the check contained a rule
+that had since been refuted; moving the notes wholesale into a loaded store would
+have delivered refuted guidance **reading as current** — which is the same defect
+one level up. Decide per note whether it still holds, then leave the store holding
+only a tombstone index.
+
+The recovery that followed made this mistake once even while arguing against it:
+a merged note carried a delivery path Daniel had removed five weeks earlier, and
+it read as current until another agent caught it. The rule that came out of it:
+**norms do not decay, mechanisms do.** A decision, a rule or a failure shape
+survives being stranded; a path, process, config, schedule or file location does
+not, and republishing one without re-measuring it is not safe.
+
+### Exit codes, and why there are four
+
+| code | meaning |
+|------|---------|
+| 0 | nothing stranded — the clean line also prints how many store paths were probed |
+| 1 | at least one store holds notes nothing loads |
+| 2 | usage error |
+| 3 | **this run measured nothing** |
+
+The path from an agent's working directory to its store needs the harness's own
+encoding, which pogo does not own — so it lives in the provider
+(`agent.Provider.AgentMemoryStoreIndex`) and a wrong model produces a path that
+does not exist rather than a wrong finding. That is the safe failure direction,
+but it means a silently-changed encoding would report zero findings forever. Exit
+3 is how a blind run says so instead of printing an all-clear it has not earned,
+and the probe count on the clean line is the positive control for the rest.
+
 ## Who gets told when a polecat leaves pushed work behind
 
 There are **two** automatic reporters, and between them they cover every polecat

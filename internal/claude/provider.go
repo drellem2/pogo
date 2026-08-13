@@ -59,6 +59,11 @@ var Provider = agent.Provider{
 	// distinguish a wedged agent from one failing every turn locally.
 	SessionTranscriptGlob: SessionTranscriptGlob,
 
+	// The same slug encoding, pointed at the auto-memory store rather than the
+	// transcripts. See AgentMemoryStoreIndex for why the workdir->store
+	// direction is worth its own function.
+	AgentMemoryStoreIndex: AgentMemoryStoreIndex,
+
 	// Claude Code's UserPromptSubmit hook fires once per submitted prompt,
 	// which is the receipt a PTY write cannot produce for itself. It is what
 	// lets a nudge be confirmed instead of assumed (mg-ebee).
@@ -84,6 +89,26 @@ func SessionTranscriptGlob(workdir string) string {
 		return ""
 	}
 	return filepath.Join(".claude", "projects", projectSlug(workdir), "*.jsonl")
+}
+
+// AgentMemoryStoreIndex returns the home-relative path of the Claude Code
+// auto-memory index for an agent whose working directory is workdir, or "" when
+// workdir is unknown.
+//
+// It shares projectSlug with SessionTranscriptGlob deliberately: both are the
+// same harness-internal encoding, and pinning them to one function means a
+// change to Claude Code's slugging moves both together instead of leaving one
+// silently pointing at nothing.
+//
+// The path is CONSTRUCTED, never discovered, so a wrong model here yields a
+// path that does not exist rather than a wrong finding. That is the safe
+// direction for a detector, and it is why the caller must distinguish "no store
+// matched" from "no store had a problem".
+func AgentMemoryStoreIndex(workdir string) string {
+	if workdir == "" {
+		return ""
+	}
+	return filepath.Join(".claude", "projects", projectSlug(workdir), "memory", "MEMORY.md")
 }
 
 // projectSlug applies Claude Code's path-to-directory-name encoding.

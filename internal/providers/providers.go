@@ -71,6 +71,34 @@ func SessionTranscriptGlobs(workdir string) []string {
 	return globs
 }
 
+// AgentMemoryStoreIndexes returns the home-relative auto-memory index paths
+// every known provider would use for an agent working in workdir, in All's
+// stable order. It is the composition point that keeps internal/memcheck free of
+// any harness's dotdir, exactly as MemoryIndexGlobs and SessionTranscriptGlobs
+// do for the machine-wide and transcript cases.
+//
+// It spans All for the same reason those two do: pogo resolves a provider
+// per-spawn (mg-b31b), so a machine can be running several harnesses at once and
+// the caller asking about an agent may not know which one produced it. A
+// provider that declares nil, or returns "" for this workdir, contributes
+// nothing.
+//
+// An empty result is NOT "this agent's store is fine" — it is "no harness here
+// claims a per-agent store", which the caller must report as unmeasured. See
+// agent.Provider.AgentMemoryStoreIndex.
+func AgentMemoryStoreIndexes(workdir string) []string {
+	var paths []string
+	for _, p := range All() {
+		if p.AgentMemoryStoreIndex == nil {
+			continue
+		}
+		if s := p.AgentMemoryStoreIndex(workdir); s != "" {
+			paths = append(paths, s)
+		}
+	}
+	return paths
+}
+
 // Resolve maps a config provider id to its agent.Provider descriptor.
 //
 // "" and "claude" resolve to Claude (the default); "codex" resolves to Codex;
