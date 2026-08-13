@@ -190,15 +190,47 @@ pogo refinery history --since=30d # Completed merges from the durable event log 
                                  # cannot reach back that far (mg-e9ee).
 pogo refinery show <id>          # Single MR details
 
-# Logs — ask the service manager where they land; don't assume a path (mg-f766).
-# macOS/launchd: the installed plist is the authority for the log file.
+# Logs — there are TWO of them, they answer different questions, and for BOTH
+# you ask for the location rather than spelling it out (mg-f766, mg-c18d).
+
+# 1. The EVENT LOG — the durable structured record, and the one YOU WRITE TO.
+#    Every `pogo events emit` below lands here. `pogo events list` resolves the
+#    path itself, so there is no path for you to get wrong:
+pogo events list --since=6h --type=agent_stopped   # --type and --agent are EXACT
+pogo events list --since=6h --json | jq -r .event_type | sort | uniq -c
+pogo events list --since=6h --json | jq -c 'select(.event_type|startswith("wedge_watch_"))'
+#    --type is an exact match (internal/events/reader.go), so a FAMILY like
+#    wedge_watch_* is a jq/grep of the output, never a flag — asking for
+#    --type=wedge_watch_ returns a clean empty, which reads like health.
+#    NEVER re-derive this path in the shell. `${POGO_HOME:-$HOME/.pogo}/events.log`
+#    cannot reproduce config.PogoHome(), which normalizes POGO_HOME == $HOME to
+#    $HOME/.pogo — so where POGO_HOME is the home directory that expression names
+#    a DIFFERENT file, which may exist and be months stale. Grepping it returns a
+#    well-formed wrong answer that `ls -l` then confirms (drellem2/pogo#145).
+#    Caveat: it reads only the LIVE file, not the rotated .1-.5, so a long
+#    --since can under-report in silence — unlike `refinery history --since`,
+#    which says TRUNCATED and exits non-zero (mg-e9ee).
+
+# 2. pogod's STDOUT LOG — unstructured daemon chatter. Ask the service manager
+#    where it lands; on macOS/launchd the installed plist is the authority.
 plist=$(pogo service status | sed -n 's/^Service installed: //p')
-grep -A1 StandardOutPath "$plist"   # today: ~/Library/Logs/pogo/pogod.log
+log=$(grep -A1 StandardOutPath "$plist" | sed -n 's:.*<string>\(.*\)</string>.*:\1:p')
+echo "$log"                         # today: ~/Library/Logs/pogo/pogod.log
+grep <pattern> "$log"
+#    The grep reads "$log", not a path written here, and that is the entire
+#    point of the two lines above it (mg-7537). This file kept the literal on
+#    the grep line for four months after mayor.md stopped doing so, because a
+#    literal that is correct on the day it is written breaks no test (mg-c18d).
 # Linux/systemd: the unit sets no StandardOutput, so there is NO log file.
 journalctl --user -u pogo.service
 # Manual mode (pogo server start): logs appear in that terminal — no file.
 # An empty grep proves nothing until you have confirmed the file exists: a
 # missing path and "pogod logged nothing" look identical.
+# Do NOT reach for this log to answer a LIFECYCLE question — it does not carry
+# them. Measured over 6h on this host 2026-08-13: pogod.log held 0 occurrences
+# of server_mode_boot / agent_stopped / wedge_watch_pending /
+# work_item_stranded_push; the event log held 233. Grepping the wrong log is
+# the same false negative as grepping the wrong path (drellem2/pogo#145).
 
 # Projects
 lsp --json                       # All registered repos
@@ -305,6 +337,15 @@ pogo agent diagnose <name> --json | jq '{health, restart_suppressed, transcript_
       --details="{\"target\":\"<name>\",\"heartbeat_age_min\":<N>,\"why\":\"<what you saw>\"}"
   ```
   Then confirm it came back (`pogo agent status <name>`) and mail `human`. `pogo agent stop` does **not** kill the agent's descendants — they reparent to launchd and keep burning cores — so follow a restart with `pogo check-orphans` when the host looks busy.
+
+**Read back what you emit — it is your only memory across sessions.** Both `emit` lines above write to the event log, and you are a fresh process every time you are woken: whether *this* target was already restarted an hour ago is not something you can remember, only something you can look up.
+
+```bash
+pogo events list --since=24h --type=stall_restart --agent=doctor
+pogo events list --since=24h --type=stall_restart_declined --agent=doctor
+```
+
+A **second** restart of the same agent inside a day is a finding to mail `human`, not a remedy to repeat — the first one evidently did not hold, and `LIKELY CAUSE` is the field that is about to be answered "unknown" for the second time. A prior `stall_restart_declined` for that target is stronger still: the credential condition it names is fleet-wide and outlives a restart, so re-check `pogo agent diagnose` before treating the target as an ordinary wedge. Neither reading is available from pogod's stdout log; both are one `pogo events list` away.
 
 **Do not restart yourself.** You cannot observe your own wedge, and with `auto_start = false` there is nothing that will bring you back. A stale reading of your own row goes to `human`. (That flag is deliberate — see the frontmatter at the top of this file before touching it.)
 
