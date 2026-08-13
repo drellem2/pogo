@@ -1,6 +1,13 @@
 // Package reviewdecl reports REVIEW TICKETS THAT DECLARE NO BUILD ITEM: work
-// items whose carrier block reads `stage: review` and which carry no usable
-// `reviews:` line, so pogod's done-reaper exemption can never fire for them.
+// items whose carrier block reads `stage: review`, which are the REVIEW half of
+// a gh-issue pair rather than the build half, and which carry no usable
+// `reviews:` line — so pogod's done-reaper exemption can never fire for them.
+//
+// That middle clause is not a refinement, it is half the predicate: BOTH halves
+// of the pair carry `stage: review` at the same time by design, so the stage line
+// collects the population and does not classify it. buildticket.go is the whole
+// of how the two are told apart and what that costs; this file's Detect calls it
+// and does not re-derive it.
 //
 // # The absence this exists to catch (mg-253e, residual of mg-aaf6)
 //
@@ -113,6 +120,12 @@
 //	     store this scan does not fully cover (see D-1), and a build item in
 //	     archive/ would come back "missing" — a false finding in the one bucket
 //	     that must not have any.
+//	D-4  A REVIEW ticket wearing a build ticket's markers — a `depends:` edge, a
+//	     `predecessor:` tag, or a title whose first word is `build` — is set
+//	     aside as the build half and its missing declaration is NOT reported.
+//	     That is the cost of classifying non-circularly (mg-2829), it is priced
+//	     against a false-positive rate of one per issue, and every set-aside item
+//	     is listed with the marker that set it aside so the reader can check it.
 package reviewdecl
 
 import (
@@ -162,6 +175,16 @@ type Item struct {
 	// no filing time, which is a third answer and not an old date — see
 	// KindUndatable.
 	Created time.Time
+	// Depends and Tags are the `depends:` and `tags:` FRONTMATTER lists, split by
+	// workitem.DependsList/TagList. They are what separates the build ticket from
+	// the review ticket, both of which carry `stage: review` at the same time by
+	// design — see buildticket.go, which is the whole of why they are read.
+	//
+	// Frontmatter, not carrier: these are fields `mg` itself writes and moves, so
+	// unlike the carrier block they cannot be pushed out of a parser's reach by a
+	// line of prose.
+	Depends []string
+	Tags    []string
 }
 
 // Kind classifies what the detector concluded about one item.
@@ -193,6 +216,11 @@ const (
 	// KindOpaque is an item whose carrier block the parser could not reach.
 	// Whether it is even a review ticket is unknown — see D-2.
 	KindOpaque Kind = "opaque"
+	// KindBuildTicket is an item carrying `stage: review` that is the BUILD half
+	// of a gh-issue pair, not the review half. It carries no `reviews:` line
+	// because it is not supposed to. Counted and listed, never a finding — see
+	// buildticket.go.
+	KindBuildTicket Kind = "build_ticket"
 )
 
 // Finding is one item's verdict.
@@ -220,6 +248,12 @@ type Report struct {
 	Declared      []Finding
 	// Opaque is the population the detector could not classify — see D-2.
 	Opaque []Finding
+	// BuildTickets are the items that carry `stage: review` and are the BUILD
+	// half of a gh-issue pair. They are OUTSIDE the review-ticket population, so
+	// they are not in Scanned and never actionable, and they are listed with the
+	// marker that excluded them because that exclusion is the one this detector
+	// most needs a reader to be able to check (mg-2829).
+	BuildTickets []Finding
 	// Scanned is how many review tickets were evaluated. It is the DENOMINATOR:
 	// "0 missing" over an unstated population is not a pass, and mg-253e asked
 	// for this explicitly (the mg-9adc/mg-e9ee family).
@@ -277,6 +311,19 @@ func Detect(items []Item, boundary time.Time) Report {
 		if !strings.EqualFold(strings.TrimSpace(it.Stage), StageReview) {
 			continue
 		}
+
+		// `stage: review` is carried by BOTH halves of a gh-issue pair at once —
+		// the review ticket from creation, the build ticket from the moment its
+		// PR opens — so it collects the population rather than classifying it.
+		// The build half is set aside BEFORE Scanned++ because it is not a review
+		// ticket, and counting it in the denominator would make the report claim
+		// to have audited an item it deliberately did not. See buildticket.go.
+		if marker, detail := classifyBuild(it); marker != MarkerNone {
+			rep.BuildTickets = append(rep.BuildTickets, Finding{
+				Item: it, Kind: KindBuildTicket, Detail: detail,
+			})
+			continue
+		}
 		rep.Scanned++
 
 		decl := strings.TrimSpace(it.Reviews)
@@ -312,7 +359,7 @@ func Detect(items []Item, boundary time.Time) Report {
 	// watching for change learns to stop reading it.
 	for _, g := range [][]Finding{
 		rep.Missing, rep.SelfReference, rep.Malformed, rep.Undatable,
-		rep.PreConvention, rep.Declared, rep.Opaque,
+		rep.PreConvention, rep.Declared, rep.Opaque, rep.BuildTickets,
 	} {
 		sort.SliceStable(g, func(i, j int) bool { return g[i].Item.ID < g[j].Item.ID })
 	}

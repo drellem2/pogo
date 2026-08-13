@@ -95,6 +95,11 @@ func (s Source) Items() ([]Item, error) {
 			Reviews:           it.Reviews,
 			CarrierUnreadable: it.CarrierUnreadable,
 			Created:           it.Created,
+			// Frontmatter, split by mg's own list shape. These are what tell the
+			// build half of a gh-issue pair from the review half, since both carry
+			// `stage: review` at once — see buildticket.go.
+			Depends: it.DependsList(),
+			Tags:    it.TagList(),
 		})
 	}
 	return out, nil

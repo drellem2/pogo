@@ -235,10 +235,16 @@ func (w *Watcher) sample(now time.Time) {
 			"undatable":      len(rep.Undatable),
 			"pre_convention": len(rep.PreConvention),
 			"opaque":         len(rep.Opaque),
-			"unprotected":    rep.Unprotected(),
-			"actionable":     rep.Actionable(),
-			"boundary":       w.boundary.UTC().Format(time.RFC3339),
-			"statuses":       strings.Join(rep.Statuses, ","),
+			// The build half of each gh-issue pair, set aside rather than
+			// audited. It travels with the denominators because it is a
+			// SUBTRACTION from them: an operator reading `scanned` needs to see
+			// what the stage line collected and the classifier removed, or a
+			// classifier that over-excludes looks exactly like a quiet week.
+			"build_tickets": len(rep.BuildTickets),
+			"unprotected":   rep.Unprotected(),
+			"actionable":    rep.Actionable(),
+			"boundary":      w.boundary.UTC().Format(time.RFC3339),
+			"statuses":      strings.Join(rep.Statuses, ","),
 		},
 	})
 

@@ -93,6 +93,23 @@ func (r Report) Render() string {
 			"heading — belongs to stallwatch's report, not this one.\n\n")
 	}
 
+	if len(r.BuildTickets) > 0 {
+		fmt.Fprintf(&b, "build tickets — %d item(s) carrying `stage: review` that are the BUILD half\n"+
+			"of a gh-issue pair, not the review half, and are therefore NOT audited:\n\n", len(r.BuildTickets))
+		for _, f := range r.BuildTickets {
+			fmt.Fprintf(&b, "  %s  status=%s  (%s)\n      %s\n", f.Item.ID, f.Item.Status, f.Detail, f.Item.Title)
+		}
+		b.WriteString("\nBoth halves carry `stage: review` at the same time BY DESIGN: the review ticket\n" +
+			"from creation, the build ticket from the moment its PR opens (mayor.md transition\n" +
+			"4). So the stage line collects this population and cannot classify it, and a\n" +
+			"detector keyed on stage alone reports the builder once PER ISSUE, every time the\n" +
+			"track runs correctly (mg-2829). These are set aside on a marker that does not read\n" +
+			"`reviews:` — a declared predecessor, or a title whose first word is `build`.\n\n" +
+			"THE COST IS LISTED HERE RATHER THAN ASSUMED AWAY: if one of the items above is\n" +
+			"really a review ticket, its missing `reviews:` line is NOT in the report above.\n" +
+			"The marker in parentheses is the exact fact each exclusion rests on — check it.\n\n")
+	}
+
 	if len(r.Declared) > 0 {
 		fmt.Fprintf(&b, "declared — %d review ticket(s) carrying a usable `reviews:` line:\n\n", len(r.Declared))
 		for _, f := range r.Declared {
@@ -120,13 +137,20 @@ func (r Report) coverage() string {
 	fmt.Fprintf(&b, "  %d declared, %d missing, %d self-reference, %d unusable value, %d undatable.\n",
 		len(r.Declared), len(r.Missing), len(r.SelfReference), len(r.Malformed), len(r.Undatable))
 	fmt.Fprintf(&b, "  %d excluded as pre-convention (filed before %s, commit c045a9a);\n"+
-		"  %d not classifiable (carrier block out of the parser's reach).\n",
-		len(r.PreConvention), stamp(r.Boundary), len(r.Opaque))
+		"  %d not classifiable (carrier block out of the parser's reach);\n"+
+		"  %d set aside as the BUILD half of a gh-issue pair (both halves carry\n"+
+		"    `stage: review` at once, so the stage line cannot classify them).\n",
+		len(r.PreConvention), stamp(r.Boundary), len(r.Opaque), len(r.BuildTickets))
 	if r.Scanned == 0 {
 		b.WriteString("\nNOTE: this run evaluated ZERO review tickets. That is a clean result only if the\n" +
 			"store genuinely holds none — over a store with review work in flight it is what a\n" +
 			"broken scan looks like. Check the population count above before reading the zero\n" +
 			"as a pass.\n")
+		if len(r.BuildTickets) > 0 {
+			fmt.Fprintf(&b, "In particular %d item(s) at `stage: review` were set aside as build tickets. If\n"+
+				"that is every review-stage item in the store, the classifier — not the store — is\n"+
+				"the first thing to check.\n", len(r.BuildTickets))
+		}
 	}
 	return b.String()
 }

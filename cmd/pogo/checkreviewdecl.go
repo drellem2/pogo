@@ -52,7 +52,7 @@ FINDINGS, all four of which mean the same thing — the exemption cannot fire:
   undatable       no line AND no readable ` + "`created:`" + ` stamp, so the convention
                   boundary below cannot be applied. NOT resolved to either side.
 
-AND TWO POPULATIONS THAT ARE COUNTED BUT NEVER ALERTED ON:
+AND THREE POPULATIONS THAT ARE COUNTED BUT NEVER ALERTED ON:
 
   pre-convention  filed before ` + "`reviews:`" + ` landed on main (commit c045a9a,
                   ` + reviewdecl.ConventionLandedAt.Format(time.RFC3339) + `). They had no convention to follow.
@@ -62,6 +62,18 @@ AND TWO POPULATIONS THAT ARE COUNTED BUT NEVER ALERTED ON:
                   (mg-27d4), so whether the item is even a review ticket is
                   unknown. The dispatch gate already refuses these outright, so
                   no review polecat is spawned and the exemption is never needed.
+  build tickets   the BUILD half of a gh-issue pair. See below.
+
+` + "`stage: review`" + ` COLLECTS THE POPULATION, IT DOES NOT CLASSIFY IT. Both halves of
+a gh-issue pair carry ` + "`stage: review`" + ` at the same time by design: the review
+ticket from creation, the build ticket from the moment its PR opens (mayor.md
+transition 4). A detector keyed on stage alone therefore reports the BUILDER once
+per issue, every time the track runs correctly — which is what it did before
+mg-2829. The build half is set aside on a marker that does not read ` + "`reviews:`" + `
+(that would be circular): a declared predecessor — a ` + "`depends:`" + ` edge or a
+` + "`predecessor:<id>`" + ` tag — or a title whose first word is ` + "`build`" + `. Every item
+set aside is listed with the marker it was set aside on, because if one of them
+is really a review ticket then its missing line is NOT in the report.
 
 IT PARSES WITH THE ENFORCER'S PARSER, not a grep. A ` + "`reviews:`" + ` line outside the
 LEADING carrier block renders perfectly under ` + "`mg show`" + ` and is invisible to the
@@ -112,13 +124,19 @@ Exit status is 0 when nothing is actionable and 1 when anything is found.`,
 					Kind    string `json:"kind"`
 					Reviews string `json:"reviews,omitempty"`
 					Created string `json:"created,omitempty"`
+					// Detail is what the detector READ to reach this verdict — the
+					// marker a build ticket was set aside on, the offending
+					// `reviews:` value, the filing stamp that put an item on the
+					// far side of the boundary. Empty for `missing`, where the
+					// whole finding is that there was nothing to read.
+					Detail string `json:"detail,omitempty"`
 				}
 				conv := func(fs []reviewdecl.Finding) []outFinding {
 					out := make([]outFinding, 0, len(fs))
 					for _, f := range fs {
 						row := outFinding{
 							ID: f.Item.ID, Title: f.Item.Title, Status: f.Item.Status,
-							Kind: string(f.Kind), Reviews: f.Item.Reviews,
+							Kind: string(f.Kind), Reviews: f.Item.Reviews, Detail: f.Detail,
 						}
 						if !f.Item.Created.IsZero() {
 							row.Created = f.Item.Created.UTC().Format(time.RFC3339)
@@ -143,6 +161,12 @@ Exit status is 0 when nothing is actionable and 1 when anything is found.`,
 					"pre_convention": conv(rep.PreConvention),
 					"declared":       conv(rep.Declared),
 					"opaque":         conv(rep.Opaque),
+					// The build half of each gh-issue pair. Emitted rather than
+					// dropped for the same reason it is rendered: it is an
+					// exclusion, and an exclusion a consumer cannot see is
+					// indistinguishable from a scan that missed it. Each row's
+					// `detail` names the marker it was excluded on.
+					"build_tickets": conv(rep.BuildTickets),
 
 					"unprotected": rep.Unprotected(),
 					"actionable":  rep.Actionable(),
