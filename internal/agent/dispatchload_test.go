@@ -184,7 +184,7 @@ func TestHostLoadEndpointAgreesWithTheGate(t *testing.T) {
 			reg.SetLoadGate(&fakeLoadGate{sample: tc.sample, ok: tc.ok})
 
 			rr := httptest.NewRecorder()
-			reg.handleHostLoad(rr, httptest.NewRequest("GET", "/hostload", nil))
+			reg.handleHostLoad(rr, httptest.NewRequest("GET", "/agents/hostload", nil))
 			if rr.Code != http.StatusOK {
 				t.Fatalf("status = %d", rr.Code)
 			}
@@ -218,7 +218,7 @@ func TestHostLoadEndpointAgreesWithTheGate(t *testing.T) {
 func TestHostLoadEndpointRejectsNonGET(t *testing.T) {
 	reg := newDrainTestRegistry(t)
 	rr := httptest.NewRecorder()
-	reg.handleHostLoad(rr, httptest.NewRequest("POST", "/hostload", nil))
+	reg.handleHostLoad(rr, httptest.NewRequest("POST", "/agents/hostload", nil))
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want 405", rr.Code)
 	}

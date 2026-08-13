@@ -13,7 +13,7 @@ import (
 //
 // It closes over the SAME Registry method the spawn point refuses on
 // (RepoOccupancyFor), rather than recounting workers, for the reason the
-// /hostload endpoint attaches the same struct: an advisory count that could
+// /agents/hostload endpoint attaches the same struct: an advisory count that could
 // drift from the enforced one lets a reader plan against a host pogod sees
 // differently. Here the reader is a coordinator being TOLD what to do, so the
 // drift would show up as advice that is refused a second later.

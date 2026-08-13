@@ -390,7 +390,7 @@ func TestHostLoadEndpointServesTheSameCount(t *testing.T) {
 	for _, tc := range []struct{ live, want int }{{0, 0}, {2, 2}, {3, 3}} {
 		reg := capRegistry(t, tc.live)
 		rr := httptest.NewRecorder()
-		reg.handleHostLoad(rr, httptest.NewRequest("GET", "/hostload?repo="+goRepo, nil))
+		reg.handleHostLoad(rr, httptest.NewRequest("GET", "/agents/hostload?repo="+goRepo, nil))
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d", rr.Code)
 		}
@@ -417,7 +417,7 @@ func TestHostLoadEndpointServesTheSameCount(t *testing.T) {
 func TestHostLoadOmitsOccupancyWhenNoRepoAsked(t *testing.T) {
 	reg := capRegistry(t, 3)
 	rr := httptest.NewRecorder()
-	reg.handleHostLoad(rr, httptest.NewRequest("GET", "/hostload", nil))
+	reg.handleHostLoad(rr, httptest.NewRequest("GET", "/agents/hostload", nil))
 	var resp HostLoadResponse
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
 		t.Fatal(err)

@@ -144,7 +144,7 @@ func (r *Registry) loadGateRefusal() string {
 		s.DispatchAdvice())
 }
 
-// HostLoadResponse is the JSON body of GET /hostload.
+// HostLoadResponse is the JSON body of GET /agents/hostload.
 type HostLoadResponse struct {
 	hostload.Sample
 	// Advice is the sentence a dispatcher should act on, and Measured says
@@ -165,7 +165,7 @@ type HostLoadResponse struct {
 	WouldRefuseDispatch bool `json:"would_refuse_dispatch"`
 
 	// RepoOccupancy is the per-repo cap's view, present only when the request
-	// named a repo (GET /hostload?repo=...). Served from the same counter the
+	// named a repo (GET /agents/hostload?repo=...). Served from the same counter the
 	// spawn path consults, for the reason above.
 	RepoOccupancy *RepoOccupancy `json:"repo_occupancy,omitempty"`
 }

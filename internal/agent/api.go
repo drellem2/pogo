@@ -517,23 +517,66 @@ func formatLastActivity(t time.Time) string {
 	return d.String() + " ago"
 }
 
+// route pairs a request pattern with the handler RegisterHandlers binds to it.
+type route struct {
+	pattern string
+	handler http.HandlerFunc
+}
+
+// routes lists the agent API endpoints in registration order.
+//
+// RegisterHandlers is driven from this list, and RoutePatterns exposes the
+// patterns, so a test can enumerate every route and check that a caller can
+// actually reach it. That check is the point: pogod does not serve this mux
+// directly, it mounts it onto DefaultServeMux under a fixed set of prefixes
+// (cmd/pogod/main.go, mountOrchestrated). A pattern outside those prefixes is
+// registered here and unreachable there — it falls through to the "/" home
+// page and 404s.
+//
+// That is not hypothetical. "/hostload" sat here for two weeks (added by
+// mg-1b8c, found by mg-c26d) as the only agent route outside "/agents", so
+// `pogo host load` answered nothing but `404 Not Found` the whole time. The
+// handler was correct and three tests proved it, because all three called the
+// handler directly: a request a test constructs itself cannot fail on a mount.
+// Keeping every pattern under "/agents" is what makes the class impossible,
+// and TestEveryAgentRouteIsMounted is what makes a lapse loud.
+func (r *Registry) routes() []route {
+	return []route{
+		{"/agents", r.handleAgents},
+		{"/agents/start", r.handleStart},
+		{"/agents/spawn-polecat", r.handleSpawnPolecat},
+		{"/agents/drain", r.handleDrain},
+		{"/agents/hostload", r.handleHostLoad},
+		{"/agents/prompts", r.handlePrompts},
+		{"/agents/mail-loops", r.handleMailLoops},
+		{"/agents/roster", r.handleRoster},
+		{"/agents/{name}", r.handleAgent},
+		{"/agents/{name}/park", r.handlePark},
+		{"/agents/{name}/wake", r.handleWake},
+		{"/agents/{name}/diagnose", r.handleDiagnose},
+		{"/agents/{name}/nudge", r.handleNudge},
+		{"/agents/{name}/output", r.handleOutput},
+		{"/agents/{name}/terminal", r.handleTerminal},
+	}
+}
+
+// RoutePatterns returns the request paths RegisterHandlers registers, in
+// registration order. It exists so a reachability test can enumerate the
+// routes without reaching into the registry — see routes.
+func RoutePatterns() []string {
+	rs := (&Registry{}).routes()
+	out := make([]string, 0, len(rs))
+	for _, rt := range rs {
+		out = append(out, rt.pattern)
+	}
+	return out
+}
+
 // RegisterHandlers registers agent API endpoints on the given mux.
 func (r *Registry) RegisterHandlers(mux *http.ServeMux) {
-	mux.HandleFunc("/agents", r.handleAgents)
-	mux.HandleFunc("/agents/start", r.handleStart)
-	mux.HandleFunc("/agents/spawn-polecat", r.handleSpawnPolecat)
-	mux.HandleFunc("/agents/drain", r.handleDrain)
-	mux.HandleFunc("/hostload", r.handleHostLoad)
-	mux.HandleFunc("/agents/prompts", r.handlePrompts)
-	mux.HandleFunc("/agents/mail-loops", r.handleMailLoops)
-	mux.HandleFunc("/agents/roster", r.handleRoster)
-	mux.HandleFunc("/agents/{name}", r.handleAgent)
-	mux.HandleFunc("/agents/{name}/park", r.handlePark)
-	mux.HandleFunc("/agents/{name}/wake", r.handleWake)
-	mux.HandleFunc("/agents/{name}/diagnose", r.handleDiagnose)
-	mux.HandleFunc("/agents/{name}/nudge", r.handleNudge)
-	mux.HandleFunc("/agents/{name}/output", r.handleOutput)
-	mux.HandleFunc("/agents/{name}/terminal", r.handleTerminal)
+	for _, rt := range r.routes() {
+		mux.HandleFunc(rt.pattern, rt.handler)
+	}
 }
 
 func (r *Registry) handleAgents(w http.ResponseWriter, req *http.Request) {

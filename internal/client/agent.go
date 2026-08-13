@@ -228,7 +228,10 @@ func NudgeAgent(name, message string, opts *NudgeOpts) error {
 // the repo count are independent answers and either can refuse a dispatch on
 // its own.
 func GetHostLoad(repo string) (*agent.HostLoadResponse, error) {
-	u := serverURL + "/hostload"
+	// The path lives under /agents on purpose. pogod mounts the agent sub-mux
+	// under a fixed set of prefixes, and this endpoint spent two weeks at the
+	// unmounted "/hostload", where every call 404'd (mg-c26d).
+	u := serverURL + "/agents/hostload"
 	if strings.TrimSpace(repo) != "" {
 		u += "?repo=" + url.QueryEscape(repo)
 	}
