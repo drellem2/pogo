@@ -2850,6 +2850,83 @@ cleanup_orphans() {
 # report main, so a split pair fails the deploy loudly instead of shipping. A
 # refusal here exits with the drain trap still armed, leaving the old pogod
 # running and dispatching — the correct resting state for "we could not build".
+
+# THE BUILD STAMP (mg-3141). Makes each installed binary able to say what it
+# contains, from inside itself, without a log line or an mtime or an inference.
+#
+# This is a deliberate duplicate of build.sh's version_ldflags. This script is
+# standalone by ruling (see the header: it calls only STABLE primitives and must
+# not grow dependencies, because it is the thing that repairs a broken pogod).
+# scripts/stamp_test.sh sources THIS function, builds with it, RUNS the binary
+# and asserts the commit — so the two copies are guarded by behaviour rather
+# than by a shared file the deploy path would then depend on.
+#
+# A wrong -X symbol path is a silent no-op producing exactly the empty-string
+# state this ticket exists to end, with no error at build time. That is why the
+# guard runs the binary and why the post-install check below asks each artifact
+# rather than trusting this string.
+version_ldflags() {
+    local repo="${1:-.}"
+    local pkg="github.com/drellem2/pogo/internal/version"
+    local commit branch dirty
+    commit="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
+    if [ -z "$commit" ]; then echo ""; return 0; fi
+    branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    [ -n "$branch" ] || branch="unknown"
+    if [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then dirty=true; else dirty=false; fi
+    printf -- '-X %s.Commit=%s -X %s.Build=%s -X %s.Branch=%s -X %s.Dirty=%s' \
+        "$pkg" "$commit" "$pkg" "${commit:0:7}" "$pkg" "$branch" "$pkg" "$dirty"
+}
+
+# stamped_rev: the revision a binary REPORTS ABOUT ITSELF, from its own ldflags
+# stamp, by being RUN and asked.
+#
+# This is a different reading from installed_rev, and keeping them apart is the
+# point. installed_rev asks the FILE (`go version -m`, Go's automatic
+# vcs.revision); stamped_rev asks the PROGRAM. They can disagree, and when they
+# do the disagreement is the finding: Go's stamp names whatever repo the build
+# directory walked up into, while this one names the repo this script chose.
+#
+# HOW IT ASKS IS LOAD-BEARING, AND IT IS NOT THE SPELLING A HUMAN WOULD USE.
+# This function runs a binary of UNKNOWN VINTAGE — that is the whole point, it
+# is checking whether the install landed. A pre-mg-3141 pogod given the bare
+# `version` argument does not print a version and does not error: stdlib flag
+# ignores unrecognised positional args, so it STARTS THE DAEMON. Measured: on a
+# box where the pogod lock is free — which is precisely the state during a
+# redeploy — that is a second daemon launched by the post-install check, and a
+# check that never returns.
+#
+# The FLAG form is the safe probe, because stdlib flag REFUSES an unknown flag:
+# a pre-fix pogod given `-version` exits 2 with "flag provided but not defined"
+# having started nothing (measured). So the flag form is the DEFAULT here, and
+# any binary not named below is probed that way — an unhandled new binary then
+# fails loudly as UNSTAMPED rather than hanging the deploy.
+#
+# cmd/pogo is the exception: it is a cobra CLI, which rejects `-version` as an
+# unknown shorthand (both vintages, measured) and has no daemon to start, so the
+# subcommand form is both necessary and harmless for it.
+stamped_rev() {
+    local name="$1"
+    local bin; bin="$(installed_bin "$name")"
+    [ -x "$bin" ] || { echo "$REV_MISSING"; return 0; }
+    local out
+    case "$name" in
+        pogo|lsp|pose) out="$("$bin" version --json 2>/dev/null || true)" ;;
+        *)             out="$("$bin" -version -json 2>/dev/null || true)" ;;
+    esac
+    # NOT json_str: that one is pinned to the compact `"k":"v"` shape pogod's
+    # HTTP handler emits, and both CLIs print INDENTED JSON — `"commit": "..."`
+    # with a space. json_str returns empty on it, which stamped_rev would have
+    # reported as UNSTAMPED: a check that fails a good deploy while looking
+    # exactly like the defect it is testing for. BRE, BSD sed (macOS).
+    local rev
+    rev="$(printf '%s' "$out" | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    # "unknown" is what an unstamped binary now reports — honest and greppable,
+    # and not comparable to a revision, so it maps onto the existing sentinel.
+    if [ -z "$rev" ] || [ "$rev" = "unknown" ]; then echo "$REV_UNSTAMPED"; return 0; fi
+    echo "$rev"
+}
+
 do_build() {
     local name; local pkgs=()
     for name in "${DEPLOYED_CMDS[@]}"; do pkgs+=("./cmd/$name"); done
@@ -2866,7 +2943,18 @@ do_build() {
     # Stage: compile the whole set into a throwaway dir. A failure here has
     # written nothing to GOBIN.
     local stage; stage="$(mktemp -d)" || { err "cannot create a staging dir"; exit 4; }
-    if ! ( cd "$REPO" && go build -o "$stage/" "${pkgs[@]}" ); then
+    # The stamp is derived once and used for BOTH the staged build and the
+    # install below. Deriving it twice would let the two differ if the tree
+    # changed between them — and the whole value of the stamp is that the
+    # artifact and the claim about it cannot come apart.
+    local ldflags; ldflags="$(version_ldflags "$REPO")"
+    if [ -z "$ldflags" ]; then
+        err "cannot read a revision from $REPO — refusing to install binaries that cannot say what they contain"
+        rm -rf "$stage"
+        exit 4
+    fi
+    log "stamping $(short "$head") into ${DEPLOYED_CMDS[*]}"
+    if ! ( cd "$REPO" && go build -ldflags "$ldflags" -o "$stage/" "${pkgs[@]}" ); then
         rm -rf "$stage"
         err "go build failed — refusing to install a partial set (nothing was written to GOBIN)"
         exit 4
@@ -2881,7 +2969,7 @@ do_build() {
     # sentence is derived from this flag, not from the exit code, which is why a
     # future exit added anywhere in this function cannot get the answer wrong.
     DEPLOY_INSTALLED="partial"
-    ( cd "$REPO" && go install "${pkgs[@]}" ) || { err "go install failed"; exit 4; }
+    ( cd "$REPO" && go install -ldflags "$ldflags" "${pkgs[@]}" ) || { err "go install failed"; exit 4; }
     # Verify EVERY binary, not just the daemon: an install that silently skipped
     # one is exactly the failure this ticket exists to end, and it is only
     # detectable by asking each binary what revision it carries.
@@ -2891,7 +2979,19 @@ do_build() {
             err "post-install $name revision $(short "$now") != main $(short "$MAIN")"
             exit 4
         fi
-        log "installed $name is now $(short "$now")"
+        # ASK THE BINARY, not just the file (mg-3141). installed_rev reads Go's
+        # automatic vcs stamp off the file; this asks the program what it says
+        # about itself, which is the reading every "is the fix live?" question
+        # actually needs and the one that did not exist before. It also catches
+        # the failure this ticket's remedy is itself subject to: a `-X` naming a
+        # symbol path that does not exist links cleanly, produces no error, and
+        # yields exactly the unstamped binary we set out to stop shipping.
+        local said; said="$(stamped_rev "$name")"
+        if [ "$said" != "$MAIN" ]; then
+            err "post-install $name SAYS $(short "$said") when asked (\`$name version --json\`) but main is $(short "$MAIN") — the binary cannot say what it contains"
+            exit 4
+        fi
+        log "installed $name is now $(short "$now") and says so itself"
     done
     # `yes` is claimed only once every binary has been asked and answered main.
     # A `go install` that returned 0 over a split pair is the failure this loop

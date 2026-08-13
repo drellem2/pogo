@@ -24,6 +24,10 @@ func main() {
 	rootCmd := newRootCmd()
 	completion.AddCommand(rootCmd)
 
+	// Version already carries the program name (mg-3141); cobra's default
+	// template would render "pose version pose 0.10.0 (...)".
+	rootCmd.SetVersionTemplate("{{.Version}}\n")
+
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitError)
 	}
@@ -36,7 +40,7 @@ func newRootCmd() *cobra.Command {
 	var searchAll bool
 	var findRefs bool
 
-	var rootCmd = &cobra.Command{Use: "pose QUERY [PATH]", Version: version.Version}
+	var rootCmd = &cobra.Command{Use: "pose QUERY [PATH]", Version: version.Get().Describe("pose")}
 	// pose takes its query as a positional arg, but registering the
 	// "completion" subcommand makes cobra default to legacyArgs, which rejects
 	// any non-subcommand first positional with `unknown command`. Declaring

@@ -63,6 +63,21 @@ gate_step "Testing bash shell integration" bash shell/bashrc_test.sh
 
 gate_step "Testing pogo-self-deploy driver" bash scripts/pogo-self-deploy_test.sh
 
+# The build stamp (mg-3141). Every locally-built binary reported commit:"" and
+# branch:"" — present and empty — because the ldflags lived only in goreleaser,
+# which builds none of the binaries this box runs. Four "is the fix live?"
+# questions in one night were answered by file mtimes and by inference as a
+# result.
+#
+# It is in the GATE and not on demand because the defect is a build-path defect:
+# it cannot be caught by any test of internal/version, which passes whether or
+# not a build path sets the flags. This suite builds via build.sh AND via
+# pogo-self-deploy's version_ldflags, RUNS each binary, and asks it — a `-X`
+# naming a wrong symbol path links cleanly and fails only at runtime. ~9s, two
+# of which are its positive control: a build with the flags withheld, required
+# to come back RED.
+gate_step "Testing the build stamp (pogo/pogod can say what they contain)" bash scripts/stamp_test.sh
+
 # The size-triggered module-cache reclaim (mg-b7c3). Runs here rather than only
 # in the Go suite because the decision this job exists for — fire, refuse, or
 # defer — lives in the shell script, not in the installer. Its stubs are on PATH,

@@ -62,6 +62,7 @@ import (
 	"github.com/drellem2/pogo/internal/synthwatch"
 	"github.com/drellem2/pogo/internal/turnlog"
 	"github.com/drellem2/pogo/internal/turnwatch"
+	"github.com/drellem2/pogo/internal/version"
 	"github.com/drellem2/pogo/internal/wedgewatch"
 	"github.com/drellem2/pogo/internal/workitem"
 
@@ -89,6 +90,14 @@ var startTime time.Time
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
 var portFlag = flag.Int("port", 0, "port to listen on (default: 10000)")
+
+// versionFlag makes the DAEMON answerable about its own build without a
+// running daemon (mg-3141). GET /version already reported a revision, but only
+// from a pogod that is up and answering — so the one question a deploy most
+// needs ("what is in the binary I just installed?") could not be asked of the
+// artifact, only of the process. `pogod -version --json` asks the file.
+var versionFlag = flag.Bool("version", false, "print this binary's build identity and exit")
+var versionJSONFlag = flag.Bool("json", false, "with -version: print JSON")
 
 // maxHTTPConns caps concurrent HTTP connections so a client leak can't
 // exhaust daemon file descriptors. Generous for a localhost daemon whose
@@ -569,16 +578,28 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 // running revision must be self-reported: reading `go version -m ~/go/bin/pogod`
 // gives the INSTALLED binary's revision, which diverges from the running one
 // the instant `go install` rewrites that file underneath a live daemon.
+//
+// THE LDFLAGS FIELDS BESIDE IT (mg-3141). `revision` stays exactly what it has
+// always been — Go's automatic vcs.revision — because running_rev, revcheck,
+// driftwatch and pogo-self-deploy all read it and its meaning must not shift
+// underneath them. The build-script stamp is reported ALONGSIDE it, under
+// `build`, and the two can legitimately disagree: Go's stamp is whatever repo
+// the build directory walked up into, while the ldflags stamp names the repo
+// the build script chose. In a polecat worktree under ~/.pogo those are
+// different repositories — measured, see internal/version/resolve.go — so
+// collapsing them into one field would have been the same near-end/far-end
+// mistake this ticket was filed about.
 type versionInfo struct {
-	Revision  string `json:"revision"`   // vcs.revision embedded at build
-	Time      string `json:"time"`       // vcs.time
-	Modified  bool   `json:"modified"`   // vcs.modified (dirty tree at build)
-	GoVersion string `json:"go_version"` // toolchain that built it
-	StartTime string `json:"start_time"` // RFC3339 process start
+	Revision  string       `json:"revision"`   // vcs.revision embedded at build
+	Time      string       `json:"time"`       // vcs.time
+	Modified  bool         `json:"modified"`   // vcs.modified (dirty tree at build)
+	GoVersion string       `json:"go_version"` // toolchain that built it
+	StartTime string       `json:"start_time"` // RFC3339 process start
+	Build     version.Info `json:"build"`      // the ldflags stamp, with its source named
 }
 
 func versionHandler(w http.ResponseWriter, r *http.Request) {
-	info := versionInfo{StartTime: startTime.Format(time.RFC3339)}
+	info := versionInfo{StartTime: startTime.Format(time.RFC3339), Build: version.Get()}
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		info.GoVersion = bi.GoVersion
 		for _, s := range bi.Settings {
@@ -1336,6 +1357,40 @@ Flags:
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	// Before anything else, and before any state is touched: this must answer
+	// for a binary that cannot start — a pogod whose config is broken is
+	// exactly the one you need to identify.
+	//
+	// BOTH SPELLINGS ANSWER. `pogo version --json` is how the CLI is asked, so
+	// a human or script holding either binary can use the same words and get
+	// the same answer — the CLI was the artifact that bit us on 2026-08-13 and
+	// the daemon was the one with a revision recorded, so the two must not
+	// diverge in how they are questioned.
+	//
+	// The DEPLOY's check does not use this spelling, and that is deliberate,
+	// not an oversight: pogo-self-deploy's stamped_rev probes an unknown-vintage
+	// binary, and a pre-mg-3141 pogod IGNORES the bare `version` argument and
+	// starts the daemon. It uses the flag form, which such a binary refuses.
+	// See the comment on stamped_rev for the measurement.
+	if *versionFlag || (len(flag.Args()) > 0 && flag.Args()[0] == "version") {
+		asJSON := *versionJSONFlag
+		for _, a := range flag.Args() {
+			if a == "--json" || a == "-json" {
+				asJSON = true
+			}
+		}
+		info := version.Get()
+		if asJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(info)
+		} else {
+			fmt.Println(info.Describe("pogod"))
+		}
+		return
+	}
+
 	startTime = time.Now()
 
 	// Rotate the launchd-managed log before anything writes to it, then mark
