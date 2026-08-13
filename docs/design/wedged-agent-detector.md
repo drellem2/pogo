@@ -344,3 +344,33 @@ Whoever rules on item (3) will need to decide at least:
   this agent to make progress with", so it reads the **whole host** rather than
   the fleet's share: an agent starved by somebody else's compiler is just as
   starved. Same package, same threshold, different denominator, on purpose.
+
+## 7. Seeing what the detector saw (mg-8a56)
+
+The detector judges an agent on the last **`OutputScanBytes` = 16KB** of its PTY
+ring (`internal/wedgewatch/source.go`), out of the 64KB the ring retains
+(`agent.OutputRingBytes`). Anyone diagnosing a wedge — or diagnosing this
+detector — needs that same window, and until mg-8a56 could not get it: `GET
+/agents/{name}/output` documented `?lines=N` and `?bytes=N`, read neither, and
+returned a fixed 4096 bytes with a 200. A quarter of the evidence, with nothing
+saying so. Two polecats on mg-20eb recorded bounds they could not close because
+of it.
+
+To reproduce what the detector read:
+
+```bash
+pogo agent output <name> --bytes 16384 --plain          # the scanned window
+pogo agent output <name> --bytes 65536 --plain          # everything retained
+curl -s "http://127.0.0.1:10000/agents/<name>/output?bytes=16384&plain=true"
+```
+
+`--bytes` is clamped to the ring capacity, so naming a large number is the
+honest way to ask for "all of it". `--lines N` returns the last N
+newline-separated lines out of the whole ring — useful for line-oriented output
+and blunt for a TUI, whose full-screen redraws address rows by cursor movement
+and emit no newline. The endpoint's default is still 4096 bytes when neither is
+given, so existing callers are unaffected; `--bytes`/`?bytes=` is what reaches
+the detector's window.
+
+`pogo agent diagnose` still prints only a ~500-byte tail — it is a summary, not
+the evidence — and now says so, naming the command above.

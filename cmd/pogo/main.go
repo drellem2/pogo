@@ -45,6 +45,7 @@ import (
 	"github.com/drellem2/pogo/internal/sourcewatch"
 	"github.com/drellem2/pogo/internal/synthfail"
 	"github.com/drellem2/pogo/internal/version"
+	"github.com/drellem2/pogo/internal/wedgewatch"
 	"github.com/drellem2/pogo/internal/xref"
 )
 
@@ -2156,15 +2157,39 @@ leaving you on a frozen screen.`,
 	}
 
 	var outputPlain bool
+	var outputBytes, outputLines int
 	var cmdAgentOutput = &cobra.Command{
 		Use:   "output <name>",
 		Short: "Show recent output from an agent",
-		Long: `Show recent output from an agent's PTY buffer.
+		Long: fmt.Sprintf(`Show recent output from an agent's PTY buffer.
 
-Use --plain to strip ANSI/VT escape sequences for human-readable or machine-parseable output.`,
+Use --plain to strip ANSI/VT escape sequences for human-readable or machine-parseable output.
+
+The default window is the last %d bytes. --bytes selects a larger one, up to the
+ring's full %d bytes; --lines selects the last N newline-separated lines out of
+the whole ring. The two are mutually exclusive.
+
+Sizing note: pogod's wedge detector judges an agent on the last %d bytes
+(wedgewatch.OutputScanBytes). Reproducing what it saw takes --bytes %d; the
+default is a quarter of that.`,
+			agent.DefaultOutputBytes, agent.OutputRingBytes,
+			wedgewatch.OutputScanBytes, wedgewatch.OutputScanBytes),
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			output, err := client.GetAgentOutput(args[0], outputPlain)
+			// A non-positive value would fall through the >0 test in the
+			// client and be sent as "no window given" — i.e. accepted and
+			// ignored, the exact shape mg-8a56 was filed about. Refuse it.
+			for _, f := range []string{"bytes", "lines"} {
+				if v, _ := cmd.Flags().GetInt(f); cmd.Flags().Changed(f) && v <= 0 {
+					cli.ExitWithError(jsonOutput,
+						fmt.Sprintf("--%s must be positive, got %d", f, v), cli.ExitError)
+				}
+			}
+			output, err := client.GetAgentOutput(args[0], client.AgentOutputOptions{
+				Plain: outputPlain,
+				Bytes: outputBytes,
+				Lines: outputLines,
+			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
@@ -2176,6 +2201,10 @@ Use --plain to strip ANSI/VT escape sequences for human-readable or machine-pars
 		},
 	}
 	cmdAgentOutput.Flags().BoolVar(&outputPlain, "plain", false, "Strip ANSI escape sequences from output")
+	cmdAgentOutput.Flags().IntVar(&outputBytes, "bytes", 0,
+		fmt.Sprintf("Return the last N bytes (default %d, max %d)", agent.DefaultOutputBytes, agent.OutputRingBytes))
+	cmdAgentOutput.Flags().IntVar(&outputLines, "lines", 0, "Return the last N lines from the whole retained ring")
+	cmdAgentOutput.MarkFlagsMutuallyExclusive("bytes", "lines")
 
 	var cmdAgentStatus = &cobra.Command{
 		Use:   "status [name]",
@@ -2367,6 +2396,14 @@ down. To keep it down, park it.`,
 				}
 				if diag.RecentOutputTail != "" {
 					fmt.Printf("\n--- Recent output (last ~500 bytes) ---\n%s\n", diag.RecentOutputTail)
+					// Say where the rest is. This tail is a fraction of the
+					// window the wedge detector judged on, and a reader with no
+					// way to ask for more takes it for everything there is —
+					// which is how mg-8a56 produced a wrong bound.
+					fmt.Printf("\n(that is a tail; pogod judged this agent on the last %d bytes —\n",
+						wedgewatch.OutputScanBytes)
+					fmt.Printf(" see them with: pogo agent output %s --bytes %d --plain)\n",
+						diag.Name, wedgewatch.OutputScanBytes)
 				}
 			}
 		},
