@@ -349,12 +349,14 @@ func (a StrandedAlert) Message() (subject, body string) {
 		fmt.Fprintf(&b, "%s\n\n", wrapAt(a.SecondOpinion, 88))
 	}
 
+	// The command is provenance-aware (mg-bfe0): `pogo refinery submit` REFUSES a
+	// branch that is not on origin (mg-586d), and this mail's whole point is that
+	// it reaches a reader who will act on it. The paragraph below already told
+	// unpushed readers to push — but it sits AFTER the command block, and a
+	// pasteable command beats a paragraph that qualifies it.
 	fmt.Fprintf(&b, "WHAT TO DO — resubmit, do not dispatch:\n\n")
-	fmt.Fprintf(&b, "    pogo refinery submit %s --repo=%s", a.Finding.Branch, a.Repo)
-	if a.WorkItemID != "" {
-		fmt.Fprintf(&b, " --author=%s", a.WorkItemID)
-	}
-	b.WriteString("\n\n")
+	fmt.Fprintf(&b, "    %s\n\n",
+		strandedwork.SubmitRemedy(a.Repo, a.Finding.Branch, a.WorkItemID, a.Finding.Pushed))
 
 	if a.WorkItemID != "" && a.itemIsClosed() {
 		// The board paragraph below is FALSE for a closed item, and saying it

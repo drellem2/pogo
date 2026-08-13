@@ -218,11 +218,20 @@ type Row struct {
 }
 
 // Remedy is the one command to run, or the one question to answer.
+//
+// THE STRANDED ROW'S COMMAND DEPENDS ON r.Pushed (mg-bfe0). The renderer already
+// labels the branch line "LOCAL ONLY — not on origin, and git-gc reaps the
+// worktree", but the remedy underneath it was the bare submit line for both
+// cases — and `pogo refinery submit` REFUSES a branch that is not on origin
+// (mg-586d, the merge worker checks it out as origin/<branch>). A prose warning
+// two lines above a runnable command loses to the command, so the push is built
+// into the command via strandedwork.SubmitRemedy, which is the same rule the
+// dispatch refusal prints.
 func (r Row) Remedy() string {
 	switch r.Kind {
 	case KindStranded:
-		return fmt.Sprintf("pogo refinery submit %s --repo=%s --author=%s   # do NOT dispatch at %s",
-			r.Branch, r.Item.Repo, r.Item.ID, r.Item.ID)
+		return fmt.Sprintf("%s   # do NOT dispatch at %s",
+			strandedwork.SubmitRemedy(r.Item.Repo, r.Branch, r.Item.ID, r.Pushed), r.Item.ID)
 	case KindLandedNotClosed:
 		return fmt.Sprintf("mg done %s --result='{\"branch\": \"%s\", \"note\": \"landed before the item was closed\"}'",
 			r.Item.ID, r.Branch)

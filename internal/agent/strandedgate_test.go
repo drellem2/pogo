@@ -478,3 +478,139 @@ func TestSpawnAtAReviewerItemIsNotRefusedForThePointerBranch(t *testing.T) {
 			"the mg-1af2 fix must not disarm the mg-9a19 refusal", rr.Code)
 	}
 }
+
+// --- The LOCAL-ONLY case: covered by the scan, misreported by the message -----
+
+// worktreeBranch reproduces how a polecat's branch actually comes into being:
+// `git worktree add -b polecat-<name>` in the SOURCE repo. The branch head
+// therefore lives in the source repo's ref namespace even though the commits
+// were made in a directory somewhere else entirely, which is the fact the whole
+// local-only question turns on. Nothing is pushed.
+func worktreeBranch(t *testing.T, repo, branch, file, subject string) (sha, tree string) {
+	t.Helper()
+	tree = filepath.Join(t.TempDir(), branch)
+	gitRun(t, repo, "worktree", "add", "-q", "-b", branch, tree, "main")
+	return writeCommit(t, tree, file, subject), tree
+}
+
+// TestSpawnRefusedForLocalOnlyPreRegistration is mg-0fc6 reproduced at the
+// moment BEFORE the push, which is the state mg-bfe0 was filed about.
+//
+// mg-bfe0's premise was that the guard is defined over pushed branches and a
+// local-only pre-registration is invisible to it — that the refusal on the night
+// of 2026-08-13 fired only because mayor happened to push the branch minutes
+// earlier. THAT PREMISE IS FALSE, and this test is where it is nailed down so it
+// cannot be re-derived: strandedwork.Scan enumerates refs/heads as well as
+// refs/remotes/origin, resolveBranchRef falls back to the local head, and a
+// polecat worktree's branch is in the source repo's ref namespace by
+// construction. The refusal fires with nothing on origin at all.
+//
+// The coverage is not accidental either, which is the part worth writing down:
+// git REFUSES to delete a branch that a worktree has checked out ("cannot delete
+// branch 'polecat-p0fc6' used by worktree at ..."), so a PRESERVED worktree pins
+// its branch ref for as long as it exists. The population mg-bfe0 was worried
+// about is therefore the population whose ref is hardest to lose.
+//
+// What was true is one layer up, and TestLocalOnlyRefusalDoesNotClaimItIsPushed
+// is that half.
+func TestSpawnRefusedForLocalOnlyPreRegistration(t *testing.T) {
+	repo := strandedRepo(t)
+	sha, _ := worktreeBranch(t, repo, "polecat-p0fc6", "predictions.md",
+		"predictions: three of the six scoping checks will fail")
+
+	// The control: nothing whatsoever is on origin. Without this line the test
+	// would still pass against a pushed-only guard.
+	if remote := gitRun(t, repo, "ls-remote", "origin", "refs/heads/polecat-*"); strings.TrimSpace(remote) != "" {
+		t.Fatalf("fixture pushed the branch, so this is not the local-only case: %q", remote)
+	}
+
+	reg := newDrainTestRegistry(t)
+	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "q0fc6", Id: "mg-0fc6", Repo: repo, Branch: "main", Template: BuildWorkerTemplate,
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("spawn onto an item with an UNPUSHED pre-registration commit: status = %d, want 409 — "+
+			"this is the population mg-bfe0 believed the gate could not see", rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{"PRE-REGISTRATION", "never amend", sha[:12], "polecat-p0fc6"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refusal does not mention %q; got: %s", want, body)
+		}
+	}
+}
+
+// TestLocalOnlyRefusalDoesNotClaimItIsPushed is the half of mg-bfe0 that was
+// real, and it is a defect about what the refusal SAYS rather than whether it
+// fires.
+//
+// Every refusal used to open "already has PUSHED, UNMERGED work" and prescribe
+// `pogo refinery submit <branch>`. On a local-only branch both halves are wrong,
+// and wrong in the dangerous direction:
+//
+//   - "PUSHED" tells the reader the work is durable and discoverable, when it
+//     exists in one worktree on one host that git-gc reaps. That is the more
+//     urgent case being reported as the less urgent one.
+//   - `pogo refinery submit` REFUSES a branch that is not on origin (mg-586d),
+//     so the one command offered cannot run. A reader who pastes it gets a
+//     rejection and no instruction about what to do instead.
+func TestLocalOnlyRefusalDoesNotClaimItIsPushed(t *testing.T) {
+	repo := strandedRepo(t)
+	worktreeBranch(t, repo, "polecat-p0fc6", "predictions.md",
+		"predictions: three of the six scoping checks will fail")
+
+	reg := newDrainTestRegistry(t)
+	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "q0fc6", Id: "mg-0fc6", Repo: repo, Branch: "main", Template: BuildWorkerTemplate,
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rr.Code)
+	}
+	body := rr.Body.String()
+
+	if strings.Contains(body, "PUSHED, UNMERGED") {
+		t.Errorf("the refusal calls unpushed work PUSHED — a reader told that concludes the branch "+
+			"is safe on origin and recoverable at leisure, which is the opposite of true; got: %s", body)
+	}
+	if !strings.Contains(body, "LOCAL-ONLY") {
+		t.Errorf("the refusal never says the work is local-only; got: %s", body)
+	}
+	if !strings.Contains(body, "NOT ON ORIGIN") {
+		t.Errorf("the refusal never states the urgency (git-gc reaps the worktree); got: %s", body)
+	}
+	// The remedy has to be runnable. A bare submit is refused by the refinery.
+	wantPush := "git -C " + repo + " push origin polecat-p0fc6 && pogo refinery submit"
+	if !strings.Contains(body, wantPush) {
+		t.Errorf("the remedy does not push first, so the command it prints is one the refinery "+
+			"refuses (mg-586d); want %q in: %s", wantPush, body)
+	}
+	if strings.Contains(body, "(`pogo refinery submit") {
+		t.Errorf("a bare submit command survived in the refusal for an unpushed branch; got: %s", body)
+	}
+}
+
+// TestPushedRefusalIsUnchanged is the negative control for the two above. The
+// pushed case is the one the gate has always got right and the one the fleet
+// reads most often; a provenance-aware message must not have moved it.
+func TestPushedRefusalIsUnchanged(t *testing.T) {
+	repo := strandedRepo(t)
+	pushBranch(t, repo, "polecat-9a19", "audit.md", "feat(audit): the whole battery (mg-9a19)")
+
+	reg := newDrainTestRegistry(t)
+	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "a9a19", Id: "mg-9a19", Repo: repo, Branch: "main", Template: BuildWorkerTemplate,
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "PUSHED, UNMERGED") {
+		t.Errorf("the pushed case lost its wording; got: %s", body)
+	}
+	if strings.Contains(body, "LOCAL-ONLY") || strings.Contains(body, "NOT ON ORIGIN") {
+		t.Errorf("a pushed branch was described as local-only; got: %s", body)
+	}
+	if strings.Contains(body, "push origin polecat-9a19 &&") {
+		t.Errorf("the remedy tells a reader to push a branch that is already on origin; got: %s", body)
+	}
+}

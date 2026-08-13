@@ -758,3 +758,117 @@ func TestScanKeepsTheBuilderAndDropsTheReviewer(t *testing.T) {
 		t.Errorf("Scan kept %q, want polecat-paaf6", findings[0].Branch)
 	}
 }
+
+// --- The remedy has to be RUNNABLE for the branch it names (mg-bfe0) ---------
+
+// TestSubmitRemedyPushesFirstOnlyForALocalOnlyBranch. `pogo refinery submit`
+// REFUSES a branch that is not on origin (mg-586d): the merge worker checks it
+// out as origin/<branch>, so an unpushed branch cannot merge and submit rejects
+// it at the door. Every stranded-work instrument printed the bare submit line
+// for both cases, which handed the one population whose work is NOT durable a
+// command that cannot run.
+func TestSubmitRemedyPushesFirstOnlyForALocalOnlyBranch(t *testing.T) {
+	pushed := SubmitRemedy("/repo", "polecat-9a19", "mg-9a19", true)
+	if strings.Contains(pushed, "push origin") {
+		t.Errorf("SubmitRemedy(pushed) = %q — it tells a reader to push a branch already on origin", pushed)
+	}
+	if want := "pogo refinery submit polecat-9a19 --repo=/repo --author=mg-9a19"; pushed != want {
+		t.Errorf("SubmitRemedy(pushed) = %q, want %q", pushed, want)
+	}
+
+	local := SubmitRemedy("/repo", "polecat-p0fc6", "", false)
+	if want := "git -C /repo push origin polecat-p0fc6 && pogo refinery submit polecat-p0fc6 --repo=/repo"; local != want {
+		t.Errorf("SubmitRemedy(local-only) = %q, want %q", local, want)
+	}
+	// Chained, not described. A prose caveat beside a runnable command loses to
+	// the command, and the reader of a stranded-work remedy is deciding what to
+	// paste.
+	if !strings.HasPrefix(local, "git -C /repo push origin") {
+		t.Errorf("SubmitRemedy(local-only) = %q, want the push FIRST", local)
+	}
+}
+
+// TestLocalOnlySummarySaysSoAndStaysRunnable. Summary() is quoted verbatim by
+// the dispatch refusal, the release log, the work_item_stranded_push event and
+// the stranded-work mail — so a provenance it gets wrong is wrong in four
+// places at once, and it was: every finding rendered as though its commits were
+// on origin.
+//
+// The direction of the error is what makes it worth a test. "Pushed" told the
+// reader the work was durable and discoverable by anyone reading `git ls-remote`
+// at the exact moment it was neither.
+func TestLocalOnlySummarySaysSoAndStaysRunnable(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-cccc", "main")
+	r.commit("wip.md", "feat: never pushed (mg-cccc)")
+	r.checkout("main")
+
+	f, err := Inspect(r.dir, "polecat-cccc", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	s := f.Summary()
+	if !strings.Contains(s, "LOCAL-ONLY") {
+		t.Errorf("Summary() = %q, want it to say the work is local-only", s)
+	}
+	if !strings.Contains(s, "NOT ON ORIGIN") {
+		t.Errorf("Summary() = %q — it never states the urgency, and 'git-gc reaps the worktree' "+
+			"is the half a reader acts on", s)
+	}
+	if !strings.Contains(s, "push origin polecat-cccc && pogo refinery submit") {
+		t.Errorf("Summary() = %q prescribes a submit the refinery refuses (mg-586d)", s)
+	}
+}
+
+// TestPushedSummaryIsNotDressedAsLocalOnly is the negative control for the
+// above: the common case must not have acquired a push it does not need or a
+// warning that is false for it.
+func TestPushedSummaryIsNotDressedAsLocalOnly(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-9a19", "main")
+	r.commit("audit.md", "feat(audit): the whole battery (mg-9a19)")
+	r.push("polecat-9a19")
+	r.checkout("main")
+
+	f, err := Inspect(r.dir, "polecat-9a19", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	s := f.Summary()
+	if !strings.Contains(s, "PUSHED") {
+		t.Errorf("Summary() = %q, want it to say the work is pushed", s)
+	}
+	for _, unwanted := range []string{"LOCAL-ONLY", "NOT ON ORIGIN", "push origin polecat-9a19 &&"} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("Summary() = %q contains %q for a branch that IS on origin", s, unwanted)
+		}
+	}
+}
+
+// TestPreRegistrationSummaryCarriesTheProvenanceToo. The pre-registration
+// verdict is the one this package says must never be crowded out, and it is the
+// verdict most likely to be read on a branch that has not been pushed — a
+// pre-registration commit is a worker's FIRST act, made before there is anything
+// to push for.
+func TestPreRegistrationSummaryCarriesTheProvenanceToo(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-p0fc6", "main")
+	r.commit("predictions.md", "predictions: three of the six scoping checks will fail")
+	r.checkout("main")
+
+	f, err := Inspect(r.dir, "polecat-p0fc6", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if f.Disposition != DispositionPreRegistration {
+		t.Fatalf("Disposition = %q, want %q", f.Disposition, DispositionPreRegistration)
+	}
+	s := f.Summary()
+	if !strings.Contains(s, "LOCAL-ONLY") || !strings.Contains(s, "NOT ON ORIGIN") {
+		t.Errorf("Summary() = %q loses the provenance on the disposition that most needs it", s)
+	}
+	// The pre-registration advice itself must survive the addition.
+	if !strings.Contains(s, "PRE-REGISTRATION") || !strings.Contains(s, "unamended") {
+		t.Errorf("Summary() = %q dropped the pre-registration instruction", s)
+	}
+}

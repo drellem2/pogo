@@ -136,7 +136,7 @@ func (r *Registry) getStrandedWorkGate() StrandedWorkGate {
 }
 
 // strandedWorkRefusal returns the refusal message for a work item that already
-// has pushed, unmerged work, or "" when dispatch is allowed.
+// has unmerged work, or "" when dispatch is allowed.
 //
 // The message is disposition-specific because the two cases need OPPOSITE
 // handling, and a refusal that flattened them would be actively harmful: told
@@ -164,6 +164,21 @@ func (r *Registry) getStrandedWorkGate() StrandedWorkGate {
 // polecat's branch is attributable to the item by BranchMatchesItem (polecat-x8af0
 // against mg-8af0 matches on the suffix), so the gate fires whatever the sibling's
 // agent letter is. See TestSpawnRefusedForASiblingsPushedBranchOnTheSameItem.
+//
+// IT NAMES THE PROVENANCE RATHER THAN ASSERTING "PUSHED" (mg-bfe0). The gate has
+// covered local-only branches since it shipped — Scan reads refs/heads as well
+// as refs/remotes/origin, and a polecat worktree's branch lives in the source
+// repo's ref namespace, so a preserved worktree holding an unpushed
+// pre-registration commit DOES refuse (TestSpawnRefusedForLocalOnlyPreRegistration
+// is that case end to end). What it could not do was SAY so: every refusal read
+// "already has PUSHED, UNMERGED work" and prescribed `pogo refinery submit`,
+// which the refinery REFUSES for a branch that is not on origin (mg-586d).
+//
+// So for the one population whose work is not durable, the gate fired correctly
+// and then told the reader two false things — that the work was safe on origin,
+// and that a command which cannot run was the remedy. mg-bfe0 was filed believing
+// the guard was blind here; it is not blind, it was misreporting, and a refusal
+// nobody can act on is the failure mode a blind guard would have had anyway.
 func (r *Registry) strandedWorkRefusal(workItemID, repo, target string) string {
 	findings, err := r.getStrandedWorkGate().StrandedFindings(workItemID, repo, target)
 	if err != nil {
@@ -186,22 +201,24 @@ func (r *Registry) strandedWorkRefusal(workItemID, repo, target string) string {
 			// is no flag that bases it on a sha — so "re-dispatch from the
 			// pre-registration commit" is not a spawn option, it is a checkout of
 			// the branch that already carries that commit.
-			return fmt.Sprintf("work item %s already has PUSHED, UNMERGED work, and it includes a "+
+			return fmt.Sprintf("work item %s already has %s, UNMERGED work, and it includes a "+
 				"PRE-REGISTRATION commit: %s. A polecat spawned now would base its worktree on %s and write "+
 				"its predictions AFTER seeing the results — the artifact would look identical to a valid "+
-				"one, so nothing downstream could catch it. Resubmit the branch instead "+
-				"(`pogo refinery submit %s --repo=%s`); if the analysis genuinely has to be redone, CONTINUE "+
-				"ON %s (`git -C %s worktree add <dir> %s`), which already carries %s, and never amend that "+
-				"commit. Dispatch anyway with --stranded-override=\"<why>\" only if this branch is spent",
-				workItemID, f.Summary(), f.Target, f.Branch, f.Repo,
+				"one, so nothing downstream could catch it. Get the branch merged instead (`%s`); if the "+
+				"analysis genuinely has to be redone, CONTINUE ON %s (`git -C %s worktree add <dir> %s`), "+
+				"which already carries %s, and never amend that commit. Dispatch anyway with "+
+				"--stranded-override=\"<why>\" only if this branch is spent",
+				workItemID, strandedwork.Provenance(f.Pushed), f.Summary(), f.Target,
+				strandedwork.SubmitRemedy(f.Repo, f.Branch, workItemID, f.Pushed),
 				f.Branch, f.Repo, f.Branch, f.PreRegistration.SHA[:min(12, len(f.PreRegistration.SHA))])
 		}
 	}
 	f := findings[0]
-	msg := fmt.Sprintf("work item %s already has PUSHED, UNMERGED work: %s. Dispatching a worker at it "+
-		"re-derives work that already exists — mg-9a19 lost 1026 lines that way. Resubmit the branch "+
-		"instead. Dispatch anyway with --stranded-override=\"<why>\" if this branch is genuinely spent",
-		workItemID, f.Summary())
+	msg := fmt.Sprintf("work item %s already has %s, UNMERGED work: %s. Dispatching a worker at it "+
+		"re-derives work that already exists — mg-9a19 lost 1026 lines that way. Get the branch merged "+
+		"instead (`%s`). Dispatch anyway with --stranded-override=\"<why>\" if this branch is genuinely spent",
+		workItemID, strandedwork.Provenance(f.Pushed), f.Summary(),
+		strandedwork.SubmitRemedy(f.Repo, f.Branch, workItemID, f.Pushed))
 	// The second opinion travels WITH the refusal and never instead of it
 	// (mg-5ec6). `git cherry` over-reports on a branch that landed through an
 	// ordinary clean rebase, and this refusal is where that costs the most: told

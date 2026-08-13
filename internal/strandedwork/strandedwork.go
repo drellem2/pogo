@@ -215,6 +215,78 @@ func (f Finding) Stranded() bool {
 	return f.Disposition == DispositionResubmit || f.Disposition == DispositionPreRegistration
 }
 
+// Provenance names where a branch's commits actually live, in the words the
+// reader has to act on rather than as a boolean.
+//
+// IT IS NOT DECORATION (mg-bfe0). "PUSHED" and "LOCAL-ONLY" license different
+// next moves and carry opposite urgency: pushed work is durable, discoverable by
+// anyone reading `git ls-remote`, and recoverable at leisure; local-only work
+// exists in one worktree on one host and git-gc reaps it. Every instrument in
+// this package's blast radius used to render both as "PUSHED, UNMERGED work",
+// which tells a reader the one thing about the urgent case that is false.
+func Provenance(pushed bool) string {
+	if pushed {
+		return "PUSHED"
+	}
+	return "LOCAL-ONLY"
+}
+
+// LocalOnlyWarning is the sentence that has to accompany a LOCAL-ONLY verdict.
+//
+// It is a constant so every renderer of a LOCAL-ONLY verdict says the same
+// thing, and it states the URGENCY rather than only the fact, because "not on origin" is a detail a
+// reader skims past while "git-gc destroys it" is one they act on. The ordering
+// against the ordinary stranded case is deliberate and is the ticket's own
+// finding: a pushed branch is durable and discoverable by anyone reading `git
+// ls-remote`; a local-only one is neither, so it is the more urgent case and not
+// the lesser one.
+const LocalOnlyWarning = "THE WORK IS NOT ON ORIGIN: it exists only in a worktree on this host, " +
+	"git-gc reaps that worktree, and no other stranded-work instrument on any other host can see it. " +
+	"Push it before anything else — stranded-on-origin is recoverable at leisure, this is not"
+
+// localOnlyNote returns LocalOnlyWarning as a trailing clause, or "" when the
+// branch is pushed and there is nothing extra to say.
+//
+// No trailing full stop, matching every other string Summary builds: callers
+// embed these mid-sentence, and one that punctuated itself produced "this is
+// not.. A polecat spawned now would..." in the dispatch refusal.
+func localOnlyNote(pushed bool) string {
+	if pushed {
+		return ""
+	}
+	return " — " + LocalOnlyWarning
+}
+
+// SubmitRemedy renders the command that gets a stranded branch merged.
+//
+// IT IS ONE FUNCTION BECAUSE THE COMMAND IS NOT THE SAME FOR BOTH CASES, and
+// getting that wrong is not a cosmetic error: `pogo refinery submit` REFUSES a
+// branch that is not on origin (mg-586d). The merge worker checks the branch out
+// as origin/<branch>, so an unpushed branch cannot merge, and submit rejects it
+// at the door rather than accepting an MR id and failing later. Four separate
+// instruments printed the bare submit line for both cases — the dispatch
+// refusal, Finding.Summary, the stranded-work mail, and the check-stranded
+// sweep — so the ONE population whose work is not durable was handed a command
+// that cannot run (mg-bfe0).
+//
+// The push is CHAINED with && rather than described in prose, because the reader
+// of a stranded-work remedy is deciding what to paste, and a prose caveat next to
+// a runnable command loses to the command.
+//
+// It lives here rather than in each caller for the reason given on
+// BranchMatchesItem: several callers depend on exactly this rule, and a second
+// copy is a second rule the day one of them changes.
+func SubmitRemedy(repo, branch, author string, pushed bool) string {
+	submit := fmt.Sprintf("pogo refinery submit %s --repo=%s", branch, repo)
+	if author != "" {
+		submit += " --author=" + author
+	}
+	if pushed {
+		return submit
+	}
+	return fmt.Sprintf("git -C %s push origin %s && %s", repo, branch, submit)
+}
+
 // Summary renders the finding as one line an agent or a person can act on
 // without reading this package. It always names the remedy, because a report
 // that only names the problem is what the pre-registration case cannot survive.
@@ -222,12 +294,14 @@ func (f Finding) Summary() string {
 	switch f.Disposition {
 	case DispositionPreRegistration:
 		return fmt.Sprintf(
-			"%s has %d unmerged commit(s) on %s, and %s is a PRE-REGISTRATION commit (%q). "+
+			"%s has %d unmerged commit(s) on %s, they are %s, and %s is a PRE-REGISTRATION commit (%q). "+
 				"Do NOT dispatch a worker that branches from %s: it would write its predictions after "+
 				"seeing the results, and the artifact would be indistinguishable from a valid one. "+
-				"Either resubmit %s to the refinery, or dispatch FROM %s and leave that commit unamended",
-			f.Branch, len(f.Unmerged), f.Target, shortSHA(f.PreRegistration.SHA), f.PreRegistration.Subject,
-			f.Target, f.Branch, shortSHA(f.PreRegistration.SHA))
+				"Either get %s merged (`%s`), or dispatch FROM %s and leave that commit unamended%s",
+			f.Branch, len(f.Unmerged), f.Target, Provenance(f.Pushed),
+			shortSHA(f.PreRegistration.SHA), f.PreRegistration.Subject,
+			f.Target, f.Branch, SubmitRemedy(f.Repo, f.Branch, "", f.Pushed),
+			shortSHA(f.PreRegistration.SHA), localOnlyNote(f.Pushed))
 	case DispositionCarried:
 		return fmt.Sprintf(
 			"%s has %d commit(s) %s does not have, but ALL of them are already carried by %s, "+
@@ -237,10 +311,10 @@ func (f Finding) Summary() string {
 			f.Branch, len(f.Unmerged), f.Target, f.Carrier, f.WorkItemID, f.Carrier, f.Branch, f.WorkItemID)
 	case DispositionResubmit:
 		return fmt.Sprintf(
-			"%s has %d unmerged commit(s) on %s (%s). Resubmit the branch to the refinery "+
-				"(`pogo refinery submit %s --repo=%s`); do NOT dispatch a worker at this item, it would "+
-				"re-derive work that is already pushed",
-			f.Branch, len(f.Unmerged), f.Target, shortSHA(f.Unmerged[0].SHA), f.Branch, f.Repo)
+			"%s has %d unmerged commit(s) on %s (%s), and they are %s. Get the branch merged (`%s`); "+
+				"do NOT dispatch a worker at this item, it would re-derive work that already exists%s",
+			f.Branch, len(f.Unmerged), f.Target, shortSHA(f.Unmerged[0].SHA), Provenance(f.Pushed),
+			SubmitRemedy(f.Repo, f.Branch, "", f.Pushed), localOnlyNote(f.Pushed))
 	default:
 		if !f.Found {
 			return fmt.Sprintf("no branch %s exists in %s", f.Branch, f.Repo)

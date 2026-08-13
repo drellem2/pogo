@@ -793,3 +793,74 @@ func TestReviewerPointerBranchIsExcluded(t *testing.T) {
 		t.Errorf("builder row Kind = %q, want %q", row.Kind, KindStranded)
 	}
 }
+
+// TestLocalOnlyStrandedRowPrescribesAPushFirst is the sweep's half of mg-bfe0.
+//
+// Render() has always labelled the branch line "LOCAL ONLY — not on origin, and
+// git-gc reaps the worktree", but the `-> remedy` line underneath it was the
+// bare `pogo refinery submit`, which the refinery REFUSES for a branch that is
+// not on origin (mg-586d). A prose warning two lines above a runnable command
+// loses to the command, so the push belongs IN the command.
+func TestLocalOnlyStrandedRowPrescribesAPushFirst(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-p0fc6", "main")
+	r.commit("predictions.md", "predictions: three of the six scoping checks will fail (mg-0fc6)")
+	r.checkout("main")
+
+	rep, err := Scan(Options{
+		Items:      board(Item{ID: "mg-0fc6", Status: "available", Repo: r.dir, Title: "scope compression2"}),
+		LiveAgents: fleet(),
+		Target:     "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	row, ok := rowFor(rep, "mg-0fc6")
+	if !ok {
+		t.Fatalf("no row for mg-0fc6; its work exists only on a local head, which is the URGENT "+
+			"case and not the lesser one.\n%s", Render(rep, true))
+	}
+	if row.Kind != KindStranded {
+		t.Fatalf("Kind = %q, want %q", row.Kind, KindStranded)
+	}
+	if row.Pushed {
+		t.Fatalf("Pushed = true for a branch that was never pushed")
+	}
+	remedy := row.Remedy()
+	if !strings.Contains(remedy, "push origin polecat-p0fc6 && pogo refinery submit") {
+		t.Errorf("Remedy() = %q — submit alone is refused for a branch that is not on origin", remedy)
+	}
+	// The rendered report must carry it too; the remedy is what gets pasted.
+	if !strings.Contains(Render(rep, true), "push origin polecat-p0fc6 &&") {
+		t.Errorf("the rendered report does not carry the push:\n%s", Render(rep, true))
+	}
+}
+
+// TestPushedStrandedRowStillPrescribesABareSubmit is the negative control: the
+// common case must not have grown a push it does not need.
+func TestPushedStrandedRowStillPrescribesABareSubmit(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-q9a19", "main")
+	r.commit("audit.md", "feat(audit): drift battery (mg-9a19)")
+	r.push("polecat-q9a19")
+	r.checkout("main")
+
+	rep, err := Scan(Options{
+		Items:      board(Item{ID: "mg-9a19", Status: "available", Repo: r.dir, Title: "drift battery"}),
+		LiveAgents: fleet(),
+		Target:     "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	row, ok := rowFor(rep, "mg-9a19")
+	if !ok {
+		t.Fatalf("no row for mg-9a19\n%s", Render(rep, true))
+	}
+	if strings.Contains(row.Remedy(), "push origin") {
+		t.Errorf("Remedy() = %q tells a reader to push a branch already on origin", row.Remedy())
+	}
+	if !strings.Contains(row.Remedy(), "pogo refinery submit polecat-q9a19") {
+		t.Errorf("Remedy() = %q lost the submit command", row.Remedy())
+	}
+}
