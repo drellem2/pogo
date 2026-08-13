@@ -42,12 +42,68 @@ const probeBurnSeconds = 90
 //
 // Re-scanning is cheap and re-constructing is not: the burners are already
 // running for probeBurnSeconds, so another attempt costs one sampling window
-// plus one cwd read and starts no new processes. It is worth having because both
-// ways this probe goes blind are TRANSIENT properties of the host — an lsof that
-// refused a pid this second, a burner the scheduler starved through one 2s
-// window — and neither says anything about the detector. On 2026-08-10 the first
-// of those failed a merge gate on a branch that had never touched this package.
+// plus one cwd read and starts no new processes. It is worth having because
+// every way this probe goes blind is a property of the HOST rather than of the
+// detector — an lsof that refused a pid this second, a burner the scheduler
+// starved through one 2s window — so a retry re-measures the same constructed
+// input against a host that may have moved on. On 2026-08-10 the first of those
+// failed a merge gate on a branch that had never touched this package.
+//
+// Retrying is NOT what makes the probe conductible under contention, and reading
+// it that way is how mg-5aac was missed for a while: sustained contention is not
+// transient, and three attempts against a host that is loaded for the whole gate
+// return the same answer three times. What makes the arm conductible is running
+// it at a floor the constructed input can actually reach — see probeFloor. The
+// retry is for the second-scale flicker on top of that.
 const probeScanAttempts = 3
+
+// probeFloor is the REPORTING floor this probe runs the scan under, standing in
+// for DefaultFloor the same way LiveOwners stands in for the registry — and for
+// the same reason: the probe has to be able to construct the input the arm needs.
+//
+// DefaultFloor is 0.20 cores, and that is a policy constant about how much
+// compute a dead owner must be holding before a human is told. It is NOT a
+// property the constructed input can guarantee, because what a shell burner
+// achieves is the host's to decide: N runnable processes on C cores get about
+// C/N each. Measured on this 10-core box, one burner got 0.24-0.29 cores
+// isolated at load 53, and 0.105-0.160 cores inside `go test ./...` — every
+// in-gate sample below 0.20, and the isolated ones clearing it by only 1.2-1.45x.
+// That is a dose-response curve with the verdict sitting on the steep part of it
+// (mg-5aac).
+//
+// The failure that produced was not a skip. The orphan was attributed correctly
+// — right cwd, right owner, right liveness answer — and only the magnitude
+// comparison fell short, so it came back `below_owner_floor`, which is a VERDICT
+// bucket. The test read `Reported == false` and reported the detector broken, on
+// a branch that had never touched this package. Measured: 4 runs out of 4 FAILED
+// with 30 additional competing processes on a box already at load 53, against 6
+// out of 6 passing on the same box without them, minutes earlier.
+//
+// 0.05 is chosen to be clear of both edges. It is 2.5x DefaultCandidateFloor,
+// so a process that reaches it is measured rather than rounded, and it is well
+// above the ~0.00-core blocked-process class the floor exists to exclude; and
+// every in-gate sample above cleared it by 2.1-3.2x. By the C/N arithmetic that
+// margin holds to a load of about 200 on this box, which is past anything this
+// fleet has produced — though that last figure is arithmetic, not a measurement.
+//
+// What it costs: this probe no longer witnesses the VALUE 0.20. It never was the
+// instrument for that — a live probe cannot pin a constant whose satisfaction it
+// does not control — and the floor arithmetic is pinned deterministically
+// against a stubbed table by TestSubdividingComputeCannotGetUNDERTheOwnerFloor,
+// TestTheOwnerFloorSumsWITHINAnOwnerNotAcrossThem and
+// TestASwarmOfSMALLProcessesIsSTILLOneDeadOwnersCompute. What this probe
+// uniquely witnesses is the PATH: real process table, real cwd reader, real
+// attribution, real liveness answer, RED at the end of it. Every term of that is
+// unchanged.
+//
+// The alternative considered and rejected was to construct MORE burners under
+// the dead owner until their sum cleared 0.20. It works arithmetically — N
+// burners sum to ~CN/(L+N), so two clear 0.20 at load 84 — but it answers host
+// load by ADDING host load, inside a merge gate, on the box whose contention is
+// the problem. This fleet has already had one branch failed by a polecat's
+// synthetic load (mg-c675); a probe that does the same thing on purpose is not a
+// fix.
+const probeFloor = 0.05
 
 // ProbeResult is what one probe run observed. Every field is a measurement; the
 // verdict is derived from them in Passed so a reader can check the derivation.
@@ -66,14 +122,23 @@ type ProbeResult struct {
 	ControlPPID  int `json:"control_ppid"`
 	OrphanCores  float64
 	ControlCores float64
+	// OrphanRate and ControlRate are what the host actually GRANTED each burner
+	// over the sampling window, read out of the scan whatever bucket the process
+	// landed in. OrphanCores above is carried only on a finding, so it is 0 for
+	// every run that did not report — including the runs where the interesting
+	// question is precisely how much the process was getting (mg-5aac).
+	OrphanRate  float64 `json:"orphan_rate_cores"`
+	ControlRate float64 `json:"control_rate_cores"`
 	// Reported is true when the scan named OrphanPID. This is the failing arm.
 	Reported bool `json:"reported"`
 	// Spared is true when the scan did NOT name ControlPID. This is the
 	// positive control.
 	Spared bool `json:"spared"`
 	// OrphanDisposition and ControlDisposition are the buckets the scan put each
-	// constructed process in. Empty means the process never met the rate floor,
-	// which is the other way an arm can measure nothing.
+	// constructed process in. Empty means the process never met the per-process
+	// CANDIDATE floor, so it was never examined at all — which is one of the ways
+	// an arm can measure nothing, and is distinct from being examined and binned
+	// below_owner_floor.
 	OrphanDisposition  Disposition `json:"orphan_disposition,omitempty"`
 	ControlDisposition Disposition `json:"control_disposition,omitempty"`
 	// Attempts is how many scans it took, out of probeScanAttempts.
@@ -85,17 +150,32 @@ type ProbeResult struct {
 	// is neither a pass nor a fail of the detector; it is the probe reporting
 	// that it measured nothing, and it is a fact about the HOST.
 	//
-	// The two ways in (mg-db12), both load-driven and both observed:
+	// The three ways in, all contention-driven and all observed:
 	//
-	//	the pid never met the rate floor   a shell burner sharing 10 cores with
-	//	                                   a load of 33 can miss 0.20 cores for
-	//	                                   a whole 2s window.
+	//	the pid never met the CANDIDATE    a shell burner sharing 10 cores with
+	//	floor                              ~68 packages' worth of test processes
+	//	                                   can miss even 0.02 cores for a whole
+	//	                                   2s window (mg-db12).
 	//	cwd_unreadable                     lsof refused or timed out on the pid.
 	//	                                   Measured live: the constructed orphan
 	//	                                   was binned here, the test read only
 	//	                                   `Reported == false`, and the gate
 	//	                                   classed it as a DEFECT of an unrelated
-	//	                                   branch.
+	//	                                   branch (mg-db12).
+	//	below_owner_floor                  the pid was attributed correctly and
+	//	                                   only the MAGNITUDE fell short of
+	//	                                   probeFloor. Added under mg-5aac, where
+	//	                                   this bucket — a verdict bucket, and so
+	//	                                   read as the detector being wrong —
+	//	                                   failed 4 gate-equivalent runs out of 4.
+	//	                                   See probeFloor for why it is a fact
+	//	                                   about the host.
+	//
+	// The discriminator for all three is CONTENTION IN THE SAMPLING WINDOW, not
+	// the host's 1-minute load average, and the difference is not academic: this
+	// probe passed 6 of 6 isolated at load 47 and 0 of 2 inside `go test ./...`
+	// on the same box (p60eb, 2026-08-13). A remedy keyed on load average would
+	// have skipped a quiet-but-contended gate and fired on a busy idle box.
 	//
 	// Err, by contrast, means the probe could not be BUILT at all.
 	Blind string `json:"blind,omitempty"`
@@ -125,11 +205,14 @@ func (p ProbeResult) Summary() string {
 	if p.Blind != "" {
 		return fmt.Sprintf(
 			"probe measured NOTHING about the detector after %d scan(s): %s\n"+
-				"constructed orphan pid=%d disposition=%q, live-owner control pid=%d disposition=%q\n"+
-				"(an empty disposition means the process never met the %.2f-core floor)",
+				"constructed orphan pid=%d disposition=%q granted %.3f cores, "+
+				"live-owner control pid=%d disposition=%q granted %.3f cores\n"+
+				"(an empty disposition means the process never met the %.2f-core candidate floor; "+
+				"the reporting floor this probe ran at is %.2f)",
 			p.Attempts, p.Blind,
-			p.OrphanPID, p.OrphanDisposition, p.ControlPID, p.ControlDisposition,
-			p.Report.Floor)
+			p.OrphanPID, p.OrphanDisposition, p.OrphanRate,
+			p.ControlPID, p.ControlDisposition, p.ControlRate,
+			p.Report.CandidateFloor, p.Report.Floor)
 	}
 	red := "did NOT report"
 	if p.Reported {
@@ -140,10 +223,10 @@ func (p ProbeResult) Summary() string {
 		green = "spared it"
 	}
 	return fmt.Sprintf(
-		"constructed orphan pid=%d (ppid=%d, owner %s dead, %.2f cores): detector %s it\n"+
-			"live-owner control pid=%d (ppid=%d, owner %s alive, %.2f cores): detector %s",
-		p.OrphanPID, p.DetachedPPID, p.DeadOwner, p.OrphanCores, red,
-		p.ControlPID, p.ControlPPID, p.LiveOwner, p.ControlCores, green)
+		"constructed orphan pid=%d (ppid=%d, owner %s dead, granted %.3f cores against a %.2f floor): detector %s it\n"+
+			"live-owner control pid=%d (ppid=%d, owner %s alive, granted %.3f cores): detector %s",
+		p.OrphanPID, p.DetachedPPID, p.DeadOwner, p.OrphanRate, p.Report.Floor, red,
+		p.ControlPID, p.ControlPPID, p.LiveOwner, p.ControlRate, green)
 }
 
 // Probe constructs the population described above under root (a throwaway
@@ -184,6 +267,7 @@ func Probe(root string) ProbeResult {
 		res.Attempts = attempt
 		rep, err := Scan(Options{
 			PolecatsRoot: root,
+			Floor:        probeFloor,
 			LiveOwners: func() (map[string]bool, error) {
 				// The registry's answer, stood in: one owner running, one gone.
 				return map[string]bool{res.LiveOwner: true}, nil
@@ -211,6 +295,8 @@ func Probe(root string) ProbeResult {
 func (p *ProbeResult) readArms(orphan, control int) {
 	p.Reported, p.Spared = false, true
 	p.OrphanCores, p.ControlCores = 0, 0
+	p.OrphanRate, _ = p.Report.RateOf(orphan)
+	p.ControlRate, _ = p.Report.RateOf(control)
 	for _, o := range p.Report.Orphans {
 		switch o.PID {
 		case orphan:
@@ -225,10 +311,10 @@ func (p *ProbeResult) readArms(orphan, control int) {
 	p.ControlDisposition, _ = p.Report.DispositionOf(control)
 
 	var blind []string
-	if why := armBlindness("the constructed orphan", orphan, p.OrphanDisposition); why != "" {
+	if why := armBlindness("the constructed orphan", orphan, p.OrphanDisposition, p.OrphanRate); why != "" {
 		blind = append(blind, why)
 	}
-	if why := armBlindness("the live-owner control", control, p.ControlDisposition); why != "" {
+	if why := armBlindness("the live-owner control", control, p.ControlDisposition, p.ControlRate); why != "" {
 		blind = append(blind, why)
 	}
 	p.Blind = strings.Join(blind, "; ")
@@ -236,17 +322,26 @@ func (p *ProbeResult) readArms(orphan, control int) {
 
 // armBlindness names why one arm was not conducted, or returns "" when it was.
 //
-// The two verdict buckets and the blind-spot bucket all count as CONDUCTED: an
-// orphan that came back `unattributable` or `live_owner` is the detector getting
-// a constructed input wrong, and must fail rather than be excused. Only the
-// absent disposition (never met the rate floor) and cwd_unreadable (the cwd
-// reader refused) are properties of the host rather than of the rule.
-func armBlindness(what string, pid int, d Disposition) string {
+// `unattributable` and `live_owner` count as CONDUCTED: an orphan that comes
+// back in either is the detector getting a constructed input wrong, and must
+// fail rather than be excused. The remaining three are properties of the HOST,
+// and each is reported with the rate the host granted, because "did not clear a
+// floor" is a comparison and the number is what a reader can act on.
+func armBlindness(what string, pid int, d Disposition, rate float64) string {
 	switch d {
 	case "":
-		return fmt.Sprintf("%s pid=%d never met the CPU rate floor, so the scan never examined it", what, pid)
+		return fmt.Sprintf("%s pid=%d never met the per-process candidate floor of %.2f cores, "+
+			"so the scan never examined it", what, pid, DefaultCandidateFloor)
 	case DispositionCwdUnreadable:
 		return fmt.Sprintf("%s pid=%d was examined but its cwd could not be read, so it could not be attributed", what, pid)
+	case DispositionBelowOwnerFloor:
+		// The attribution ALL worked — right cwd, right owner, right liveness
+		// answer — and the host simply would not grant the process enough CPU to
+		// clear the floor that arm is being run at. Nothing about the rule is on
+		// trial in that comparison; see probeFloor.
+		return fmt.Sprintf("%s pid=%d was attributed to its owner correctly, but the host granted it "+
+			"only %.3f cores against this probe's %.2f-core floor, so the owner never became reportable",
+			what, pid, rate, probeFloor)
 	default:
 		return ""
 	}

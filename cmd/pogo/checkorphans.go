@@ -280,12 +280,19 @@ func runOrphanProbe(jsonOutput bool) {
 			"orphan_cores": res.OrphanCores,
 			"control_pid":  res.ControlPID,
 			"control_ppid": res.ControlPPID,
-			"reported":     res.Reported,
-			"spared":       res.Spared,
-			"blind":        res.Blind,
-			"attempts":     res.Attempts,
-			"passed":       res.Passed(),
-			"report":       res.Report,
+			// The rate the host GRANTED each burner, whatever bucket it landed
+			// in. orphan_cores above rides on a finding, so it is 0 on exactly
+			// the runs where a reader most needs the magnitude — a probe that
+			// did not report reads as 0.00 cores for a process that was
+			// provably spinning (mg-5aac).
+			"orphan_rate_cores":  res.OrphanRate,
+			"control_rate_cores": res.ControlRate,
+			"reported":           res.Reported,
+			"spared":             res.Spared,
+			"blind":              res.Blind,
+			"attempts":           res.Attempts,
+			"passed":             res.Passed(),
+			"report":             res.Report,
 		})
 	} else {
 		fmt.Println(res.Summary())

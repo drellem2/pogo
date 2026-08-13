@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
@@ -20,18 +21,51 @@ func listenerID(a *Agent) (net.Listener, chan struct{}) {
 	return a.listener, a.listenerDead
 }
 
-// waitForRebind blocks until the agent's listener identity changes from the one
-// given, reporting whether it did within the timeout.
-func waitForRebind(t *testing.T, a *Agent, oldL net.Listener, timeout time.Duration) bool {
+// attachWaitTimeout bounds every "wait until the supervisor has repaired this"
+// poll below (mg-5aac). It is a BACKSTOP against a hung test, not a budget the
+// repair is expected to use: on a quiet host each of these waits returns in
+// single-digit milliseconds, so raising the bound costs nothing there and costs
+// only patience on a host that is merely slow.
+//
+// It was 2-3s, and that was a load-sensitivity of the test rather than of the
+// code. A wait sized to a quiet box turns "this machine is busy" into "this
+// branch is broken", and the branch in the queue when the box is busy is
+// whichever one happened to be next — so the cost lands on an author who
+// touched none of this. Slow must be slow, not wrong.
+const attachWaitTimeout = 30 * time.Second
+
+// waitUntil polls cond until it holds, and reports whether it ever did. The
+// deadline is attachWaitTimeout, shortened when the test binary's own deadline
+// would arrive first — a bounded false is a legible failure, whereas running
+// into `go test -timeout` is an unlabelled goroutine dump.
+func waitUntil(t *testing.T, cond func() bool) bool {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if l, _ := listenerID(a); l != oldL && l != nil {
+	deadline := time.Now().Add(attachWaitTimeout)
+	if d, ok := t.Deadline(); ok {
+		// Leave a margin so the assertion, not the timeout, reports the failure.
+		if margin := d.Add(-5 * time.Second); margin.Before(deadline) {
+			deadline = margin
+		}
+	}
+	for {
+		if cond() {
 			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	return false
+}
+
+// waitForRebind blocks until the agent's listener identity changes from the one
+// given, reporting whether it did.
+func waitForRebind(t *testing.T, a *Agent, oldL net.Listener) bool {
+	t.Helper()
+	return waitUntil(t, func() bool {
+		l, _ := listenerID(a)
+		return l != oldL && l != nil
+	})
 }
 
 // ownsSocketPath reports whether the file at socketPath is the one the agent's
@@ -72,19 +106,17 @@ func withSupervisorInterval(t *testing.T, d time.Duration) {
 }
 
 // waitForAttach polls the agent's socket until a dial succeeds, and reports
-// whether it ever did within the timeout.
-func waitForAttach(t *testing.T, a *Agent, timeout time.Duration) bool {
+// whether it ever did.
+func waitForAttach(t *testing.T, a *Agent) bool {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	return waitUntil(t, func() bool {
 		conn, err := net.Dial("unix", a.SocketPath())
-		if err == nil {
-			conn.Close()
-			return true
+		if err != nil {
+			return false
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	return false
+		conn.Close()
+		return true
+	})
 }
 
 // killAcceptLoop reproduces the observed fault: the accept loop stops, but the
@@ -107,20 +139,20 @@ func TestAttachRebindsAfterAcceptLoopDies(t *testing.T) {
 	withSupervisorInterval(t, 10*time.Millisecond)
 	a := spawnAgent(t, "rebind-dead-loop", "sleep", "30")
 
-	if !waitForAttach(t, a, 2*time.Second) {
+	if !waitForAttach(t, a) {
 		t.Fatal("attach socket not usable before the fault was injected")
 	}
 	oldListener, oldDead := listenerID(a)
 
 	killAcceptLoop(t, a)
 
-	if !waitForRebind(t, a, oldListener, 3*time.Second) {
+	if !waitForRebind(t, a, oldListener) {
 		t.Fatal("supervisor never rebound the listener after the accept loop died")
 	}
 	if _, dead := listenerID(a); dead == oldDead {
 		t.Error("listener rebound but the accept loop was not restarted")
 	}
-	if !waitForAttach(t, a, 2*time.Second) {
+	if !waitForAttach(t, a) {
 		t.Fatal("attach socket never recovered after the accept loop died")
 	}
 	if !ownsSocketPath(a) {
@@ -135,7 +167,7 @@ func TestAttachRebindsAfterSocketFileRemoved(t *testing.T) {
 	withSupervisorInterval(t, 10*time.Millisecond)
 	a := spawnAgent(t, "rebind-unlinked", "sleep", "30")
 
-	if !waitForAttach(t, a, 2*time.Second) {
+	if !waitForAttach(t, a) {
 		t.Fatal("attach socket not usable before the fault was injected")
 	}
 	oldListener, _ := listenerID(a)
@@ -143,10 +175,10 @@ func TestAttachRebindsAfterSocketFileRemoved(t *testing.T) {
 		t.Fatalf("remove socket: %v", err)
 	}
 
-	if !waitForRebind(t, a, oldListener, 3*time.Second) {
+	if !waitForRebind(t, a, oldListener) {
 		t.Fatal("supervisor never rebound the listener after the socket file was removed")
 	}
-	if !waitForAttach(t, a, 2*time.Second) {
+	if !waitForAttach(t, a) {
 		t.Fatal("attach socket never recovered after the socket file was removed")
 	}
 }
@@ -157,30 +189,57 @@ func TestAttachRebindsAfterSocketFileReplaced(t *testing.T) {
 	withSupervisorInterval(t, 10*time.Millisecond)
 	a := spawnAgent(t, "rebind-replaced", "sleep", "30")
 
-	if !waitForAttach(t, a, 2*time.Second) {
+	if !waitForAttach(t, a) {
 		t.Fatal("attach socket not usable before the fault was injected")
 	}
 	oldListener, _ := listenerID(a)
 
-	// Replace the socket file with a foreign listener nobody accepts on.
-	os.Remove(a.SocketPath())
-	foreign, err := net.Listen("unix", a.SocketPath())
+	// Replace the socket file with a foreign listener nobody accepts on —
+	// ATOMICALLY, via a bind at a sibling path and a rename over the target.
+	//
+	// This is the load sensitivity this test was filed for (mg-5aac), and it was
+	// in the injection rather than in the code under test. The old form was
+	// `os.Remove(path)` and then `net.Listen(path)`, which leaves a window in
+	// which the path names NOTHING. The supervisor polls that same path every
+	// 10ms here; landing in the window it reads `socket_file_missing`, rebinds,
+	// and recreates the file — so the test's own foreign bind then loses with
+	// EADDRINUSE and the test fails having injected no fault at all.
+	//
+	// The window is normally microseconds, so the race is invisible on a quiet
+	// box; under load the two statements drift apart and the failure rate climbs
+	// with it. Measured: widening the gap to 30ms fails 10 runs out of 10 with
+	// `foreign listen: ... bind: address already in use`.
+	//
+	// Rename closes the window rather than narrowing it. The path names the
+	// agent's own socket right up to the instant it names the foreign one, so
+	// `socket_file_missing` is unreachable by construction and the only reason
+	// the supervisor can see is the one under test, `socket_file_replaced`.
+	// A SIBLING of the socket, not a suffix on it: rename is only atomic within
+	// one filesystem, and a unix socket path is capped at ~104 bytes — which is
+	// why these tests bind under shortSocketDir in the first place. `f.sock` is
+	// shorter than any agent name, so this cannot be the thing that overflows it.
+	foreignPath := filepath.Join(filepath.Dir(a.SocketPath()), "f.sock")
+	foreign, err := net.Listen("unix", foreignPath)
 	if err != nil {
 		t.Fatalf("foreign listen: %v", err)
 	}
 	disarmUnlinkOnClose(foreign)
 	defer foreign.Close()
+	defer os.Remove(foreignPath)
+	if err := os.Rename(foreignPath, a.SocketPath()); err != nil {
+		t.Fatalf("replace socket file with the foreign one: %v", err)
+	}
 
 	// The supervisor must notice the path no longer names its own socket and
 	// reclaim it. Listener identity is the assertion — a dial would succeed
 	// against the foreign listener's backlog and prove nothing.
-	if !waitForRebind(t, a, oldListener, 3*time.Second) {
+	if !waitForRebind(t, a, oldListener) {
 		t.Fatal("supervisor never reclaimed the replaced socket path")
 	}
 	if !ownsSocketPath(a) {
 		t.Error("agent does not own the socket file at its own path after reclaim")
 	}
-	if !waitForAttach(t, a, 2*time.Second) {
+	if !waitForAttach(t, a) {
 		t.Fatal("reclaimed socket is not attachable")
 	}
 }
@@ -191,7 +250,7 @@ func TestAttachNotRecreatedAfterCleanup(t *testing.T) {
 	withSupervisorInterval(t, 10*time.Millisecond)
 	a := spawnAgent(t, "no-zombie-socket", "sleep", "30")
 
-	if !waitForAttach(t, a, 2*time.Second) {
+	if !waitForAttach(t, a) {
 		t.Fatal("attach socket not usable before cleanup")
 	}
 	a.Cleanup()
@@ -236,7 +295,7 @@ func TestSupervisorThrottlesRebindFlap(t *testing.T) {
 	withSupervisorInterval(t, time.Hour) // isolate: only the dead-channel path drives this
 	a := spawnAgent(t, "rebind-flap", "sleep", "30")
 
-	if !waitForAttach(t, a, 2*time.Second) {
+	if !waitForAttach(t, a) {
 		t.Fatal("attach socket not usable before the fault was injected")
 	}
 

@@ -31,12 +31,24 @@ import (
 // touched this package: it blamed an unrelated author and suppressed the retry
 // that would have passed.
 //
-// So the probe now says which bucket ITS OWN pids landed in, and the two buckets
-// that are facts about the host rather than about the rule — never met the CPU
-// floor, cwd unreadable — are reported as Blind after probeScanAttempts tries.
-// A blind run skips. Everything else still fails, including the two ways a
-// constructed orphan can come back WRONG (`unattributable`, `live_owner`), so
-// the failing arm has not been softened, only separated from the host.
+// So the probe now says which bucket ITS OWN pids landed in, and the buckets
+// that are facts about the host rather than about the rule — never met the
+// candidate floor, cwd unreadable, and (mg-5aac) attributed correctly but
+// granted too little CPU to clear the floor — are reported as Blind after
+// probeScanAttempts tries. A blind run skips. Everything else still fails,
+// including the two ways a constructed orphan can come back WRONG
+// (`unattributable`, `live_owner`), so the failing arm has not been softened,
+// only separated from the host.
+//
+// WHY IT DOES NOT RUN AT DefaultFloor (mg-5aac). It runs at probeFloor, 0.05
+// cores, because 0.20 is not a threshold the constructed input can be built to
+// clear: what a burner earns is the host's to decide, and under `go test ./...`
+// it competes with ~68 packages' processes. That is the same shape as mg-6c90 —
+// an absolute CPU floor asserted over a shared resource is unmeetable by
+// construction under contention — and the variable is contention in the sampling
+// window rather than the 1-minute load average: 6 of 6 passing isolated at load
+// 47 beside 0 of 2 inside the gate on the same box. See probeFloor for what that
+// costs and what it does not.
 func TestProbeGoesRedAgainstAConstructedOrphan(t *testing.T) {
 	if testing.Short() {
 		t.Skip("live probe starts real CPU burners; skipped under -short")
@@ -49,19 +61,25 @@ func TestProbeGoesRedAgainstAConstructedOrphan(t *testing.T) {
 	if res.Blind != "" {
 		t.Skipf("INCONCLUSIVE — this host would not let the probe be observed, so it says "+
 			"NOTHING about the detector either way (%d/%d scans): %s\n"+
-			"orphan disposition=%q control disposition=%q busy=%d floor=%.2f cores",
+			"orphan disposition=%q granted %.3f cores, control disposition=%q granted %.3f cores, "+
+			"busy=%d floor=%.2f cores",
 			res.Attempts, probeScanAttempts, res.Blind,
-			res.OrphanDisposition, res.ControlDisposition, res.Report.Busy, res.Report.Floor)
+			res.OrphanDisposition, res.OrphanRate,
+			res.ControlDisposition, res.ControlRate, res.Report.Busy, res.Report.Floor)
 	}
 
 	if !res.Reported {
 		t.Errorf("FAILING ARM: constructed orphan pid=%d (owner %s, dead) was examined and binned "+
-			"%q instead of %q. That is the rule getting a constructed input wrong, not the host: "+
-			"an unreadable cwd or a starved burner would have skipped above.\n"+
-			"report: busy=%d live_owner=%d unattributable=%d cwd_unreadable=%d orphans=%+v",
+			"%q instead of %q, having been granted %.3f cores against a %.2f-core floor. That is the "+
+			"rule getting a constructed input wrong, not the host: an unreadable cwd, a starved "+
+			"burner, or one the host would not grant the floor would all have skipped above.\n"+
+			"report: busy=%d live_owner=%d unattributable=%d cwd_unreadable=%d "+
+			"below_owner_floor=%d orphans=%+v",
 			res.OrphanPID, res.DeadOwner, res.OrphanDisposition, DispositionOrphan,
+			res.OrphanRate, res.Report.Floor,
 			res.Report.Busy, res.Report.LiveOwner,
-			res.Report.Unattributable, res.Report.CwdUnreadable, res.Report.Orphans)
+			res.Report.Unattributable, res.Report.CwdUnreadable,
+			res.Report.BelowOwnerFloor, res.Report.Orphans)
 	}
 	if !res.Spared {
 		t.Errorf("POSITIVE CONTROL: pid=%d belongs to a LIVE owner (%s) and was reported anyway. "+

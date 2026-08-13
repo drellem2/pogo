@@ -19,12 +19,19 @@ func probeArms(t *testing.T, orphanBucket, controlBucket Disposition, reported b
 	t.Helper()
 	const orphanPID, controlPID = 111, 222
 
-	rep := Report{Floor: DefaultFloor, Dispositions: map[int]Disposition{}}
+	rep := Report{
+		Floor:          probeFloor,
+		CandidateFloor: DefaultCandidateFloor,
+		Dispositions:   map[int]Disposition{},
+		Rates:          map[int]float64{},
+	}
 	if orphanBucket != "" {
 		rep.Dispositions[orphanPID] = orphanBucket
+		rep.Rates[orphanPID] = 0.9
 	}
 	if controlBucket != "" {
 		rep.Dispositions[controlPID] = controlBucket
+		rep.Rates[controlPID] = 0.9
 	}
 	rep.Busy = len(rep.Dispositions)
 	if reported {
@@ -43,6 +50,32 @@ func probeArms(t *testing.T, orphanBucket, controlBucket Disposition, reported b
 	return res
 }
 
+// TestProbeFloorSitsBetweenTheTwoDefaults pins the invariant probeFloor was
+// introduced with and did not state anywhere enforceable (mg-5aac).
+//
+// Both bounds are load-bearing and both fail SILENTLY at the point of use. A
+// probeFloor at or below DefaultCandidateFloor makes Scan REFUSE the whole run
+// with ErrCandidateFloorAboveFloor, so the probe stops being a verdict on the
+// detector and starts being an instrument failure — while looking, from the
+// constant's definition, entirely reasonable. Above DefaultFloor it would make
+// the probe stricter than the detector it is checking, which is the original
+// defect with a larger number.
+//
+// This is the guard against the remedy carrying its own defect: probeFloor is a
+// new constant whose correctness is a RELATION to two others, and nothing about
+// editing either of those brings a reader here.
+func TestProbeFloorSitsBetweenTheTwoDefaults(t *testing.T) {
+	if probeFloor <= DefaultCandidateFloor {
+		t.Errorf("probeFloor = %.3f is at or below DefaultCandidateFloor %.3f; Scan REFUSES that "+
+			"pairing (ErrCandidateFloorAboveFloor), so every probe run would report an instrument "+
+			"failure rather than a verdict", probeFloor, DefaultCandidateFloor)
+	}
+	if probeFloor > DefaultFloor {
+		t.Errorf("probeFloor = %.3f is above DefaultFloor %.3f; the probe would be asserting a "+
+			"stricter threshold than the detector ships with", probeFloor, DefaultFloor)
+	}
+}
+
 // TestProbeIsBlindWhenTheHostWouldNotLetItBeObserved is the defect this ticket
 // was filed for, reproduced as a unit: the constructed orphan WAS seen, and was
 // binned cwd_unreadable because lsof would not answer for it. The old test read
@@ -54,7 +87,12 @@ func TestProbeIsBlindWhenTheHostWouldNotLetItBeObserved(t *testing.T) {
 		wantIn       string
 	}{
 		{"cwd unreadable", DispositionCwdUnreadable, "cwd could not be read"},
-		{"never met the floor", "", "never met the CPU rate floor"},
+		{"never met the floor", "", "never met the per-process candidate floor"},
+		// mg-5aac. The attribution all worked and only the MAGNITUDE fell short,
+		// which is the host declining to give a burner a share of a contended
+		// box rather than the rule getting anything wrong. It used to read as a
+		// verdict and failed 4 gate-equivalent runs out of 4.
+		{"granted too little CPU to clear the floor", DispositionBelowOwnerFloor, "the host granted it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := probeArms(t, tc.orphanBucket, DispositionLiveOwner, false)
@@ -147,6 +185,9 @@ func TestReadArmsOverwritesAStaleAttempt(t *testing.T) {
 	res.Report = Report{Dispositions: map[int]Disposition{
 		orphanPID:  DispositionOrphan,
 		controlPID: DispositionOrphan,
+	}, Rates: map[int]float64{
+		orphanPID:  0.9,
+		controlPID: 0.8,
 	}, Orphans: []Orphan{
 		{PID: orphanPID, Cores: 0.9},
 		{PID: controlPID, Cores: 0.8},
@@ -154,6 +195,9 @@ func TestReadArmsOverwritesAStaleAttempt(t *testing.T) {
 	res.readArms(orphanPID, controlPID)
 	if !res.Reported || res.Spared || res.OrphanCores == 0 || res.ControlCores == 0 {
 		t.Fatalf("fixture did not take: %+v", res)
+	}
+	if res.OrphanRate == 0 || res.ControlRate == 0 {
+		t.Fatalf("fixture did not take (rates): %+v", res)
 	}
 
 	// Attempt 2: a scan that examined neither pid. Everything must reset.
@@ -164,6 +208,15 @@ func TestReadArmsOverwritesAStaleAttempt(t *testing.T) {
 	}
 	if res.OrphanCores != 0 || res.ControlCores != 0 {
 		t.Errorf("cores survived a scan that measured none: orphan=%.2f control=%.2f", res.OrphanCores, res.ControlCores)
+	}
+	// The rates are the reading mg-5aac ADDED, so they are exactly the field a
+	// stale-attempt bug would arrive through next: a probe that went blind and
+	// recovered would otherwise print the earlier attempt's grant beside this
+	// attempt's verdict, which is a wrong number in the one sentence a reader
+	// uses to decide whether the host or the rule was at fault.
+	if res.OrphanRate != 0 || res.ControlRate != 0 {
+		t.Errorf("granted rates survived a scan that measured none: orphan=%.3f control=%.3f",
+			res.OrphanRate, res.ControlRate)
 	}
 	if res.OrphanDisposition != "" || res.ControlDisposition != "" {
 		t.Errorf("dispositions survived: orphan=%q control=%q", res.OrphanDisposition, res.ControlDisposition)

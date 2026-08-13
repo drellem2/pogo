@@ -399,6 +399,40 @@ func TestDispositionsAreTheCountersPerProcess(t *testing.T) {
 		t.Errorf("dispositions = %d, busy = %d; every busy process must land in exactly one bucket",
 			len(rep.Dispositions), rep.Busy)
 	}
+
+	// Rates carries the same key set, and carries the MAGNITUDE for the pids
+	// that cleared no floor — which is the only place that number exists
+	// (mg-5aac). Orphan.Cores rides on findings, so without this a process
+	// binned below_owner_floor reads as 0.00 cores, and "under the floor" and
+	// "not running" become the same report. Only one of those is about the host,
+	// and telling them apart is the whole job of the constructive probe.
+	if len(rep.Rates) != len(rep.Dispositions) {
+		t.Errorf("rates = %d entries, dispositions = %d; a busy pid must have both", len(rep.Rates), len(rep.Dispositions))
+	}
+	for pid := range rep.Dispositions {
+		if _, ok := rep.RateOf(pid); !ok {
+			t.Errorf("pid %d was binned %q but has no measured rate", pid, rep.Dispositions[pid])
+		}
+	}
+	if _, ok := rep.RateOf(500); ok {
+		t.Error("idle pid 500 has a rate; a pid that was never a candidate must be ABSENT, not zero")
+	}
+	// 50ms of CPU over the 1s window is 0.05 cores. The arithmetic is asserted
+	// rather than the presence, because a rate map full of zeroes would satisfy
+	// every check above while reintroducing exactly the reading it replaced.
+	if got, _ := rep.RateOf(600); got < 0.049 || got > 0.051 {
+		t.Errorf("pid 600 rate = %.4f cores, want 0.05 (50ms of CPU over a 1s window)", got)
+	}
+	if got, _ := rep.RateOf(100); got < 0.99 || got > 1.01 {
+		t.Errorf("pid 100 rate = %.4f cores, want 1.00", got)
+	}
+	// And the finding's own Cores must be the same measurement, not a second one.
+	for _, o := range rep.Orphans {
+		if got, _ := rep.RateOf(o.PID); got != o.Cores {
+			t.Errorf("pid %d: Orphan.Cores = %.4f but Rates says %.4f; the report would be "+
+				"quoting two different measurements of one process", o.PID, o.Cores, got)
+		}
+	}
 }
 
 // TestASwarmOfSMALLProcessesIsSTILLOneDeadOwnersCompute is mg-c675, and it is

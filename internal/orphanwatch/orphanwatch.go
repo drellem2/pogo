@@ -283,6 +283,26 @@ type Report struct {
 	// process, whereas every bucket here is a fact about what the attribution
 	// step could do with it.
 	Dispositions map[int]Disposition `json:"dispositions,omitempty"`
+
+	// Rates is the measured rate in cores of every BUSY pid, keyed by pid — the
+	// same key set as Dispositions.
+	//
+	// It exists because a process that did not clear a floor otherwise has no
+	// observable MAGNITUDE anywhere in this report (mg-5aac). Orphan.Cores is
+	// carried only on findings, so a pid binned below_owner_floor came back as
+	// the literal string "0.00 cores" in the constructive probe's own summary —
+	// for a process that was provably spinning. "Did not clear the floor" and
+	// "was not running" are different facts and only one of them is about the
+	// host, so a reader deciding whether a floor is set right, or whether a probe
+	// was starved, needs the number rather than the comparison's result.
+	Rates map[int]float64 `json:"rates,omitempty"`
+}
+
+// RateOf reports the measured rate in cores of pid. The false return means the
+// pid was never a CANDIDATE — see Dispositions — and must not be read as zero.
+func (r Report) RateOf(pid int) (float64, bool) {
+	c, ok := r.Rates[pid]
+	return c, ok
 }
 
 // DispositionOf reports which bucket pid landed in. The false return means the
@@ -484,6 +504,10 @@ func Scan(opts Options) (Report, error) {
 	}
 	dirs := cwds(pids)
 	rep.Dispositions = make(map[int]Disposition, len(busy))
+	rep.Rates = make(map[int]float64, len(busy))
+	for _, c := range busy {
+		rep.Rates[c.row.PID] = c.cores
+	}
 
 	// First pass: attribute. No process is convicted here, because the verdict
 	// is reached on the owner's total and the total is not known until every
