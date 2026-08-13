@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -88,6 +89,49 @@ func verdictStore(t *testing.T, verdictMailed bool) string {
 		if err := os.WriteFile(filepath.Join(box, "1.msg"), []byte(msg), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	return root
+}
+
+// verdictStoreDelivered builds the same store with the verdict delivered by the
+// channel named — "worker" for the worker's own mail, "pogod" for the
+// Creator-notification mg-f120 added. The three arms share one fixture on purpose:
+// what separates them is a single message, which is the whole of the difference
+// this command could not see.
+func verdictStoreDelivered(t *testing.T, channel string) string {
+	t.Helper()
+	root := verdictStore(t, false)
+	box := filepath.Join(root, "mail", "filer-a", "cur")
+	var msg string
+	switch channel {
+	case "worker":
+		msg = "From: wa1\nSubject: mg-a1b2 VERDICT\nDate: 2026-08-01T09:00:00Z\n\nbody\n"
+	case "pogod":
+		msg = "From: pogod\nSubject: COMPLETED: mg-a1b2 — a landed item\nDate: 2026-08-01T09:30:00Z\n\n" +
+			"The work item you filed has completed.\n"
+	case "relay":
+		msg = "From: mayor\nSubject: FYI: mg-a1b2 is done — passing on what I heard\n" +
+			"Date: 2026-08-01T09:30:00Z\n\nno verdict attached\n"
+	default:
+		t.Fatalf("unknown channel %q", channel)
+	}
+	if err := os.WriteFile(filepath.Join(box, "2.msg"), []byte(msg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// verdictStoreWithRecordedVerdict is the ROUTING case: nobody was told and the
+// outcome is sitting in the item's result sidecar, which is the file this command
+// opens to identify the worker in the first place.
+func verdictStoreWithRecordedVerdict(t *testing.T) string {
+	t.Helper()
+	root := verdictStore(t, false)
+	side := `{"branch":"polecat-wa1","completed_by":"refinery",` +
+		`"verdict":{"verdict":"partial","summary":"the outcome, recorded in full"}}`
+	if err := os.WriteFile(filepath.Join(root, "work", "done", "mg-a1b2.result.json"),
+		[]byte(side), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	return root
 }
@@ -211,6 +255,146 @@ func TestTheProbeIsReachableFromTheCLI(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------- the channels (mg-4e02)
+
+// TestTheChannelThatCarriedItIsNamedAtTheCLI. Exit 0 is not enough: "delivered by
+// the worker" means a polecat did its job and "delivered by pogod" means a backstop
+// caught it, and a schedule reading only the integer cannot tell a fleet whose
+// polecats report from one whose polecats never do and whose daemon covers for them.
+func TestTheChannelThatCarriedItIsNamedAtTheCLI(t *testing.T) {
+	for _, tc := range []struct {
+		channel  string
+		wantCode int
+		wantText string
+	}{
+		{"worker", 0, "worker-mail 1"},
+		{"pogod", 0, "pogod-notify 1"},
+		// The relay must stay a drop. A predicate that cannot tell a verdict from a
+		// mention of one counts talk about the thing alongside the thing.
+		{"relay", 1, "DROPPED"},
+	} {
+		t.Run(tc.channel, func(t *testing.T) {
+			root := verdictStoreDelivered(t, tc.channel)
+			out, code := runCheckVerdicts(t, "--root", root, "--filer", "filer-a", "--all")
+			if code != tc.wantCode {
+				t.Errorf("exit %d for a verdict delivered by %s, want %d:\n%s", code, tc.channel, tc.wantCode, out)
+			}
+			if !strings.Contains(out, tc.wantText) {
+				t.Errorf("the report does not carry %q for the %s arm:\n%s", tc.wantText, tc.channel, out)
+			}
+		})
+	}
+}
+
+// TestTheReportEnumeratesItsChannelsAndClaimsNoMore is the wording defect, pinned
+// against the OUTPUT an operator reads rather than against the source.
+//
+// This command measured "the worker mailed the filer" and printed "no verdict
+// reached you". The near end is a fact about one channel; the far end quantifies
+// over all of them, and the channel set grew on 2026-08-12. The report may say what
+// it looked at. It may not say a verdict reached nobody.
+func TestTheReportEnumeratesItsChannelsAndClaimsNoMore(t *testing.T) {
+	out, code := runCheckVerdicts(t, "--root", verdictStore(t, false), "--filer", "filer-a")
+	if code != 1 {
+		t.Fatalf("exit %d on a store with one drop, want 1:\n%s", code, out)
+	}
+	for _, want := range []string{
+		"CHANNELS CHECKED",
+		"worker-mail",
+		"pogod-notify",
+		"no channel above carried a verdict to the filer",
+		"is not measured by this run",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, out)
+		}
+	}
+	for _, forbidden := range []string{"never received", "no verdict reached", "was never told", "did not reach"} {
+		if strings.Contains(strings.ToLower(out), forbidden) {
+			t.Errorf("the report claims the far end (%q):\n%s", forbidden, out)
+		}
+	}
+}
+
+// TestADroppedRowAtTheCLIPrintsItsRecordedVerdictAndTheInstructionWORKS.
+//
+// Two acceptance criteria in one test, because they are the same criterion seen
+// twice. A DROPPED row whose sidecar holds a verdict must PRINT it — this command
+// opens that file to identify the worker, so the outcome is already in hand. And
+// every retrieval instruction it emits is EXECUTED here against an item known to
+// have a verdict: `mg show <id> --json | jq -r .result` prints `null` and exits 0
+// because there is no `result` key at all, and that negative reached three agents
+// and became a mechanism in a ticket. AN EMITTED INSTRUCTION IS A CLAIM THAT THE
+// ARTIFACT IS THERE.
+func TestADroppedRowPrintsItsVerdictAndTheEmittedInstructionWorks(t *testing.T) {
+	root := verdictStoreWithRecordedVerdict(t)
+	out, code := runCheckVerdicts(t, "--root", root, "--filer", "filer-a")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (nobody was told, whatever is on disk):\n%s", code, out)
+	}
+	for _, want := range []string{
+		"ROUTING",
+		"partial",
+		"the outcome, recorded in full",
+		filepath.Join(root, "work", "done", "mg-a1b2.result.json"),
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the dropped row does not print %q:\n%s", want, out)
+		}
+	}
+	for _, forbidden := range []string{"jq -r .result", `jq -r '.result'`, "mg show mg-", `has("result")`} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("the report emits %q, a recipe this tool cannot satisfy:\n%s", forbidden, out)
+		}
+	}
+
+	// Now run what it told the reader to run.
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is not on PATH; the emitted instruction cannot be executed here")
+	}
+	cmds := emittedRetrievalCommands(out)
+	if len(cmds) == 0 {
+		t.Fatalf("the report emitted no retrieval instruction for a row whose verdict it printed:\n%s", out)
+	}
+	for _, cmdline := range cmds {
+		got, err := exec.Command("sh", "-c", cmdline).CombinedOutput()
+		text := strings.TrimSpace(string(got))
+		if err != nil {
+			t.Errorf("the emitted instruction failed: %s\n%v\n%s", cmdline, err, text)
+			continue
+		}
+		if text == "" || text == "null" {
+			t.Errorf("the emitted instruction %q returned %q against an item known to have a verdict; "+
+				"a recipe that prints null at exit 0 is exactly the failure this pins", cmdline, text)
+		}
+		if !strings.Contains(text, "partial") {
+			t.Errorf("the emitted instruction %q returned %q, which does not contain the verdict the "+
+				"report attributed to that item", cmdline, text)
+		}
+	}
+}
+
+var retrievalCommand = regexp.MustCompile(`(?m)^\s*read it in full:\s+(jq .*)$`)
+
+func emittedRetrievalCommands(out string) []string {
+	var cmds []string
+	for _, m := range retrievalCommand.FindAllStringSubmatch(out, -1) {
+		cmds = append(cmds, strings.TrimSpace(m[1]))
+	}
+	return cmds
+}
+
+// TestTheDefaultScopeIsEveryFiler (mayor's suggestion, and it is a measurement
+// lesson rather than a preference): mayor ran a FILTERED census, generalised from
+// it, and refuted itself with one unfiltered command. The filter is what made the
+// wrong scope legible, so the unfiltered answer is the default.
+func TestTheDefaultScopeIsEveryFiler(t *testing.T) {
+	out, _ := runCheckVerdicts(t, "--root", verdictStore(t, false))
+	if !strings.Contains(out, "filer ALL FILERS") {
+		t.Errorf("an invocation with no --filer does not say it covered every filer:\n%s", out)
+	}
+}
+
 // TestTheHelpStatesTheContractItsCallersReadFor. The family's contract lives in
 // its help text — "never acts", "never files anything", "never fixes" — and a
 // reader deciding whether to schedule this needs the exit codes and the
@@ -226,10 +410,35 @@ func TestTheHelpStatesTheContractItsCallersReadFor(t *testing.T) {
 		"INSTRUMENT FAILURE",        // the third answer
 		"ORDERED BY WHEN IT LANDED", // the ordering is the recovery affordance
 		"Exit status: 0 no dropped verdicts, 1 at least one, 2 usage error, 3",
+		// mg-4e02: the channel set, because the help text IS where the predicate is
+		// documented, and a reader who takes it as complete is the one who added a
+		// channel and did not know to come back here.
+		"worker-mail",
+		"pogod-notify",
+		"mg-f120",
+		"A RELAY IS NOT A DELIVERY",
+		"WHAT IT MEASURES IS THE NEAR END",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the help text does not carry %q:\n%s", want, out)
 		}
+	}
+
+	// The help text states the PREDICATE, so a far-end claim there is the same
+	// defect one layer up — and it is the layer a reader consults when deciding
+	// whether their case is covered.
+	for _, forbidden := range []string{
+		"whose FILER never\nreceived a verdict",
+		"without their filer ever receiving a verdict",
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("the help text still claims the far end (%q):\n%s", forbidden, out)
+		}
+	}
+	// And it must not hand the reader a recipe this tool cannot satisfy: there is
+	// no `result` key on a work item at all, so that one prints null and exits 0.
+	if strings.Contains(out, "jq -r .result") || strings.Contains(out, `jq -r '.result'`) {
+		t.Errorf("the help text emits `jq -r .result`, which returns null at exit 0:\n%s", out)
 	}
 
 	// The ONE-LINE summary is where every sibling's contract lives — "never

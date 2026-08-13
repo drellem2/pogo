@@ -4131,10 +4131,16 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// check-strandedmail (mg-aa96): the residue a repointed mail-check leaves —
 	// mail already delivered to the mailbox nobody polls any more.
 	rootCmd.AddCommand(newCheckStrandedMailCmd(&jsonOutput))
-	// check-verdicts (mg-f5dd): the ninth sibling — work that landed while the
-	// party who filed it was never told how it came out. Ported from macguffin's
-	// verdictwatch.py, which was confirmed correct and then sat unrun in a
-	// research directory, where nothing has a runner by construction.
+	// check-verdicts (mg-f5dd): the ninth sibling — work that landed and that none
+	// of the channels it checks carried a verdict to the filer over. Ported from
+	// macguffin's verdictwatch.py, which was confirmed correct and then sat unrun
+	// in a research directory, where nothing has a runner by construction.
+	//
+	// Its report names the near end deliberately (mg-4e02): it measured one channel
+	// and claimed the far end, so mg-f120's pogod Creator-notify — right transport,
+	// right mailbox, right item, different sender — scored DROPPED for every item
+	// that backstop covered, and the fix for verdict delivery was being measured by
+	// an instrument unable to register it working.
 	rootCmd.AddCommand(newCheckVerdictsCmd(&jsonOutput))
 	// check-review-decl (mg-253e): the tenth sibling — a review ticket filed
 	// without the `reviews:` line mg-aaf6 introduced, whose builder is therefore

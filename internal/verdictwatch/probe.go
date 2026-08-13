@@ -201,10 +201,21 @@ func Probe() ProbeResult {
 
 // matchedPair constructs the known-bad and known-good inputs and reads the
 // detector's verdict on each.
+//
+// FOUR ARMS, NOT TWO (mg-4e02). The pair that matters most is no longer
+// mailed/not-mailed: it is the pogod Creator-notify against the coordinator RELAY.
+// Those two look nearly identical on disk — macguffin mail, in the filer's own
+// box, naming the item — and the detector must call the first a delivery and the
+// second a drop, because the question is who discharged the obligation. A
+// predicate that cannot separate them either misses every notified item (what
+// this was) or counts every mention of a verdict as one (the widening it must not
+// take).
 func (s *store) matchedPair() ([]ProbeArm, error) {
 	const filer = "filer-a"
 
-	// KNOWN-BAD INPUT: the work lands and the worker never mails the filer.
+	// KNOWN-BAD INPUT: the work lands and nobody mails the filer at all. THE
+	// POSITIVE CONTROL: whatever else changes, this must stay RED, or the fix for
+	// the false positives has silenced the true ones.
 	bad, err := s.newItem(filer, "arm A: the verdict is dropped on purpose",
 		"This worker finishes the work and never mails the filer.\n")
 	if err != nil {
@@ -228,6 +239,46 @@ func (s *store) matchedPair() ([]ProbeArm, error) {
 		return nil, err
 	}
 
+	// KNOWN-GOOD INPUT, THE CHANNEL THIS DETECTOR WAS BLIND TO: the worker never
+	// mails anyone and pogod's Creator-notification (mg-f120) tells the filer. The
+	// subject is the shape internal/filernotify emits; the coupling to that
+	// package's real output is pinned by a test, because a fixture is free to be
+	// wrong about a format in exactly the way this detector already was.
+	notified, err := s.newItem(filer, "arm C: the worker never mailed, pogod's Creator-notify did",
+		"The backstop covers this one. The worker mails nobody.\n")
+	if err != nil {
+		return nil, err
+	}
+	if err := s.land(notified, "wc1"); err != nil {
+		return nil, err
+	}
+	if _, err := s.sendMail(filer, pogodSender,
+		fmt.Sprintf("COMPLETED: %s — arm C: the worker never mailed, pogod's Creator-notify did", notified),
+		"The work item you filed has completed.\n"); err != nil {
+		return nil, err
+	}
+
+	// KNOWN-BAD INPUT THAT LOOKS LIKE A DELIVERY: the coordinator relays a
+	// headline to the filer. Same transport, same mailbox, the item named in the
+	// subject — and it is not a verdict. This arm is what stops the fix for arm C
+	// being "count anything that mentions the item".
+	relayed, err := s.newItem(filer, "arm D: a relayed headline is not a verdict",
+		"The coordinator forwards word of this one. Nobody sends a verdict.\n")
+	if err != nil {
+		return nil, err
+	}
+	// This one lands WITH its verdict recorded, so the report has to place it in
+	// ROUTING and print the outcome it is holding, while arm A — closed with no
+	// verdict at all — is the LOST class.
+	if err := s.landRecording(relayed, "wd1", "partial"); err != nil {
+		return nil, err
+	}
+	if _, err := s.sendMail(filer, DefaultCoordinator,
+		fmt.Sprintf("FYI: %s is done — passing on what I heard", relayed),
+		"Heard your item finished. No verdict attached; I do not have one.\n"); err != nil {
+		return nil, err
+	}
+
 	rep, err := Scan(Options{Root: s.root, Filer: filer})
 	if err != nil {
 		return nil, fmt.Errorf("scan the throwaway store: %w", err)
@@ -239,36 +290,102 @@ func (s *store) matchedPair() ([]ProbeArm, error) {
 
 	arms := []ProbeArm{
 		{
-			Name: "known-bad input: work landed, worker never mailed the filer",
+			Name: "known-bad input: work landed, nobody mailed the filer",
 			Item: bad, Want: Dropped, Got: statusOf(rep, bad),
 		},
 		{
-			Name: "known-good input: the same work, verdict mailed to the filer",
+			Name: "known-good input: the same work, verdict mailed to the filer by the WORKER",
 			Item: good, Want: Delivered, Got: statusOf(rep, good),
+		},
+		{
+			Name: "known-good input: the worker mailed nobody and POGOD's Creator-notify told the filer",
+			Item: notified, Want: Delivered, Got: statusOf(rep, notified),
+		},
+		{
+			Name: "known-bad input: the COORDINATOR relayed a headline — a mention of a verdict is not one",
+			Item: relayed, Want: Dropped, Got: statusOf(rep, relayed),
 		},
 	}
 	for i := range arms {
 		arms[i].OK = arms[i].Got == arms[i].Want
 	}
-	// The counts are asserted as well as the per-row verdicts: two rows landing
-	// correctly while the report claims three drops would be a report nobody
-	// could act on, and the row check alone would pass.
-	if rep.Dropped != 1 || rep.Delivered != 1 {
-		arms = append(arms, ProbeArm{
-			Name: "the report's own counts agree with its rows",
-			Want: "1 dropped / 1 delivered",
-			Got:  Status(fmt.Sprintf("%d dropped / %d delivered", rep.Dropped, rep.Delivered)),
-			OK:   false,
-			Detail: fmt.Sprintf("scanned %d row(s); a count that disagrees with the rows is a report nobody can act on",
-				rep.Scanned),
-		})
-	} else {
-		arms = append(arms, ProbeArm{
-			Name: "the report's own counts agree with its rows",
-			Want: "1 dropped / 1 delivered", Got: "1 dropped / 1 delivered", OK: true,
-		})
+	// DELIVERED must name the channel, so the two delivered arms assert WHICH one
+	// carried them. A detector that counts pogod's notice as the worker's mail has
+	// stopped being able to answer the question the census exists for: did a
+	// polecat do its job, or did a backstop catch it?
+	arms = append(arms,
+		channelArm("the WORKER's mail is attributed to the worker channel", rep, good, ChannelWorker),
+		channelArm("POGOD's notice is attributed to the pogod channel, not the worker's", rep, notified, ChannelPogod))
+
+	// The counts are asserted as well as the per-row verdicts: rows landing
+	// correctly while the report claims a different number of drops would be a
+	// report nobody could act on, and the row check alone would pass.
+	wantCounts := "2 dropped / 2 delivered"
+	gotCounts := fmt.Sprintf("%d dropped / %d delivered", rep.Dropped, rep.Delivered)
+	countArm := ProbeArm{
+		Name: "the report's own counts agree with its rows",
+		Want: Status(wantCounts), Got: Status(gotCounts), OK: gotCounts == wantCounts,
 	}
+	if !countArm.OK {
+		countArm.Detail = fmt.Sprintf("scanned %d row(s); a count that disagrees with the rows is a report nobody can act on",
+			rep.Scanned)
+	}
+	arms = append(arms, countArm)
+
+	// The recoverability axis, over the same population and never added to the
+	// first: arm D's sidecar records a verdict and arm A's does not, so the two
+	// dropped rows are one ROUTING and one LOST. A single collapsed DROPPED number
+	// cannot say which, and that is the difference between a row somebody can
+	// discharge in one pass and a row that is gone.
+	wantClasses := "1 routing / 1 lost"
+	gotClasses := fmt.Sprintf("%d routing / %d lost", rep.Routing, rep.Lost)
+	classArm := ProbeArm{
+		Name: "the dropped rows split into ROUTING (verdict on disk) and LOST (nothing recorded)",
+		Want: Status(wantClasses), Got: Status(gotClasses), OK: gotClasses == wantClasses,
+	}
+	if !classArm.OK {
+		classArm.Detail = "arm D was closed WITH a verdict in its sidecar and arm A without one; a report that " +
+			"calls arm D LOST would send its reader hunting for an outcome the report is holding"
+	}
+	arms = append(arms, classArm)
+
+	// And the verdict is PRINTED, not merely counted. The row that says nobody was
+	// told must also say what they should have been told, or recovery is one item
+	// at a time out of a report that already had the answer open.
+	rendered := rep.Render(false, false)
+	printsIt := strings.Contains(rendered, "partial") && strings.Contains(rendered, relayed+".result.json")
+	arms = append(arms, ProbeArm{
+		Name: "the dropped row PRINTS the verdict its sidecar holds, with the explicit path",
+		Item: relayed, Want: "verdict printed", Got: Status(printed(printsIt)), OK: printsIt,
+		Detail: "the worker's identity comes out of that same sidecar, so a report that omits the verdict " +
+			"is looking past an answer it has in hand",
+	})
 	return arms, nil
+}
+
+func printed(ok bool) string {
+	if ok {
+		return "verdict printed"
+	}
+	return "verdict withheld"
+}
+
+// channelArm asserts which channel a delivered row was attributed to.
+func channelArm(name string, rep Report, id string, want Channel) ProbeArm {
+	got := Channel("ABSENT")
+	for _, row := range rep.Rows {
+		if row.ID == id {
+			got = row.DeliveredBy
+			if got == "" {
+				got = "not-delivered"
+			}
+			break
+		}
+	}
+	return ProbeArm{
+		Name: name, Item: id,
+		Want: Status(want), Got: Status(got), OK: got == want,
+	}
 }
 
 func statusOf(rep Report, id string) Status {
@@ -350,16 +467,34 @@ func (s *store) newItem(filer, title, body string) (string, error) {
 // the worker's branch. That sidecar is the ONLY worker identity macguffin
 // records, so a fixture that skipped it would land in UNDECIDABLE and the probe
 // would be asserting on the wrong bucket.
-func (s *store) land(id, worker string) error {
+func (s *store) land(id, worker string) error { return s.landRecording(id, worker, "") }
+
+// landRecording lands an item and, when verdict is non-empty, records that
+// verdict in the result sidecar the way `pogo refinery submit --verdict-file`
+// reaches it.
+//
+// The two forms are what separate the ROUTING class from the LOST one: a dropped
+// row whose sidecar holds the outcome can be discharged from the report itself,
+// and a dropped row with nothing recorded is the only actual loss. A probe that
+// only ever constructed one of them could not tell whether the report's split
+// means anything.
+func (s *store) landRecording(id, worker, verdict string) error {
 	if out, code, err := s.run(worker, "claim", id); err != nil {
 		return err
 	} else if code != 0 {
 		return fmt.Errorf("`mg claim` exited %d:\n%s", code, out)
 	}
-	result, err := json.Marshal(map[string]string{
+	side := map[string]interface{}{
 		"branch": "polecat-" + worker, "completed_by": "refinery",
 		"mr": "mr-constructed", "target": "main",
-	})
+	}
+	if verdict != "" {
+		side["verdict"] = map[string]interface{}{
+			"verdict": verdict,
+			"summary": "constructed by the verdictwatch probe: the outcome exists on disk",
+		}
+	}
+	result, err := json.Marshal(side)
 	if err != nil {
 		return err
 	}
