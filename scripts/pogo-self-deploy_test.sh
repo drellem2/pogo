@@ -2773,6 +2773,46 @@ grep -q 'agent.InstallPrompts' "$HERE/pogo-self-deploy" \
     && pass "the script names pogod's boot as the thing that installs prompts (a grep for 'prompt install' finds 0 for a REASON, now stated)" \
     || fail "nothing in the script explains that the restart performs the prompt install"
 
+# --- supervision reporting (mg-fa79) ---------------------------------------
+# Same wiring assertion, same reason: report_supervision could be perfect while
+# nothing ever called it, and the whole point of mg-fa79 is a signal that
+# existed 19,274 times and was read zero times.
+grep -q '^    report_supervision$' "$HERE/pogo-self-deploy" \
+    && pass "cmd_redeploy actually calls report_supervision — the reading is wired, not just written" \
+    || fail "report_supervision is defined but never called from cmd_redeploy"
+
+# It must run AFTER the restart, or it reports on the pogod being replaced.
+SUP_LINE="$(grep -n '^    report_supervision$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
+RESTART_LINE="$(grep -n '^    do_restart$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
+[ -n "$SUP_LINE" ] && [ -n "$RESTART_LINE" ] && [ "$SUP_LINE" -gt "$RESTART_LINE" ] \
+    && pass "report_supervision runs after do_restart — it reads the daemon this deploy produced" \
+    || fail "report_supervision at line ${SUP_LINE:-?} does not follow do_restart at line ${RESTART_LINE:-?}"
+
+# A missing CLI must SKIP, never fail the deploy: the fleet is already up by
+# the time this runs, and an unknown subcommand on an older install is not a
+# reason to call a completed deploy failed.
+OUT="$(POGO_GOBIN=/nonexistent-supervision-probe report_supervision 2>&1)"; RC=$?
+{ [ "$RC" = 0 ] && grep -q 'SKIPPED' <<<"$OUT"; } \
+    && pass "report_supervision skips (rc 0) when there is no pogo CLI to ask" \
+    || fail "missing CLI produced rc=$RC out=$OUT — a report-only step must not fail the deploy"
+
+# An UNSUPERVISED verdict must be loud AND must say what the revision check
+# cannot see. A quiet exit-1 here would reproduce the defect: in 2026-08 the
+# signal existed and nobody was told.
+SUP_STUB="$(mktemp -d)"; mkdir -p "$SUP_STUB"
+cat > "$SUP_STUB/pogo" <<'STUB'
+#!/bin/sh
+echo "UNSUPERVISED: com.pogo.daemon is loaded but has NO live process, while pid 4368 owns this POGO_HOME"
+echo "  launchd job pid : none (job loaded, no live process)"
+exit 1
+STUB
+chmod +x "$SUP_STUB/pogo"
+OUT="$(POGO_GOBIN="$SUP_STUB" report_supervision 2>&1)"; RC=$?
+{ [ "$RC" = 0 ] && grep -q 'UNSUPERVISED' <<<"$OUT" && grep -qi 'not the running daemon' <<<"$OUT"; } \
+    && pass "an UNSUPERVISED verdict is reported loudly, names what the revision check cannot see, and still does not fail the deploy" \
+    || fail "UNSUPERVISED under-reported: rc=$RC out=$OUT"
+rm -rf "$SUP_STUB"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)

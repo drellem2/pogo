@@ -3097,6 +3097,42 @@ format_prompt_refresh() {
     return 0
 }
 
+# report_supervision — put the post-restart supervision reading in the
+# transcript (mg-fa79). Reports only; never sets an exit code.
+#
+# WHAT IT ADDS THAT verify_running DOES NOT. verify_running asks whether a pogod
+# at main's revision is answering. In the 2026-08 displacement the answering
+# pogod was a process launchd had not started and could not restart — and if it
+# had been at main's revision already (an orphan that outlived a previous
+# deploy), verify_running would have said "verified" about a daemon this
+# deploy's kickstart did not touch. That is not hypothetical about REVISION, it
+# is a statement about IDENTITY, and revision cannot see it.
+#
+# Deliberately report-only, on the same reasoning as report_prompt_refresh: the
+# fleet is up and answering by the time this runs, and a supervision finding is
+# a thing to say loudly, not a reason to call a completed deploy failed. It also
+# tolerates a `pogo` with no such subcommand — on the FIRST night this ships,
+# the CLI being asked is the one this deploy just installed, but a rollback or a
+# hand-run against an older install must not turn an unknown subcommand into a
+# deploy failure.
+report_supervision() {
+    local cli; cli="$(installed_bin pogo)"
+    if [ ! -x "$cli" ]; then
+        log "supervision: SKIPPED — no pogo CLI at $cli to ask"
+        return 0
+    fi
+    local out rc
+    out="$("$cli" service supervision 2>&1)"; rc=$?
+    case "$rc" in
+        0) log "supervision: $(printf '%s' "$out" | head -1)" ;;
+        1) err "supervision: $(printf '%s' "$out" | head -1)"
+           err "supervision: THIS DEPLOY'S RESTART ACTED ON A JOB THAT IS NOT THE RUNNING DAEMON. The revision check above can still read green — it asks what is answering, not who launchd supervises."
+           printf '%s\n' "$out" | tail -n +2 | while IFS= read -r l; do err "supervision:   $l"; done ;;
+        *) log "supervision: could not establish (exit $rc) — $(printf '%s' "$out" | head -1)" ;;
+    esac
+    return 0
+}
+
 # report_prompt_refresh — the impure half: ask the freshly-restarted pogod's
 # event log what act 3 did, and put it in this transcript.
 #
@@ -3425,6 +3461,12 @@ cmd_redeploy() {
     # back?". Only the second is the question this deploy exists to close, and
     # for its whole life the script asked only the first (mg-6d2f).
     verify_orchestration || exit 11
+
+    # 3a. Report the supervision reading (mg-fa79). AFTER the two verifies,
+    #     because a daemon that has not finished booting has not taken the
+    #     lockfile yet and would read UNKNOWN for a reason that is about timing
+    #     rather than about ownership.
+    report_supervision
 
     # 3b. Report act 3 (mg-b6bd). AFTER verify_orchestration, because a pogod
     #     that has not finished booting has not finished refreshing prompts

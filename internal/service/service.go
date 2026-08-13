@@ -19,6 +19,14 @@ import (
 
 const launchdLabel = "com.pogo.daemon"
 
+// LaunchdLabel exports the daemon's launchd label for callers that must ask
+// launchd about the SAME job this package installs. Exported rather than
+// duplicated as a literal at the call site: a check that asks about a label
+// this package does not install would report on a job nobody manages, and the
+// disagreement would be invisible — which is the exact failure shape mg-fa79
+// is about, one level up.
+func LaunchdLabel() string { return launchdLabel }
+
 // launchdPlistTemplate matches the mg-1416 spec: ProcessType=Interactive
 // (prevents App Nap throttling of refinery polls + agent idle detection),
 // unconditional KeepAlive (auto-restart on any exit), explicit PATH so

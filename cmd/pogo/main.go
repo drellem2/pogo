@@ -43,6 +43,7 @@ import (
 	"github.com/drellem2/pogo/internal/selfdrift"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/sourcewatch"
+	"github.com/drellem2/pogo/internal/supervision"
 	"github.com/drellem2/pogo/internal/synthfail"
 	"github.com/drellem2/pogo/internal/version"
 	"github.com/drellem2/pogo/internal/wedgewatch"
@@ -1738,12 +1739,16 @@ suppresses only the reference it names.`,
 	var cmdServiceStatus = &cobra.Command{
 		Use:   "status",
 		Short: "Whether the service is installed, and whether the daemon is running the code you think it is",
-		Long: `Report two things about this installation:
+		Long: `Report three things about this installation:
 
-  1. whether the pogo system service (launchd/systemd) is installed, and
-  2. REVISION DRIFT — the three-way running / installed / main comparison.
+  1. whether the pogo system service (launchd/systemd) is installed,
+  2. SUPERVISION — whether the pogod that owns this POGO_HOME is the process
+     launchd is actually supervising (mg-fa79; ` + "`pogo service supervision`" + ` is
+     the same reading with an exit code, and its help explains why identity is
+     a different question from revision), and
+  3. REVISION DRIFT — the three-way running / installed / main comparison.
 
-The second half is the one that answers "am I running what I think I am
+The third is the one that answers "am I running what I think I am
 running?", and until mg-75ec it had no shipped surface at all. pogod does NOT
 self-install: nothing rebuilds the binary when a change merges and nothing
 restarts the daemon when the binary is replaced, so an installation drifts from
@@ -1788,10 +1793,20 @@ callers keep working; read the "status" field of --json to gate on it.`,
 				r := selfdrift.Check(selfdrift.HostDeps(statusRepo), statusRef)
 				report = &r
 			}
+			// The supervision verdict rides along here rather than living only
+			// behind its own subcommand (mg-fa79). An on-demand check nobody
+			// runs is the same shape as the defect it detects: the 2026-08
+			// displacement was recorded 19,274 times in a log and reacted to
+			// zero times. This is the surface an operator already opens to ask
+			// "is my install right", and the supervision question belongs to
+			// that answer. It never changes this command's exit status —
+			// `pogo service supervision` is the form with a gate.
+			sup := supervision.CheckHost(service.LaunchdLabel())
 			if jsonOutput {
 				out := map[string]interface{}{
-					"installed": installed,
-					"path":      path,
+					"installed":   installed,
+					"path":        path,
+					"supervision": sup,
 				}
 				if report != nil {
 					out["drift"] = report
@@ -1804,6 +1819,8 @@ callers keep working; read the "status" field of --json to gate on it.`,
 			} else {
 				fmt.Println("Service not installed.")
 			}
+			fmt.Println()
+			fmt.Print(sup.Text())
 			if report != nil {
 				fmt.Println()
 				fmt.Print(report.Text())
@@ -1896,6 +1913,99 @@ answer to it.`,
 			}
 		},
 	}
+	var cmdServiceSupervision = &cobra.Command{
+		Use:   "supervision",
+		Short: "Is the pogod that owns this POGO_HOME the process launchd is supervising?",
+		Long: `Compare the pid launchd attributes to com.pogo.daemon against the pid that
+holds the pogod lockfile, and say whether they are the same process.
+
+WHY THIS IS A SEPARATE QUESTION (mg-fa79). Between 2026-08-05 12:45:49 and
+2026-08-07 18:37:18 this box ran a pogod that launchd had not started. It held
+the lockfile and served :10000; the loaded com.pogo.daemon job could not acquire
+that lock, exited 1, and KeepAlive respawned it about every ten seconds for
+forty-six hours. The rotated daemon log holds 19,274 "Cannot acquire pogod lock
+… held by pid 4368" lines, all inside that window and none after it. Nothing in
+the fleet reacted to any of them.
+
+It went unnoticed because every instrument anyone had reported health:
+
+  launchctl list              said "no PID, last exit 1" for a daemon that was
+                              up — so a check built on it reads a healthy box as
+                              dead, and a DEAD pid 4368 as unchanged.
+  GET /health                 said something was listening. Something was.
+  pogo service verify-revision
+                              compares REVISIONS. The displacing pogod usually
+                              execs the same on-disk binary, so it answers with
+                              the revision the job would have and this reads
+                              AGREES. It is not wrong; it is a different
+                              question.
+
+All three read a property of whatever answers. None reads IDENTITY, and identity
+is the whole defect: the wrong process is healthy, current and listening — it is
+simply not the one launchd restarts when it wedges. KeepAlive was faithfully
+restarting a process that exited in milliseconds. A hung pid 4368 would have been
+restarted by nobody.
+
+TWO READINGS, ONE COMPARISON. launchd's own attribution (` + "`launchctl print`" + `)
+and the lockfile at $POGO_HOME/pogo.pid. The lockfile is the second reading
+rather than the :10000 listener because the lockfile is the component that
+NOTICED — its refusal is the record the episode was reconstructed from.
+
+PPID IS NOT AN ANSWER, and this command prints it saying so. Three separate
+readings of mg-fa79 used ` + "`ps -o ppid`" + ` and took ppid 1 as showing launchd
+started the process. It does not: a daemon orphaned by its spawner reparents to
+launchd too, and the 2026-08 displacer was setsid() out of a CLI, so it had
+ppid 1 from its first instant and looked exactly like a launchd-started daemon.
+The same goes for ` + "`runs`" + ` and ` + "`last exit reason`" + ` — lifetime fields that keep
+their values across a repair. This box read runs=24991 and
+last exit reason=OS_REASON_CODESIGNING on a daemon that was healthy and current.
+Both travel in the report as context and neither reaches the verdict.
+
+EXIT CODES — three, because "could not tell" is a real answer:
+
+  0  SUPERVISED    both pids were read and they name the same process.
+  1  UNSUPERVISED  a loaded job and a lock holder that are not the same process
+                   — including the 2026-08 shape, a loaded job with NO live
+                   process while something else owns the POGO_HOME.
+  3  UNKNOWN       a reading was missing, or no job is loaded at all. NOT a
+                   pass. A lock holder with no job loaded is the fleet-owns-it
+                   half of mg-fa79's either/or — a valid single-owner setup, but
+                   not one this command can call supervised.
+
+ONE SAMPLE. This is a single reading, not a poll. ` + "`launchctl kickstart -k`" + `
+kills the old process before spawning and the kernel releases its lock at death,
+so an ordinary restart cannot show a new launchd pid beside an old lock holder.
+A GRACEFUL stop can, for as long as a SIGTERMed pogod takes to unlock — that is
+the one known false positive, it is seconds wide, and the remedy is to read it
+again.
+
+UNSUPERVISED DOES NOT MEAN BROKEN. Throughout the 2026-08 episode pogod was up,
+current and serving. It means the supervision anyone believes com.pogo.daemon
+provides is not being provided, and that a restart issued through launchd — how
+scripts/pogo-self-deploy restarts pogod — acts on a process nobody is using.
+
+REPORT-ONLY. This command never starts, stops, kickstarts or unloads anything.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			res := supervision.CheckHost(service.LaunchdLabel())
+
+			if jsonOutput {
+				cli.PrintJSON(res)
+			} else {
+				fmt.Print(res.Text())
+			}
+
+			switch res.Verdict {
+			case supervision.Supervised:
+				os.Exit(cli.ExitSuccess)
+			case supervision.Unsupervised:
+				os.Exit(cli.ExitError)
+			default:
+				os.Exit(cli.ExitUnknown)
+			}
+		},
+	}
+
 	cmdServiceVerifyRevision.Flags().StringVar(&verifyRevisionExpect, "expect", "",
 		"revision the daemon should be running (default: the vcs stamp of the pogod binary launchd execs)")
 	cmdServiceVerifyRevision.Flags().DurationVar(&verifyRevisionTimeout, "timeout", revcheck.DefaultTimeout,
@@ -4270,6 +4380,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	cmdService.AddCommand(cmdServiceReconcile)
 	cmdService.AddCommand(cmdServiceCheckDrift)
 	cmdService.AddCommand(cmdServiceVerifyRevision)
+	cmdService.AddCommand(cmdServiceSupervision)
 	rootCmd.AddCommand(cmdService)
 
 	// Recovery commands (mg-f5fc tier-3). The agent itself is installed via
