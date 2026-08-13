@@ -565,12 +565,53 @@ the one file current enough for +1 to flip the sign. Note this removes a
 secondary blocker from mg-8bcb and does **not** unpark it; its stated park is
 the still-failing architect precondition on the daemon's revision.
 
-**The reference can itself be stale.** `--repo` defaults to the deploy checkout
-at `~/.pogo/deploy-src`, whose `origin/main` is only as fresh as its last
-successful fetch — and a failed fetch is one of the things this command is for.
-The resolved commit and its date are printed every run, so read them before
-trusting a clean verdict. Nothing here fetches: a detector that mutates the tree
-it is judging has made itself a participant.
+**The reference is itself stale by construction, and the row says so (mg-afd0).**
+`--repo` defaults to the deploy checkout at `~/.pogo/deploy-src`, which the
+nightly fetches **at deploy time and never after** — so its `origin/main` is
+frozen at the *deployed* revision, not the live remote head. Everything that
+shipped since the last deploy is invisible to the comparison, and that window is
+the only one in which the fleet is running something older than what shipped —
+which is what this command's first line claims to witness. On 2026-08-13 the
+reference stood 17 commits behind `origin/main`, five of them touching the
+corpus, and the report read `ok: all 9 shipped prompt(s) match the reference`.
+The `--help` did carry the caveat; the row did not, and a caveat that does not
+travel with the output does not exist.
+
+So every run now prints **when the reference last fetched** — from `FETCH_HEAD`'s
+mtime, which dates the last *fetch*; a remote-tracking ref's own mtime dates the
+last time the branch *moved*, and a mirror that fetched an hour ago and found
+nothing new would date itself days old by that measure — and asks the remote,
+with `git ls-remote`, whether it has moved past the reference:
+
+```
+  reference:    /Users/you/.pogo/deploy-src @ origin/main = 082ec38b0159 (committed …)
+                LAST FETCHED 2026-08-13T03:00:12+01:00 (5h43m ago) — that ref is this repo's own
+                copy, not the live remote; anything pushed since is invisible to the comparison below.
+  BEHIND THE REMOTE: origin is at 107f6b2a4cd7, which this reference does not have.
+                18 commit(s) have shipped since, 5 of them touching internal/agent/prompts:
+                  d27ecc1  the DOCTOR's refinery-history advice names its window (mg-af0c)
+                  …
+```
+
+When the reference already holds those objects the gap is **quantified and
+named**; when it does not — the usual case for a mirror that has not fetched
+since 03:00 — it is reported as *unknown*, never as zero, and unknown is a
+finding. A gap whose commits touch nothing under the corpus is **not** a finding:
+this witness judges the prompt corpus, and claiming more would be the same
+over-reporting the change exists to remove.
+
+**Still nothing fetches by default** — a detector that mutates the tree it is
+judging has made itself a participant, and `ls-remote` is a query that writes
+nothing. `--fetch` opts into refreshing the one remote-tracking ref, so the whole
+comparison runs against what *shipped*; it also names where the reference stood
+**before** the fetch, because that is the deployed revision and the fetch is the
+only thing that erases the local record of it. The fetch passes
+`--no-write-fetch-head` so it does not overwrite the very timestamp the row above
+is read from — the remedy would otherwise destroy the evidence of the fault, and
+on a git too old to know the flag the run says the timestamp moved.
+`--skip-remote` disarms the query on an offline host; an unreachable remote is
+reported loudly and is **not** counted as a finding, because a check that fails
+on every laptop gets its exit status ignored.
 
 **Constructing the positive control.** An alarm that has only ever been silent
 has not been shown to work, and silence is what those five nights produced. Both

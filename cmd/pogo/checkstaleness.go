@@ -103,6 +103,8 @@ func newCheckStalenessCmd(jsonOutput *bool) *cobra.Command {
 		nowFlag    string
 		skipDeploy bool
 		skipPrompt bool
+		skipRemote bool
+		doFetch    bool
 	)
 
 	cmd := &cobra.Command{
@@ -148,12 +150,29 @@ main — LONGER — while the other eight were shorter. The decision is a hash o
 the file body with the install stamp stripped; line counts are printed for a
 human to orient on and are consulted for nothing.
 
-THE REFERENCE CAN ITSELF BE STALE. ` + "`--repo`" + ` defaults to the deploy checkout at
-~/.pogo/deploy-src, whose ` + "`origin/main`" + ` is only as fresh as its last successful
-fetch — and a failed fetch is one of the things this command is for. The
-resolved commit and its date are printed every run so a reader can judge the
-reference before judging the verdict. Nothing here fetches: a detector that
-mutates the tree it is judging has made itself a participant.
+THE REFERENCE IS ITSELF STALE BY CONSTRUCTION, and the row says so (mg-afd0).
+` + "`--repo`" + ` defaults to the deploy checkout at ~/.pogo/deploy-src, which the nightly
+fetches AT DEPLOY TIME and never after — so its ` + "`origin/main`" + ` is frozen at the
+DEPLOYED revision, not the live remote head, and anything that shipped since the
+last deploy is invisible to the comparison. That window is the only one in which
+the fleet is running something older than what shipped, which is what this
+command's first line claims to witness. Measured 2026-08-13: the reference stood
+17 commits behind origin/main, five of them touching the corpus, and the report
+read "ok: all 9 shipped prompt(s) match the reference."
+
+So every run now prints WHEN the reference last fetched (from FETCH_HEAD's
+mtime) and asks the remote, with ` + "`git ls-remote`" + `, whether it has moved since.
+When the reference already holds those objects the gap is quantified: N commits
+have shipped since, M of them touching the corpus, named. When it does not — the
+usual case for a mirror that has not fetched since 03:00 — the gap is reported
+as unknown rather than as zero, and unknown is a finding.
+
+Still nothing fetches by default: a detector that mutates the tree it is judging
+has made itself a participant, and ` + "`ls-remote`" + ` is a query that writes nothing.
+` + "`--fetch`" + ` opts into refreshing the one remote-tracking ref, which makes the whole
+comparison run against what shipped; it also names where the reference stood
+BEFORE the fetch, because that is the deployed revision and the fetch is the
+only thing that erases it. ` + "`--skip-remote`" + ` disarms the query for an offline host.
 
 WHAT IT DOES NOT JUDGE, and says so every run: files under the corpus
 directories that the ref does not ship. ~/.pogo/agents holds plenty of
@@ -252,7 +271,14 @@ its subject healthy.`,
 			}
 			if !skipPrompt {
 				promptsRan = true
-				promptRep = staleness.CheckPrompts(cmd.Context(), refRepo, ref, promptsDir)
+				promptRep = staleness.CheckPrompts(cmd.Context(), staleness.PromptOptions{
+					Repo:          refRepo,
+					Ref:           ref,
+					InstalledRoot: promptsDir,
+					SkipRemote:    skipRemote,
+					Fetch:         doFetch,
+					Now:           now,
+				})
 				if !promptRep.Clean() {
 					findings++
 				}
@@ -305,6 +331,8 @@ its subject healthy.`,
 	cmd.Flags().StringVar(&nowFlag, "now", "", "RFC3339 instant to judge against instead of the clock — for constructing the positive control")
 	cmd.Flags().BoolVar(&skipDeploy, "skip-redeploy", false, "Do not run the missed-redeploy witness")
 	cmd.Flags().BoolVar(&skipPrompt, "skip-prompts", false, "Do not run the prompt-corpus witness")
+	cmd.Flags().BoolVar(&skipRemote, "skip-remote", false, "Do not ask the remote whether the reference is behind (no network)")
+	cmd.Flags().BoolVar(&doFetch, "fetch", false, "Refresh the reference's remote-tracking ref first, so the comparison is against what SHIPPED rather than what was deployed")
 	return cmd
 }
 
@@ -460,12 +488,15 @@ func printPromptWitness(r staleness.PromptReport) {
 	fmt.Printf("  installed:    %s\n", r.InstalledRoot)
 	if r.Err != "" {
 		fmt.Printf("  reference:    %s @ %s\n", r.Reference.Repo, r.Reference.Ref)
+		printReferenceLimit(r.Reference, r.Remote.Fetched)
 		fmt.Printf("  COULD NOT CHECK: %s\n", r.Err)
 		fmt.Println("             This is not an all-clear. Nothing was compared.")
 		return
 	}
 	fmt.Printf("  reference:    %s @ %s = %s (committed %s)\n",
 		r.Reference.Repo, r.Reference.Ref, shortSHA(r.Reference.Commit), r.Reference.CommitTime)
+	printReferenceLimit(r.Reference, r.Remote.Fetched)
+	printRemoteWitness(r.Remote)
 
 	if len(r.Unreadable) > 0 {
 		fmt.Printf("  UNREADABLE: %d installed file(s) could not be read, so their content is unknown:\n", len(r.Unreadable))
@@ -497,6 +528,124 @@ func printPromptWitness(r staleness.PromptReport) {
 	fmt.Printf("  not judged: %d installed file(s) the reference does not ship (locally added)\n", len(r.Unjudged))
 	for _, u := range r.Unjudged {
 		fmt.Printf("    %s\n", u)
+	}
+}
+
+// printReferenceLimit makes the reference row carry its own limit (mg-afd0).
+//
+// The row used to read `reference: ~/.pogo/deploy-src @ origin/main = 082ec38b`
+// and a reader took `origin/main` for the live remote head, because that is
+// what the string says. It is this mirror's last fetch, which the nightly
+// performs at deploy time and nothing performs after — so the label was a claim
+// the row could not support, and the caveat that would have supported it lived
+// in `--help`. A caveat that does not travel with the output does not exist:
+// this is the line, beside the number, in every run.
+// refreshed says the reference was brought up to date by THIS run, which
+// retires the limit rather than restating it. Printing "anything pushed since
+// is invisible" under a --fetch that just made it visible would be this
+// ticket's own defect committed by its own fix: a caveat that no longer holds,
+// travelling with the output that disproves it.
+func printReferenceLimit(ref staleness.Reference, refreshed bool) {
+	// Refreshed FIRST, before the known/unknown split. A run that has just
+	// fetched knows the ref is live whether or not it can date the previous
+	// fetch, and "how much this reference can have seen is unknown" printed
+	// under a --fetch would be the same unsupported claim in the other
+	// direction — pessimistic instead of optimistic, and equally wrong.
+	if refreshed {
+		fmt.Println("                REFRESHED BY THIS RUN (--fetch), so the ref above is the live remote head.")
+		if ref.Fetch.Known() {
+			fmt.Printf("                The deploy's own last fetch was %s (%s before this run), from %s.\n",
+				ref.Fetch.At, staleness.HumanDuration(ref.Fetch.AgeSeconds), ref.Fetch.Source)
+		} else {
+			fmt.Println("                When the DEPLOY last fetched is still unknown, which is a fact about this")
+			fmt.Println("                reference repo and not about the comparison below.")
+		}
+		return
+	}
+	if !ref.Fetch.Known() {
+		fmt.Println("                FETCH TIME UNKNOWN, so how much this reference can have seen is unknown too.")
+		if ref.Fetch.Why != "" {
+			fmt.Printf("                %s\n", ref.Fetch.Why)
+		}
+		return
+	}
+	fmt.Printf("                LAST FETCHED %s (%s ago) — that ref is this repo's own copy, not the live\n",
+		ref.Fetch.At, staleness.HumanDuration(ref.Fetch.AgeSeconds))
+	fmt.Printf("                remote; anything pushed since is invisible to the comparison below. (%s)\n", ref.Fetch.Source)
+}
+
+// printRemoteWitness renders the reference judged against the live remote head.
+//
+// It sits ABOVE the corpus verdict rather than below it, because it decides how
+// to read that verdict: "matches the reference" means one thing when the
+// reference is the remote head and another when the reference is where the
+// deploy left it seventeen commits ago, and a reader who stops after the first
+// green line must not have stopped before the qualifier.
+func printRemoteWitness(r staleness.RemoteState) {
+	switch {
+	case !r.Armed:
+		fmt.Println("  remote:       NOT CONSULTED — no remote head to compare this reference with.")
+		if r.Err != "" {
+			fmt.Printf("                %s\n", r.Err)
+		}
+		fmt.Println("                This is not an all-clear: nothing here can see what has shipped since.")
+		return
+	case r.Err != "":
+		fmt.Printf("  remote:       COULD NOT CONSULT %s (%s)\n", r.Target.Name, r.Target.URL)
+		fmt.Printf("                %s\n", r.Err)
+		fmt.Println("                Not counted as a finding — an offline host must not fail this check forever —")
+		fmt.Println("                and not an all-clear either. The fetch age above is all the limit that is known.")
+		return
+	}
+
+	if r.Fetched {
+		fmt.Printf("  remote:       FETCHED by this run from %s (%s)\n", r.Target.Name, r.Target.URL)
+		if r.Was != "" && r.Was != r.Head {
+			fmt.Printf("                before the fetch the reference stood at %s — that is the DEPLOYED revision,\n", shortSHA(r.Was))
+			fmt.Println("                and the fetch is the only thing that erases the local record of it.")
+		} else if r.Was != "" {
+			fmt.Printf("                the reference was already at the remote head (%s); the fetch moved nothing.\n", shortSHA(r.Was))
+		}
+		if r.FetchStampMoved {
+			fmt.Println("                NOTE: FETCH_HEAD now dates THIS run, not the deploy's fetch —")
+			fmt.Printf("                %s\n", r.FetchStampReason)
+		}
+	}
+
+	if !r.Behind {
+		if !r.Fetched {
+			fmt.Printf("  remote:       %s (%s) is at %s — the reference is level with it.\n",
+				r.Target.Name, r.Target.URL, shortSHA(r.Head))
+		}
+		return
+	}
+
+	if !r.Fetched {
+		fmt.Printf("  BEHIND THE REMOTE: %s is at %s, which this reference does not have.\n",
+			r.Target.Name, shortSHA(r.Head))
+	}
+	switch {
+	case !r.Counted:
+		fmt.Println("                How many commits have shipped since, and whether any touch the corpus, CANNOT")
+		fmt.Println("                be determined from here — the reference has not fetched those objects. The")
+		fmt.Println("                verdict below is 'installed matches what was DEPLOYED', not 'matches what shipped'.")
+		fmt.Println("                To answer it: re-run with --fetch.")
+	case r.CorpusCommits == 0:
+		fmt.Printf("                %d commit(s) have shipped since, NONE of them touching %s —\n",
+			r.Commits, staleness.PromptsSubtree)
+		fmt.Println("                so the corpus verdict below is about the live corpus after all. Not a finding here;")
+		fmt.Println("                a stale BINARY is a different subject and this witness does not judge it.")
+	default:
+		fmt.Printf("                %d commit(s) have shipped since, %d of them touching %s:\n",
+			r.Commits, r.CorpusCommits, staleness.PromptsSubtree)
+		for _, c := range r.Corpus {
+			fmt.Printf("                  %s  %s\n", c.SHA, c.Subject)
+		}
+		if r.Truncated > 0 {
+			fmt.Printf("                  ... %d more (enumeration clipped; the count above is exact)\n", r.Truncated)
+		}
+		fmt.Println("                Every agent is reading a corpus that predates those, whatever the verdict below says.")
+		fmt.Println("                Fix: redeploy, or 'pogo agent prompt install' from a build of the remote head.")
 	}
 }
 

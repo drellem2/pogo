@@ -300,7 +300,7 @@ func TestCheckPromptsAgainstGitRef(t *testing.T) {
 	writeFile(t, filepath.Join(fresh, "mayor.md"), stamped(mayor))
 	writeFile(t, filepath.Join(fresh, "templates", "polecat-qa.md"), stamped(qa))
 
-	rep := CheckPrompts(context.Background(), repo, "main", fresh)
+	rep := CheckPrompts(context.Background(), PromptOptions{Repo: repo, Ref: "main", InstalledRoot: fresh, SkipRemote: true})
 	if rep.Err != "" {
 		t.Fatalf("CheckPrompts: %s", rep.Err)
 	}
@@ -320,7 +320,7 @@ func TestCheckPromptsAgainstGitRef(t *testing.T) {
 	writeFile(t, filepath.Join(stale, "mayor.md"), stamped(lines(579, "mayor")))
 	writeFile(t, filepath.Join(stale, "templates", "polecat-qa.md"), stamped(lines(250, "qa")))
 
-	rep = CheckPrompts(context.Background(), repo, "main", stale)
+	rep = CheckPrompts(context.Background(), PromptOptions{Repo: repo, Ref: "main", InstalledRoot: stale, SkipRemote: true})
 	if rep.Err != "" {
 		t.Fatalf("CheckPrompts: %s", rep.Err)
 	}
@@ -339,7 +339,7 @@ func TestCheckPromptsAgainstGitRef(t *testing.T) {
 func TestCheckPromptsUnreachableReferenceIsNotClean(t *testing.T) {
 	repo := fixtureRepo(t, map[string][]byte{"mayor.md": lines(3, "m")})
 
-	rep := CheckPrompts(context.Background(), repo, "origin/main", t.TempDir())
+	rep := CheckPrompts(context.Background(), PromptOptions{Repo: repo, Ref: "origin/main", InstalledRoot: t.TempDir(), SkipRemote: true})
 	if rep.Err == "" {
 		t.Fatal("an unresolvable ref produced no error")
 	}
@@ -347,7 +347,7 @@ func TestCheckPromptsUnreachableReferenceIsNotClean(t *testing.T) {
 		t.Fatal("an unresolvable ref read as clean")
 	}
 
-	rep = CheckPrompts(context.Background(), filepath.Join(t.TempDir(), "nope"), "main", t.TempDir())
+	rep = CheckPrompts(context.Background(), PromptOptions{Repo: filepath.Join(t.TempDir(), "nope"), Ref: "main", InstalledRoot: t.TempDir(), SkipRemote: true})
 	if rep.Clean() {
 		t.Fatal("a missing reference repo read as clean")
 	}

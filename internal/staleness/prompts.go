@@ -58,6 +58,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
 )
@@ -105,12 +106,62 @@ type Reference struct {
 	// uninformative one.
 	Commit     string `json:"commit"`
 	CommitTime string `json:"commit_time"`
+	// Fetch dates the reference repo's last fetch (mg-afd0). CommitTime alone
+	// was not enough and reads as though it were: a reader sees a commit dated
+	// an hour ago and concludes the reference is an hour old, when what it
+	// means is that the deploy's fetch — hours or days ago — happened to land
+	// on a commit of that age. Only the fetch time bounds what the ref can
+	// possibly have seen.
+	Fetch FetchState `json:"fetch"`
 }
 
 // gitOut runs git in repo and returns stdout, with stderr folded into the error
 // so a failure says why rather than just "exit status 128".
 func gitOut(ctx context.Context, repo string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repo}, args...)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		}
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, msg)
+	}
+	return out, nil
+}
+
+// gitNetEnv is the extra environment the network calls need — a sealed list of
+// ADDITIONS, never an environment in itself.
+func gitNetEnv() []string {
+	extra := []string{"GIT_TERMINAL_PROMPT=0"}
+	if os.Getenv("GIT_SSH_COMMAND") == "" {
+		extra = append(extra, "GIT_SSH_COMMAND=ssh -oBatchMode=yes")
+	}
+	return extra
+}
+
+// gitNetOut is gitOut for the calls that touch the network, with every
+// interactive prompt disabled.
+//
+// A credential or host-key prompt on a detector is not a slow run, it is a
+// permanent one: nothing is attached to the terminal a cron or a pogod-spawned
+// agent runs under, so the read blocks until the timeout — and before the
+// timeout existed it blocked until someone noticed. The deploy runner learned
+// this the same way (mg-56ac): its 08-08 night did not fail, it never returned.
+// GIT_SSH_COMMAND is only supplied when the caller has not set one, so a host
+// with its own ssh wrapper keeps it.
+func gitNetOut(ctx context.Context, repo string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repo}, args...)...)
+	// The assignment is written as a single append onto os.Environ() rather
+	// than assembled into a local first, because internal/gitceiling's
+	// inheritance check matches SYNTAX: it accepts append-rooted-in-os.Environ
+	// at the assignment and refuses an identifier it cannot follow. Building
+	// this env in a local and assigning the local reads as a sealed
+	// environment, and it flagged exactly that here — correctly, by its own
+	// stated rule that unknown is never clean.
+	cmd.Env = append(os.Environ(), gitNetEnv()...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -344,24 +395,100 @@ type PromptReport struct {
 	// and unknown is not the same as matching.
 	Unreadable []string `json:"unreadable,omitempty"`
 	Unjudged   []string `json:"unjudged"`
+	// Remote judges the REFERENCE, not the corpus (mg-afd0): has the live
+	// remote moved past the revision everything above was compared with? A
+	// corpus that matches a reference frozen at the last deploy is a true
+	// answer to "does the fleet match what was deployed" and no answer at all
+	// to "does the fleet match what shipped", which is the question the command
+	// announces in its first line.
+	Remote RemoteState `json:"remote"`
 }
 
 // Clean reports whether the fleet is reading what the ref ships.
 func (r PromptReport) Clean() bool {
-	return r.Err == "" && len(r.Deltas) == 0 && len(r.Unreadable) == 0
+	return r.Err == "" && len(r.Deltas) == 0 && len(r.Unreadable) == 0 && r.Remote.Clean()
 }
 
-// CheckPrompts runs the prompt-corpus comparison end to end.
-func CheckPrompts(ctx context.Context, repo, ref, installedRoot string) PromptReport {
-	rep := PromptReport{InstalledRoot: installedRoot}
-	shipped, info, err := LoadShippedCorpus(ctx, repo, ref)
+// PromptOptions is the prompt witness's whole input, as a struct rather than a
+// widening parameter list — the two additions here are both about the
+// REFERENCE, and a positional bool named `fetch` at the end of a four-argument
+// call is how a detector quietly acquires a side effect.
+type PromptOptions struct {
+	Repo          string
+	Ref           string
+	InstalledRoot string
+	// SkipRemote disarms the live-remote-head query. The corpus comparison is
+	// unaffected; what is lost is the qualifier on the reference, which the
+	// report then says out loud.
+	SkipRemote bool
+	// Fetch refreshes the reference's remote-tracking ref BEFORE comparing, so
+	// the comparison runs against what has shipped rather than against what was
+	// deployed. Off by default: a detector that mutates the tree it judges has
+	// made itself a participant, and this one would also overwrite the fetch
+	// timestamp the reference's own age is read from.
+	Fetch         bool
+	RemoteTimeout time.Duration
+	// Now is the instant the fetch age is measured against, so a test can
+	// construct an age without waiting for one.
+	Now time.Time
+}
+
+// CheckPrompts runs the prompt-corpus comparison end to end, plus the
+// reference's own staleness.
+//
+// ORDER MATTERS AND IS NOT ARBITRARY. The reference is resolved and dated
+// FIRST, before any fetch, because the pre-fetch revision is the deployed one —
+// the thing a reader wants named — and a fetch destroys the only local record
+// of it. With --fetch the report therefore carries both: where the deploy left
+// the reference, and what has shipped since.
+func CheckPrompts(ctx context.Context, opts PromptOptions) PromptReport {
+	rep := PromptReport{InstalledRoot: opts.InstalledRoot}
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	deployed, target, armed := prepareReference(ctx, opts, now, &rep)
+	if opts.Fetch && armed {
+		moved, err := FetchReference(ctx, opts.Repo, target, opts.RemoteTimeout)
+		if err != nil {
+			rep.Remote = RemoteState{Armed: true, Target: target, Err: err.Error()}
+		} else {
+			rep.Remote = RemoteState{Armed: true, Target: target, Fetched: true, Was: deployed,
+				FetchStampMoved: moved}
+			if moved {
+				rep.Remote.FetchStampReason = "this git does not know --no-write-fetch-head, so FETCH_HEAD now dates THIS run rather than the deploy's fetch"
+			}
+		}
+	}
+
+	shipped, info, err := LoadShippedCorpus(ctx, opts.Repo, opts.Ref)
+	info.Fetch = rep.Reference.Fetch
 	rep.Reference = info
 	if err != nil {
 		rep.Err = err.Error()
 		return rep
 	}
+
+	switch {
+	case opts.SkipRemote:
+		// Left un-armed and unexplained by this layer; the caller asked for it
+		// and the printer says so.
+	case opts.Fetch:
+		// The fetch already moved the reference to the remote head, so an
+		// ls-remote here would be a second network call to re-learn what the
+		// fetch just established. Fill in the gap the fetch closed instead.
+		if rep.Remote.Fetched && rep.Remote.Was != "" && rep.Remote.Was != info.Commit {
+			rep.Remote.Behind = true
+			rep.Remote.Head = info.Commit
+			countAhead(ctx, opts.Repo, rep.Remote.Was, info.Commit, &rep.Remote)
+		}
+	default:
+		rep.Remote = CheckRemote(ctx, opts.Repo, opts.Ref, info.Commit, opts.RemoteTimeout)
+	}
+
 	rep.Shipped = len(shipped)
-	installed, unreadable, err := LoadInstalledCorpus(installedRoot, LayoutOf(shipped))
+	installed, unreadable, err := LoadInstalledCorpus(opts.InstalledRoot, LayoutOf(shipped))
 	if err != nil {
 		rep.Err = err.Error()
 		return rep
@@ -369,4 +496,25 @@ func CheckPrompts(ctx context.Context, repo, ref, installedRoot string) PromptRe
 	rep.Unreadable = unreadable
 	rep.Deltas, rep.Unjudged = ComparePrompts(shipped, installed)
 	return rep
+}
+
+// prepareReference dates the reference repo and, when a fetch is coming,
+// records where the ref stood before it. Both are best-effort: a reference that
+// cannot be resolved at all is the corpus comparison's error to report, not
+// this one's, and reporting it twice would put a git failure in the row that is
+// supposed to be about time.
+func prepareReference(ctx context.Context, opts PromptOptions, now time.Time, rep *PromptReport) (deployed string, target RemoteTarget, armed bool) {
+	rep.Reference.Fetch = ReadFetchState(ctx, opts.Repo, now)
+	if !opts.Fetch {
+		return "", RemoteTarget{}, false
+	}
+	if sha, err := gitOut(ctx, opts.Repo, "rev-parse", "--verify", "--end-of-options", opts.Ref+"^{commit}"); err == nil {
+		deployed = strings.TrimSpace(string(sha))
+	}
+	t, err := ResolveRemoteTarget(ctx, opts.Repo, opts.Ref)
+	if err != nil {
+		rep.Remote = RemoteState{Armed: false, Err: err.Error()}
+		return deployed, RemoteTarget{}, false
+	}
+	return deployed, t, true
 }
