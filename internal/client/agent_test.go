@@ -433,3 +433,78 @@ func TestMGWorkItemReviewsFailureIsAnError(t *testing.T) {
 		t.Error("unparseable JSON must be an error, not an empty declaration")
 	}
 }
+
+// TestGetAgentOutput_SendsTheRequestedWindow covers mg-8a56 from the client
+// side: the window a caller asks for has to reach pogod as a query param. The
+// endpoint documented ?bytes= and ?lines= for its whole life while the handler
+// read neither, and this client sent neither either.
+func TestGetAgentOutput_SendsTheRequestedWindow(t *testing.T) {
+	tests := []struct {
+		name string
+		opts AgentOutputOptions
+		want string // expected RawQuery, canonically encoded
+	}{
+		{"default window names nothing", AgentOutputOptions{}, ""},
+		{"plain only", AgentOutputOptions{Plain: true}, "plain=true"},
+		{"bytes", AgentOutputOptions{Bytes: 16384}, "bytes=16384"},
+		{"lines", AgentOutputOptions{Lines: 40}, "lines=40"},
+		{"bytes with plain", AgentOutputOptions{Bytes: 65536, Plain: true}, "bytes=65536&plain=true"},
+		// Non-positive is "unset", not "zero bytes": the CLI rejects it before
+		// reaching here, so it must not become bytes=0 on the wire.
+		{"non-positive is unset", AgentOutputOptions{Bytes: -1, Lines: 0}, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotQuery, gotPath string
+			withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				gotQuery, gotPath = r.URL.RawQuery, r.URL.Path
+				w.Write([]byte("screen contents"))
+			})
+
+			out, err := GetAgentOutput("mayor", tc.opts)
+			if err != nil {
+				t.Fatalf("GetAgentOutput: %v", err)
+			}
+			if out != "screen contents" {
+				t.Errorf("output = %q, want %q", out, "screen contents")
+			}
+			if gotPath != "/agents/mayor/output" {
+				t.Errorf("path = %q, want /agents/mayor/output", gotPath)
+			}
+			if gotQuery != tc.want {
+				t.Errorf("query = %q, want %q", gotQuery, tc.want)
+			}
+		})
+	}
+}
+
+// TestGetAgentOutput_RejectionIsNotOutput pins the second half of the same
+// shape: pogod's 400 for an unusable window must surface as an error, not be
+// printed where the agent's screen belongs and exited 0.
+func TestGetAgentOutput_RejectionIsNotOutput(t *testing.T) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bytes and lines are mutually exclusive; send at most one", http.StatusBadRequest)
+	})
+
+	out, err := GetAgentOutput("mayor", AgentOutputOptions{Bytes: 10, Lines: 10})
+	if err == nil {
+		t.Fatalf("a 400 must be an error; got output %q and nil error", out)
+	}
+	if out != "" {
+		t.Errorf("output = %q, want empty on error", out)
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error should quote pogod's reason; got %v", err)
+	}
+}
+
+func TestGetAgentOutput_NotFound(t *testing.T) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "agent \"ghost\" not found", http.StatusNotFound)
+	})
+
+	if _, err := GetAgentOutput("ghost", AgentOutputOptions{Bytes: 16384}); err == nil ||
+		!strings.Contains(err.Error(), "not found") {
+		t.Errorf("404 should surface as a not-found error; got %v", err)
+	}
+}

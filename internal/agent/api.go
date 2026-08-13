@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -459,9 +461,6 @@ func withinCronInterval(now time.Time, windows []CronWindow) bool {
 	}
 	return false
 }
-
-// OutputAPIRequest query params for GET /agents/:name/output.
-// ?lines=N or ?bytes=N
 
 // ExportInfo returns the public AgentInfo for an agent.
 func ExportInfo(a *Agent) AgentInfo {
@@ -958,6 +957,33 @@ func (r *Registry) handleNudge(w http.ResponseWriter, req *http.Request) {
 	})
 }
 
+// DefaultOutputBytes is how much of an agent's PTY ring GET
+// /agents/{name}/output returns when the caller names no window. It is the
+// value the endpoint has always returned, kept as the default so callers that
+// send neither ?bytes= nor ?lines= are unaffected by those params existing.
+//
+// It is NOT the largest window available, and reading it as one is how mg-8a56
+// happened: the params were documented, the handler ignored them, and 4096 was
+// therefore the ceiling for every caller outside pogod — a quarter of the
+// wedgewatch.OutputScanBytes window pogod judges agents on, and an sixteenth of
+// the OutputRingBytes actually retained. Anyone debugging a PTY-reading
+// detector could not retrieve the input that detector reads.
+const DefaultOutputBytes = 4096
+
+// handleOutput serves GET /agents/{name}/output.
+//
+// Query params:
+//
+//	?bytes=N   return the last N bytes, clamped to OutputRingBytes (the ring's
+//	           capacity — asking for more can only yield what is retained)
+//	?lines=N   return the last N newline-separated lines out of the whole
+//	           retained ring
+//	?plain=true  strip ANSI/VT escape sequences from whatever window was selected
+//
+// bytes and lines are mutually exclusive: sending both is a 400 rather than a
+// silent choice between them. A non-numeric or non-positive value is a 400 for
+// the same reason — the accepted-and-ignored shape is the defect this handler
+// was fixed for, and swapping it for accepted-and-guessed would keep it.
 func (r *Registry) handleOutput(w http.ResponseWriter, req *http.Request) {
 	if req.Method != "GET" {
 		http.Error(w, "", http.StatusMethodNotAllowed)
@@ -971,14 +997,86 @@ func (r *Registry) handleOutput(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Default to last 4KB of output
-	n := 4096
-	output := agent.RecentOutput(n)
-	if req.URL.Query().Get("plain") == "true" {
+	q := req.URL.Query()
+	hasBytes, hasLines := q.Has("bytes"), q.Has("lines")
+	if hasBytes && hasLines {
+		http.Error(w, "bytes and lines are mutually exclusive; send at most one", http.StatusBadRequest)
+		return
+	}
+
+	var output []byte
+	switch {
+	case hasBytes:
+		n, err := positiveParam(q.Get("bytes"))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("bytes: %v", err), http.StatusBadRequest)
+			return
+		}
+		// Belt-and-braces with RingBuffer.Last, which already returns only
+		// what is retained: the ceiling is stated here so it is a property of
+		// the endpoint rather than of a buffer implementation callers cannot
+		// see. The tests assert the effective ceiling, not this branch.
+		if n > OutputRingBytes {
+			n = OutputRingBytes
+		}
+		output = agent.RecentOutput(n)
+	case hasLines:
+		n, err := positiveParam(q.Get("lines"))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("lines: %v", err), http.StatusBadRequest)
+			return
+		}
+		output = lastLines(agent.RecentOutput(OutputRingBytes), n)
+	default:
+		output = agent.RecentOutput(DefaultOutputBytes)
+	}
+
+	if q.Get("plain") == "true" {
 		output = StripANSI(output)
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	io.WriteString(w, string(output))
+}
+
+// positiveParam parses a query-param value that must be a positive integer.
+func positiveParam(raw string) (int, error) {
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a number", raw)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("must be positive, got %d", n)
+	}
+	return n, nil
+}
+
+// lastLines returns the last n newline-separated lines of b, preserving the
+// trailing newline when b has one.
+//
+// The line count is over '\n' bytes in the raw PTY stream, which for a TUI is
+// not the same as visible screen rows — a full-screen redraw addresses lines by
+// cursor movement and emits no newline at all. ?lines= is therefore useful for
+// line-oriented agent output and blunt for a TUI; ?bytes= is the precise
+// instrument, and it is the one that reaches the detector's window.
+func lastLines(b []byte, n int) []byte {
+	if len(b) == 0 {
+		return b
+	}
+	// A trailing newline terminates the last line rather than opening an empty
+	// one; search from before it so "n lines" counts real lines.
+	end := len(b)
+	if b[end-1] == '\n' {
+		end--
+	}
+	cut := end
+	for i := 0; i < n; i++ {
+		idx := bytes.LastIndexByte(b[:cut], '\n')
+		if idx < 0 {
+			return b
+		}
+		cut = idx
+	}
+	return b[cut+1:]
 }
 
 // CrewPromptDir is the directory where crew agent prompt files live.

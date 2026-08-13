@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/drellem2/pogo/internal/agent"
@@ -765,14 +766,40 @@ func MailLoopReport() (*agent.MailLoopReport, error) {
 	return &rep, nil
 }
 
+// AgentOutputOptions selects how much of an agent's PTY ring to retrieve, and
+// in what form. The zero value asks for the server's default window
+// (agent.DefaultOutputBytes) with escape sequences intact.
+//
+// Bytes and Lines are mutually exclusive; sending both is rejected by pogod.
+type AgentOutputOptions struct {
+	// Plain strips ANSI escape sequences server-side.
+	Plain bool
+	// Bytes, when > 0, requests the last N bytes. pogod clamps it to the
+	// ring's capacity (agent.OutputRingBytes, 64KB), so a caller that wants
+	// everything retained can name a large number rather than guess.
+	Bytes int
+	// Lines, when > 0, requests the last N newline-separated lines out of the
+	// whole retained ring.
+	Lines int
+}
+
 // GetAgentOutput returns recent output from an agent.
-// If plain is true, ANSI escape sequences are stripped server-side.
-func GetAgentOutput(name string, plain bool) (string, error) {
-	url := serverURL + "/agents/" + name + "/output"
-	if plain {
-		url += "?plain=true"
+func GetAgentOutput(name string, opts AgentOutputOptions) (string, error) {
+	q := url.Values{}
+	if opts.Plain {
+		q.Set("plain", "true")
 	}
-	r, err := http.Get(url)
+	if opts.Bytes > 0 {
+		q.Set("bytes", strconv.Itoa(opts.Bytes))
+	}
+	if opts.Lines > 0 {
+		q.Set("lines", strconv.Itoa(opts.Lines))
+	}
+	u := serverURL + "/agents/" + name + "/output"
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
+	r, err := http.Get(u)
 	if err != nil {
 		return "", err
 	}
@@ -783,6 +810,13 @@ func GetAgentOutput(name string, plain bool) (string, error) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return "", err
+	}
+	// Any other non-200 is an error, not output. Returning the body as if it
+	// were PTY content printed pogod's rejection where the agent's screen
+	// belongs and exited 0 — the same accepted-and-ignored shape mg-8a56 was
+	// filed about, one layer up.
+	if r.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("pogod returned %s for %s: %s", r.Status, u, strings.TrimSpace(string(body)))
 	}
 	return string(body), nil
 }
