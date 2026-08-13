@@ -587,6 +587,53 @@ nothing to complete. This keeps "the fire did not arrive" distinct from "the
 fire arrived and accomplished nothing" — the two faults this pair of signals
 exists to separate.
 
+#### `schedule_removed`
+
+An entry left the live set. Emitted at **every** delete site so an operator can
+answer "why did this schedule disappear?" from the log alone (mg-8e5d).
+
+- **`details` fields:**
+  - `schedule_id`, `to`, `delivery`, `replay_policy`, `one_shot`, `cron`, `next_fire`
+  - `removed_at` (string, RFC3339)
+  - `reason` (string): one of the values below
+  - `error` (string, optional): present when the removal was caused by a failure
+
+| `reason` | Meaning |
+|---|---|
+| `explicit_rm` / `explicit_rm_by_id` | `pogo schedule rm` |
+| `agent_gone` | the mail-check's target agent is no longer alive |
+| `cron_unparseable` / `no_future_fire` | the cron stopped yielding a fire |
+| `rollback_persist_failure` | `Add` could not persist and was rolled back |
+| `one_shot_acked` | a one-shot's fire was acknowledged; its work was reported done |
+| `one_shot_unacked` | a one-shot's ack window (`AckStaleWindow`, 24h) closed with no ack |
+| `one_shot_undelivered` | a one-shot's delivery failed, so no turn ran |
+| `one_shot_skipped` | `ReplaySkip` elided a stale one-shot fire |
+
+**One-shots are completable (mg-64e6).** Until this fix a one-shot was deleted
+in the same `Tick` pass that delivered it, tagged `one_shot_complete` — while
+the body it had just delivered told the agent to run
+`pogo schedule ack <id> ...`. That command could never work: the entry was gone
+before any agent could read the nudge, so the ack was refused with
+`schedule not found`. Not a race; the delete was in the same pass as the
+delivery. And because `Completion()` iterates the LIVE entries, the deleted
+one-shot then contributed to no counter at all — a silent hole rather than a
+false red, so nothing would ever start looking wrong. Worse, the label asserted
+at fire time what only the agent can know: a one-shot delivered into a dead,
+wedged or zero-token agent produced a record byte-identical to one whose work
+was done.
+
+A fired one-shot now stays in the live set — marked spent, so it never fires
+again — until its ack lands or its window closes, and `one_shot_acked` vs
+`one_shot_unacked` are the two records that used to be one. `one_shot_complete`
+is retired and must not come back; `internal/scheduler/oneshotack_test.go`
+guards the label.
+
+`pogo schedule list` shows a fired-and-unacked one-shot with
+`— (fired, awaiting ack)` in the NEXT FIRE column.
+
+The usual caveat still applies: an agent can forget to ack, so
+`one_shot_unacked` means nobody answered, not that the work failed.
+
 ### Refinery
 
 These events are the **only** durable record of a completed merge. The refinery's in-memory history is pruned destructively past `MaxHistoryLen` (100) / `MaxHistoryAge` (7d), and because the count cap bites first at any real merge rate, `pogo refinery history` sees under a day. `pogo refinery history --since=<duration|date>` reconstructs merge requests from these events instead (`refinery.HistoryFromLog`), which is how a question about last week gets an answer at all.

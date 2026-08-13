@@ -327,14 +327,26 @@ func TestOneShotFiresOnceAndIsRemoved(t *testing.T) {
 		t.Fatalf("due tick: want 1 fire, got %d", len(res))
 	}
 
-	// After firing: gone.
-	if _, ok := s.Get("cat-foo", "wakeup"); ok {
-		t.Error("one-shot entry should be removed after firing")
+	// After firing: retained only until its ack lands or its window closes
+	// (mg-64e6) — deleting it here is what made the ack instruction it just
+	// delivered unredeemable. It is marked spent, not gone.
+	fired, ok := s.Get("cat-foo", "wakeup")
+	if !ok {
+		t.Fatal("one-shot entry should be retained after firing so its ack can be redeemed")
+	}
+	if fired.LastFire.IsZero() {
+		t.Error("fired one-shot carries no LastFire — nothing marks it spent")
 	}
 
 	// A subsequent tick must not refire.
 	if got := s.Tick(context.Background(), now.Add(20*time.Minute)); len(got) != 0 {
 		t.Fatalf("refire after one-shot: %v", got)
+	}
+
+	// And once its ack window closes it does go, so retention cannot accumulate.
+	s.Tick(context.Background(), now.Add(10*time.Minute).Add(AckStaleWindow+time.Minute))
+	if _, ok := s.Get("cat-foo", "wakeup"); ok {
+		t.Error("one-shot entry should be reaped once its ack window closes")
 	}
 }
 

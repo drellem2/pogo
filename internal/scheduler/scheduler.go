@@ -821,6 +821,10 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 	// pogod restarting kills its children without firing onExit (gh #15).
 	s.GCStaleMailChecks(now)
 
+	// Reap fired one-shots whose ack window has closed. Without this the
+	// retention introduced by mg-64e6 would accumulate spent entries forever.
+	s.GCExpiredOneShots(now)
+
 	s.mu.Lock()
 	due := s.dueLocked(now)
 	s.mu.Unlock()
@@ -892,6 +896,21 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			if live, ok := s.entries[key]; ok {
 				fire.PendingToken = issueFireTokenLocked(live, now)
 				fire.PendingSince = now
+				if live.OneShot {
+					// Mark the one-shot spent HERE, in the same locked section
+					// that issues its token and BEFORE the bytes go out, not in
+					// the removal block below. An Ack can land at any moment
+					// after delivery, and it is Ack that removes a fired
+					// one-shot (mg-64e6); if the spent marker were set after
+					// delivery there would be a window in which a fast ack
+					// cleared the token but left the entry behind, and the
+					// removal block would then read a token-less entry as never
+					// delivered and record a COMPLETED one-shot as undelivered.
+					// The same defect this change exists to fix, one lock
+					// section over.
+					live.LastFire = now
+					fire.LastFire = now
+				}
 			}
 			s.mu.Unlock()
 
@@ -945,9 +964,51 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			continue
 		}
 		if fire.OneShot {
-			s.emitSchedulerRemovalEvent("one_shot_complete", *entry, now, nil)
-			delete(s.entries, key)
-			changed = true
+			// A one-shot used to be deleted right here, unconditionally, tagged
+			// `one_shot_complete` — in the same Tick pass that had just handed
+			// the agent a `pogo schedule ack` command. Three consequences, all
+			// closed here (mg-64e6):
+			//
+			//   1. The token was unredeemable BY CONSTRUCTION. Not a race: the
+			//      delete ran in the same pass as the delivery, so no ack could
+			//      ever win. Every one-shot in this box's history that carried a
+			//      message told its agent to run a command that always errored
+			//      with "schedule not found".
+			//   2. The work the fire triggered was therefore recorded NOWHERE.
+			//      Completion() iterates the LIVE entries, so a deleted one-shot
+			//      contributed to no counter at all — a silent hole, not a false
+			//      red, and so nothing would ever start looking wrong.
+			//   3. `one_shot_complete` asserted at FIRE time something the
+			//      scheduler cannot know. A one-shot delivered into a dead,
+			//      wedged or zero-token agent produced a record byte-identical
+			//      to one whose work was done.
+			//
+			// So: an entry holding a redeemable token STAYS, marked spent via
+			// LastFire (dueLocked skips it), until Ack removes it as
+			// `one_shot_acked` or GCExpiredOneShots reaps it as
+			// `one_shot_unacked`. Those two are distinguishable, which is the
+			// whole point. A fire that never went out has nothing to complete
+			// and is removed now, under a reason that says which end failed —
+			// the old code removed a FAILED delivery as `one_shot_complete` too.
+
+			// Belt and braces on the spent marker: the fire path above sets it
+			// for every one-shot that actually went out, and this covers the
+			// two that did not — a skipped fire, and a fire whose delivery
+			// failed. Without it a skipped one-shot holding a token carried
+			// across re-registration would stay due and be re-skipped on every
+			// subsequent tick forever.
+			entry.LastFire = now
+			if entry.PendingToken != "" {
+				changed = true
+			} else {
+				reason := "one_shot_undelivered"
+				if res.Skipped {
+					reason = "one_shot_skipped"
+				}
+				s.emitSchedulerRemovalEvent(reason, *entry, now, nil)
+				delete(s.entries, key)
+				changed = true
+			}
 		} else {
 			c, err := ParseCron(entry.Cron)
 			if err != nil {
@@ -990,6 +1051,15 @@ func (s *Scheduler) dueLocked(now time.Time) []entryKey {
 	}
 	var pairs []pair
 	for k, e := range s.entries {
+		if e.OneShot && !e.LastFire.IsZero() {
+			// Already fired. A one-shot that handed out a redeemable token is
+			// retained past its fire so the ack can land (mg-64e6), and its
+			// NextFire still holds the time it came due — so without this guard
+			// it would refire on every subsequent tick forever. LastFire is set
+			// only by the fire path, and only one-shots that fired have it, so
+			// it is an unambiguous "this one is spent" marker.
+			continue
+		}
 		if !e.NextFire.IsZero() && (e.NextFire.Before(now) || e.NextFire.Equal(now)) {
 			pairs = append(pairs, pair{key: k, when: e.NextFire})
 		}
@@ -1101,6 +1171,70 @@ func (s *Scheduler) reapMailChecks(now time.Time, gone func(agent string) bool) 
 
 	for _, e := range removed {
 		s.emitSchedulerRemovalEvent("agent_gone", e, now, nil)
+	}
+	return len(removed)
+}
+
+// GCExpiredOneShots removes every fired one-shot whose outstanding token has
+// aged past AckStaleWindow, emitting schedule_removed with reason
+// "one_shot_unacked" for each. Returns the number reaped. Called from Tick on
+// every heartbeat.
+//
+// This is the reaper for the retention added by mg-64e6, and the reason it
+// exists as a separate reason string rather than reusing the fire-time one is
+// the entire value of the change: a one-shot that left the live set as
+// `one_shot_acked` had a live model turn run a tool to say its work was done,
+// and a one-shot that left as `one_shot_unacked` sat for a full day with nobody
+// answering. Those used to be the same record. The pre-deploy and verification
+// one-shots — the fires that happen once, are never retried, and whose silent
+// no-op nobody would otherwise notice — are exactly the population this
+// separates.
+//
+// The window is AckStaleWindow, the same bound Ack enforces, so a retained
+// entry is reaped at the moment its token stops being redeemable and never
+// before: a legitimately long agent turn can still ack. An entry with no
+// PendingSince (hand-built, or persisted by a binary that predates the field)
+// falls back to LastFire so it cannot be retained forever.
+func (s *Scheduler) GCExpiredOneShots(now time.Time) int {
+	s.mu.Lock()
+	var expired []entryKey
+	for k, e := range s.entries {
+		if !e.OneShot || e.LastFire.IsZero() {
+			continue
+		}
+		since := e.PendingSince
+		if since.IsZero() {
+			since = e.LastFire
+		}
+		if now.Sub(since) > AckStaleWindow {
+			expired = append(expired, k)
+		}
+	}
+	if len(expired) == 0 {
+		s.mu.Unlock()
+		return 0
+	}
+	saved := make([]*Entry, len(expired))
+	for i, k := range expired {
+		saved[i] = s.entries[k]
+		delete(s.entries, k)
+	}
+	if err := s.persistLocked(); err != nil {
+		for i, k := range expired {
+			s.entries[k] = saved[i]
+		}
+		s.mu.Unlock()
+		log.Printf("scheduler: one-shot GC of %d entr(ies) failed to persist, rolled back: %v", len(expired), err)
+		return 0
+	}
+	removed := make([]Entry, len(saved))
+	for i, e := range saved {
+		removed[i] = e.Clone()
+	}
+	s.mu.Unlock()
+
+	for _, e := range removed {
+		s.emitSchedulerRemovalEvent("one_shot_unacked", e, now, nil)
 	}
 	return len(removed)
 }
