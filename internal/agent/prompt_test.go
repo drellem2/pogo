@@ -5703,6 +5703,24 @@ func TestPromptsDoNotAssertADeadLogPath(t *testing.T) {
 		if !strings.Contains(body, "empty grep") {
 			t.Errorf("%s: must say an empty grep is not evidence until the file is known to exist — that false negative is the whole defect (mg-f766)", path)
 		}
+		// Naming the ingredients is not the same as performing the
+		// derivation. doctor.md carried every assertion above while its
+		// command line still read `grep -A1 StandardOutPath "$plist"   #
+		// today: <literal>` — the prose said derive, the command said
+		// hardcode, and they only disagree once someone moves the log. It
+		// stayed that way for four months after e846f2a (mg-7537) fixed
+		// mayor.md alone. Pin the derivation itself, in both prompts
+		// (mg-c18d, drellem2/pogo#145).
+		const deriveLog = `log=$(grep -A1 StandardOutPath "$plist" | sed -n 's:.*<string>\(.*\)</string>.*:\1:p')`
+		if !strings.Contains(body, deriveLog) {
+			t.Errorf("%s: names StandardOutPath but never binds the result — the log path must be DERIVED (%s) and the grep must read $log, not a literal (mg-c18d)", path, deriveLog)
+		}
+		for _, line := range strings.Split(body, "\n") {
+			cmd := strings.TrimLeft(line, " \t")
+			if strings.HasPrefix(cmd, "grep ") && strings.Contains(cmd, "~/Library/Logs/pogo/pogod.log") {
+				t.Errorf("%s: command line greps the literal log path: %q. The literal may be QUOTED as today's reading; the command must read the derived \"$log\" (mg-c18d)", path, cmd)
+			}
+		}
 	}
 
 	mayor, err := defaultPrompts.ReadFile("prompts/mayor.md")
@@ -5723,6 +5741,57 @@ func TestPromptsDoNotAssertADeadLogPath(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("mayor.md: missing %q from the refinery-logs section (mg-f766)", want)
 		}
+	}
+}
+
+// A prompt that EMITS to the event log must also be routed back to READ it, and
+// must be routed there through the CLI rather than through a path it spells out
+// itself (mg-c18d, drellem2/pogo#145).
+//
+// doctor.md was 484 lines with `pogo events emit` in it twice and zero
+// occurrences of `events.log`, `$POGO_HOME` or `pogo events list`: doctor wrote
+// to the durable log every time it restarted an agent and had no route back to
+// what it had written. That is not cosmetic — measured over 6h on the reporting
+// host, pogod's stdout log held 0 occurrences of server_mode_boot /
+// agent_stopped / wedge_watch_pending / work_item_stranded_push while the event
+// log held 233, so the log doctor WAS pointed at cannot answer a lifecycle
+// question at all.
+//
+// The reporter's own patch is pinned here as the wrong fix. Re-deriving the path
+// in shell cannot reproduce config.PogoHome(), which normalizes POGO_HOME ==
+// $HOME to $HOME/.pogo; on such a host `${POGO_HOME:-$HOME/.pogo}/events.log`
+// names a different file that may exist and be stale, so the grep returns a
+// well-formed wrong answer. `pogo events list` resolves the path via
+// events.LogPath() and is the only reader that cannot get it wrong.
+func TestPromptsThatEmitEventsAreRoutedBackToReadThem(t *testing.T) {
+	for _, path := range []string{"prompts/crew/doctor.md", "prompts/mayor.md"} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+		if !strings.Contains(body, "pogo events list") {
+			t.Errorf("%s: never reads the event log. Route it at `pogo events list --since=... --type=...`, which resolves the path itself — an agent that emits lifecycle events and cannot read them back has no memory across sessions, and pogod's stdout log carries none of them (mg-c18d)", path)
+		}
+		// The shell derivation, quoted only to be refused.
+		if strings.Contains(body, "POGO_HOME") && !strings.Contains(body, "config.PogoHome()") {
+			t.Errorf("%s: mentions POGO_HOME near the event log without saying why re-deriving the path is wrong — `${POGO_HOME:-$HOME/.pogo}/events.log` cannot reproduce config.PogoHome()'s POGO_HOME == $HOME normalization, and the resulting file may exist and be stale (mg-c18d)", path)
+		}
+	}
+
+	doctor, err := defaultPrompts.ReadFile("prompts/crew/doctor.md")
+	if err != nil {
+		t.Fatalf("read doctor.md: %v", err)
+	}
+	body := string(doctor)
+	if strings.Contains(body, "pogo events emit") && !strings.Contains(body, "--type=stall_restart") {
+		t.Error("doctor.md: emits stall_restart but is not shown reading it back; a second restart of the same target inside a day is a finding, and it is only visible from the event log (mg-c18d)")
+	}
+	// --type and --agent are exact matches (internal/events/reader.go
+	// Filter.Match), so `--type=wedge_watch_` returns a clean empty that reads
+	// like health. A prompt that hands an agent the flag must say so.
+	if !strings.Contains(body, "EXACT") && !strings.Contains(body, "exact match") {
+		t.Error("doctor.md: routes at `pogo events list` without saying --type/--agent are exact matches — a prefix like wedge_watch_ returns an empty result indistinguishable from a healthy fleet (mg-c18d)")
 	}
 }
 
