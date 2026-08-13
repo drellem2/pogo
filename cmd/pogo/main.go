@@ -103,6 +103,36 @@ func optedOutNote(n int) string {
 	return fmt.Sprintf(" (%d deliberately unindexed, not counted)", n)
 }
 
+// indirectNote renders the indirectly-reachable count on a parity PASS.
+//
+// It is shown on the pass and not only on the warn because the number is the
+// whole reason the pass is trustworthy. Silence about it would make a store with
+// 42 notes hanging off one sub-index hook indistinguishable from a store where
+// the index names everything, and those two want different attention: the first
+// is a prominence question for the corpus owner, the second is nothing. Reported
+// as a count and never as a defect — reachability is satisfied in both (mg-d97f).
+func indirectNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d reachable only via another note — prominence, not a defect)", n)
+}
+
+// indirectClause is the same fact on a parity WARN, where it also has to stop a
+// reader from folding the two populations back together.
+//
+// A reader who sees "N unreachable" beside a store they know has many unindexed
+// notes will assume the check simply missed some, and the natural repair — hook
+// everything absent from the index — is the one this axis spent a corpus-policy
+// argument establishing is neither necessary nor affordable.
+func indirectClause(indirect, direct int) string {
+	if indirect == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" A further %d note(s) are NOT named by the index but ARE reached through one that is (%d are named directly); those are a question about prominence — whether a note needs to surface unprompted in every session — and are NOT counted above.",
+		indirect, direct)
+}
+
 // exitInstrumentFailure is `pogo check-teardown`'s exit code for a run that
 // reached no verdict for any carrier it scanned (mg-dd22).
 //
@@ -3663,7 +3693,7 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				// spawn.
 				resolve := memcheck.NewMgResolver()
 				var approaching []memcheck.Result
-				var offParity []memcheck.ParityResult
+				var offParity, indirectOnly []memcheck.ParityResult
 				var staleHooks []memcheck.StaleHook
 				// The size and parity axes report separately, but a reader
 				// near the cap needs each one to know about the other: they
@@ -3674,7 +3704,7 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				sizeByPath := map[string]memcheck.Result{}
 				unrefByPath := map[string]int{}
 				lineCostByPath := map[string]int{}
-				checked, parityChecked, notesChecked, optedOut := 0, 0, 0, 0
+				checked, parityChecked, notesChecked, optedOut, indirect := 0, 0, 0, 0, 0
 				idsTried, idsResolved := 0, 0
 				for _, mf := range memFiles {
 					res, cerr := memcheck.CheckFile(mf)
@@ -3693,9 +3723,19 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						parityChecked++
 						notesChecked += p.Notes
 						optedOut += len(p.OptedOut)
+						indirect += len(p.Indirect)
 						if !p.InParity {
 							offParity = append(offParity, p)
-							unrefByPath[mf] = len(p.Unreferenced)
+							unrefByPath[mf] = len(p.Unreachable)
+						} else if len(p.Indirect) > 0 {
+							// Reachable, so not a defect — but it must not
+							// go SILENT either. An index whose notes hang
+							// off one sub-index hook is a different store
+							// from one that names everything, and the
+							// difference is the corpus owner's to judge.
+							// Without this it is reported nowhere whenever
+							// any OTHER index warns (mg-d97f).
+							indirectOnly = append(indirectOnly, p)
 						}
 					}
 					if rep, serr := memcheck.StaleCheckFile(mf, resolve); serr == nil {
@@ -3748,25 +3788,38 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 							res.Path, res.Chars, res.EstTokens, res.SizeBytes, which, tension, strings.Join(fat, " | ")))
 					}
 				}
-				// 7b. INDEX/FILE PARITY. A note the index does not name is
-				// written, costs disk, and is unreachable by recall — and this is
-				// the axis where a size check moves the WRONG WAY, since dropping
-				// a hook makes MEMORY.md smaller. The opt-out count is reported
-				// alongside so a reader can see deliberate non-indexing is
-				// accounted for rather than folded silently into the defects.
-				// DETECT ONLY, for the same reason as the size axis: appending
-				// missing hooks unattended would index working scratch files.
+				// 7b. INDEX/FILE PARITY. A note NO ROUTE arrives at is written,
+				// costs disk, and is unreachable by recall — and this is the axis
+				// where a size check moves the WRONG WAY, since dropping a hook
+				// makes MEMORY.md smaller.
+				//
+				// THE DEFECT IS UNREACHABILITY, NOT ABSENCE FROM THE INDEX
+				// (mg-d97f). The index is where recall starts, not where it ends:
+				// a note an indexed note names, or one listed in a sub-index that
+				// is itself hooked, is reached. This check used to report the
+				// difference as the defect, and on the shared corpus that was 42
+				// notes described as "unreachable by recall: nothing points at
+				// them" when something pointed at every one of them. The two
+				// populations are now reported separately — unreachable is the
+				// defect, indirect is a question about PROMINENCE — because they
+				// take different remedies and only one of them is wrong.
+				//
+				// The opt-out count is reported alongside so a reader can see
+				// deliberate non-indexing is accounted for rather than folded
+				// silently into the defects. DETECT ONLY, for the same reason as
+				// the size axis: appending missing hooks unattended would index
+				// working scratch files.
 				if parityChecked == 0 {
 					pass("memory index parity", "no MEMORY.md indexes found")
 				} else if len(offParity) == 0 {
 					pass("memory index parity", fmt.Sprintf(
-						"%d note(s) across %d index(es) all referenced%s",
-						notesChecked, parityChecked, optedOutNote(optedOut)))
+						"%d note(s) across %d index(es) all reachable%s%s",
+						notesChecked, parityChecked, indirectNote(indirect), optedOutNote(optedOut)))
 				} else {
 					for _, p := range offParity {
-						names := p.Unreferenced
+						names := p.Unreachable
 						if len(names) > 8 {
-							names = append(names[:8:8], fmt.Sprintf("… and %d more", len(p.Unreferenced)-8))
+							names = append(names[:8:8], fmt.Sprintf("… and %d more", len(p.Unreachable)-8))
 						}
 						// The remedy is budget-dependent, so it is computed
 						// rather than fixed prose. Near the cap "add a hook
@@ -3775,14 +3828,33 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						// impossible instructions satisfies the cheaper one by
 						// leaving the notes unreachable (mg-1b2f).
 						remedy := memcheck.ParityRemedy(
-							len(p.Unreferenced),
+							len(p.Unreachable),
 							sizeByPath[p.IndexPath].HeadroomChars(),
 							lineCostByPath[p.IndexPath])
+						// Host size rides with the fold advice rather than
+						// as its own check: it is the price of the remedy
+						// being recommended in the same sentence (mg-d97f).
+						host := memcheck.FoldHostNote(p.FattestNote, p.FattestNoteBytes, p.IndexBytes, p.NotesOverIndex)
+						if host != "" {
+							host = " " + host
+						}
 						warn("memory index parity", fmt.Sprintf(
-							"%s — %d of %d note(s) NOT referenced by the index: %s. They are on disk and unreachable by recall: nothing points at them, so the agent that wrote them cannot recall them either. %s Or declare a note deliberately unindexed with '%s' in its frontmatter (a working scratch file legitimately has no hook). Never auto-append hooks%s",
-							p.IndexPath, len(p.Unreferenced), p.Notes, strings.Join(names, ", "),
-							remedy, memcheck.UnindexedMarker, optedOutNote(len(p.OptedOut))))
+							"%s — %d of %d note(s) UNREACHABLE by any route: %s. Nothing names them and nothing an indexed note names reaches them, so the agent that wrote them cannot recall them either.%s %s%s Or declare a note deliberately unindexed with '%s' in its frontmatter (a working scratch file legitimately has no hook). Never auto-append hooks%s",
+							p.IndexPath, len(p.Unreachable), p.Notes, strings.Join(names, ", "),
+							indirectClause(len(p.Indirect), p.Direct),
+							remedy, host, memcheck.UnindexedMarker, optedOutNote(len(p.OptedOut))))
 					}
+				}
+				// Prominence, on the indexes that are otherwise clean. Emitted
+				// as its own pass line rather than folded into the summary
+				// above, which only renders when NOTHING warns — the shared
+				// corpus has 42 notes on the sub-index tier and would have been
+				// reported nowhere on any run where some other store had a real
+				// defect (mg-d97f).
+				for _, p := range indirectOnly {
+					pass("memory index parity", fmt.Sprintf(
+						"%s — all %d note(s) reachable, %d of them only via another note (%d named by the index directly). NOT a defect: reachability is satisfied. It is a question about PROMINENCE — which notes need to surface unprompted in every session, and which are fine to find on demand — and that is the corpus owner's judgement, not this checker's%s",
+						p.IndexPath, p.Notes, len(p.Indirect), p.Direct, optedOutNote(len(p.OptedOut))))
 				}
 
 				// 7c. STALE TENSE-BEARING ASSERTIONS. An index line asserting a

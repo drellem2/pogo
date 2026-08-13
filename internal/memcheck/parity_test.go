@@ -59,8 +59,8 @@ func TestPositiveControl_ParityFiresOnUnindexedNote(t *testing.T) {
 	if res.InParity {
 		t.Fatal("parity check reported in-parity with a planted unindexed note — the check cannot fire")
 	}
-	if got := res.Unreferenced; len(got) != 1 || got[0] != "unindexed.md" {
-		t.Fatalf("Unreferenced = %v, want [unindexed.md]", got)
+	if got := res.Unreachable; len(got) != 1 || got[0] != "unindexed.md" {
+		t.Fatalf("Unreachable = %v, want [unindexed.md]", got)
 	}
 	if res.Notes != 2 {
 		t.Errorf("Notes = %d, want 2 (MEMORY.md must not count itself)", res.Notes)
@@ -80,10 +80,10 @@ func TestParityNegativeControl_SilentAtParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !res.InParity {
-		t.Fatalf("in-parity dir reported defects: %v", res.Unreferenced)
+		t.Fatalf("in-parity dir reported defects: %v", res.Unreachable)
 	}
-	if len(res.Unreferenced) != 0 {
-		t.Errorf("Unreferenced = %v, want empty", res.Unreferenced)
+	if len(res.Unreachable) != 0 {
+		t.Errorf("Unreachable = %v, want empty", res.Unreachable)
 	}
 }
 
@@ -109,7 +109,7 @@ func TestParityRespectsUnindexedOptOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !res.InParity {
-		t.Fatalf("opted-out notes counted as defects: %v", res.Unreferenced)
+		t.Fatalf("opted-out notes counted as defects: %v", res.Unreachable)
 	}
 	if len(res.OptedOut) != 2 {
 		t.Fatalf("OptedOut = %v, want both opted-out notes reported separately", res.OptedOut)
@@ -221,6 +221,15 @@ func TestReferenceDetectionBoundaries(t *testing.T) {
 		{"suffix of a longer name", "- [T](xa.md) — hook", "a.md", false},
 		{"prefix stem of a longer name", "- [T](feedback_drive_dont_ask.md) — hook", "feedback_drive.md", false},
 		{"longer name is not satisfied by its stem", "- [T](feedback_drive.md) — hook", "feedback_drive_dont_ask.md", false},
+		// The TRAILING boundary, which the containment test this replaced did
+		// not have: `.mdx` is a different file and names no note.
+		{"a longer extension is a different file", "see a-note.mdx", "a-note.md", false},
+		// The wikilink form, which is how notes name each other. Its `.md` is
+		// implied, so the containment test could not see these edges at all.
+		{"wikilink", "see [[a-note]] for the general rule", "a-note.md", true},
+		{"wikilink with alias", "see [[a-note|the general rule]]", "a-note.md", true},
+		{"wikilink with section", "see [[a-note#the-rule]]", "a-note.md", true},
+		{"wikilink to a different note", "see [[other]]", "a-note.md", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,7 +252,7 @@ func TestParityIgnoresIndexItself(t *testing.T) {
 		t.Errorf("Notes = %d, want 0 for an index-only dir", res.Notes)
 	}
 	if !res.InParity {
-		t.Errorf("index-only dir reported defects: %v", res.Unreferenced)
+		t.Errorf("index-only dir reported defects: %v", res.Unreachable)
 	}
 }
 
@@ -288,5 +297,208 @@ func TestParityIsReadOnly(t *testing.T) {
 	}
 	if string(got) != noteBody {
 		t.Errorf("CheckParity rewrote a note")
+	}
+}
+
+// REACHABILITY, NOT ABSENCE FROM THE INDEX (mg-d97f).
+//
+// The tests below are the controls for the distinction that this check used to
+// collapse. On the shared corpus it ships against, collapsing them reported 42
+// notes as "on disk and unreachable by recall: nothing points at them" when
+// something pointed at every one of them — and the number went straight into a
+// corpus-policy argument about whether reachability and the size cap were
+// jointly satisfiable, an argument that did not need to happen.
+//
+// A permissive reachability rule is the obvious way to get this wrong in the
+// other direction, which is why each positive control below is paired with a
+// discrimination control that must still fire.
+
+// TestSubIndexHookMakesItsNotesReachable is the shape that motivated the change
+// and the cheapest remedy the checker now recommends: ONE hooked secondary index
+// makes everything it lists reachable, for one index line.
+func TestSubIndexHookMakesItsNotesReachable(t *testing.T) {
+	idx := writeMemDir(t,
+		"# Memory index\n\n- [Recovered notes](_index-recovered.md) — 3 notes, one hop\n",
+		map[string]string{
+			"_index-recovered.md": "# Recovered\n\n- [A](a.md)\n- [B](b.md)\n",
+			"a.md":                note("a", "listed in the sub-index"),
+			"b.md":                note("b", "listed in the sub-index"),
+		})
+
+	res, err := CheckParity(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.InParity {
+		t.Fatalf("notes listed in a HOOKED sub-index reported unreachable: %v", res.Unreachable)
+	}
+	if got := res.Indirect; len(got) != 2 || got[0] != "a.md" || got[1] != "b.md" {
+		t.Fatalf("Indirect = %v, want [a.md b.md] — they are reachable, and the fact that the index does not name them is still worth reporting", got)
+	}
+	if res.Direct != 1 {
+		t.Errorf("Direct = %d, want 1 (only the sub-index is named by MEMORY.md)", res.Direct)
+	}
+}
+
+// TestUnhookedSubIndexDoesNotLaunder is the discrimination control for the test
+// above, and the single most important one in this file. If a sub-index counted
+// whether or not MEMORY.md reached it, then dropping the sub-index's own hook —
+// a one-line diff that makes the size check happier — would leave every note it
+// lists reported as reachable. That is the failure this axis exists to catch,
+// laundered through the remedy the checker now recommends.
+func TestUnhookedSubIndexDoesNotLaunder(t *testing.T) {
+	idx := writeMemDir(t,
+		"# Memory index\n\n- [Something else](kept.md) — a hook\n",
+		map[string]string{
+			"kept.md":             note("kept", "hooked"),
+			"_index-recovered.md": "# Recovered\n\n- [A](a.md)\n- [B](b.md)\n",
+			"a.md":                note("a", "listed only in an UNHOOKED sub-index"),
+			"b.md":                note("b", "listed only in an UNHOOKED sub-index"),
+		})
+
+	res, err := CheckParity(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"_index-recovered.md", "a.md", "b.md"}
+	if len(res.Unreachable) != len(want) {
+		t.Fatalf("Unreachable = %v, want %v — a sub-index nothing hooks reaches nothing", res.Unreachable, want)
+	}
+	for i, w := range want {
+		if res.Unreachable[i] != w {
+			t.Fatalf("Unreachable = %v, want %v", res.Unreachable, want)
+		}
+	}
+	if len(res.Indirect) != 0 {
+		t.Errorf("Indirect = %v, want empty", res.Indirect)
+	}
+}
+
+// TestWikilinkReachesANote pins the form the corpus actually uses between notes.
+// Notes link to each other as `[[slug]]` with no `.md` anywhere in the string, so
+// the filename-containment test this replaced could not see the corpus's own link
+// graph at all — it read every one of those edges as absent.
+func TestWikilinkReachesANote(t *testing.T) {
+	idx := writeMemDir(t,
+		"# Memory index\n\n- [Host](host.md) — a hook\n",
+		map[string]string{
+			"host.md":          "---\nname: host\n---\n\nSee [[folded-detail]] and [[aliased|some words]].\n",
+			"folded-detail.md": note("folded-detail", "reached by wikilink"),
+			"aliased.md":       note("aliased", "reached by an aliased wikilink"),
+		})
+
+	res, err := CheckParity(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.InParity {
+		t.Fatalf("wikilinked notes reported unreachable: %v", res.Unreachable)
+	}
+	if len(res.Indirect) != 2 {
+		t.Errorf("Indirect = %v, want both wikilinked notes", res.Indirect)
+	}
+}
+
+// TestChainsMustStartAtTheIndex is the discrimination control for reachability in
+// general: two orphans that link to each other are still orphans. A traversal
+// seeded from "every note" rather than from the index would report this clean,
+// and would report EVERY store clean, which is the way a reachability check
+// silently stops being a check.
+func TestChainsMustStartAtTheIndex(t *testing.T) {
+	idx := writeMemDir(t,
+		"# Memory index\n\n- [Hooked](hooked.md) — a hook\n",
+		map[string]string{
+			"hooked.md": note("hooked", "has a hook"),
+			"lost-a.md": "---\nname: lost-a\n---\n\nsee [[lost-b]]\n",
+			"lost-b.md": "---\nname: lost-b\n---\n\nsee [[lost-a]]\n",
+		})
+
+	res, err := CheckParity(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Unreachable) != 2 {
+		t.Fatalf("Unreachable = %v, want both mutually-linked orphans — a cycle off the index reaches nobody", res.Unreachable)
+	}
+}
+
+// TestReachabilityIsTransitiveBeyondOneHop: the walk must not stop at the notes
+// the index names. A two-hop chain is how a fold-with-a-link and a sub-index that
+// points at another sub-index both stay reachable.
+func TestReachabilityIsTransitiveBeyondOneHop(t *testing.T) {
+	idx := writeMemDir(t,
+		"# Memory index\n\n- [One](one.md) — a hook\n",
+		map[string]string{
+			"one.md":   "---\nname: one\n---\n\nsee [[two]]\n",
+			"two.md":   "---\nname: two\n---\n\nsee [[three]]\n",
+			"three.md": note("three", "two hops from the index"),
+		})
+
+	res, err := CheckParity(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.InParity {
+		t.Fatalf("a two-hop chain reported unreachable: %v", res.Unreachable)
+	}
+}
+
+// TestUnreadableNoteFailsTowardsTheDefect. A note that cannot be read cannot be
+// traversed, so anything reachable ONLY through it reports as unreachable. That
+// is the safe direction — a visible defect rather than a silent pass — and it is
+// the same choice declaresUnindexed makes for an unreadable frontmatter.
+func TestUnreadableNoteFailsTowardsTheDefect(t *testing.T) {
+	idx := writeMemDir(t,
+		"# Memory index\n\n- [Gate](gate.md) — a hook\n",
+		map[string]string{
+			"gate.md":   "---\nname: gate\n---\n\nsee [[behind]]\n",
+			"behind.md": note("behind", "reachable only through gate"),
+		})
+	gate := filepath.Join(filepath.Dir(idx), "gate.md")
+	if err := os.Chmod(gate, 0o000); err != nil {
+		t.Skipf("cannot make a file unreadable here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(gate, 0o644) })
+	if f, err := os.Open(gate); err == nil {
+		f.Close()
+		t.Skip("running as a user that can read a 0o000 file; the control cannot be staged")
+	}
+
+	res, err := CheckParity(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Unreachable) != 1 || res.Unreachable[0] != "behind.md" {
+		t.Fatalf("Unreachable = %v, want [behind.md] — an untraversable gate must not silently vouch for what is behind it", res.Unreachable)
+	}
+}
+
+// TestHostSizeIsMeasured pins the third metric (mg-d97f). Folding is free against
+// the index cap and is therefore what a margin policy incentivises, so the cost
+// lands in the host and nothing counted it: on the corpus this ships against, two
+// notes had grown larger than the whole MEMORY.md that reaches them, and the
+// parity number went DOWN as it happened.
+func TestHostSizeIsMeasured(t *testing.T) {
+	index := "# Memory index\n\n- [Host](host.md) — a hook\n- [Small](small.md) — a hook\n"
+	idx := writeMemDir(t, index, map[string]string{
+		"host.md":  "---\nname: host\n---\n\n" + strings.Repeat("folded content. ", 200),
+		"small.md": note("small", "ordinary"),
+	})
+
+	res, err := CheckParity(idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IndexBytes != len(index) {
+		t.Errorf("IndexBytes = %d, want %d", res.IndexBytes, len(index))
+	}
+	if res.FattestNote != "host.md" {
+		t.Errorf("FattestNote = %q, want host.md", res.FattestNote)
+	}
+	if res.NotesOverIndex != 1 {
+		t.Errorf("NotesOverIndex = %d, want 1 — the host outgrew the index that reaches it", res.NotesOverIndex)
+	}
+	if res.FattestNoteBytes <= res.IndexBytes {
+		t.Errorf("FattestNoteBytes = %d, not larger than IndexBytes = %d", res.FattestNoteBytes, res.IndexBytes)
 	}
 }
