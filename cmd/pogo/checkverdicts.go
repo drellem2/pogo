@@ -98,13 +98,15 @@ OBLIGATION, and a predicate that cannot tell a verdict from a mention of one
 counts talk about the thing alongside the thing. Each channel therefore matches
 a SENDER plus that sender's own notice shape.
 
-Two things are deliberately NOT channels, named here so their absence is not read
-as an oversight. The refinery's MERGED mail to the coordinator reports a merge —
+One thing is deliberately NOT a channel, named here so its absence is not read as
+an oversight. The refinery's MERGED mail to the coordinator reports a merge —
 branch, target, SHA — and says nothing about the outcome, so it is a relay by the
-above test; and because pogod SKIPS its own notice for a coordinator-filed item on
-the merge route (the refinery has already written), a coordinator's merge-route
-rows are dropped here by construction. That is mg-da12's finding and it is a
-different repair, in a different file.
+above test. That distinction used to cut the other way too: pogod SKIPPED its own
+notice for a coordinator-filed item on the merge route because the refinery had
+already written, so a coordinator's merge-route rows were dropped here by
+construction, and the coordinator's mailbox held zero pogod notices while it filed
+more items than anyone. mg-da12 removed that skip — the refinery mails a MERGE and
+pogod mails a VERDICT — so those rows are now measured like every other filer's.
 
 THE DROPPED ROWS SPLIT IN TWO, and the split is the difference between work you
 can finish now and work that is gone:

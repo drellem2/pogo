@@ -32,9 +32,15 @@
 // optional:
 //
 //   - Every outcome is recorded, including the ones that send nothing. A skip
-//     ("the filer is the worker", "the coordinator already got the refinery's
-//     merge mail") emits the same kind of record as a send, so "the notifier
-//     decided not to" and "the notifier never ran" are distinguishable.
+//     ("the filer is the worker", "the item records no creator") emits the same
+//     kind of record as a send, so "the notifier decided not to" and "the
+//     notifier never ran" are distinguishable.
+//   - A skip may only claim the recipient was already told when it can name a
+//     message carrying THIS content. A second skip once spared the coordinator
+//     on the merge route because "the refinery already mailed it" — but the
+//     refinery mails a MERGE and this mails a VERDICT, so the coordinator, which
+//     files more items than anyone on the box, was the single filer this never
+//     reached. Removed in mg-da12; see Notify.
 //   - A send that FAILS is never recorded as handled, so the next observation of
 //     the same completion retries it.
 //   - A creator that cannot be READ is escalated to the coordinator rather than
@@ -257,25 +263,38 @@ func (n *Notifier) Notify(c Completion) Outcome {
 		// would otherwise turn this whole package off without a word.
 		return n.finish(c, res, Outcome{Skipped: "work item records no creator"})
 	}
-	// BOTH SKIPS BELOW TURN ON THE ITEM HAVING CLOSED (mg-2b71). Each says the
-	// recipient already knows, and each is right about a COMPLETION and wrong
+	// THE ONE REMAINING SKIP TURNS ON THE ITEM HAVING CLOSED (mg-2b71). It says
+	// the recipient already knows, and it is right about a COMPLETION and wrong
 	// about a merge that left the item open: the worker was stopped before it
-	// could see the refusal, and the refinery's MERGED mail reports the merge
-	// without a word about the item's state. "Already told" is a claim about a
-	// message that was actually sent, and no message says this.
+	// could see the refusal. "Already told" is a claim about a message that was
+	// actually sent, and no message says that.
+	//
+	// It is the only such claim left, and it survives the removal below because
+	// its premise is about the recipient's OWN act (mg-da12): the worker wrote
+	// the verdict, so this mail would be handing it back what it produced. That
+	// is a different assertion from "some other message covered it".
 	if c.Closed && c.Worker != "" && strings.EqualFold(creator, c.Worker) {
 		return n.finish(c, res, Outcome{Creator: creator, Skipped: "the filer is the worker — it already knows"})
 	}
-	if c.Closed && c.Route == RouteMerge && strings.EqualFold(creator, n.coordinator) {
-		// The refinery already mails the coordinator on every merge, with the
-		// branch, the target and the merged SHA. A second mail saying the same
-		// thing about the same event teaches the coordinator to skim both.
-		//
-		// Scoped to the merge route on purpose: a coordinator-filed item that
-		// closes WITHOUT a merge gets no refinery mail at all, and is exactly
-		// as silent as any other filer's would be.
-		return n.finish(c, res, Outcome{Creator: creator, Skipped: "coordinator filed it and the refinery already mailed it this merge"})
-	}
+	// THERE IS NO COORDINATOR SKIP, AND RE-ADDING ONE NEEDS A DIFFERENT REASON
+	// THAN THE ONE THAT WAS HERE (mg-da12).
+	//
+	// The skip that stood here spared the coordinator a merge-route notice on
+	// the grounds that "the refinery already mails the coordinator on every
+	// merge". The scoping was careful and the premise was false: the refinery
+	// mails a MERGE — branch, target, merged SHA — and this mails a VERDICT.
+	// `MERGED: mr-… (branch=polecat-p687f)` says a branch landed; it does not
+	// carry, and cannot carry, what the worker concluded. Treating the two as
+	// substitutes made the coordinator the single filer this never reached, and
+	// the coordinator files more items than anyone on the box: measured on
+	// 2026-08-13, its mailbox held ZERO `COMPLETED:` notices while every notice
+	// the fleet had gone to a non-coordinator.
+	//
+	// The duplicate that removing it costs is one extra mail about one event.
+	// The duplicate it bought was a verdict reaching nobody. A justification
+	// that names the wrong artifact is what made the skip look safe to write, so
+	// the guard against writing it again is to state the artifacts: any future
+	// "they already got this" must name a message that carries THIS content.
 
 	to, redirected := creator, false
 	if n.known != nil && !n.known(creator) {

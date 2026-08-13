@@ -80,8 +80,10 @@ func (r Report) Render(verbose, quiet bool) string {
 		"question here is who discharged the obligation. A channel absent from this list\n" +
 		"is not measured by this run and nothing below is a claim about it.\n" +
 		"The refinery's MERGED mail is deliberately NOT one of them: it reports a merge,\n" +
-		"not an outcome. pogod also skips its own notice for an item the coordinator filed\n" +
-		"on the merge route, so those rows are dropped here by construction (mg-da12).\n")
+		"not an outcome — which is also why pogod no longer withholds its own notice from\n" +
+		"the coordinator on the merge route. It did until mg-da12, on the premise that the\n" +
+		"refinery's mail covered it, and a coordinator's merge-route rows were dropped here\n" +
+		"by construction. They are now measured like anyone else's.\n")
 
 	for _, agent := range r.MissingBoxes {
 		fmt.Fprintf(&b, "  !! filer %s has NO MAILBOX — no channel could have reached it, so its rows read\n"+
