@@ -2924,6 +2924,13 @@ the schedule fires exactly once and reschedules to the next future occurrence.`,
 				if e.OneShot {
 					kind = "one-shot"
 				}
+				// A one-shot that has fired is retained only until its ack lands
+				// or its window closes (mg-64e6) — it will never fire again, so
+				// printing its old due time under "NEXT FIRE" would be a lie.
+				nextFire := e.NextFire.Local().Format(time.RFC3339)
+				if e.OneShot && !e.LastFire.IsZero() {
+					nextFire = "— (fired, awaiting ack)"
+				}
 				// A schedule that has never acked reads "—", not "0/N": absent
 				// evidence is not evidence of failure (mg-a754).
 				completed := "—"
@@ -2934,7 +2941,7 @@ the schedule fires exactly once and reschedules to the next future occurrence.`,
 					}
 				}
 				fmt.Printf("%-20s  %-20s  %-25s  %-16s  %s\n",
-					e.ID, e.Agent, e.NextFire.Local().Format(time.RFC3339), kind, completed)
+					e.ID, e.Agent, nextFire, kind, completed)
 			}
 		},
 	}

@@ -89,6 +89,11 @@ const completionTokenBytes = 4
 // has been issued yet (a one-shot, or a schedule with a long cron), and
 // accepting its ack would credit completion to work that finished a day late.
 // Generous on purpose: a legitimately long agent turn must still be able to ack.
+//
+// It doubles as the retention bound for a fired one-shot, which is held in the
+// live set until its ack lands (mg-64e6) — GCExpiredOneShots reaps it at
+// exactly the moment its token stops being redeemable here, so the two cannot
+// drift apart into an entry that is kept but can no longer be acked.
 const AckStaleWindow = 24 * time.Hour
 
 var (
@@ -184,10 +189,23 @@ func (s *Scheduler) Ack(agentName, id, token string, now time.Time) (AckResult, 
 	entry.PendingToken = ""
 	entry.PendingSince = time.Time{}
 	done := entry.Clone()
+	// A one-shot is retained past its fire ONLY so this ack can land (mg-64e6);
+	// the ack is what it was waiting for, so it leaves now rather than sitting
+	// spent until GCExpiredOneShots gets to it. The reason is what makes the
+	// removal readable: `one_shot_acked` says a live model turn ran a tool to
+	// report the work done, which is precisely the claim the old fire-time
+	// `one_shot_complete` made without evidence.
+	oneShotDone := entry.OneShot && !entry.LastFire.IsZero()
+	if oneShotDone {
+		delete(s.entries, key)
+	}
 	_ = s.persistLocked()
 	s.mu.Unlock()
 
 	s.emitCompletionEvent(done, now, token, latency)
+	if oneShotDone {
+		s.emitSchedulerRemovalEvent("one_shot_acked", done, now, nil)
+	}
 
 	return AckResult{Entry: done, Latency: latency, LatencyMS: latency.Milliseconds()}, nil
 }

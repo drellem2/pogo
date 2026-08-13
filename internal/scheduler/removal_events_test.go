@@ -64,8 +64,11 @@ func TestEmitsScheduleRemovedAtAllPaths(t *testing.T) {
 			},
 		},
 		{
-			name:   "one_shot_complete",
-			reason: "one_shot_complete",
+			// Was "one_shot_complete", emitted at FIRE time. A one-shot now
+			// stays until its ack lands or its window closes, and the reason
+			// says which happened — see oneshotack_test.go and mg-64e6.
+			name:   "one_shot_unacked",
+			reason: "one_shot_unacked",
 			setup: func(t *testing.T) (*Scheduler, string, string) {
 				s := newSchedulerForTest(t, nil)
 				now := fixedTime()
@@ -76,7 +79,48 @@ func TestEmitsScheduleRemovedAtAllPaths(t *testing.T) {
 					t.Fatal(err)
 				}
 				s.Tick(context.Background(), now.Add(2*time.Minute))
+				s.Tick(context.Background(), now.Add(2*time.Minute).Add(AckStaleWindow+time.Minute))
 				return s, "oneshot-me", "cat-oneshot"
+			},
+		},
+		{
+			name:   "one_shot_acked",
+			reason: "one_shot_acked",
+			setup: func(t *testing.T) (*Scheduler, string, string) {
+				s := newSchedulerForTest(t, nil)
+				now := fixedTime()
+				if _, err := s.Add(Entry{
+					Agent: "cat-acked", OneShot: true,
+					NextFire: now.Add(time.Minute), ID: "acked-me",
+				}, now); err != nil {
+					t.Fatal(err)
+				}
+				fireAt := now.Add(2 * time.Minute)
+				s.Tick(context.Background(), fireAt)
+				live := s.List("cat-acked")
+				if len(live) != 1 {
+					t.Fatalf("want the fired one-shot retained, got %d", len(live))
+				}
+				if _, err := s.Ack("cat-acked", "acked-me", live[0].PendingToken, fireAt.Add(time.Minute)); err != nil {
+					t.Fatalf("Ack: %v", err)
+				}
+				return s, "acked-me", "cat-acked"
+			},
+		},
+		{
+			name:   "one_shot_undelivered",
+			reason: "one_shot_undelivered",
+			setup: func(t *testing.T) (*Scheduler, string, string) {
+				s := newSchedulerForTest(t, &recorder{failNth: 1})
+				now := fixedTime()
+				if _, err := s.Add(Entry{
+					Agent: "cat-nodeliver", OneShot: true,
+					NextFire: now.Add(time.Minute), ID: "nodeliver-me",
+				}, now); err != nil {
+					t.Fatal(err)
+				}
+				s.Tick(context.Background(), now.Add(2*time.Minute))
+				return s, "nodeliver-me", "cat-nodeliver"
 			},
 		},
 		{
