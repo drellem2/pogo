@@ -113,16 +113,17 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    mg show <source-work-item-id>
    ```
 
-4. **Check out the source branch.** Switch to the branch that contains the implementation you are verifying:
+4. **Check out the source branch.** Switch to the branch that contains the implementation you are verifying — **naming `origin/`, so the command cannot pick a different commit from the one the prose describes** (mg-7537):
    ```bash
    git fetch origin
-   git checkout <source-branch>
+   git checkout -B <source-branch> --no-track "origin/<source-branch>"
    ```
+   A bare `git checkout <source-branch>` resolves to a *local* branch of that name when one exists, and only falls back to origin when it does not. Your worktree shares its `.git` with the source repo, so a local branch of that name may well exist and may be behind what was pushed — in which case you verify a commit that is not the implementation, and nothing says so. `-B` resets it to origin's tip instead. Keep `--no-track` (it stops your upstream being set to somebody else's branch) and stay on a **named** branch rather than detaching: the deploy drain reads the worktree's branch name and treats `unknown` as a hold (mg-f0bf). You never push here, so overwriting the local `<source-branch>` costs nothing.
 
-5. **Review the changes.** Understand what was changed:
+5. **Review the changes.** Understand what was changed. Compare against `origin/main`, for the same reason — the local `main` in this worktree is whatever the shared repo last left it at, which is not necessarily what the branch was built on:
    ```bash
-   git log --oneline main..<source-branch>
-   git diff main...<source-branch>
+   git log --oneline origin/main..<source-branch>
+   git diff origin/main...<source-branch>
    ```
 
 6. **Run the test suite.** Execute the project's tests and confirm they pass:

@@ -538,7 +538,21 @@ for repo in <repos>; do
     # merge success, so the merging worker cannot tag its own merge no matter how
     # clearly it is instructed — both v0.8.0 attempts lost that race and left the
     # item done with no tag.
-    printf 'Latest release %s is %s days old; origin/main is %s commits ahead. Semver: patch for CI/doc-only, minor otherwise.\n\nStep 1 (the release-cut worker): scripts/bump-version.sh X.Y.Z --commit  -- NOTE: no --tag. Off main, --tag tags the pre-merge commit and the refinery re-commits what it merges, so the tag would dangle off a commit no branch contains. bump-version.sh refuses it.\n\nStep 2 (NOT the merging worker -- a coordinator or a follow-up dispatch): after the merge LANDS, tag the merged sha:\n  git fetch origin main && git tag -a vX.Y.Z -m "Release vX.Y.Z" origin/main && git push origin vX.Y.Z\nThen CONFIRM against the remote, because a local tag proves nothing:\n  git ls-remote --tags origin | grep vX.Y.Z\nStep 2 cannot be done by whoever merges step 1: pogod stops a polecat within ~3s of merge success, and both v0.8.0 cut attempts were reaped before tagging, leaving the work item done with no tag in existence. Assign it an owner that outlives the merge.\n\nThe tag push is what triggers .github/workflows/release.yml -- until step 2 is confirmed, no release exists. Thresholds (50 commits / 30 days) are tunable in pm-template.md.\n' \
+    #
+    # NO COMMAND IN THIS BODY MAY NAME A MOVING REF AS THE THING TO TAG (mg-7537).
+    # Step 2 read `git tag -a vX.Y.Z ... origin/main` under prose that said "tag
+    # the merged sha" — two halves that are individually correct and disagree the
+    # moment main advances past the merge. That is a race, not an invariant: other
+    # workers in the same repo can merge in the window between the release merge
+    # and the tag. Nobody was careless; whoever read the prose was right and
+    # whoever read the command was right, which is exactly why no line-by-line
+    # review of either half catches it. The repair is to give the command nothing
+    # to disagree with: --post-merge-tag writes no sha at all, and the by-hand
+    # fallback takes the sha from the refinery's own record of what it merged.
+    # v0.4.0 is the historical instance — main was four commits past the
+    # smoke-tested prep commit, so origin/main would have published commits that
+    # were never in the release that was tested.
+    printf 'Latest release %s is %s days old; origin/main is %s commits ahead. Semver: patch for CI/doc-only, minor otherwise.\n\nStep 1 (the release-cut worker): scripts/bump-version.sh X.Y.Z --commit  -- NOTE: no --tag. Off main, --tag tags the pre-merge commit and the refinery re-commits what it merges, so the tag would dangle off a commit no branch contains. bump-version.sh refuses it.\n\nStep 2 -- THE TAG. Declare it on the SAME submit and let the REFINERY create it:\n  pogo refinery submit <branch> --repo=<repo> --post-merge-tag=vX.Y.Z\nThe refinery creates the tag on the commit the merge actually landed as and pushes it before the author is reaped. Prefer this form: no sha is written into the command, so the command has nothing it can disagree with. If the tag cannot be pushed the merge still stands, the work item is deliberately NOT marked done, and the mayor is mailed -- a half-finished release cannot read as complete.\n\nStep 2 BY HAND, only if the submit already went out without --post-merge-tag. Tag the MERGED SHA, read from a record of what merged and never from a branch tip:\n  MERGED=$(pogo refinery show <mr-id> --json | jq -r .merged_sha)   # same value as the "Merged SHA:" line of the MERGED mail, and .result.merged_sha under `mg sidecar <item> --json`\n  case "$MERGED" in ""|null) echo "no merged sha on record -- do NOT tag"; exit 1;; esac\n  git fetch origin main && git tag -a vX.Y.Z -m "Release vX.Y.Z" "$MERGED" && git push origin vX.Y.Z\nDO NOT tag origin/main. It equals the merged sha only while main has not advanced past the merge, which is a race and not an invariant -- another worker in the same repo can merge inside that window. At v0.4.0 main was four commits past the smoke-tested prep commit, and tagging origin/main there would have published commits that were never in the release that was tested.\nThe by-hand path cannot be run by whoever merges step 1: pogod stops a polecat within ~3s of merge success, and both v0.8.0 cut attempts were reaped before tagging, leaving the work item done with no tag in existence. It needs an owner that outlives the merge -- which is the whole reason to prefer --post-merge-tag.\n\nAcceptance -- FOUR checks. Each catches a failure the others cannot see, and none of them covers another. Run these two first, on EITHER path -- on the --post-merge-tag path nothing above them has fetched the tag or set MERGED, and an unfetched tag makes rev-parse print nothing, which the DRIFT check reads as drift:\n  git fetch --tags origin main\n  MERGED=$(pogo refinery show <mr-id> --json | jq -r .merged_sha)\n  test "$(git rev-parse "vX.Y.Z^{}")" = "$MERGED"              # DRIFT -- the tag is on the wrong IN-BRANCH commit (the v0.4.0 shape). ^{} peels the annotated tag to its commit, and it MUST be quoted: unquoted under zsh with extendedglob it is a filename pattern, so the same command aborts with "no matches found" or not depending on what is in the current directory.\n  git merge-base --is-ancestor vX.Y.Z origin/main               # DANGLE -- the tag is on a commit NO branch contains (the v0.8.0 / mg-cef7 shape). BLIND TO DRIFT: an ancestor is an ancestor whether or not it is the right commit, so it passes a drifted tag just as happily.\n  git ls-remote --tags origin | grep vX.Y.Z                     # PUSHED -- a local tag proves nothing about what was published.\n  gh run list --repo <slug> --workflow release.yml --limit 3    # FIRED -- the tag push is the trigger, so a push with no run means no release exists. in_progress is neither outcome; report it as in flight.\nClose this item on the last two, never on a command exit status. A pushed release tag cannot be unpublished, so tag the right sha the first time rather than fixing it after.\n\nThresholds (50 commits / 30 days) are tunable in pm-template.md.\n' \
            "$tag" "$days" "$ahead" |
       mg new --title="release-cut: $slug — main is $ahead commits ahead of $tag (${days}d)" \
              --assignee=pm-<your-name> \
@@ -549,15 +563,55 @@ done
 ```
 
 The hook only **files** the ticket; the actual version bump + tag push stays
-with the release-cut {{.Worker}} or Daniel. Note that the ticket body splits the
-cut into **two steps with two owners** (mg-cef7): the bump/merge, and the
-post-merge tag on the merged sha. They cannot be the same owner — pogod stops a
-{{.Worker}} within ~3s of merge success, so the one who merges is dead before it
-can tag, and an instruction cannot beat a reap. When you file this ticket,
-either plan to run step 2 yourself once the merge lands, or file it as its own
-work item so the obligation has an owner; then verify with
-`git ls-remote --tags origin`, never a local `git tag -l`. Surfacing as a ticket is the right
+with the release-cut {{.Worker}} or Daniel. Surfacing as a ticket is the right
 granularity — never auto-tag.
+
+**Who tags, and why the body now prefers `--post-merge-tag`.** mg-cef7 split the
+cut into two steps with two owners because pogod stops a {{.Worker}} within ~3s
+of merge success: the one who merges is dead before it can tag, and an
+instruction cannot beat a reap. That is still true of any tag a {{.Worker}}
+issues from its own sequence. What changed is that there is now an actor with
+neither problem — `pogo refinery submit --post-merge-tag=vX.Y.Z` (mg-6879) makes
+the **refinery** create the tag, on the commit the merge landed as, before the
+author is reaped. It is the only actor that both sees the merged SHA and
+outlives the worker, so the two-owner split becomes a fallback rather than the
+plan. A push failure there blocks auto-done and mails the {{.Coordinator}},
+which is what stops a half-finished release reading as complete.
+
+**Never let the tag command name a moving ref (mg-7537).** Until that ticket,
+step 2 read `git tag -a vX.Y.Z … origin/main` directly beneath prose that said *tag the
+merged sha* — two halves that are individually correct and disagree the instant
+main advances past the merge. Both readers are diligent and they diverge, which
+is why no line-by-line review of either half catches it; the defect lives only
+in their relationship. The v0.10.0 cut of 2026-08-13 is the demonstration in
+both directions: the coordinator read the prose, checked `origin/main` against the
+refinery's `Merged as` sha before tagging, and got it right — an *armed* check
+that returned a real negative, not a confirmation of nothing. But that check was
+the operator's, not the instruction's. **The near-miss is evidence the
+instruction was wrong; it is not evidence the process verified anything.**
+
+**Two acceptance checks, two different failures — do not let either stand in for
+the other.** `git merge-base --is-ancestor vX.Y.Z origin/main` catches the
+**dangle**: a tag on a commit no branch contains (the v0.8.0 / mg-cef7 shape).
+It is blind to the **drift**: a tag on the wrong *in-branch* commit (the v0.4.0
+shape, where main was four commits past the smoke-tested prep commit), because
+an ancestor is an ancestor either way. Only
+`test "$(git rev-parse "vX.Y.Z^{}")" = "$MERGED"` — against the sha the refinery
+recorded merging — discriminates that one.
+
+**Quote the `^{}`, and note why that instruction is in the same family as the
+one above it.** Written bare, `vX.Y.Z^{}` is a zsh filename pattern (this fleet
+runs `zsh -c -l`, with `extendedglob` set), so the *same* check aborts with
+`no matches found` or sails through depending on what happens to be in the
+current directory — measured both ways on this host inside one minute. That is a
+command whose behaviour disagrees with its prose under some state, which is
+precisely the defect this section exists to fix, reappearing in the fix for it.
+It is fail-safe in the `test` form (an aborted substitution compares empty and
+the check fails loudly) and it is not fail-safe anywhere a sha is being *used*.
+Then verify publication with
+`git ls-remote --tags origin`, never a local `git tag -l`, and confirm
+`release.yml` actually ran: the push is the trigger, and a push with no run
+means no release exists.
 
 **Additional sources are listed in your config under `sources`.** Apply each one. Examples:
 
