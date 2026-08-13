@@ -177,6 +177,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```
    Use a simple bash loop only. Adding more cron jobs or `pogo nudge` commands for polling interrupts interactive sessions — the mail-check schedule from step 2 is the only background trigger you should have running.
 
+   **This loop is the channel that works — the mail is redundancy.** A `MERGE FAILED` notice now arrives in `$POGO_AGENT_NAME` as well as `{{.Id}}` (mg-1fcc); before that it went only to the work-item box, and four polecats in a row recovered anyway because the poll finds the failure at failure time and mail cannot beat that. The mail matters for the one case the loop cannot cover: an author who has finished polling, or was stopped, finds out never. So do not substitute mail-watching for this loop, and do not treat a missing notice as a reason to stop polling.
+
    If your branch already landed on the target (e.g. you resubmitted after losing track of a merged MR), the refinery detects it and resolves the MR as `merged` immediately — without re-running gates or pushing — with `"already_merged": true` in the `--json` output. Treat it exactly like a normal `merged`: proceed to step 7, and do **not** submit the branch again.
 
    Two non-terminal outcomes need explicit handling — do NOT treat them as merge failures:

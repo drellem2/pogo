@@ -3161,11 +3161,33 @@ Flags:
 					refineryAttemptSummary(mr), mr.Error, mr.GateOutput, mr.FailureCount,
 					refineryAttemptDetail(mr))
 
-				// Mail the author agent so they can fix and resubmit.
-				if mr.Author != "" {
-					if err := client.SendMGMail(mr.Author, "refinery", subject, body); err != nil {
-						log.Printf("refinery: failed to mail author %s: %v", mr.Author, err)
+				// Mail the author so they can fix and resubmit — and address the
+				// AGENT that owns the branch, not only the work-item id
+				// (mg-1fcc). `mr.Author` is "mg-32e3"; the running polecat reads
+				// "c32e3". Those are different mailboxes, so the notice used to
+				// land unread in a box its addressee does not poll. Polling the
+				// refinery is the working channel and nothing was ever stranded
+				// by this, but a polecat that was stopped or is past its polling
+				// phase has no channel at all — which is the gap this closes.
+				route := routeRefineryFailMail(mr, func(author string) string {
+					if a := agentRegistry.GetByWorkItemOrName(author); a != nil {
+						return a.Name
 					}
+					return ""
+				})
+				var undelivered []string
+				for _, to := range route.Recipients {
+					if err := client.SendMGMail(to, "refinery", subject, body); err != nil {
+						log.Printf("refinery: failed to mail %s: %v", to, err)
+						undelivered = append(undelivered, to)
+					}
+				}
+				// A notice that reached no agent-owned mailbox is recorded rather
+				// than left to look like a successful delivery.
+				if ev, ok := refineryFailRouteEvent(mr, route, undelivered); ok {
+					log.Printf("refinery: MERGE FAILED notice for %s did not route cleanly (agent_notified=%v): %v",
+						mr.ID, ev.Details["agent_notified"], ev.Details["reason"])
+					events.Emit(context.Background(), ev)
 				}
 
 				// Mail the coordinator so they can re-dispatch if the author exited.
