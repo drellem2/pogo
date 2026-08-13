@@ -52,7 +52,13 @@ consults, so this command and the daemon cannot disagree.
 per-repo dispatch cap. That is a separate refusal from the host one and neither
 implies the other: a repo can be full on an idle host, because what saturates is
 one repo's test suite run concurrently rather than the fleet's worker count. Ask
-for it before planning several dispatches into the same repository.`,
+for it before planning several dispatches into the same repository.
+
+'worker_budget' is the share of this host the NEXT worker spawned here will be
+told it may use. It is a policy division of the core count, not a measurement,
+and nothing enforces it — it exists because both dispatch gates count workers,
+so one worker whose toolchain self-parallelises can hold the box while a cap of
+3 reads one-of-three.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resp, err := client.GetHostLoad(repo)
 			if err != nil {
@@ -67,10 +73,18 @@ for it before planning several dispatches into the same repository.`,
 				fmt.Println("Host load: NOT MEASURED — the sample could not be taken.")
 				fmt.Println("This is missing information, not an idle host.")
 				fmt.Printf("\n%s\n", resp.Advice)
+				// The budget is a policy division of the core count, not a
+				// sample, so it answers when the host could not be measured.
+				printWorkerBudget(os.Stdout, resp.WorkerBudget)
 				// The repo cap is a count, not a sample: it still answers when
 				// the host could not be measured, and suppressing it here would
 				// hide the refusal the caller is most likely about to hit.
-				printRepoOccupancy(os.Stdout, resp.RepoOccupancy)
+				//
+				// hostWouldRefuse is FALSE here because nothing was measured,
+				// not because the host has room — so the "reroute elsewhere"
+				// note stays, which is the right call: it is advice about this
+				// cap, and an unmeasured host is not evidence against it.
+				printRepoOccupancy(os.Stdout, resp.RepoOccupancy, false)
 				return nil
 			}
 			s := resp.Sample
@@ -88,15 +102,35 @@ for it before planning several dispatches into the same repository.`,
 			fmt.Printf("Load avg:   %.2f (1-min) — CONTEXT ONLY, not a decision input\n", s.LoadAvg1)
 			fmt.Printf("\n%s\n", resp.Advice)
 			if resp.WouldRefuseDispatch {
-				fmt.Printf("\n`pogo agent spawn-polecat` would currently be refused with 503 (retryable).\n")
+				fmt.Printf("\n`pogo agent spawn-polecat` would currently be refused with 503 (retryable),\n" +
+					"for ANY repo — this gate does not read the --repo argument.\n")
 			}
-			printRepoOccupancy(os.Stdout, resp.RepoOccupancy)
+			printWorkerBudget(os.Stdout, resp.WorkerBudget)
+			printRepoOccupancy(os.Stdout, resp.RepoOccupancy, resp.WouldRefuseDispatch)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&repo, "repo", "",
 		"also report this repository's worker occupancy against the per-repo dispatch cap")
 	return cmd
+}
+
+// printWorkerBudget renders the share the next worker will be told it may take.
+//
+// It is printed on the measured and unmeasured paths both, because it is not a
+// measurement: it is a division of the core count by the enforced worker cap,
+// and it answers whether one worker can legitimately plan to hold most of the
+// box. That question had no answer at all before mg-eb47, which is how one Lean
+// build came to hold 9.0 of 10 cores while the per-repo cap read one-of-three.
+func printWorkerBudget(w io.Writer, b agent.WorkerBudget) {
+	if !b.Known() {
+		fmt.Fprintf(w, "\nWorker budget: NOT DERIVED — %s\n", b.Basis)
+		return
+	}
+	fmt.Fprintf(w, "\nWorker budget: %d of %d cores per worker (%s).\n", b.Cores, b.HostCores, b.Basis)
+	fmt.Fprintf(w, "               Advisory: it reaches a worker as $%s and prompt prose.\n"+
+		"               Nothing enforces it — a toolchain that ignores it takes the box, and\n"+
+		"               the host gate above is still what notices.\n", agent.WorkerCoresEnv)
 }
 
 // printRepoOccupancy renders the per-repo cap's view, or nothing when --repo
@@ -107,7 +141,13 @@ for it before planning several dispatches into the same repository.`,
 // when it found nothing is indistinguishable from one that was not asked — and
 // the caller here is deciding whether to dispatch, so silence would read as
 // permission.
-func printRepoOccupancy(w io.Writer, occ *agent.RepoOccupancy) {
+//
+// hostWouldRefuse is the host gate's current answer, and it is a parameter
+// rather than something re-derived here because the two must agree. It gates
+// the "dispatch into a different repo" note: that advice was measured wrong on
+// 2026-08-13 (mg-eb47), when a per-repo slot freed by a merge was unusable
+// because the host gate was refusing every spawn regardless of repo.
+func printRepoOccupancy(w io.Writer, occ *agent.RepoOccupancy, hostWouldRefuse bool) {
 	if occ == nil {
 		return
 	}
@@ -139,7 +179,13 @@ func printRepoOccupancy(w io.Writer, occ *agent.RepoOccupancy) {
 	}
 	if occ.WouldRefuse {
 		fmt.Fprintf(w, "\n`pogo agent spawn-polecat --repo=%s` would currently be refused with 503\n"+
-			"(retryable — a dispatch into a DIFFERENT repo is unaffected).\n", occ.Repo)
+			"(retryable — a dispatch into a DIFFERENT repo is not refused by THIS cap).\n", occ.Repo)
+		if hostWouldRefuse {
+			fmt.Fprintf(w, "But rerouting will NOT help right now: the host gate above is ALSO refusing,\n"+
+				"and it refuses every spawn regardless of repo. A slot freed here is not capacity —\n"+
+				"it is the absence of one particular refusal. Retry on the fleet's core share, not on\n"+
+				"a worker exiting.\n")
+		}
 	}
 }
 

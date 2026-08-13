@@ -1631,6 +1631,15 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		providerID = provider.ID
 	}
 
+	// The share of this host this worker is told it may take. Both dispatch
+	// gates count workers, so a worker whose toolchain self-parallelises can
+	// hold the whole box while the per-repo cap reads one-of-three — measured
+	// on 2026-08-12 at 9.0 of 10 cores from a single Lean build (mg-eb47). The
+	// budget is advice: it reaches the worker as env vars and as prompt prose,
+	// and nothing enforces it. See workerbudget.go for what that does and does
+	// not claim.
+	budget := r.WorkerBudget()
+
 	// Expand template to a temp file
 	vars := TemplateVars{
 		Task:          spawnReq.Task,
@@ -1643,6 +1652,8 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		RecentCommits: recentCommits,
 		RecentFiles:   recentFiles,
 		Provider:      providerID,
+		WorkerCores:   budget.Cores,
+		HostCores:     budget.HostCores,
 	}
 	promptFile, err := ExpandTemplateToFile(tmplPath, spawnReq.Name, vars)
 	if err != nil {
@@ -1650,11 +1661,10 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Ensure POGO_ROLE is set for mg prime and role detection. Its value is the
-	// frozen agent-type literal (string(TypePolecat)), never the worker DISPLAY
-	// name — a cross-tool identifier, so a display rename must never move it
-	// (mg-6a24 §1.1). Byte-identical to the previous "polecat" literal.
-	env := append(spawnReq.Env, "POGO_ROLE="+string(TypePolecat))
+	// The worker's environment: core budget, the dispatcher's own --env, then
+	// POGO_ROLE. The ordering is load-bearing in both directions — see
+	// polecatSpawnEnv, which owns it so the precedence can be asserted.
+	env := polecatSpawnEnv(budget, spawnReq.Env)
 
 	// Create git worktree for polecat isolation
 	if createWorktree {

@@ -212,9 +212,23 @@ func dedupeSorted(list []string, counted map[string]bool) []string {
 // request succeeds once a worker in that repo finishes. The message says so,
 // because the reader is usually a coordinator with no human in the loop and
 // "hold this item" and "abandon this item" are opposite actions. It also says
-// that a DIFFERENT repository is unaffected, since the whole point of a
-// per-repo cap is that a refusal here is not a refusal everywhere — and
+// that a DIFFERENT repository is not refused BY THIS CAP, since the whole point
+// of a per-repo cap is that a refusal here is not a refusal everywhere — and
 // "dispatch elsewhere" is a third action, better than either of the other two.
+//
+// # What it no longer promises
+//
+// It used to say a dispatch into a different repo was "unaffected", full stop,
+// and that this refusal cleared "as soon as a worker here finishes". Both were
+// measured wrong on 2026-08-13 (mg-eb47). The host gate refuses every spawn
+// regardless of repo, so a per-repo slot freed by a merge was unusable and
+// rerouting elsewhere would have been refused too — a freed slot is not
+// capacity, it is the absence of one particular refusal. And worker count is
+// not a proxy for the resource in either direction: the fleet went from 6
+// agents holding 6.1 of 10 cores to 5 holding 7.0, because two refinery gates
+// that self-parallelise outweighed them. A coordinator that took either sentence
+// literally retried twice into a guaranteed refusal, which is exactly the cost
+// a refusal message exists to avoid.
 func (r *Registry) repoCapRefusal(repo string) string {
 	occ := r.RepoOccupancyFor(repo)
 	if !occ.WouldRefuse {
@@ -231,9 +245,15 @@ func (r *Registry) repoCapRefusal(repo string) string {
 			occ.RefineryReserved, occ.ConfiguredCap)
 	}
 	b.WriteString("This is a LATER, not a refusal of the item — nothing about the work item is wrong, " +
-		"and the same request succeeds as soon as a worker here finishes. It is also NOT a fleet-wide " +
-		"limit: a dispatch into a DIFFERENT repo is unaffected, because what saturates is one repo's " +
-		"test suite run concurrently, not the number of workers. ")
+		"and the same request succeeds once a worker here finishes. It is also NOT a fleet-wide " +
+		"limit: THIS cap does not refuse a dispatch into a DIFFERENT repo, because what saturates is " +
+		"one repo's test suite run concurrently, not the number of workers. ")
+	b.WriteString("A freed slot here is not capacity, though, and neither is another repo — the HOST " +
+		"gate is a separate refusal and it applies to every spawn regardless of repo. Do not retry on " +
+		"a worker EXITING: measured 2026-08-13, the fleet went from 6 agents holding 6.1 of 10 cores to " +
+		"5 agents holding 7.0 — fewer agents, MORE cores, because two refinery gates that each " +
+		"parallelise across packages outweighed the ones that left (mg-eb47). " +
+		"Retry on the fleet's CORE share dropping below the host gate's mark, which is a different event. ")
 	if occ.WitnessErr != "" {
 		fmt.Fprintf(&b, "(The persisted polecat witness could not be read — %s — so this count may be "+
 			"missing survivors of an earlier pogod.) ", occ.WitnessErr)
@@ -242,6 +262,7 @@ func (r *Registry) repoCapRefusal(repo string) string {
 		fmt.Fprintf(&b, "(%d live worker(s) could not be attributed to any repo and are NOT in this "+
 			"count: %s.) ", len(occ.Unattributed), strings.Join(occ.Unattributed, ", "))
 	}
-	b.WriteString("Read the current numbers with `pogo host load --repo=" + occ.Repo + "`.")
+	b.WriteString("Read both numbers with `pogo host load --repo=" + occ.Repo + "` — it reports this " +
+		"count and the host's core share from the same gates that refuse on them.")
 	return b.String()
 }

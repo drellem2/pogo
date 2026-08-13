@@ -221,9 +221,15 @@ func (s Sample) DispatchAdvice() string {
 		return fmt.Sprintf("HOLD: the fleet is already holding %.1f of %d cores (%.0f%%) across %d "+
 			"processes, at or above the %.0f%% mark where more fleet work slows the work in flight "+
 			"and itself. Non-fleet load is %.1f cores and is not counted against you. "+
-			"Re-check rather than queueing: this clears when the work in flight finishes.",
+			"Re-check rather than queueing, and re-check THIS NUMBER rather than the agent count: "+
+			"the refusal clears when the fleet's core share falls below %.0f%%, which is not the same "+
+			"event as an agent exiting. Measured 2026-08-13 (mg-eb47), the fleet went from 6 agents "+
+			"holding 6.1 of 10 cores to 5 agents holding 7.0 — fewer agents, MORE cores, with the "+
+			"process count falling 32 to 21 in the same step, because two refinery gates that each "+
+			"parallelise across packages outweighed the agents that left. `pogo host load` reads this "+
+			"number without costing a spawn attempt.",
 			s.FleetCores, s.Cores, s.FleetSaturation()*100, s.FleetProcs, FleetHeavyAt*100,
-			s.ExternalCores)
+			s.ExternalCores, FleetHeavyAt*100)
 	}
 	return fmt.Sprintf("PROCEED: the fleet is holding %.1f of %d cores (%.0f%%), below the %.0f%% mark. "+
 		"Non-fleet load is %.1f cores; %.1f cores are free.",
