@@ -654,17 +654,72 @@ means no release exists.
           xargs -0 -r -I{} find {} -name '*.jsonl' -newermt "$since" 2>/dev/null)
   echo "scanned $(printf '%s\n' "$files" | grep -c .) transcripts since '$since'"
 
-  printf '%s\n' "$files" | grep -v '^$' | tr '\n' '\0' |
-    xargs -0 -r grep -icE "$pat" 2>/dev/null |
-    awk -F: '$2>0 {print $2"\t"$1}' | sort -rn | sed "s|$proj/$slug-||"
+  ranked=$(printf '%s\n' "$files" | grep -v '^$' | tr '\n' '\0' |
+           xargs -0 -r grep -icE "$pat" 2>/dev/null |
+           awk -F: '$2>0 {print $2"\t"$1}' | sort -rn | sed "s|$proj/$slug-||")
+
+  # Hits per class. BOTH lines print even at zero, so "the polecats were quiet"
+  # and "the polecat half of the scan broke" stay distinguishable.
+  printf '%s\n' "$ranked" | awk -F'\t' '
+    $1 != "" {c = ($2 ~ /^polecats-/) ? "p" : "c"; h[c]+=$1; s[c]++}
+    END {printf "hits by class: polecat %d in %d sessions | crew %d in %d sessions\n",
+                h["p"]+0, s["p"]+0, h["c"]+0, s["c"]+0}'
+
+  echo; echo "== {{.WorkerTitle}} sessions — READ THE TOP OF THIS LIST =="
+  printf '%s\n' "$ranked" | awk -F'\t' '$1 != "" && $2 ~ /^polecats-/'
+  echo; echo "== crew sessions — context only, not the sample =="
+  printf '%s\n' "$ranked" | awk -F'\t' '$1 != "" && $2 !~ /^polecats-/'
   ```
 
-  That prints a hit-count ranking, which is a **candidate list, not a finding**.
-  Read the top sessions in the same shell (`$pat` is still set):
+  Each ranking is a **candidate list, not a finding**. Read the top of the
+  **{{.Worker}}** list in the same shell (`$pat` is still set):
 
   ```bash
   grep -ihoE "($pat).{0,200}" "$proj/$slug-polecats-<id>/<session>.jsonl"
   ```
+
+  **Why the two classes are ranked separately, and why you read the
+  {{.Worker}} one (mg-08f7).** Until that ticket this scan emitted one merged
+  ranking and said *"read the top sessions"*. Hit count tracks **session
+  length**, not friction density: crew agents run for hours and accumulate hits
+  across a whole shift, {{.Worker}}s are short-lived and numerous and each
+  carries a handful. So the head of a merged ranking is crew **by
+  construction**, and the prescribed sample was crew-weighted no matter how
+  carefully it was executed — a method defect, not an execution one, and
+  therefore not repairable by being more careful next time. Measured over
+  145 transcripts in a 24h window on 2026-08-13:
+
+      polecat  163 hits in 61 sessions   (51% of hits, 82% of sessions)
+      crew     155 hits in 13 sessions   (49% of hits, 18% of sessions)
+      top 12 of the merged ranking:      9 crew, 3 polecat
+
+  {{.WorkerTitle}}s are the **majority in aggregate and a minority in the
+  head** — reading the merged head, the PM that found this estimated crew at
+  ~76% of hits when the aggregate said 49%, an error the aggregate refuted and
+  the procedure invited, because the head is the only thing it said to look
+  at. That matters because {{.Worker}} transcripts are the
+  source that shows real product friction, while crew sessions are largely
+  agents *discussing* friction, which is the noise class the last bullet below
+  already warns about. The sweep that exposed this concluded "no new friction
+  gap" after reading **2 {{.Worker}} sessions out of a 171-hit {{.Worker}}
+  population**, following the procedure exactly.
+
+  **What splitting the classes does not fix.** Inside the {{.Worker}} list the
+  order is still hit count, so the longest {{.Worker}} sessions still lead it —
+  the same bias, one level down. It is a far weaker effect there (these
+  sessions are short and their counts cluster: 61 sessions, 163 hits, nothing
+  above 18) and the printed denominator makes what is left of it priceable
+  rather than invisible. If you want a sample that is not length-ordered at
+  all, take every *n*th line of the {{.Worker}} list instead of its head, and
+  say in the conclusion that that is what you did.
+
+  **State the denominator in the conclusion, every time.** The scan now hands
+  it to you on its own, so a conclusion about this source is written as
+  *"no new friction gap in the 5 {{.Worker}} sessions I read, of 61 carrying
+  hits"* — never a bare "sampled" or "no new gap". The two forms are the same
+  sentence to the writer and completely different evidence to whoever reads the
+  digest; the bare form invites the reader to price a 2-of-171 read as a survey.
+  If you read fewer sessions than you meant to, that is what the sentence says.
 
   Four things that ruin this scan — all measured 2026-08-12 against 63
   transcripts / 62 MB, where the scan itself runs in ~5s:
