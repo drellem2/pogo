@@ -2919,11 +2919,27 @@ stamped_rev() {
     # with a space. json_str returns empty on it, which stamped_rev would have
     # reported as UNSTAMPED: a check that fails a good deploy while looking
     # exactly like the defect it is testing for. BRE, BSD sed (macOS).
-    local rev
+    local rev src
     rev="$(printf '%s' "$out" | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-    # "unknown" is what an unstamped binary now reports — honest and greppable,
-    # and not comparable to a revision, so it maps onto the existing sentinel.
+    src="$(printf '%s' "$out" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    # "unknown" is what an unstamped binary reports — honest and greppable, and
+    # not comparable to a revision, so it maps onto the existing sentinel.
     if [ -z "$rev" ] || [ "$rev" = "unknown" ]; then echo "$REV_UNSTAMPED"; return 0; fi
+    # ONLY AN ldflags STAMP COUNTS, and this line is the whole point of the
+    # check rather than a nicety. A `-X` naming a symbol path that does not
+    # exist links cleanly and sets nothing — the silent no-op this ticket was
+    # filed about. In a worktree that is NOT nested inside another git repo,
+    # Go's automatic vcs.revision then supplies the CORRECT sha anyway, so a
+    # check that accepted any non-empty commit would report the deploy healthy
+    # while the stamping it exists to verify had done nothing at all.
+    #
+    # That is not hypothetical: the first version of this function omitted the
+    # test and passed on the developer box — where a polecat worktree under
+    # ~/.pogo makes Go's stamp foreign and so accidentally distinguishable —
+    # and the refinery caught it on the merge gate, whose worktree is not
+    # nested and where buildinfo covered for the missing stamp exactly as
+    # described. The remedy was subject to the defect it remedies.
+    if [ "$src" != "ldflags" ]; then echo "$REV_UNSTAMPED"; return 0; fi
     echo "$rev"
 }
 

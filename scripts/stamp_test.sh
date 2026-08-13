@@ -150,6 +150,23 @@ ST_NS_DIR="$ST_TMP/no-stamp"; mkdir -p "$ST_NS_DIR"
 ST_NS_BUILT=no
 ( cd "$ST_REPO" && POGO_GATE_PROFILE=0 POGO_BUILD_NO_STAMP=1 POGO_BUILD_DIR="$ST_NS_DIR" ./build.sh --skip-tests ) >"$ST_TMP/ns.log" 2>&1 && ST_NS_BUILT=yes
 
+# 3b. THE SILENT NO-OP, reproduced. A `-X` whose symbol path is misspelled
+# (Commmit) links with rc=0 and no warning, sets nothing, and leaves the binary
+# reporting Go's automatic vcs.revision — which in a worktree that is not nested
+# inside another repo is the CORRECT sha, and so looks entirely convincing. Note
+# the deliberately CORRECT Branch flag beside it: the artifact this produces has
+# a real branch and a revision the build script never supplied, which is why
+# "the fields look populated" is not evidence of anything.
+#
+# This is the failure mode the ticket names ("a no-op -X produces exactly the
+# current empty-string state with no error"), and it is the reason every check
+# here runs the binary and reads `source` rather than trusting a flag string.
+ST_TYPO_DIR="$ST_TMP/typo-x"; mkdir -p "$ST_TYPO_DIR"
+ST_TYPO_BUILT=no
+( cd "$ST_REPO" && go build \
+    -ldflags "-X github.com/drellem2/pogo/internal/version.Commmit=$ST_SHA -X github.com/drellem2/pogo/internal/version.Branch=$ST_BRANCH" \
+    -o "$ST_TYPO_DIR/" ./cmd/pogo ) 2>"$ST_TMP/typo.err" && ST_TYPO_BUILT=yes
+
 # 4. The dirty/clean pair, built from THIS tree with the Dirty flag forced both
 # ways — so the result does not depend on whether the working tree happens to be
 # clean when the gate runs. It is dirty in a polecat mid-change and clean at
@@ -375,13 +392,56 @@ if [ "$ST_BS_BUILT" = yes ]; then
     else
         fail "deploy check: stamped_rev on an absent binary returned '$ST_SR_MISSING', want $REV_MISSING"
     fi
-    # And an UNSTAMPED one must not be reported as main.
+    # AND AN UNSTAMPED ONE MUST COME BACK $REV_UNSTAMPED — not "some string
+    # that isn't main", which is a weaker claim that happens to hold only in
+    # some worktrees.
+    #
+    # This assertion is the one the refinery caught, and the finding was real.
+    # An unstamped build still carries Go's automatic vcs.revision, and whether
+    # that revision EQUALS main depends on where the worktree sits: under
+    # ~/.pogo (a polecat) Go walks up into a different repo and the sha is
+    # foreign, so a weaker "!= main" test passed there; in the refinery's
+    # worktree Go finds the right repo and supplies the correct sha, so the
+    # same test failed. The environment-dependence was the tell. The property
+    # that actually matters — and that holds everywhere — is that stamped_rev
+    # must reject a binary whose revision did not come from the BUILD SCRIPT,
+    # because a `-X` with a wrong symbol path is a silent no-op that buildinfo
+    # then covers for.
     if [ "$ST_NS_BUILT" = yes ]; then
         ST_SR_NS="$(POGO_GOBIN="$ST_NS_DIR" stamped_rev pogo)"
-        case "$ST_SR_NS" in
-            "$ST_SHA") fail "deploy check: stamped_rev accepted an UNSTAMPED binary as $ST_SHA" ;;
-            *) pass "deploy check: stamped_rev does not report an unstamped binary as main ($ST_SR_NS)" ;;
-        esac
+        if [ "$ST_SR_NS" = "$REV_UNSTAMPED" ]; then
+            pass "deploy check: stamped_rev reports an UNSTAMPED binary as $REV_UNSTAMPED even when Go's own stamp happens to name the right revision"
+        else
+            fail "deploy check: stamped_rev returned '$ST_SR_NS' for an unstamped binary, want $REV_UNSTAMPED — a no-op -X would pass the post-install check"
+        fi
+    fi
+
+    # THE SILENT NO-OP, end to end. This is the artifact a misspelled -X
+    # actually produces, and both the deploy's check and this suite's assertion
+    # must refuse it — otherwise the whole remedy could be inert and every
+    # instrument would report it working.
+    if [ "$ST_TYPO_BUILT" = yes ]; then
+        ST_TYPO_SR="$(POGO_GOBIN="$ST_TYPO_DIR" stamped_rev pogo)"
+        if [ "$ST_TYPO_SR" = "$REV_UNSTAMPED" ]; then
+            pass "deploy check: a MISSPELLED -X symbol path is caught — stamped_rev returns $REV_UNSTAMPED though the binary prints a plausible commit"
+        else
+            fail "deploy check: a misspelled -X passed the post-install check as '$ST_TYPO_SR' — the stamping could be inert and the deploy would call itself healthy"
+        fi
+        if st_assert_stamped "typo-x/pogo" "$ST_TYPO_DIR/pogo" "$ST_SHA" "$ST_BRANCH" >/dev/null 2>&1; then
+            fail "the suite's own assertion accepted a binary built with a misspelled -X"
+        else
+            pass "the suite's own assertion refuses a misspelled -X too (it reads source, not just commit)"
+        fi
+        # And name what made it convincing: the branch flag WAS spelled right,
+        # so the binary carries a real branch beside a revision no build script
+        # supplied.
+        if [ "$(printf '%s' "$("$ST_TYPO_DIR/pogo" version --json 2>/dev/null)" | st_field branch)" = "$ST_BRANCH" ]; then
+            pass "the misspelled build still reports a correct branch — 'the fields look populated' is not evidence"
+        else
+            fail "the misspelled-build fixture did not produce the intended shape (branch missing)"
+        fi
+    else
+        fail "could not build the misspelled--X fixture ($(tail -2 "$ST_TMP/typo.err" 2>/dev/null))"
     fi
 fi
 
