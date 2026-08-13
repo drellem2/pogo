@@ -5275,6 +5275,126 @@ func TestPromptsTeachAppendBodyRatherThanWholesaleRewrite(t *testing.T) {
 	}
 }
 
+// The dispatch window on that same affordance (mg-9ccc).
+//
+// The block mg-4bb9 installed teaches the append and closes with "a note the
+// next actor must act on belongs in the ticket, because a {{.Worker}} reads the
+// ticket and not your outbox". That is true, and it expires at the spawn:
+// `spawn-polecat` takes the body as a `--body-file` snapshot (cmd/pogo/main.go's
+// spawnPolecatBodyFile, rendered into the worker's prompt file), so from that
+// moment the worker holds a copy and never reads the item again.
+//
+// So the same edit is two different operations either side of one instant, and
+// nothing distinguishes them at the call site: the edit exits 0, `mg show`
+// renders the new text, and a dispatched worker proceeds on the old. pm-onethird
+// found it on mg-409a — re-scoped at 14:05, dispatched moments earlier when its
+// dependency cleared — and caught it only because it happened to notice the item
+// was already claimed as it wrote. It mailed p409a directly, which was correct
+// and required already believing the window exists.
+//
+// The remedy is documentary because the defect is a false belief rather than a
+// missing mechanism: the mail channel works and is the intended path. What this
+// test pins is that the belief is corrected where it is formed — in the three
+// prompts whose agents edit bodies they did not just author — and that the
+// correction names the dispatch tell (`claimed`, reliable since mg-7254's
+// claim-at-spawn) and the way to get the agent name to mail.
+//
+// It also pins the direction the ticket ruled OUT, which is the half no prose
+// protects: a worker must not re-read its own item body mid-task. That would
+// make the body a live instruction channel and reintroduce the mid-flight scope
+// change that stood a worker down. The pin is a rule rather than a spelling
+// list — a `templates/` line that both names the worker's own id via `mg show`
+// and reaches for a body flag or the `.body` field — so it survives rephrasing
+// while leaving the legitimate uses alone (a status grep reads no body, and
+// polecat-triage.md confirming its own append mentions no body flag).
+func TestPromptsSayABodyEditAfterDispatchReachesNobody(t *testing.T) {
+	// The same three files mg-4bb9 scoped: the agents that edit an item
+	// somebody else's worker may already be holding.
+	for _, path := range []string{
+		"prompts/mayor.md",
+		"prompts/pm/pm-template.md",
+		"prompts/crew/doctor.md",
+	} {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+
+		for _, want := range []string{
+			// The window, and the mechanism that closes it. Without the
+			// snapshot there is no window to describe.
+			"true up to the spawn",
+			"a `--body-file` **snapshot**",
+			"never re-reads the item",
+			// Why it needs saying at all: the failure looks like success.
+			"indistinguishable from outside",
+			// The instance, so the claim is not folklore.
+			"mg-409a",
+			// The dispatch tell, and why it can be trusted now.
+			"mg-7254",
+			// The name to mail. A correction that says "mail the worker"
+			// without saying how to find it leaves the reader guessing at a
+			// name, and `mg mail send` refuses an unknown one (mg-d639).
+			"select(.work_item_id==",
+			// And the same defect one level down, in the remedy's own
+			// instruments: `mg show` errors to stderr and exits 3, so
+			// `jq -r .status` prints nothing and exits 0; `pogo agent list
+			// --json` errors to STDOUT, so the jq exits 5. Either way the
+			// reader sees an empty line, and "nobody to tell" is the wrong
+			// conclusion from one of the two.
+			"An empty answer from either line is two answers",
+			// Do BOTH: the body is the human record, the mail is the only
+			// thing that reaches the worker.
+			"append the change to the body **and** mail it to that name",
+			// The ruled-out direction, stated where the editors will read it.
+			"Do not ask for the {{.Worker}} to re-read its item mid-task",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing post-dispatch body-edit guidance %q (mg-9ccc)", path, want)
+			}
+		}
+	}
+
+	// Scope pin, in the direction the ticket ruled out. A worker reads its own
+	// item for STATUS (step 1's `| grep '^Status:'`) and, in the triage case,
+	// to confirm its own append. Neither reads the body as instructions, and
+	// nothing else in a worker's protocol may start to.
+	workers, err := defaultPrompts.ReadDir("prompts/templates")
+	if err != nil {
+		t.Fatalf("read prompts/templates: %v", err)
+	}
+	if len(workers) == 0 {
+		t.Fatal("prompts/templates is empty — this pin would pass vacuously")
+	}
+	for _, e := range workers {
+		path := "prompts/templates/" + e.Name()
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			if !strings.Contains(line, "mg show {{.Id}}") {
+				continue
+			}
+			if strings.Contains(line, ".body") || strings.Contains(line, "--body") {
+				t.Errorf("%s:%d reads its OWN item's body (%q) — that makes the "+
+					"work item a live instruction channel and reintroduces the "+
+					"mid-flight scope change mg-9ccc ruled out. A worker's task is "+
+					"the snapshot it was dispatched with; changes arrive by MAIL",
+					path, i+1, strings.TrimSpace(line))
+			}
+		}
+		// And the editors' block stays out of the worker prompts, on the same
+		// boundary mg-4bb9 and mg-61f4 drew: a worker files no holds and edits
+		// no bodies, so it has no use for the dispatch-window rule either.
+		if strings.Contains(string(data), "true up to the spawn") {
+			t.Errorf("%s: gained the post-dispatch body-edit block, but a worker "+
+				"edits nobody's body — scope was mayor + PM + doctor (mg-9ccc)", path)
+		}
+	}
+}
+
 // Log paths in a diagnostic section (mg-f766).
 //
 // mayor.md's "Refinery logs" section sent readers to

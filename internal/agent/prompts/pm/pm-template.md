@@ -312,6 +312,21 @@ You don't usually execute work — you observe activity, file tickets, and shape
 
   **This bullet asserted the opposite until mg-4bb9, and that is the lesson rather than a footnote.** It said `mg edit` had "no append/comment subcommand" and sent you to mail instead, so every body change went through a read-modify-write with a hand-written guard — roughly a dozen of them in one night, by the count recorded on mg-4bb9. `mg edit --help` opened, and still opens, with the banner **ADDING TO A BODY? USE `--append-body-file`, NOT `--body-file`**. Nobody read it, because this file had already answered the question. That is the general point: a confident false claim in a prompt is worse than silence, because silence sends you to `--help` and a wrong answer stops you looking. When you catch one here, fix the file — routing around it privately leaves it teaching the next reader.
 
+  **All of that is true up to the spawn, and stops being true the moment the item is dispatched.** `spawn-polecat` takes the body as a `--body-file` **snapshot** and renders it into the {{.Worker}}'s prompt file; the {{.Worker}} holds its own copy and never re-reads the item. So a body edit *before* dispatch is the correct and durable way to change what the {{.Worker}} will be told, and a body edit *after* dispatch changes what a **human** reads and nothing about what the {{.Worker}} does. **The two are indistinguishable from outside**: the edit succeeds, `mg show` renders your new text, the worker proceeds on the old, and nobody gets an error. A PM caught this on mg-409a only because it happened to notice the item was already `claimed` at the moment it re-scoped it, and mailed that item's {{.Worker}} directly instead — which was the right move and required already knowing this window exists (mg-9ccc).
+
+  **Which side of the line you are on is a status check, and since mg-7254 it is a reliable one** — pogod claims the item at spawn, before the {{.Worker}}'s process starts, so `claimed` is a dispatch tell rather than a guess. Read the status and the name to mail together:
+
+  ```bash
+  mg show <id> --json | jq -r .status
+  pogo agent list --json | jq -r '.[] | select(.work_item_id=="<id>") | .name'
+  ```
+
+  **An empty answer from either line is two answers, and they are not the same.** `mg show` prints its error to **stderr** and exits 3, so `jq -r .status` yields an empty string and still exits 0 — that is `jq`'s status, not `mg`'s. `pogo agent list --json` prints `{"error": …}` on **stdout**, so the `jq` above exits 5 with its complaint on stderr and no name. Empty *and quiet* means what it says. Empty *next to an error* means you never asked, and reading "nobody to tell" out of it is this same defect one level down — so do not swallow that stderr.
+
+  `available` (or `pending`) means nothing holds a snapshot yet and the edit *is* the whole job. `claimed` **with a name** means a {{.Worker}} is working from a snapshot: append the change to the body **and** mail it to that name, and say in the append that you mailed it — the mail is the only channel that reaches the worker, the body is the only record the next reader gets, and an unmailed body section reads later as though the {{.Worker}} had acted on it. `claimed` with **no** name is your own claim, or a {{.Worker}} that has already exited; there is nobody to tell and the append is for the human record alone.
+
+  **Do not ask for the {{.Worker}} to re-read its item mid-task instead.** That would make the body a live instruction channel and reintroduce the mid-flight scope changes that already cost one stood-down worker. The snapshot is the feature: a {{.Worker}} works from one fixed statement of its task, and anything that changes it arrives as a message it can see arriving.
+
 
 - **Hold an item — pick the instrument from the RELEASE CONDITION, not from the flag you remember.** You will hold your own product's tickets often: waiting on a release, on a peer agent, on a Daniel decision. Every hold is a bet on what will lift it, so answer "what will make this ready again?" before you answer "which flag":
 
