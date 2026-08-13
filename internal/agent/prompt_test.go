@@ -5218,6 +5218,21 @@ func TestPromptsTeachAppendBodyRatherThanWholesaleRewrite(t *testing.T) {
 			// Property 3: exempt from the workflow-tag refusal a full
 			// rewrite hits on an item already carrying the tag.
 			"exempt from the workflow-tag refusal",
+			// Property 2 read the other way round (mg-36da). The append is
+			// safe BECAUSE it cannot author the leading heading, so a
+			// correction lands in the body and leaves the title asserting
+			// the refuted claim — and `mg list` shows titles only, so a
+			// `done` item's title is the whole of what the next reader
+			// gets. Four items needed retitling on 2026-08-13 and one
+			// propagated: mg-8074's worker repeated mg-b6bd's refuted
+			// premise verbatim, citing mg-b6bd, hours after that body
+			// refuted it. This is a prompt line and deliberately NOT a
+			// detector — judging whether a title "still asserts" something
+			// is the expensive half, and the cheap half is the person
+			// already editing the body.
+			"When you append a correction, read the title.",
+			"retitle in the same edit",
+			`mg edit <id> --title="<what is true now>" --append-body-file -`,
 			// The rewrite is reserved, not forbidden — and when it is
 			// genuinely the shape, it names the version it read.
 			"Reserve `--body-file` for a genuine full rewrite",
