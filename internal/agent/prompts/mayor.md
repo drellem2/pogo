@@ -106,6 +106,18 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
   - **It lands below the existing prose, so it can never author the body's leading `# ` heading** — and that heading *is* the title, the only place the title is stored. An append therefore cannot rename an item, and needs no `--title` to avoid doing so. A `--body`/`--body-file` whose first heading differs from the current title is a rename, and is refused (exit 4) unless you also pass `--title`.
   - **It is exempt from the workflow-tag refusal** on an item that already carries the tag, where a full rewrite is not: it prints a note on stderr rather than refusing. (A carrier block *inside* the appended text is still refused.)
 
+  **When you append a correction, read the title.** A correction lands in the body; `mg list` shows titles only, and a `done` item's title is what the next reader gets. If the title still asserts what you just corrected, retitle in the same edit. The second property above is why this has to be said rather than going without saying: the append is safe *because* it cannot author the leading heading, so it leaves the title asserting whatever it asserted before — silently, with exit 0. `--title` composes with `--append-body-file` in one invocation, and on its own it rewrites the `# ` heading line in place without touching another byte of the body.
+
+  ```bash
+  mg edit <id> --title="<what is true now>" --append-body-file - <<'EOF'
+  ## 2026-08-13 21:05Z — correction
+
+  <what the title asserted, and what is actually true>
+  EOF
+  ```
+
+  Four items needed exactly this on 2026-08-13, and one of them propagated: mg-8074's {{.Worker}} repeated mg-b6bd's refuted premise verbatim, hours after mg-b6bd's own body had refuted it, and cited mg-b6bd as the source. It was being careful — the claim went into its *unverified* list, with a citation. Being careful is what carried it, because a cited premise reads as sourced and the source was a title.
+
   Quote the heredoc. `<<'EOF'` passes the bytes through untouched; an unquoted `<<EOF` expands backticks, `$VAR` and `$(cmd)` before mg ever sees them, exactly as `--body="..."` does — which is why `--body` is the inline-only shortcut for bodies with no shell metacharacters in them.
 
   Reserve `--body-file` for a genuine full rewrite, and when you do one, name the version you read:
