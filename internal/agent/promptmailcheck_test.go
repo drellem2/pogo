@@ -134,8 +134,28 @@ func TestDoctorPromptRegistersItsOwnMailCheckAtTenMinutes(t *testing.T) {
 		}
 	}
 
-	if strings.Count(body, "--id mail-check-") != 1 {
-		t.Errorf("crew/doctor.md should register exactly one mail-check schedule, found %d",
-			strings.Count(body, "--id mail-check-"))
+	// Exactly one mail-check registered FOR ITSELF. Extra self-cadences are the
+	// hazard this counts; the prompt says "do not add additional schedules
+	// beyond this one".
+	if n := strings.Count(body, "--id mail-check-doctor"); n != 1 {
+		t.Errorf("crew/doctor.md should register exactly one mail-check schedule for itself, found %d", n)
+	}
+	if n := strings.Count(body, "pogo schedule doctor "); n != 1 {
+		t.Errorf("crew/doctor.md addresses %d schedule registrations to `doctor`, want exactly 1 — "+
+			"a second self-schedule under a different --id would slip past the count above", n)
+	}
+	// Since mg-477a doctor also RE-REGISTERS a mail-check for an agent it found
+	// deaf, so the corpus legitimately carries other `--id mail-check-` strings.
+	// Each one must be a placeholder addressed to some other agent; a concrete
+	// id that is not `doctor` would be a schedule quietly delivered elsewhere.
+	for _, occ := range strings.Split(body, "--id mail-check-")[1:] {
+		suffix := occ
+		if i := strings.IndexAny(suffix, " \n\t`"); i >= 0 {
+			suffix = suffix[:i]
+		}
+		if suffix != "doctor" && suffix != "<name>" {
+			t.Errorf("crew/doctor.md registers `--id mail-check-%s`: a mail-check keyed on "+
+				"anything but `doctor` or the `<name>` placeholder is delivered to someone else", suffix)
+		}
 	}
 }
