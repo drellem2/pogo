@@ -3072,6 +3072,131 @@ SPAWN_BODY="$(sed -n '/^spawn_snapshot() {/,/^}/p;/^report_spawns() {/,/^}/p;/^f
     && pass "the spawn recorder never invokes the just-installed pogo binary — the artifact under suspicion" \
     || fail "spawn recorder depends on the deployed binary it is meant to observe"
 
+# --- launchd activation reporting (mg-b9e7) --------------------------------
+# classify_activation is pure: it takes an exit status and a first line and says
+# which of the five outcomes happened. The cases that matter are the two that a
+# careless reader collapses — an OLD BINARY (nonzero, no marker) must not read as
+# drift, and it must not read as clean either.
+
+[ "$(classify_activation 0 'activation: ACTIVATED — all 4 managed launchd job(s) match')" = "ACTIVATED" ] \
+    && pass "classify_activation: marker+0 is ACTIVATED" || fail "classify_activation ACTIVATED"
+[ "$(classify_activation 1 'activation: DRIFTED — 2 of 4 managed launchd job(s) disagree')" = "DRIFTED" ] \
+    && pass "classify_activation: marker+1 is DRIFTED" || fail "classify_activation DRIFTED"
+[ "$(classify_activation 3 'activation: UNKNOWN — 1 of 4 are NOT INSTALLED')" = "UNKNOWN" ] \
+    && pass "classify_activation: marker+3 is UNKNOWN" || fail "classify_activation UNKNOWN"
+
+# THE OLD-BINARY CASE, which is mg-b9e7's second gap. cobra's own output for a
+# command that does not exist, verbatim. Nonzero, so an exit-status-only reader
+# calls it a failure of the WRONG thing; there is no marker, so this one refuses
+# to name a verdict at all.
+COBRA_UNKNOWN='Error: unknown command "check-activation" for "pogo"'
+[ "$(classify_activation 1 "$COBRA_UNKNOWN")" = "NO_VERDICT" ] \
+    && pass "classify_activation: an old binary's 'unknown command' is NO_VERDICT, not DRIFTED (both are exit 1)" \
+    || fail "classify_activation read an unknown-command error as a verdict: $(classify_activation 1 "$COBRA_UNKNOWN")"
+[ "$(classify_activation 0 '')" = "NO_VERDICT" ] \
+    && pass "classify_activation: silence with exit 0 is NO_VERDICT, never a clean box" || fail "classify_activation empty"
+
+# The word and the status are two renderings of one value in
+# cmd/pogo/checkactivation.go. If they disagree, something in between is
+# rewriting one of them and NEITHER can be trusted — that is its own outcome,
+# not a tie broken toward the friendlier reading.
+[ "$(classify_activation 0 'activation: DRIFTED — 2 of 4 disagree')" = "MISMATCH" ] \
+    && pass "classify_activation: DRIFTED reported with exit 0 is a MISMATCH, not a pass" || fail "classify_activation mismatch 0"
+[ "$(classify_activation 1 'activation: ACTIVATED — all match')" = "MISMATCH" ] \
+    && pass "classify_activation: ACTIVATED reported with exit 1 is a MISMATCH, not a drift" || fail "classify_activation mismatch 1"
+
+# report_activation: the impure half. alert_external is stubbed so no mail is
+# sent and so the escalation is OBSERVABLE — an alert that only happens in
+# production is an alert nobody has ever seen work.
+ALERTS="$(mktemp)"
+alert_external() { printf '%s\n' "$1|$2" >> "$ALERTS"; return 0; }
+DEPLOY_REF="test-ref"; MAIN="0000000000"
+
+OUT="$(POGO_GOBIN=/nonexistent-activation-probe report_activation 2>&1)"; RC=$?
+{ [ "$RC" = 0 ] && grep -q 'SKIPPED' <<<"$OUT" && ! grep -q 'ACTIVATED' <<<"$OUT"; } \
+    && pass "report_activation skips (rc 0) when there is no pogo CLI, and does not call the absence clean" \
+    || fail "missing CLI: rc=$RC out=$OUT"
+
+ACT_STUB="$(mktemp -d)"
+mk_activation_stub() {  # BODY_EXIT, then the stdout on stdin
+    cat > "$ACT_STUB/pogo" <<STUB
+#!/bin/sh
+cat <<'BODY'
+$(cat)
+BODY
+exit $1
+STUB
+    chmod +x "$ACT_STUB/pogo"
+}
+
+: > "$ALERTS"
+mk_activation_stub 0 <<'BODY'
+activation: ACTIVATED — all 4 managed launchd job(s) on this box match the plist this build renders
+  build: pogo 0.10.0 (abc1234, branch=main, source=ldflags)
+BODY
+OUT="$(POGO_GOBIN="$ACT_STUB" report_activation 2>&1)"; RC=$?
+{ [ "$RC" = 0 ] && grep -q 'ACTIVATED' <<<"$OUT" && ! grep -q 'ERROR' <<<"$OUT" && [ ! -s "$ALERTS" ]; } \
+    && pass "report_activation: a clean box logs quietly and mails nobody" \
+    || fail "clean box: rc=$RC alerts=$(cat "$ALERTS") out=$OUT"
+
+: > "$ALERTS"
+mk_activation_stub 1 <<'BODY'
+activation: DRIFTED — 2 of 4 managed launchd job(s) disagree with the plist this build renders
+  build: pogo 0.10.0 (abc1234, branch=main, source=ldflags)
+  FIRES    com.pogo.deploy — installed plist FIRES AT DIFFERENT TIMES than this build expects
+BODY
+OUT="$(POGO_GOBIN="$ACT_STUB" report_activation 2>&1)"; RC=$?
+{ [ "$RC" = 0 ] && grep -q 'DRIFTED' <<<"$OUT" && grep -q 'ERROR' <<<"$OUT" && grep -q 'com.pogo.deploy' <<<"$OUT" \
+    && grep -q '^launchd_activation_drift|' "$ALERTS"; } \
+    && pass "report_activation: DRIFTED is loud, carries the per-job detail, ESCALATES, and still does not fail the deploy" \
+    || fail "drift: rc=$RC alerts=$(cat "$ALERTS") out=$OUT"
+
+# UNKNOWN is loud in the transcript and silent on the wire. A plist deliberately
+# left uninstalled sits in UNKNOWN indefinitely, and a nightly alert nothing can
+# clear is how a check gets filtered.
+: > "$ALERTS"
+mk_activation_stub 3 <<'BODY'
+activation: UNKNOWN — 1 of 4 managed launchd job(s) are NOT INSTALLED
+  ABSENT   com.pogo.reclaim — not installed
+BODY
+OUT="$(POGO_GOBIN="$ACT_STUB" report_activation 2>&1)"; RC=$?
+{ [ "$RC" = 0 ] && grep -q 'UNKNOWN' <<<"$OUT" && grep -q 'ERROR' <<<"$OUT" && [ ! -s "$ALERTS" ]; } \
+    && pass "report_activation: UNKNOWN is loud in the transcript and does not mail (an unclearable nightly alert gets filtered)" \
+    || fail "unknown: rc=$RC alerts=$(cat "$ALERTS") out=$OUT"
+
+# THE REMEDY'S OWN DEFECT. The detector ships in the binary it audits, so a build
+# predating it answers with cobra's unknown-command error — nonzero, no marker.
+# That must be reported as ITS OWN finding: not as drift (the exit codes
+# collide), and above all not as clean.
+: > "$ALERTS"
+mk_activation_stub 1 <<'BODY'
+Error: unknown command "check-activation" for "pogo"
+BODY
+OUT="$(POGO_GOBIN="$ACT_STUB" report_activation 2>&1)"; RC=$?
+{ [ "$RC" = 0 ] && grep -q 'NO VERDICT' <<<"$OUT" && ! grep -q 'DRIFTED' <<<"$OUT" \
+    && grep -q '^launchd_activation_drift|' "$ALERTS"; } \
+    && pass "report_activation: a binary too old to carry the check is reported as NO VERDICT and escalated — never as drift, never as clean" \
+    || fail "old binary: rc=$RC alerts=$(cat "$ALERTS") out=$OUT"
+
+rm -rf "$ACT_STUB" "$ALERTS"
+unset -f alert_external mk_activation_stub
+
+# Wiring, for the same reason report_supervision has the assertion: the reader
+# can be perfect while nothing ever calls it.
+grep -q '^    report_activation$' "$HERE/pogo-self-deploy" \
+    && pass "cmd_redeploy actually calls report_activation — the nightly reading is wired, not just written" \
+    || fail "report_activation is defined but never called from cmd_redeploy"
+
+# It must run AFTER the install+restart. The whole reason a nightly can be
+# trusted with this question is that the binary it asks is a VERIFIED build from
+# main; asked before, it would report the OUTGOING build's expectation (mg-b9e7
+# gap 3), which is how 2026-08-07's "fix" reinstalled the drift.
+ACT_LINE="$(grep -n '^    report_activation$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
+VERIFY_LINE="$(grep -n '^    verify_orchestration || exit 11$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
+{ [ -n "$ACT_LINE" ] && [ -n "$VERIFY_LINE" ] && [ "$ACT_LINE" -gt "$VERIFY_LINE" ]; } \
+    && pass "report_activation runs after the install is verified — it asks the build this deploy produced, which is the only build whose expectation is right" \
+    || fail "report_activation at line ${ACT_LINE:-?} does not follow verify_orchestration at line ${VERIFY_LINE:-?}"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)
