@@ -22,9 +22,9 @@ func TestParityRemedy_NearCapDoesNotDemandAHook(t *testing.T) {
 	if !strings.Contains(got, "ADD A HOOK IS NOT AVAILABLE FOR ALL OF THESE") {
 		t.Errorf("remedy does not state that hooks do not fit:\n%s", got)
 	}
-	for _, want := range []string{"FOLD", "RE-ROUTE"} {
+	for _, want := range []string{"FOLD", "SUB-INDEX"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("remedy omits the zero-cost remedy %q — the only ones available at this size:\n%s", want, got)
+			t.Errorf("remedy omits the zero-line remedy %q — the only ones available at this size:\n%s", want, got)
 		}
 	}
 	// The fold must be named BEFORE any surviving mention of spending hooks:
@@ -83,17 +83,16 @@ func TestParityRemedy_StatesTheAsymmetry(t *testing.T) {
 	}
 }
 
-// TestParityRemedy_WithHeadroomStillOffersTheZeroCostRemedies. Folding and
-// re-routing are not merely emergency measures: a note that belongs in an
-// agent-scoped index was misfiled, and folding is often the better record even
-// with room to spare. Offering them only under pressure would teach that they
-// are a compromise.
-func TestParityRemedy_WithHeadroomStillOffersTheZeroCostRemedies(t *testing.T) {
+// TestParityRemedy_WithHeadroomStillOffersTheZeroLineRemedies. Folding and
+// sub-indexing are not merely emergency measures: folding is often the better
+// record even with room to spare. Offering them only under pressure would teach
+// that they are a compromise.
+func TestParityRemedy_WithHeadroomStillOffersTheZeroLineRemedies(t *testing.T) {
 	got := ParityRemedy(2, 9000, 200)
 	if !strings.Contains(got, "so they fit") {
 		t.Errorf("remedy does not report that the hooks fit when they do:\n%s", got)
 	}
-	for _, want := range []string{"ADD A HOOK", "FOLD", "RE-ROUTE"} {
+	for _, want := range []string{"ADD A HOOK", "FOLD", "SUB-INDEX"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("remedy omits %q even with headroom:\n%s", want, got)
 		}
@@ -253,5 +252,92 @@ func TestHeadroomChars_TracksTheAutoInjectCap(t *testing.T) {
 	over := Check("MEMORY.md", []byte(strings.Repeat("a", HarnessAutoInjectCapChars+500)))
 	if over.HeadroomChars() >= 0 {
 		t.Errorf("HeadroomChars = %d on an over-cap index, want negative", over.HeadroomChars())
+	}
+}
+
+// TestParityRemedy_DoesNotRecommendAStoreNothingLoads is a REGRESSION GUARD on a
+// withdrawn recommendation, not a wording preference (mg-d97f).
+//
+// This remedy used to offer "RE-ROUTE — move a note that belongs to a
+// less-pressured index (an agent-scoped dir rather than the shared one)". On the
+// box it shipped against, those per-agent dirs had stopped being loaded on
+// 2026-07-07 and 153 notes sat in them unread for five weeks — the condition
+// peragent.go exists to detect. Following the advice would have moved notes into
+// a directory nothing reads: the parity count would have gone down, the size
+// check would have gone green, every number would have improved, and the content
+// would have been unreachable. That is a loud enumerable problem converted into a
+// silent one, arriving through the remedy meant to avoid it.
+//
+// "Less pressured" is not evidence that a destination is loaded. An unpressured
+// index is exactly what a store with no readers looks like, so the phrase selects
+// FOR the failure. The guard is on the phrasing because the phrasing is the
+// instruction.
+//
+// It keys on the UPPERCASE label because that is how this file marks a remedy it
+// is offering — ADD A HOOK, FOLD, SUB-INDEX — while the prose withdrawal below
+// has to be free to name what it is withdrawing. A guard that banned the words
+// outright would forbid saying why, which is the part a reader arriving at the
+// constrained branch most needs.
+func TestParityRemedy_DoesNotRecommendAStoreNothingLoads(t *testing.T) {
+	for _, got := range []string{ParityRemedy(2, 9000, 200), ParityRemedy(6, 300, 200)} {
+		if strings.Contains(got, "RE-ROUTE") {
+			t.Errorf("remedy still OFFERS a re-route to another index; the destination it used to name had no reader:\n%s", got)
+		}
+	}
+	// The constrained branch is where the withdrawal has to be stated rather
+	// than merely omitted: that is the branch a reader reaches when the hooks do
+	// not fit, which is exactly when re-routing somewhere quieter looks like the
+	// answer.
+	short := ParityRemedy(6, 300, 200)
+	if !strings.Contains(short, "must be one something LOADS") {
+		t.Errorf("constrained remedy does not state the constraint a destination must meet:\n%s", short)
+	}
+}
+
+// TestParityRemedy_NamesTheOnlyRemedyThatScales. Hooks and folds are per-note; a
+// sub-index is per-set. When 42 notes need reachability and there is room for 13
+// hooks, the arithmetic only closes one way, and a remedy list that does not say
+// so hands the reader a shortfall with no exit.
+func TestParityRemedy_NamesTheOnlyRemedyThatScales(t *testing.T) {
+	got := ParityRemedy(42, 1400, 107)
+	if !strings.Contains(got, "SUB-INDEX") {
+		t.Fatalf("remedy omits the sub-index at a count no number of hooks can cover:\n%s", got)
+	}
+	if strings.Index(got, "SUB-INDEX") > strings.Index(got, "FOLD") {
+		t.Errorf("fold is offered before the sub-index at a count where folding 42 notes by hand is the expensive answer:\n%s", got)
+	}
+}
+
+// TestParityRemedy_FoldIsNotSoldAsFree. "Zero index lines" is the sentence that
+// makes folding the rational move under a margin policy, and it is true — but a
+// reader who stops there folds every time and never sees the aggregate. On the
+// corpus this ships against, a night of individually-correct folds produced two
+// notes each LARGER than the whole 23,952-byte index that reaches them, and no
+// check counted it because the parity number goes DOWN when you fold.
+func TestParityRemedy_FoldIsNotSoldAsFree(t *testing.T) {
+	for _, got := range []string{ParityRemedy(1, 9000, 200), ParityRemedy(9, 100, 200)} {
+		if !strings.Contains(got, "FREE AGAINST THE INDEX, NOT FREE") {
+			t.Errorf("remedy recommends folding without stating where the cost lands:\n%s", got)
+		}
+	}
+}
+
+// TestFoldHostNote_FiresOnlyOnDisproportion. The host-size clause rides with the
+// fold advice rather than being its own check: it is not a defect, it is the
+// price of the remedy being recommended in the same sentence. So it must be
+// silent on an ordinary store, or it becomes noise attached to every parity warn.
+func TestFoldHostNote_FiresOnlyOnDisproportion(t *testing.T) {
+	if got := FoldHostNote("host.md", 900, 20000, 0); got != "" {
+		t.Errorf("host clause fired with no note larger than the index: %q", got)
+	}
+	if got := FoldHostNote("", 0, 20000, 3); got != "" {
+		t.Errorf("host clause fired with no note named: %q", got)
+	}
+	got := FoldHostNote("world-state-claims-decay.md", 30414, 23952, 2)
+	if !strings.Contains(got, "world-state-claims-decay.md") {
+		t.Errorf("host clause does not name the largest host:\n%s", got)
+	}
+	if !strings.Contains(got, "30414") || !strings.Contains(got, "23952") {
+		t.Errorf("host clause states the disproportion without the two numbers that show it:\n%s", got)
 	}
 }

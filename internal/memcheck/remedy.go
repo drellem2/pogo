@@ -42,10 +42,22 @@ import (
 //	ADD A HOOK   costs one index line. Viable only with headroom.
 //	FOLD         append the content to an already-hooked note and delete the
 //	             standalone file. Satisfies parity by removing the orphan
-//	             rather than by pointing at it. ZERO index cost.
-//	RE-ROUTE     move the note to a less-pressured index if it belongs to one
-//	             (an agent-scoped dir rather than the shared one). Zero cost to
-//	             the pressured file.
+//	             rather than by pointing at it. ZERO index cost — but NOT zero
+//	             cost; see foldCostsTheHost.
+//	SUB-INDEX    hook ONE secondary index from MEMORY.md and list the notes in
+//	             it. One line buys reachability for as many notes as it names —
+//	             28 of them, on the corpus this ships against.
+//
+// THE REMEDY THIS FILE USED TO NAME AND NO LONGER DOES: "re-route to a
+// less-pressured index (an agent-scoped dir rather than the shared one)". It was
+// wrong in the way this package exists to catch, and peragent.go is the proof —
+// the per-agent stores on the box this was written against had stopped being
+// loaded on 2026-07-07, and 153 notes sat in them unread for five weeks. Routing
+// a note there does not relieve the index; it deletes the note from recall while
+// every count improves. A re-route destination must be a store something LOADS,
+// and "less pressured" is not evidence of that — an unpressured index is exactly
+// what a store with no readers looks like. The sub-index above is the re-route
+// that survives the test, because it hangs off the index already being loaded.
 //
 // WHAT THIS FILE DELIBERATELY DOES NOT DO — suppress the parity finding near the
 // cap. That would reproduce the exact defect parity was built to catch: an
@@ -137,6 +149,30 @@ const AsymmetryNote = "INDEX LINES ARE CAPPED; NOTE BODIES ARE NOT. The cap meas
 // foldStandard is the acceptance test a fold must meet. It is stated wherever
 // folding is recommended because the obvious success criterion is the WRONG one,
 // and a fold judged by the wrong one is worse than leaving the orphan alone.
+// foldCostsTheHost is the sentence that keeps "zero index lines" from being read
+// as "zero cost". It is stated wherever folding is recommended because the
+// margin policy makes folding free and hooking expensive, so a reader following
+// the incentive folds every time and never sees the aggregate.
+//
+// MEASURED on the corpus this ships against, after a night of folds each taken
+// individually correctly: two notes had grown to 30,414 and 28,348 bytes against
+// a 23,952-byte MEMORY.md. Two notes each larger than the entire index that
+// reaches them. Nothing reported it, because no check counts host size and the
+// parity number goes DOWN when you fold.
+const foldCostsTheHost = "FOLDING IS FREE AGAINST THE INDEX, NOT FREE. The content still has to live somewhere, and it lands in the host: a reader arriving from a one-line hook now has to find the relevant section inside a larger note, and that cost grows with every later fold into the same host. Do not fold into a host that is already large — that case is precisely the note that deserved its own index line and was refused one, and it should be recorded as such rather than absorbed. The line cap and host bloat are the same pressure measured at two levels; relieving only the first is what produces notes bigger than the index that reaches them."
+
+// FoldHostNote renders the host-size clause for one index, or empty when nothing
+// there is out of proportion. Reported alongside the fold advice rather than as
+// its own check: it is not a defect, it is the price of the remedy being
+// recommended in the same breath.
+func FoldHostNote(fattest string, fattestBytes, indexBytes, overIndex int) string {
+	if overIndex <= 0 || fattest == "" {
+		return ""
+	}
+	return fmt.Sprintf("HOST SIZE ON THIS INDEX: %d note(s) are individually larger than the whole index that reaches them (largest: %s at %dB, against %dB of index). That is what repeated zero-line folding looks like from outside, and it is the reason to check the host before adding to it.",
+		overIndex, fattest, fattestBytes, indexBytes)
+}
+
 const foldStandard = "A fold is judged by REACHABILITY, not by the diff. The test is NOT 'the file is gone and the index did not grow' — it is 'a reader looking for this content arrives at it'. Choose the host by where a future reader would go looking, not by which note is topically nearest, and merge the content into the host's subject rather than appending it as an unrelated tail. A fold into a plausible-but-wrong host converts a LOUD, LOCAL problem (an orphan you can enumerate) into a SILENT one (content buried under a hook that does not advertise it), so a careless fold is worse than no fold. This is cheap in characters and expensive in judgement: schedule it, do not do it in passing."
 
 // neverDropTheHook is the instruction that closes off the cheap-diff escape. The
@@ -144,25 +180,27 @@ const foldStandard = "A fold is judged by REACHABILITY, not by the diff. The tes
 // smallest diff that turns a check green.
 const neverDropTheHook = "Do NOT resolve this by leaving a note unindexed to keep 'memory index size' green. That is the failure THIS axis exists to catch, and it reports as compliance: a green size check beside unreachable notes looks like a tidy directory."
 
-// ParityRemedy renders the remedy guidance for a parity defect: unreferenced
+// ParityRemedy renders the remedy guidance for a parity defect: unreachable
 // notes on an index with headroomChars characters left before the auto-inject
 // cap, where one more index line costs about lineCostChars.
 //
-// It names all three remedies in every case, because fold and re-route are
-// zero-cost and frequently the BETTER answer even with headroom to spare — a
-// note that belongs in an agent-scoped index was misfiled, not merely unhooked.
-// What the arithmetic changes is the ORDER and the framing: once the hooks
+// It names all three remedies in every case, because fold and sub-index are
+// zero-line and frequently the BETTER answer even with headroom to spare. What
+// the arithmetic changes is the ORDER and the framing: once the hooks
 // demonstrably do not fit, "add a hook for each" stops being offered as the
 // remedy and is stated plainly as unavailable, so the reader is not handed two
 // instructions that cannot both be followed.
-func ParityRemedy(unreferenced, headroomChars, lineCostChars int) string {
-	if unreferenced <= 0 {
+//
+// The remedy it does NOT name is a re-route to a less-pressured index. See the
+// header: that destination was measured and nothing loaded it.
+func ParityRemedy(unreachable, headroomChars, lineCostChars int) string {
+	if unreachable <= 0 {
 		return ""
 	}
 	if lineCostChars <= 0 {
 		lineCostChars = DefaultIndexLineCostChars
 	}
-	cost := unreferenced * lineCostChars
+	cost := unreachable * lineCostChars
 	fits := headroomChars / lineCostChars
 	if fits < 0 {
 		fits = 0
@@ -173,21 +211,23 @@ func ParityRemedy(unreferenced, headroomChars, lineCostChars int) string {
 	b.WriteString(" ")
 
 	if cost <= headroomChars {
-		fmt.Fprintf(&b, "Hooks for all %d would cost ~%d chars against %d chars of headroom (~%d chars/line, measured from this index's own hooks), so they fit. Three remedies, and the cheapest is not always the hook: (1) ADD A HOOK for each note that earns a permanent slot in every session's context; (2) FOLD a note whose content belongs with an already-hooked note — append it there and delete the standalone file, satisfying parity by removing the orphan rather than pointing at it, at ZERO index cost; (3) RE-ROUTE a note that belongs to a less-pressured index (an agent-scoped dir rather than the shared one), also at zero cost here. ",
-			unreferenced, cost, headroomChars, lineCostChars)
+		fmt.Fprintf(&b, "Hooks for all %d would cost ~%d chars against %d chars of headroom (~%d chars/line, measured from this index's own hooks), so they fit. Three remedies, and the cheapest is not always the hook: (1) ADD A HOOK for each note that earns a permanent slot in every session's context; (2) FOLD a note whose content belongs with an already-hooked note — append it there and delete the standalone file, satisfying parity by removing the orphan rather than pointing at it, at ZERO index cost; (3) SUB-INDEX — hook ONE secondary index from this file and list the notes in it, which costs one line however many notes it names. ",
+			unreachable, cost, headroomChars, lineCostChars)
 	} else {
-		fmt.Fprintf(&b, "ADD A HOOK IS NOT AVAILABLE FOR ALL OF THESE: %d hooks would cost ~%d chars against %d chars of headroom (~%d chars/line, measured from this index's own hooks) — room for about %d. Compaction will not fund the rest; on an already-compacted index one careful pass recovered 71 chars and five compressions recovered ~190, against ~%d to add one line. Use the ZERO-COST remedies first: (1) FOLD — append the content to an already-hooked note and delete the standalone file, satisfying parity by removing the orphan rather than pointing at it; (2) RE-ROUTE — move a note that belongs to a less-pressured index (an agent-scoped dir rather than the shared one). (3) Spend the remaining %d hook(s) on the notes that most need a permanent slot in every session's context. ",
-			unreferenced, cost, headroomChars, lineCostChars, fits, lineCostChars, fits)
+		fmt.Fprintf(&b, "ADD A HOOK IS NOT AVAILABLE FOR ALL OF THESE: %d hooks would cost ~%d chars against %d chars of headroom (~%d chars/line, measured from this index's own hooks) — room for about %d. Compaction will not fund the rest; on an already-compacted index one careful pass recovered 71 chars and five compressions recovered ~190, against ~%d to add one line. Use the ZERO-LINE remedies first: (1) SUB-INDEX — hook ONE secondary index from this file and list these notes in it; one line buys reachability for all of them, which is the only remedy here that scales with the count; (2) FOLD — append the content to an already-hooked note and delete the standalone file, satisfying parity by removing the orphan rather than pointing at it. (3) Spend the remaining %d hook(s) on the notes that most need a permanent slot in every session's context. A re-route to a less-pressured index is NOT on this list: the per-agent stores that used to be recommended for it had stopped being loaded, and 153 notes sat there unread for five weeks while every count improved. A destination must be one something LOADS. ",
+			unreachable, cost, headroomChars, lineCostChars, fits, lineCostChars, fits)
 	}
 
 	b.WriteString(foldStandard)
+	b.WriteString(" ")
+	b.WriteString(foldCostsTheHost)
 	b.WriteString(" ")
 	b.WriteString(neverDropTheHook)
 	return b.String()
 }
 
 // SizeParityTension renders the clause appended to a SIZE warn when the same
-// index also has unreferenced notes. Empty when it does not.
+// index also has UNREACHABLE notes. Empty when it does not.
 //
 // The size axis needs this because its own advice — compact — reads as "shrink,
 // by any means" to a reader who is simultaneously being told to add hooks. The
@@ -195,13 +235,13 @@ func ParityRemedy(unreferenced, headroomChars, lineCostChars int) string {
 // not be made. Naming the competition on BOTH sides is the point: a reader who
 // sees only one of the two warns must still be able to tell that the other
 // exists and that the obvious resolution is the wrong one.
-func SizeParityTension(unreferenced, lineCostChars int) string {
-	if unreferenced <= 0 {
+func SizeParityTension(unreachable, lineCostChars int) string {
+	if unreachable <= 0 {
 		return ""
 	}
 	if lineCostChars <= 0 {
 		lineCostChars = DefaultIndexLineCostChars
 	}
-	return fmt.Sprintf("PARITY ALSO FIRES ON THIS INDEX (%d unreferenced note(s)), and the two findings pull in opposite directions: reachability is bought with index lines, and index lines are what this budget is short of. Compacting to make room does not work at this size — a careful pass over an already-compacted index recovered 71 chars, and five compressions recovered ~190, against ~%d to add one line. So do NOT shrink this file by dropping hooks or by leaving the notes unindexed: that is the smallest diff that turns THIS check green, and it turns it green by abandoning reachability. See the 'memory index parity' warn for the zero-char remedies (fold, re-route) — note BODIES are free against this cap, only index LINES are scarce. If those do not apply, what is left is a corpus-policy question — which notes earn a permanent slot in every session's context and which should be found on demand — and that belongs to whoever owns the corpus, not to this checker.",
-		unreferenced, lineCostChars)
+	return fmt.Sprintf("PARITY ALSO FIRES ON THIS INDEX (%d UNREACHABLE note(s)), and the two findings pull in opposite directions: reachability is bought with index lines, and index lines are what this budget is short of. Compacting to make room does not work at this size — a careful pass over an already-compacted index recovered 71 chars, and five compressions recovered ~190, against ~%d to add one line. So do NOT shrink this file by dropping hooks or by leaving the notes unindexed: that is the smallest diff that turns THIS check green, and it turns it green by abandoning reachability. See the 'memory index parity' warn for the zero-line remedies (sub-index, fold) — note BODIES are free against this cap, only index LINES are scarce. If those do not apply, what is left is a corpus-policy question — which notes earn a permanent slot in every session's context and which should be found on demand — and that belongs to whoever owns the corpus, not to this checker.",
+		unreachable, lineCostChars)
 }
