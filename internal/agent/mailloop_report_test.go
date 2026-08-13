@@ -423,3 +423,77 @@ func TestHandleMailLoops_ServesTheFleetRead(t *testing.T) {
 		t.Error("decoded Unjudged = nil; the endpoint must put `\"unjudged\": []` on the wire rather than omitting it")
 	}
 }
+
+// TestMailLoopReport_ScannedMinusJudgedIsTheUnjudgedCount pins the arithmetic
+// the documented wire contract rests on (mg-4692).
+//
+// `pogo check-mailloops --help` now tells a machine reader that "scanned" -
+// "judged" is the honest unjudged COUNT in BOTH wire states, and that it
+// therefore never needs the `unjudged` field to get the number. That is the
+// line which makes the bare `null` sufficient rather than merely defensible —
+// and it is a claim about this function, not about the JSON tags. If a report
+// ever counted an agent in neither bucket, or in both, the arithmetic would
+// silently start under- or over-stating the set and the help text would be
+// wrong in the one case it exists to cover.
+//
+// The text render already computes the count this way in the nil branch
+// (renderCoverage), so this also pins the two renders to the same number.
+func TestMailLoopReport_ScannedMinusJudgedIsTheUnjudgedCount(t *testing.T) {
+	sandboxDesiredState(t, "pm-pogo", true)
+	writeCrewPrompt(t, "architect", true)
+	now := time.Now()
+
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	// Both judged branches must be represented: an agent WITH a loop and one
+	// WITHOUT. Judged is incremented in two separate places, and a count that
+	// only exercised one of them would not notice the other drifting.
+	reg.agents["pm-pogo"] = mailLoopCrewAgent("pm-pogo", now)
+	reg.agents["architect"] = mailLoopCrewAgent("architect", now)
+	// And each exclusion branch, so every path through the loop is counted.
+	cat := mailLoopCrewAgent("cat-4692", now)
+	cat.Type = TypePolecat
+	cat.PID = liveProcess(t)
+	reg.agents["cat-4692"] = cat
+	off := mailLoopCrewAgent("doctor", now)
+	off.PID = deadProcess(t)
+	reg.agents["doctor"] = off
+	ghost := mailLoopCrewAgent("ghost", now)
+	ghost.PID = liveProcess(t)
+	reg.agents["ghost"] = ghost
+
+	reg.SetMailCheckProvider(fakeMailChecks{have: map[string]bool{"crew-pm-pogo": true}})
+
+	rep, err := reg.MailLoopReport()
+	if err != nil {
+		t.Fatalf("MailLoopReport: %v", err)
+	}
+	if rep.Unjudged == nil {
+		t.Fatal("Unjudged = nil from a registry that computed the set")
+	}
+	if got, want := rep.Scanned-rep.Judged, len(*rep.Unjudged); got != want {
+		t.Errorf("scanned(%d) - judged(%d) = %d, but the report excluded %d agent(s) %+v — "+
+			"`check-mailloops --help` tells a machine reader to derive the unjudged count that way, "+
+			"and against an old daemon that arithmetic is the ONLY way to get it",
+			rep.Scanned, rep.Judged, got, want, *rep.Unjudged)
+	}
+	if rep.Scanned != 5 || rep.Judged != 2 {
+		t.Errorf("Scanned=%d Judged=%d, want 5 and 2 — the roster staged two judged agents "+
+			"(one green, one RED) and three exclusions, one per branch", rep.Scanned, rep.Judged)
+	}
+
+	// Positive control on the derivation itself: a report with NOTHING excluded
+	// must yield zero by the same arithmetic, or the sentence would be true only
+	// where it is uninteresting.
+	reg.agents = map[string]*Agent{"pm-pogo": mailLoopCrewAgent("pm-pogo", now)}
+	rep, err = reg.MailLoopReport()
+	if err != nil {
+		t.Fatalf("MailLoopReport: %v", err)
+	}
+	if rep.Scanned-rep.Judged != 0 || len(*rep.Unjudged) != 0 {
+		t.Errorf("full-coverage report: scanned(%d) - judged(%d) with unjudged=%+v, want 0 both ways",
+			rep.Scanned, rep.Judged, *rep.Unjudged)
+	}
+}

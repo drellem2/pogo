@@ -1590,61 +1590,9 @@ a quiet fleet is verified in the conditions where the metric was never wrong.
 	var cmdCheckMailLoops = &cobra.Command{
 		Use:   "check-mailloops",
 		Short: "Report agents with no mail-check schedule — they can be mailed but never woken (never acts)",
-		Long: `Report every agent that has NO mail-check schedule. Such an agent can be
-mailed, and nothing will ever wake it to read the mail — it is unreachable by
-every coordination path the fleet has, while looking perfectly healthy.
-
-This is the same judgement ` + "`pogo agent diagnose <name>`" + ` has reported as
-health=no_mail_loop since mg-de08, asked of every agent at once. That difference
-is the point. Until mg-032b the ONLY consumer was that per-agent subcommand,
-which takes the agent's NAME as an argument — and not knowing which name to type
-is exactly what a silently-unreachable agent looks like from the outside. The
-fault was detectable, never announced.
-
-pogod now also announces it on its heartbeat (see [deaf_watch] in
-docs/CONFIGURATION.md); this command is for when you want the answer now.
-
-WHO IS NOT JUDGED, deliberately:
-
-  polecats            they register their own loop at spawn (mg-e633) with
-                      their own escalation path (mg-6fe0); coverage is the
-                      witness, not this.
-  stopped agents      a configured agent that is not running is owed nothing.
-  not configured      no prompt for it on this machine's prompt tree, which was
-                      read: it is not one of ours.
-  unreadable prompts  the prompt tree could not be READ, so the agent could not
-                      be classified, and a false RED costs more than silence.
-                      This one is not a clean exclusion — it is a fault in the
-                      instrument, and the report says so in those words.
-
-Those exclusions mean a small "judged" count is normal. Every report NAMES the
-agents it did not judge, whatever the verdict — a clean bill of health over 2 of
-6 agents is a statement about 2 agents, and it says so. A report that judged
-NOTHING says so in as many words rather than printing an all-clear, and a pogod
-with no basis to judge at all is an ERROR here, not an empty list.
-
-The machine-readable reason in --json is one of "polecat", "not_running",
-"not_configured", "unreadable_prompts" — one per category above. Until mg-7b3f
-the last two were a single value, because agent.IsConfiguredAgent returned false
-for both and the reason set was deliberately kept no more precise than the code
-could back; this text named a distinction the code could not compute, which was
-this command's own reported defect one level in.
-
-Against a pogod older than this client the unjudged set is absent from the wire
-entirely. That is reported as UNKNOWN — never as zero — because "the daemon did
-not say" and "nobody was excluded" are opposite statements. Such a pogod also
-still sends "not_configured" for an unreadable prompt tree, and nothing on the
-wire distinguishes that from a real one: the report carries no version, so this
-client cannot detect the skew and does not pretend to. Read a "not_configured"
-from an old daemon as the old collapsed value; "pogo version" says which you
-have.
-
-REPORTS ONLY — it never registers a schedule, nudges, or restarts. Re-registering
-the loop on the agent's behalf would hide WHY it vanished, and that is the part
-worth knowing.
-
-Exit status is 0 when every judged agent has a loop, 1 when any agent is
-unreachable.`,
+		// Body in checkmailloops.go, where a test can hold the `--json`
+		// contract it states against the shape agent.MailLoopReport marshals.
+		Long: checkMailLoopsLong,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			rep, err := client.MailLoopReport()

@@ -127,6 +127,23 @@ type MailLoopExclusion struct {
 // commits behind main. The pointer makes "unknown" unsayable as zero, and the
 // tag carries no `omitempty` so a report that judged everything still puts
 // `"unjudged": []` on the wire (the shape internal/staleness already ships).
+//
+// # And why the null does not explain itself
+//
+// The null stays BARE: no `unjudged_reason`, no coverage object beside it. The
+// asymmetry drellem2/pogo#127's review named — the text render prints a
+// sentence, the JSON prints a null — is prose and advice, not data. Scanned and
+// Judged are sent by every daemon version, so the COUNT is already derivable on
+// the wire by the same arithmetic renderCoverage uses; what `null` withholds is
+// exactly what `null` means. The ruling (mg-4692) is that this is paid for in
+// DOCUMENTATION, and the place it is paid is `pogo check-mailloops --help` —
+// where a machine reader looks — not here, where no consumer does. See
+// cmd/pogo/checkmailloops.go for the shipped text and the reasoning; a test
+// holds that text against the bytes this struct marshals.
+//
+// The ruling is priced against there being exactly TWO wire states. A daemon
+// that reported the set PARTIALLY would be a third, `null` vs `[]` would stop
+// carrying the distinction, and the shape question would be live again.
 type MailLoopReport struct {
 	Now      time.Time            `json:"now"`
 	Scanned  int                  `json:"scanned"`
