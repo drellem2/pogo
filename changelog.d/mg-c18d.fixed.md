@@ -26,17 +26,25 @@
   family like `wedge_watch_*` is a jq of the output and never a flag — asking
   for `--type=wedge_watch_` returns a clean empty that reads like health.
 
-- **doctor's pogod-log recipe derives the path instead of grepping a literal,
-  four months late.** `7082121` gave both `mayor.md` and `doctor.md` the pinned
-  `~/Library/Logs/pogo/pogod.log`; `e846f2a` replaced mayor's with a `log=$(...)`
-  derivation and never touched doctor, which kept `grep -A1 StandardOutPath
-  "$plist"   # today: <literal>` — prose saying *derive it*, one line above a
-  command saying *hardcode it*. Both halves were correct on the day, which is
-  why nothing caught it. `TestPromptsDoNotAssertADeadLogPath` previously
-  asserted the ingredients (`StandardOutPath`, the literal, the `journalctl`
-  fallback) and passed on the broken form; it now pins the derivation itself and
-  rejects any command line that greps the literal, in **both** prompts. A new
-  `TestPromptsThatEmitEventsAreRoutedBackToReadThem` pins the read-back route.
-  Prompt changes have no automatic path onto disk — `pogo agent prompt install`
-  plus an agent restart is still required before doctor runs the new recipe
-  (mg-b6bd).
+- **doctor's pogod-log recipe derives the path instead of grepping a literal.**
+  `7082121` (2026-07-30) gave both `mayor.md` and `doctor.md` the same pinned
+  `~/Library/Logs/pogo/pogod.log`; `e846f2a` (2026-08-13) replaced mayor's with
+  a `log=$(...)` derivation and left doctor behind **the same day**, still
+  reading `grep -A1 StandardOutPath "$plist"   # today: <literal>` — prose
+  saying *derive it*, one line above a command saying *hardcode it*. Both
+  halves were correct on the day, which is why six further edits to `doctor.md`
+  on 2026-08-13 all read past the block.
+
+- **The guidance is now held by test rather than by care.**
+  `TestPromptsDoNotAssertADeadLogPath` asserted the *ingredients*
+  (`StandardOutPath`, the literal, the `journalctl` fallback) and passed on the
+  broken form; it now pins the derivation itself and rejects any **runnable**
+  line naming the literal, in both prompts. A new
+  `TestPromptsThatEmitEventsAreRoutedBackToReadThem` requires a prompt that
+  emits lifecycle events to carry a `pogo events list` line that reads them
+  back, and rejects a `POGO_HOME` re-derivation on any runnable line. Both of
+  those guards distinguish a path that is **quoted** — as today's reading, or
+  as a snippet being refused — from one that is **used**, which is the
+  distinction the fix itself rests on. Prompt changes have no automatic path
+  onto disk: `pogo agent prompt install` plus an agent restart is still
+  required before doctor runs the new recipe (mg-b6bd).

@@ -218,9 +218,12 @@ log=$(grep -A1 StandardOutPath "$plist" | sed -n 's:.*<string>\(.*\)</string>.*:
 echo "$log"                         # today: ~/Library/Logs/pogo/pogod.log
 grep <pattern> "$log"
 #    The grep reads "$log", not a path written here, and that is the entire
-#    point of the two lines above it (mg-7537). This file kept the literal on
-#    the grep line for four months after mayor.md stopped doing so, because a
-#    literal that is correct on the day it is written breaks no test (mg-c18d).
+#    point of the two lines above it (mg-7537). 7082121 pinned the literal in
+#    BOTH prompts on 2026-07-30; e846f2a derived mayor.md's on 2026-08-13 and
+#    left this file behind the SAME DAY. doctor.md was edited six times that
+#    day — one of them after e846f2a — and every one read straight past this
+#    block. A literal that is correct on the day it is written breaks no test,
+#    and is not what a reader is looking at when they edit (mg-c18d).
 # Linux/systemd: the unit sets no StandardOutput, so there is NO log file.
 journalctl --user -u pogo.service
 # Manual mode (pogo server start): logs appear in that terminal — no file.
@@ -343,6 +346,10 @@ pogo agent diagnose <name> --json | jq '{health, restart_suppressed, transcript_
 ```bash
 pogo events list --since=24h --type=stall_restart --agent=doctor
 pogo events list --since=24h --type=stall_restart_declined --agent=doctor
+# The question is about THIS target, and the target lives in details.target —
+# the pretty view summarizes details, but filter on it to answer directly:
+pogo events list --since=24h --type=stall_restart --agent=doctor --json |
+    jq -c 'select(.details.target=="<name>")'
 ```
 
 A **second** restart of the same agent inside a day is a finding to mail `human`, not a remedy to repeat — the first one evidently did not hold, and `LIKELY CAUSE` is the field that is about to be answered "unknown" for the second time. A prior `stall_restart_declined` for that target is stronger still: the credential condition it names is fleet-wide and outlives a restart, so re-check `pogo agent diagnose` before treating the target as an ordinary wedge. Neither reading is available from pogod's stdout log; both are one `pogo events list` away.
