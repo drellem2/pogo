@@ -322,6 +322,63 @@ func TestParityRemedy_FoldIsNotSoldAsFree(t *testing.T) {
 	}
 }
 
+// TestParityRemedy_TellsTheReaderToCheckTheNoteIsStillTrue is a guard on the
+// step this remedy used to omit entirely (mg-5e29).
+//
+// Every sentence here used to be about COST, HEADROOM, or where a future reader
+// would look. None of them said to read the note. So the fastest correct-looking
+// way to discharge a parity finding was to add routes to notes nobody had opened
+// — which is what happened: 11 orphans indexed in one pass, one of them
+// resurfacing hours later as a 'memory index staleness' finding on the same file.
+//
+// The instruction has to appear in BOTH arithmetic branches. The constrained
+// branch is if anything the more exposed one, since the remedy it leads with is
+// the sub-index, and a sub-index publishes a whole set of unread notes in a
+// single line.
+func TestParityRemedy_TellsTheReaderToCheckTheNoteIsStillTrue(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  string
+	}{
+		{"affordable", ParityRemedy(2, 9000, 200)},
+		{"constrained", ParityRemedy(6, 300, 200)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(tc.got, verifyBeforeHooking) {
+				t.Errorf("remedy never tells the reader to check the note is still true:\n%s", tc.got)
+			}
+		})
+	}
+}
+
+// TestVerifyBeforeHooking_CoversEveryRemedyThatPublishesTheNote is the
+// discrimination control. Scoping the instruction to hooking alone would leave
+// the two remedies this file leads with when the hooks do not fit — sub-index
+// and fold — with no verify step, and those are exactly the bulk cases: one
+// sub-index line buys reachability for as many notes as it names.
+//
+// It also pins the naming of the CONSEQUENCE. The rule alone ("read the note")
+// reads as hygiene advice; the reason it earns space in already-long text is
+// that the same report carries a staleness axis which will report the damage as
+// an unrelated finding, with nothing linking it back to here.
+func TestVerifyBeforeHooking_CoversEveryRemedyThatPublishesTheNote(t *testing.T) {
+	for _, want := range []string{"hooking", "sub-index", "folding"} {
+		if !strings.Contains(verifyBeforeHooking, want) {
+			t.Errorf("verify instruction does not reach the %q remedy, which publishes the note just as much:\n%s", want, verifyBeforeHooking)
+		}
+	}
+	if !strings.Contains(verifyBeforeHooking, "staleness") {
+		t.Errorf("verify instruction does not name the finding this one manufactures when discharged at speed:\n%s", verifyBeforeHooking)
+	}
+	// REACHABLE vs TRUE is the distinction the whole sentence exists to draw,
+	// and the header's "CORRECTNESS property" is what blurs it.
+	for _, want := range []string{"REACHABLE", "TRUE"} {
+		if !strings.Contains(verifyBeforeHooking, want) {
+			t.Errorf("verify instruction does not draw the %q distinction it exists for:\n%s", want, verifyBeforeHooking)
+		}
+	}
+}
+
 // TestFoldHostNote_FiresOnlyOnDisproportion. The host-size clause rides with the
 // fold advice rather than being its own check: it is not a defect, it is the
 // price of the remedy being recommended in the same sentence. So it must be
