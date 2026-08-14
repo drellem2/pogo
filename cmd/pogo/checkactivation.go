@@ -51,15 +51,25 @@ package main
 // to do exactly that, so the build stamp is on the report and not only in
 // `pogo version`.
 //
-// REPORTS ONLY, DELIBERATELY, AND THIS IS THE PART mg-b9e7 LEAVES OPEN. It never
-// installs, never bootstraps, never kickstarts. Reconciling is `pogo service
-// install*`, which bounces the daemon or rewrites a nightly's schedule; making
-// that automatic is a blast-radius decision that mg-b201 declined to take inside
-// a drift ticket and that this ticket declines to take inside a detection
-// change. What is closed here is that the drift is no longer silent. What is not
-// closed is that a human still has to act on it — that decision is mg-de0c,
-// filed rather than left in this sentence, because a deferred half announced in
-// a comment and never filed is a half that gets dropped.
+// REPORTS ONLY, AND THAT IS SETTLED (mg-de0c), NOT PENDING. It never installs,
+// never bootstraps, never kickstarts. mg-b9e7 left auto-reconciling open;
+// mg-de0c measured all four installers and closed it as NO —
+// docs/design/launchd-reconcile-decision.md. The two facts that bear on THIS
+// file rather than on the nightly:
+//
+//   - The `Remedy` string on every job row is ADVISORY. It is printed for a
+//     human and is not a command any caller of this package runs. A caller that
+//     executed it would be running an installer chosen by a byte comparison —
+//     and byte equality cannot tell a moved log path from the state-root move
+//     that com.pogo.daemon's drift on the reference box actually is.
+//   - The drift predicate is bytes ON DISK, and the verdict below never crosses
+//     it with whether launchd has the job LOADED (only the scope line carries
+//     that, and nothing reads the scope line for a verdict). So any future
+//     reconciler that wrote a plist without reloading it would flip this
+//     command from DRIFTED/1 to ACTIVATED/0 while the old job kept running.
+//     That is the defect this command exists to report, reproduced by its own
+//     remedy, which is the specific reason "just write the file" is refused
+//     rather than deferred.
 //
 // WHAT THIS COMMAND CANNOT SEE, said here because a detector's denominator is
 // the thing that rots: it audits the jobs internal/service renders (the registry
@@ -263,9 +273,12 @@ func (r activationReport) Text() string {
 		fmt.Fprintf(&b, "  %s %s — %s\n", activationStateLabel(j.State, j.ScheduleDrift), j.Label, j.Detail)
 	}
 	fmt.Fprintf(&b, "  scope: %s\n", r.Scope)
-	b.WriteString("  REPORTS ONLY: nothing here installs, bootstraps or kickstarts anything. Reconciling is\n")
+	b.WriteString("  REPORTS ONLY: nothing here installs, bootstraps or kickstarts anything, and nothing\n")
+	b.WriteString("  will — mg-de0c measured every installer and refused to automate it. Reconciling is\n")
 	b.WriteString("  a `pogo service install*` run by a human — and it must be run from a build that\n")
 	b.WriteString("  contains the plist change, or it reinstalls the schedule it was meant to replace.\n")
+	b.WriteString("  Writing the plist WITHOUT reloading the job would turn this report clean while\n")
+	b.WriteString("  launchd kept running the old one: the comparison above is bytes on disk.\n")
 	return b.String()
 }
 
@@ -318,11 +331,14 @@ merged: running its installer would have REINSTALLED the old schedule and
 reported success. The build stamp is therefore part of the report, not only of
 ` + "`pogo version`" + `.
 
-REPORTS ONLY. It never installs, never bootstraps, never kickstarts, and it is
-not a reconciler. Making reconciliation automatic is a decision about blast
-radius — ` + "`pogo service install`" + ` bounces the daemon and
-` + "`install-deploy`" + ` rewrites a nightly's schedule — that mg-b9e7
-deliberately does not take here.`,
+REPORTS ONLY, and that is decided rather than pending (mg-de0c). It never
+installs, never bootstraps, never kickstarts, and it is not a reconciler. Every
+remedy printed below is for a human to run: ` + "`pogo service install`" + `
+bounces the daemon, ` + "`install-recovery`" + ` bootstraps a job that
+kickstarts pogod when the recovery queue is non-empty, and
+` + "`install-deploy`" + ` boots out the nightly it would run inside — measured
+to kill that process before its own bootstrap line. See
+docs/design/launchd-reconcile-decision.md.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			audits := service.AuditLaunchAgents()

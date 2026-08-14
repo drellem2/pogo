@@ -3178,7 +3178,69 @@ OUT="$(POGO_GOBIN="$ACT_STUB" report_activation 2>&1)"; RC=$?
     && pass "report_activation: a binary too old to carry the check is reported as NO VERDICT and escalated — never as drift, never as clean" \
     || fail "old binary: rc=$RC alerts=$(cat "$ALERTS") out=$OUT"
 
-rm -rf "$ACT_STUB" "$ALERTS"
+# --- THE REFUSAL, ENFORCED (mg-de0c) ---------------------------------------
+# mg-b9e7 left "should the nightly RECONCILE what it reports" open. mg-de0c
+# closes it as NO, per job, and this is the assertion that makes the refusal a
+# property of the script rather than a paragraph in a comment. See
+# docs/design/launchd-reconcile-decision.md.
+#
+# WHY IT IS BEHAVIOURAL AND NOT A GREP. The section's own doc comment and the
+# alert body BOTH contain the string `pogo service install*` — on purpose: the
+# mail tells a human what to run. A text scan for it would either flag those or
+# be tuned until it flagged nothing, and a guard tuned to pass is not a guard.
+# So the CLI stub and a launchctl stub RECORD THEIR ARGV, and the assertion is
+# on what was actually invoked while report_activation ran against a DRIFTED box
+# — the one input under which a reconciler would have something to do.
+#
+# THE FAILURE THIS SHAPE MUST NOT HAVE is observing nothing because the witness
+# is wired to the wrong path, which reads identically to observing nothing
+# because nothing happened. So the same two stubs are shown CATCHING a
+# `service install-recovery` and a `launchctl bootout` below.
+: > "$ALERTS"
+CALLS="$(mktemp)"
+LCDIR="$(mktemp -d)"
+cat > "$ACT_STUB/pogo" <<STUB
+#!/bin/sh
+echo "pogo \$*" >> "$CALLS"
+[ "\$1" = check-activation ] || exit 0
+cat <<'BODY'
+activation: DRIFTED — 2 of 4 managed launchd job(s) disagree with the plist this build renders
+  DRIFT    com.pogo.daemon — differs in keys other than its schedule — run \`pogo service install\`
+  DRIFT    com.pogo.recovery — differs in keys other than its schedule — run \`pogo service install-recovery\`
+  ABSENT   com.pogo.reclaim — not installed (\`pogo service install-reclaim\` installs it)
+BODY
+exit 1
+STUB
+chmod +x "$ACT_STUB/pogo"
+cat > "$LCDIR/launchctl" <<STUB
+#!/bin/sh
+echo "launchctl \$*" >> "$CALLS"
+exit 0
+STUB
+chmod +x "$LCDIR/launchctl"
+
+OUT="$(PATH="$LCDIR:$PATH" POGO_GOBIN="$ACT_STUB" report_activation 2>&1)"; RC=$?
+{ [ "$RC" = 0 ] && grep -q 'DRIFTED' <<<"$OUT" \
+    && [ "$(grep -c . "$CALLS")" = 1 ] && [ "$(cat "$CALLS")" = "pogo check-activation" ]; } \
+    && pass "report_activation on a DRIFTED box invokes the CLI exactly once, for check-activation — it reports, it does not reconcile (mg-de0c)" \
+    || fail "reconcile refusal: rc=$RC calls=[$(tr '\n' ';' < "$CALLS")]"
+! grep -q 'service install' "$CALLS" \
+    && pass "report_activation runs no \`pogo service install*\` — the per-job blast radius is the reason, not an oversight" \
+    || fail "the nightly reconciled: $(grep 'service install' "$CALLS")"
+! grep -q '^launchctl ' "$CALLS" \
+    && pass "report_activation makes no launchctl call — nothing is booted out, bootstrapped or kickstarted" \
+    || fail "the nightly touched launchd: $(grep '^launchctl ' "$CALLS")"
+
+# The witness, armed. Both stubs are driven directly with exactly what the
+# assertions above look for; if either records nothing here, the three passes
+# above were measuring a broken recorder rather than a script that did nothing.
+"$ACT_STUB/pogo" service install-recovery >/dev/null 2>&1
+PATH="$LCDIR:$PATH" launchctl bootout gui/0 /tmp/nonexistent.plist >/dev/null 2>&1
+{ grep -q 'service install' "$CALLS" && grep -q '^launchctl bootout' "$CALLS"; } \
+    && pass "the witness is ARMED: the same stubs record a \`service install-recovery\` and a \`launchctl bootout\` when one actually happens" \
+    || fail "witness not armed — the refusal assertions above cannot distinguish 'nothing ran' from 'nothing was recorded': [$(tr '\n' ';' < "$CALLS")]"
+
+rm -rf "$ACT_STUB" "$ALERTS" "$CALLS" "$LCDIR"
 unset -f alert_external mk_activation_stub
 
 # Wiring, for the same reason report_supervision has the assertion: the reader

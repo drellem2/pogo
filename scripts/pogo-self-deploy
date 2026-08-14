@@ -3558,10 +3558,39 @@ report_supervision() {
 # REPORT-ONLY, on the same reasoning as report_supervision. It never installs,
 # never bootstraps, never kickstarts, and it never sets this script's exit code:
 # the fleet is up and answering by the time it runs, and a stale plist is a thing
-# to say loudly, not a reason to call a completed deploy failed. Auto-reconciling
-# is a blast-radius decision (`pogo service install` bounces the daemon,
-# `install-deploy` rewrites this very job's schedule) that mg-b9e7 deliberately
-# leaves open.
+# to say loudly, not a reason to call a completed deploy failed.
+#
+# AND IT STAYS THAT WAY — that is a DECISION (mg-de0c), not a gap. mg-b9e7 left
+# auto-reconciling open; it is now closed as NO, per job, with the blast radius
+# measured. docs/design/launchd-reconcile-decision.md is the argument; the four
+# findings that decide it are:
+#
+#   - `pogo service install` reaches the orchestrated bounce every time a
+#     reconciler would fire, because its skip-when-unchanged gate is false by
+#     construction in the drift case. And the drift on this box is the legacy
+#     POGO_HOME=$HOME — reconciling it moves the running daemon's state root,
+#     unattended, on a nightly whose next act is to call the deploy a success.
+#   - `install-recovery` bootstraps a RunAtLoad=true job, so it RUNS
+#     pogo-recovery.sh, which kickstarts pogod whenever a .req sits in the
+#     queue — a conditional daemon bounce whose condition nothing here reads.
+#   - `install-deploy` boots out THIS job. Measured with an isolated LaunchAgent:
+#     the process dies AT the `launchctl bootout` line, so the `bootstrap` that
+#     follows it in InstallDeploy NEVER RUNS. The plist is left byte-correct on
+#     disk and the job left UNLOADED — the nightly deletes itself from launchd
+#     until the next login, and nothing survives to report it.
+#   - com.pogo.reclaim is ABSENT, not drifted, and the audit says in its own
+#     output that it cannot tell a job deliberately left uninstalled from one
+#     whose install never ran.
+#
+# THE DODGE THAT LOOKS SAFE IS THE WORST OPTION. "Write the plist, skip the
+# reload" avoids every launchctl hazard above — and the audit's drift predicate
+# is byte equality of the file on disk, which nothing in buildActivationReport
+# crosses with whether the job is LOADED. So it would flip this step's verdict
+# from DRIFTED to ACTIVATED and its exit status from 1 to 0 while launchd still
+# runs the old job, for however many weeks until the next login. That is mg-8f7e
+# exactly — an artifact that merged, was never activated, and reads green —
+# manufactured by its own remedy. pogo-self-deploy_test.sh asserts, with an armed
+# witness, that this step invokes the CLI once and only for check-activation.
 #
 # IT ESCALATES, THOUGH — because a report that lands only in pogo-deploy.log is
 # the opt-in problem again with a different reader. DRIFTED and NO VERDICT go out

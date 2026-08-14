@@ -438,9 +438,12 @@ missing) this job was shaped around.
 
 ### What re-asserts an installed plist against the shipped one
 
-**Still nothing — but the nightly now NOTICES, and mails.** This is the general
-question mg-fc99 left open, mg-b201 recorded, and mg-b9e7 answers by closing the
-detection half and deliberately leaving the reconciliation half open.
+**Nothing does, and after mg-de0c nothing is going to — but the nightly NOTICES,
+and mails.** This is the general question mg-fc99 left open, mg-b201 recorded,
+and mg-b9e7 answered on the detection half. The reconciliation half is now
+answered too, and the answer is **no**: see
+[docs/design/launchd-reconcile-decision.md](../../docs/design/launchd-reconcile-decision.md)
+for the blast radius measured per job.
 
 Merging a change under `scripts/launchd/` changes nothing on any machine. The
 only writer of `~/Library/LaunchAgents/com.pogo.deploy.plist` is `pogo service
@@ -501,8 +504,24 @@ command is shaped the way it is.
    nightly has been failing for a week gets no report. That is the same argument
    that keeps `com.pogo.revisionprobe` outside the audit's registry (mg-a03d).
 
-So the reconciliation is still manual, and the read-back is the part that proves
-it happened. The install command's own output does not:
+**Reconciliation stays manual, decided rather than deferred (mg-de0c).** All
+four installers were measured against the question "could the nightly run this?"
+and all four refuse for a named reason: `install` bounces the daemon *and*, on
+this box, the drift is the legacy `POGO_HOME=$HOME` — reconciling it moves the
+running daemon's state root; `install-recovery` bootstraps a `RunAtLoad=true`
+job that kickstarts pogod whenever the recovery queue is non-empty;
+`install-deploy` boots out the job the nightly is running in, and was measured
+to kill the process *before* its `bootstrap` line, leaving the plist correct on
+disk and the job unloaded; `com.pogo.reclaim` is absent rather than drifted, and
+the audit says in its own output that it cannot tell "deliberately uninstalled"
+from "never installed". The tempting dodge — write the plist without reloading —
+is a regression, not a partial fix: the audit's predicate is byte equality on
+disk, so it would flip the verdict to `ACTIVATED` while launchd still runs the
+old job. Full argument and the conditions that would reopen it:
+[docs/design/launchd-reconcile-decision.md](../../docs/design/launchd-reconcile-decision.md).
+
+The read-back is the part that proves the manual reconcile happened. The install
+command's own output does not:
 
 ```bash
 pogo service install-deploy

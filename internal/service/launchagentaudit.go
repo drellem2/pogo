@@ -225,6 +225,22 @@ type LaunchAgentAudit struct {
 // is a decision with a reason, not a job somebody forgot. Auditing the probe's
 // job on the merge-activated path is filed as its own item, because a deferred
 // half announced in a comment and never filed is a half that gets dropped.
+// REMEDY IS A STRING TO PRINT, NEVER A COMMAND TO RUN (mg-de0c). It is the one
+// field here that looks executable, and nothing in this repo executes it. That
+// is a decision with the blast radius measured per job
+// (docs/design/launchd-reconcile-decision.md), not an omission waiting to be
+// tidied up: `pogo service install` bounces the daemon, `install-recovery`
+// bootstraps a RunAtLoad job that kickstarts pogod when the recovery queue is
+// non-empty, and `install-deploy` boots out the job an automated caller would
+// most likely be running inside — measured to kill that process at the bootout,
+// before InstallDeploy's own bootstrap line.
+//
+// The reason it cannot become executable by a small edit is upstream of all
+// three: the drift predicate is byte equality (see the file header), which
+// cannot classify WHAT drifted. On the reference box com.pogo.daemon's whole
+// diff is POGO_HOME=$HOME -> $HOME/.pogo — a state-root move, reported in the
+// same words as a moved log path. Choosing an installer off a boolean means
+// choosing it without reading the difference it is about to apply.
 type managedLaunchAgent struct {
 	Label  string
 	Path   func() string
