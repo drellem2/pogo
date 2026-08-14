@@ -50,8 +50,9 @@ This is the failure that took the fleet down for 23h30m on 2026-07-22, and the r
 ### How you find out
 
 - **One coalesced page to `human`** (subject `AGENTS FAILING TURNS — <agent> (<reason>): <N> errors in <window>, <first>–<last>`). This class is characteristically fleet-wide: additional agents join the episode silently, and one clear mail names them all when it ends. **Why it is fleet-wide depends on the reason, and the two are not interchangeable** — `auth_failed` / `spend_limit` because one credential and one account are shared, `server_error` because a network or provider fault reaches everything at once. Only the first is evidence about a credential; reading the second as though it were is what mg-c058 is about.
+- **The page is immediate; the all-clear is not.** The episode stays open until **60 minutes pass with nothing failing** ([`synthwatch.DefaultClearHold`](../internal/synthwatch/synthwatch.go)), so a fault that recurs inside that hold produces no second page and no premature all-clear. See [Why the all-clear waits an hour](#why-the-all-clear-waits-an-hour).
 - **`pogo agent diagnose <name>`** reports `Health: failing_turns (<N> errors in <window>, <first>–<last>, last <age> ago)`, which outranks `stalled`, `rate_limited` and `idle`. `--json` carries the same reading in `health_detail`, plus `restart_suppressed` and a `transcript_check` object with the reason, the count, the window (`window_seconds`), the scan time (`scanned_at`), and the span.
-- The `synthetic_failure_detected` / `synthetic_failure_cleared` / `synthetic_failure_restart_suppressed` events land in `~/.pogo/events.log`.
+- The `synthetic_failure_detected` / `synthetic_failure_cleared` / `synthetic_failure_restart_suppressed` / `synthetic_failure_episode_held` / `synthetic_failure_page_suppressed` events land in `~/.pogo/events.log`. The per-agent `_detected` / `_cleared` pair is **not** the episode boundary — `incident_episode_cleared{kind:auth}` is.
 
 ### What to do
 
@@ -82,6 +83,27 @@ When it clears you get one mail with a per-agent checklist. Work through it: the
 So read `health_detail`, or `transcript_check.{count,window_seconds,first,last,scanned_at}`, before drawing a conclusion. `pogo agent diagnose` for a *failing* agent answers out of the watcher's cache, so the scan behind the reading can be up to `synthwatch.DefaultInterval` (5 minutes) old; `scanned_at` says which moment it describes, and the CLI appends `scan <age> old` once that gap exceeds 30s.
 
 One instrument-reading trap in the same family, met while investigating this: `~/.pogo/reminders/deadman.log` timestamps when the delivering daemon **noticed** a mail, not when it was sent. The 2026-08-14 page logged at 02:44:38Z was sent at 02:28:12Z — the maildir filename's leading nanosecond stamp is the send time. A 16-minute notice lag read as a send time will misdate any paging analysis built on that log.
+
+### Why the all-clear waits an hour
+
+This alarm used to **flap**. As of 2026-08-14T08:16Z `~/.pogo/reminders/deadman.log` holds **49 open pages and 44 clear notices** from it (45/40 a few hours earlier — it added four of each overnight). On 2026-08-10 it opened and cleared roughly every half hour between 07:26Z and 12:22Z. On 2026-08-14 it ran **five** clear→re-alarm cycles between 02:28Z and 06:58Z — gaps of 2m50s, 2m29s, 10m09s, 3m31s and 31m32s — for **one** intermittent github.com reachability fault (mg-70f3).
+
+The mechanism was that the episode closed on the first quiet reading, and **quiet is not absence**: it is also what an idle agent writes, and what an intermittent fault looks like between recurrences. So a fault of one shape — intermittent, hours long — was reported as a series of short faults, each with its own page and its own all-clear. The clear was the more misleading half, because it actively asserted a recovery the next page contradicted minutes later.
+
+> **Read every gap above off the SEND stamp, never off the log line.** `deadman.log` records when the delivering daemon *noticed* a mail, and that lag was 16m26s on the anchor page — so a gap computed from two log lines is wrong by the difference of two lags. The five gaps above are send-stamp gaps. The set circulated earlier for the same night — 2m29s, 2m07s, 14m04s, 6m37s — is the notice-time reading of four of them and is superseded; it is also missing the 31m32s cycle entirely.
+
+Since mg-70f3:
+
+- **An episode does not close until 60 minutes pass with nothing failing** (`synthwatch.DefaultClearHold`). A recurrence inside the hold resumes the same episode: no clear mail, no new page, one `synthetic_failure_episode_held` event. 60m is where the measured data breaks — all 43 clear→re-open gaps in the log were extracted, and they cluster below 60.5m and then jump to 106.5m and beyond (out to three days). 60m absorbs 34 of 43; 30m absorbs 28 and would have missed the 31m32s cycle by 92 seconds.
+- **The clear mail states what the hold absorbed.** Its subject reads `turn failures cleared — 9 agent(s), quiet 60m after 5 recurrence(s)`. Read that as **one** intermittent fault spanning the whole episode, not as five short ones. Damping the mail must not become under-reporting the fault, so the recurrence count travels in the subject, which is the part that gets skimmed.
+- **A paging floor** (`DefaultMinPageInterval`, 30m) backstops the whole thing: an open page for the *same reason* within the floor is withheld and recorded as `synthetic_failure_page_suppressed`. Because the floor is below the hold, it should never fire under the shipped configuration; it is left at 30m rather than tracking the hold so that shortening the hold does not silently take the backstop with it.
+
+**What was deliberately NOT done: "wait and see whether it clears before paging".** It was proposed and ruled out on evidence. The 2026-08-14 fault was not transient — github.com intermittently unreachable from at least 01:18Z to 03:16Z, over SSH/22 as well as HTTPS/DNS, on four independent instruments — and on 2026-07-22 a genuinely dead fleet went 23h30m unnoticed. Delaying the *first* page would have delayed a real multi-hour outage, which is the case this channel exists for. **Nothing damps the opening page**: the hold applies to the close, and the floor has an unconditional escape when the reason changes.
+
+Two consequences for anyone reading the logs:
+
+- `synthetic_failure_cleared` is a **per-agent** transition and fires on the first quiet reading, exactly as before. Restart suppression is lifted for that agent right then. It is not the episode boundary — `incident_episode_cleared{kind:auth}` is, and it is at least an hour later.
+- The hold lives in pogod's memory. A pogod restart mid-episode drops it, and no all-clear is sent for that episode — the same as before mg-70f3, when a restart dropped the open episode too.
 
 ### When the check is unavailable
 

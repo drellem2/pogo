@@ -1194,10 +1194,50 @@ This is distinct from `usage_limit_hit`, which reads the PTY modal. This one rea
 
 The agent left the failing state: its transcript now shows real model turns in the window, or it stopped running. Restart suppression is lifted. Note that a transcript becoming **unreadable** does NOT clear the state — only a positive quiet reading does, because "we stopped being able to look" is not "it recovered". Additive — no `schema_version` bump.
 
+**This is a per-agent transition, not an episode boundary, and since mg-70f3 the two are far apart.** The episode — and its `human` mail — stays open for a further `synthwatch.DefaultClearHold` (60m) of continuous quiet, so a `synthetic_failure_cleared` here is routinely followed by a fresh `synthetic_failure_detected` for the same episode with no mail in between. Count `incident_episode_cleared{kind:auth}` for episodes; count this for agents.
+
 - **`details` fields:** `target` (string, required)
 
 ```json
 {"schema_version":1,"timestamp":"2026-07-22T22:40:37.000000000Z","event_type":"synthetic_failure_cleared","agent":"pm-pogo","details":{"target":"pm-pogo"}}
+```
+
+#### `synthetic_failure_episode_held`
+
+The class **recurred inside an open episode's quiet hold**, so pogod extended the episode instead of closing it and re-opening — withholding one clear mail and one re-open page (mg-70f3). Each of these is a flap that did not reach a human, and counting them is the only way to answer "is this alarm still flapping" without re-deriving it from mail. Additive — no `schema_version` bump.
+
+The founding population: 49 open pages and 44 clear notices in `~/.pogo/reminders/deadman.log` as of 2026-08-14T08:16Z, including **five** clear→re-alarm cycles on 2026-08-14 with gaps of 2m50s, 2m29s, 10m09s, 3m31s and 31m32s — one intermittent github.com reachability fault reported as six short ones. Every gap here is from the mail's maildir SEND stamp; the log line records when the delivering daemon noticed it, a lag of 16m26s on the anchor page.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **Optional envelope:** `work_item_id`
+- **`details` fields:**
+  - `target` (string, required): the agent whose recurrence extended the episode. **Incidental** — it is whoever took a turn during the burst, not an identification of the affected agent.
+  - `reason` (string, required): the class member, as above
+  - `episode_id` (string, required): the episode this was folded into — the same id its eventual `incident_episode_cleared` carries
+  - `quiet_seconds` (int, required): how long the episode had been quiet when the class came back. This is the flap gap.
+  - `hold_seconds` (int, required): the hold in force, so a suppression can be checked against the bound that produced it
+  - `recurrence` (int, required): 1-based index of this recurrence within the episode
+  - `why`, `withheld` (string): the rationale and what was not sent
+
+```json
+{"schema_version":1,"timestamp":"2026-08-14T03:07:23.000000000Z","event_type":"synthetic_failure_episode_held","agent":"cat-p82a6","details":{"target":"p82a6","reason":"server_error","episode_id":"ep-1786789692000000000-crew-mayor","quiet_seconds":171,"hold_seconds":3600,"recurrence":1,"why":"the class recurred inside the episode's quiet hold; the episode was extended instead of closed and re-opened (mg-70f3)","withheld":"one clear mail and one re-open page"}}
+```
+
+#### `synthetic_failure_page_suppressed`
+
+The **paging floor** withheld an episode-open page: an open page for the *same reason* went out less than `synthwatch.DefaultMinPageInterval` (30m) ago. The floor is a backstop independent of the episode machinery, and it has one unconditional escape — **a page for a different reason is never withheld**, because a reason change is new information about a different fix. Additive — no `schema_version` bump.
+
+Under the shipped configuration this event should not appear at all: `DefaultMinPageInterval` (30m) is below `DefaultClearHold` (60m), so two episode-opens can never be closer together than a full hold. Seeing one means the hold was shortened or disabled.
+
+- **`details` fields:**
+  - `target`, `reason` (string, required): as above
+  - `subject` (string, required): the page that was not sent, verbatim
+  - `since_last_page_sec` (int, required): how long since the last page of this reason
+  - `floor_sec` (int, required): the floor in force
+  - `why` (string, required): the rationale
+
+```json
+{"schema_version":1,"timestamp":"2026-08-10T20:01:24.000000000Z","event_type":"synthetic_failure_page_suppressed","agent":"crew-mayor","details":{"target":"mayor","reason":"spend_limit","subject":"AGENTS FAILING TURNS — mayor (spend_limit): 2 errors in 30m, 2026-08-10T19:31:02Z–19:59:40Z","since_last_page_sec":41,"floor_sec":1800,"why":"an episode-open page for the same reason went out less than the paging floor ago (mg-70f3); a DIFFERENT reason is never floored"}}
 ```
 
 #### `synthetic_failure_restart_suppressed`
