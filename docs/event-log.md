@@ -1180,13 +1180,14 @@ This is distinct from `usage_limit_hit`, which reads the PTY modal. This one rea
 - **`details` fields:**
   - `target` (string, required): the bare agent name
   - `reason` (string, required): `auth_failed` | `rate_limit` | `weekly_limit` | `spend_limit` | `server_error` | `invalid_request` | `unclassified`
-  - `failing_turns` (int, required): count inside the detection window
-  - `first`, `last` (RFC3339, required): the window's bounds
+  - `failing_turns` (int, required): count inside the detection window. **A count, not a rate** — the threshold is 2, so this fires alongside any number of successful turns. Never read it as "the agent is failing every turn" (mg-c058).
+  - `window_seconds` (int): the size of the trailing window `failing_turns` was counted over. Added mg-c058: without it a reader supplies their own window, and the counter's window is narrower than the fault at both ends.
+  - `first`, `last` (RFC3339, required): the bounds of the counted errors — **not** the bounds of the fault, which can start before `first` and continue past `last`.
   - `detail` (string): the harness's own error text, truncated
   - `remediation` (string): always the page-don't-restart directive in v1
 
 ```json
-{"schema_version":1,"timestamp":"2026-07-22T00:10:26.000000000Z","event_type":"synthetic_failure_detected","agent":"crew-pm-pogo","details":{"target":"pm-pogo","reason":"auth_failed","failing_turns":14,"first":"2026-07-21T23:10:26Z","last":"2026-07-22T00:10:26Z","detail":"Login expired · Please run /login","remediation":"page a human; restart is suppressed and cannot help"}}
+{"schema_version":1,"timestamp":"2026-07-22T00:10:26.000000000Z","event_type":"synthetic_failure_detected","agent":"crew-pm-pogo","details":{"target":"pm-pogo","reason":"auth_failed","failing_turns":14,"window_seconds":1800,"first":"2026-07-21T23:10:26Z","last":"2026-07-22T00:10:26Z","detail":"Login expired · Please run /login","remediation":"page a human; restart is suppressed and cannot help"}}
 ```
 
 #### `synthetic_failure_cleared`

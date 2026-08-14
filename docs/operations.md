@@ -49,8 +49,8 @@ This is the failure that took the fleet down for 23h30m on 2026-07-22, and the r
 
 ### How you find out
 
-- **One coalesced page to `human`** (subject `AGENTS ARE FAILING EVERY TURN — <agent> (<reason>)`). This class is characteristically fleet-wide, because one credential is shared: additional agents join the episode silently, and one clear mail names them all when it ends.
-- **`pogo agent diagnose <name>`** reports `Health: failing_turns`, which outranks `stalled`, `rate_limited` and `idle`. `--json` carries `restart_suppressed` and a `transcript_check` object with the reason, the count, and the window.
+- **One coalesced page to `human`** (subject `AGENTS FAILING TURNS — <agent> (<reason>): <N> errors in <window>, <first>–<last>`). This class is characteristically fleet-wide: additional agents join the episode silently, and one clear mail names them all when it ends. **Why it is fleet-wide depends on the reason, and the two are not interchangeable** — `auth_failed` / `spend_limit` because one credential and one account are shared, `server_error` because a network or provider fault reaches everything at once. Only the first is evidence about a credential; reading the second as though it were is what mg-c058 is about.
+- **`pogo agent diagnose <name>`** reports `Health: failing_turns (<N> errors in <window>, <first>–<last>, last <age> ago)`, which outranks `stalled`, `rate_limited` and `idle`. `--json` carries the same reading in `health_detail`, plus `restart_suppressed` and a `transcript_check` object with the reason, the count, the window (`window_seconds`), the scan time (`scanned_at`), and the span.
 - The `synthetic_failure_detected` / `synthetic_failure_cleared` / `synthetic_failure_restart_suppressed` events land in `~/.pogo/events.log`.
 
 ### What to do
@@ -69,6 +69,19 @@ Each reason needs a human or the passage of time:
 | `invalid_request` | a human — the request itself is being rejected |
 
 When it clears you get one mail with a per-agent checklist. Work through it: the window's nudges were **consumed and destroyed, not queued**, so the scheduled work of that window is gone rather than late — re-run anything that mattered.
+
+### `failing_turns` is a count over a window, not a state
+
+`failing_turns` fires at **two** failing turns inside a **30-minute trailing window** (`synthfail.DefaultMinTurns` / `DefaultWindow`). Everything about the reading follows from that, and it is the opposite of how the token reads:
+
+- **It is not a rate.** Two failures in thirty minutes sets it, alongside any number of turns that succeeded. An agent flagged `failing_turns` **can be working normally right now** — on 2026-08-14 seven of nine agents carried it, all seven were completing turns, and one of them was the mayor that ran the query (mg-c058).
+- **The window is not the size of the fault.** It is narrower at both ends by construction: 30 minutes of history, and no reach past the last turn written. That night the counted window was 02:24:50Z–02:33:27Z; the actual github.com reachability fault ran intermittently from at least 01:18Z to 03:16Z across both HTTPS/DNS and SSH/22, and two separate readers concluded a nine-minute blip from the counter's window.
+- **The reasons split by who has to act, and the split is invisible in the token.** `auth_failed`, `spend_limit` and `invalid_request` need a human. `rate_limit`, `weekly_limit` and `server_error` clear with time and need nobody. `server_error` is a provider/network fault — it looks fleet-wide because networks are, not because a credential is shared. Reporting a `server_error` episode as a credential problem parked a ticket on `human` for nine days (mg-fb29).
+- **A clean probe is not recovery.** Every connectivity probe run during that outage came back healthy, because probes land in good minutes. Establishing that an intermittent fault has ended takes a **period with no instrument failures** — refinery fetch retries, `gh-intake-watch`, `gh-teardown-watch` — not one successful check. The episode-close mail states what it measured (no failing turns in the window) rather than claiming the fault is over, for the same reason.
+
+So read `health_detail`, or `transcript_check.{count,window_seconds,first,last,scanned_at}`, before drawing a conclusion. `pogo agent diagnose` for a *failing* agent answers out of the watcher's cache, so the scan behind the reading can be up to `synthwatch.DefaultInterval` (5 minutes) old; `scanned_at` says which moment it describes, and the CLI appends `scan <age> old` once that gap exceeds 30s.
+
+One instrument-reading trap in the same family, met while investigating this: `~/.pogo/reminders/deadman.log` timestamps when the delivering daemon **noticed** a mail, not when it was sent. The 2026-08-14 page logged at 02:44:38Z was sent at 02:28:12Z — the maildir filename's leading nanosecond stamp is the send time. A 16-minute notice lag read as a send time will misdate any paging analysis built on that log.
 
 ### When the check is unavailable
 

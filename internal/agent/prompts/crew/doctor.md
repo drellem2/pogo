@@ -322,10 +322,14 @@ You have standing authority to restart a wedged agent — first raised by doctor
 **The pre-restart check is mandatory. A stale heartbeat has two causes that look identical from outside and take opposite responses.**
 
 ```bash
-pogo agent diagnose <name> --json | jq '{health, restart_suppressed, transcript_check}'
+pogo agent diagnose <name> --json | jq '{health, health_detail, restart_suppressed, transcript_check}'
 ```
 
-- `health: "failing_turns"` / `restart_suppressed: true` — **do not restart, and do not nudge.** Not wedged: it is alive, consuming every nudge on time, failing each one in ~10ms on an expired credential, a rate limit or a spend cap. A restart inherits the same credential and destroys the transcript that makes the condition diagnosable; a nudge is just one more turn for it to fail. pogod has already suppressed restart-based remediation and paged `human`. Record it and stay out of the way:
+- `health: "failing_turns"` / `restart_suppressed: true` — **do not restart, and do not nudge.** Not wedged: it is alive, consuming nudges on time, failing some of them in ~10ms on an expired credential, a rate limit, a spend cap, or a provider/network fault (`server_error`). A restart inherits the same credential and destroys the transcript that makes the condition diagnosable; a nudge is just one more turn for it to fail. pogod has already suppressed restart-based remediation and paged `human`.
+
+  **Read `health_detail` before you report this state.** `failing_turns` is a COUNT over a trailing window, not a claim about this instant: `failing_turns (2 errors in 30m, 02:24:50Z–02:33:27Z, last 14m ago)` and `failing_turns (143 errors in 30m, …)` are different facts that the bare token renders identically. The count is not a rate, and the window is not the size of the fault — it can be narrower at either end. On 2026-08-14 seven of nine agents carried this token while all seven were completing turns (mg-c058). And `transcript_check.reason` decides who acts: `auth_failed` / `spend_limit` / `invalid_request` need a human; `rate_limit` / `weekly_limit` / `server_error` clear with time and need nobody. Never report a `server_error` episode as a credential problem — it looks fleet-wide because a network fault is fleet-wide, not because a credential is shared.
+
+  Record it and stay out of the way:
   ```bash
   pogo events emit --type=stall_restart_declined --agent=doctor \
       --details="{\"target\":\"<name>\",\"reason\":\"failing_turns\",\"detail\":\"<transcript_check.reason>\"}"

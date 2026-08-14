@@ -270,7 +270,30 @@ type DiagnoseInfo struct {
 
 	// Health is a summary string: "healthy", "idle", "stalled",
 	// "failing_turns", "rate_limited", "no_mail_loop", "exited", or "dead".
+	//
+	// It is a TOKEN, not a sentence: every value here is a label a machine
+	// matches on, and several of them ("failing_turns" above all) are summaries
+	// of a trailing window rather than statements about this instant. Render it
+	// with HealthDetail, never alone — see that field.
 	Health string `json:"health"`
+	// HealthDetail is the human-readable qualification of Health: for
+	// "failing_turns", the count, the trailing window it was counted over, the
+	// span of the errors, and how long ago the last one was. Empty when the
+	// health value needs no qualification.
+	//
+	// It exists because the token misleads on its own. `failing_turns` is a
+	// trailing-window error COUNT rendered as a present-tense claim about the
+	// agent's capacity, and the guidance built on it names only PERSISTENT
+	// causes (expired credential, rate limit, spend cap) — so a reader takes it
+	// for one. On 2026-08-14 seven of nine agents read `failing_turns` off an
+	// intermittent network fault while every one of them was completing turns,
+	// including the mayor that ran the query, and pogod paged a sleeping human
+	// with the bare token (mg-c058).
+	//
+	// It is deliberately NOT folded into Health: every consumer that compares
+	// health to "failing_turns" would break, and the machine-readable window is
+	// already in TranscriptCheck. The defect being fixed is the READING.
+	HealthDetail string `json:"health_detail,omitempty"`
 	// RecentOutputTail is the last ~500 bytes of PTY output for quick triage.
 	RecentOutputTail string `json:"recent_output_tail,omitempty"`
 }
@@ -411,6 +434,7 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mai
 	mailCheckMissing := mailLoop == mailLoopMissing
 	failingTurns := transcript != nil && transcript.State == synthfail.StateFailing
 	health := "healthy"
+	healthDetail := ""
 	switch {
 	case info.Status == StatusExited:
 		health = "exited"
@@ -418,6 +442,10 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mai
 		health = "dead"
 	case failingTurns:
 		health = "failing_turns"
+		// The window travels with the token. Reading is computed against the
+		// same injected now as every other age in this struct, so a caller
+		// cannot get a recency that was measured against a different clock.
+		healthDetail = transcript.Reading(now)
 	case info.RateLimited:
 		health = "rate_limited"
 	case mailCheckMissing:
@@ -443,6 +471,7 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mai
 		TranscriptCheck:   transcript,
 		RestartSuppressed: transcript != nil && transcript.SuppressRestart(),
 		Health:            health,
+		HealthDetail:      healthDetail,
 		RecentOutputTail:  tail,
 	}
 }

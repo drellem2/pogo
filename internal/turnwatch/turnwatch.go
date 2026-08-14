@@ -512,7 +512,7 @@ func renderNotice(rep turnlog.Report, confirmed []turnlog.State, coordinator, to
 	}
 
 	b.WriteString("\nBEFORE RESTARTING ANYTHING:\n")
-	b.WriteString("  pogo agent diagnose <name> --json | jq '{health, restart_suppressed, transcript_check}'\n")
+	b.WriteString("  pogo agent diagnose <name> --json | jq '{health, health_detail, restart_suppressed, transcript_check}'\n")
 	b.WriteString("A `silent` agent may simply be running a prompt rendered before this artifact\n")
 	b.WriteString("existed — check its uptime. An agent failing every turn in ~10ms is not wedged:\n")
 	b.WriteString("restarting it destroys the transcript that says so, and the replacement inherits\n")

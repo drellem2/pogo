@@ -276,12 +276,16 @@ func (w *Watcher) observe(t Target, rep synthfail.Report, now time.Time) {
 				"failing_turns": rep.Count,
 				"first":         rep.First.UTC().Format(time.RFC3339),
 				"last":          rep.Last.UTC().Format(time.RFC3339),
-				"detail":        rep.Detail,
-				"remediation":   "page a human; restart is suppressed and cannot help",
+				// window_seconds is what makes failing_turns a reading rather
+				// than a number: it is the trailing window the count was taken
+				// over, and without it a later reader supplies their own (mg-c058).
+				"window_seconds": rep.WindowSeconds,
+				"detail":         rep.Detail,
+				"remediation":    "page a human; restart is suppressed and cannot help",
 			},
 		})
 		if newEpisode {
-			w.page(t, rep)
+			w.page(t, rep, now)
 		}
 		return
 	}
@@ -363,7 +367,7 @@ func (w *Watcher) clear(name string, now time.Time) {
 	// the per-agent EventCleared and after the lock is dropped, mirroring the
 	// usage-limit coordinator.
 	w.opts.Emit(episodeClearedEvent(episodeID, identities, openedAt, now))
-	w.sendMail(clearMail(names, now))
+	w.sendMail(clearMail(names, now, w.window()))
 }
 
 // makeEpisodeID builds a stable per-episode id from the opening agent and the
@@ -398,8 +402,18 @@ func episodeClearedEvent(episodeID string, roster []string, openedAt, closedAt t
 	}
 }
 
-func (w *Watcher) page(t Target, rep synthfail.Report) {
-	w.sendMail(hitMail(t, rep))
+func (w *Watcher) page(t Target, rep synthfail.Report, now time.Time) {
+	w.sendMail(hitMail(t, rep, now))
+}
+
+// window is the trailing window the reports were counted over, for the mails
+// that have to state it. It reads the resolved value the same way synthfail
+// does, so the page can never claim a window the scan did not use.
+func (w *Watcher) window() time.Duration {
+	if w.opts.ScanOptions.Window > 0 {
+		return w.opts.ScanOptions.Window
+	}
+	return synthfail.DefaultWindow
 }
 
 func (w *Watcher) sendMail(subject, body string) {
@@ -414,15 +428,61 @@ func (w *Watcher) sendMail(subject, body string) {
 // hitMail builds the episode-open page. It leads with the fact that this is not
 // a wedge and not restartable, because the operator's first instinct — and the
 // mayor's documented 120-minute rule — is to restart.
-func hitMail(t Target, rep synthfail.Report) (subject, body string) {
-	subject = fmt.Sprintf("AGENTS ARE FAILING EVERY TURN — %s (%s)", t.Name, rep.Reason)
+//
+// # Why the subject states a count and a window rather than a rate
+//
+// It used to read `AGENTS ARE FAILING EVERY TURN — <agent> (<reason>)`. Sent at
+// 02:28:12Z on 2026-08-14, it woke Daniel, and two of its three parts were
+// false: the count was 2 in a 30-minute trailing window, not "every turn", and
+// the named agent (mayor) was completing turns — it had itself run the query
+// that found them. The third part, `server_error`, was true.
+//
+// So this page was NOT a false alarm. The fault was real and ongoing: an
+// intermittent network fault, not the persistent per-agent cause the phrasing
+// points a reader at. What was wrong was the scope and the attribution, and
+// they sent the reader at the wrong subsystem for nine days via a credential
+// ticket parked on `human` (mg-c058, mg-fb29). That is why nothing here delays
+// or suppresses the page — only the words change.
+//
+// So the subject now carries what was measured: N errors, over how long, ending
+// when. The founding 23h30m case renders as "143 errors in 30m,
+// 2026-07-21T23:10:26Z–2026-07-22T12:00:00Z" — strictly more alarming than the
+// old wording, and true.
+//
+// Every time in this mail is ABSOLUTE. A page is read minutes or hours after it
+// is sent — the 2026-08-14 one was noticed by the delivering daemon 16m26s
+// later — so a relative age ("last 14m ago") would be wrong by the time anyone
+// saw it. That is the same defect one layer out, and it is why the send time is
+// stated too: without it, a reader dates the page to when they read it.
+func hitMail(t Target, rep synthfail.Report, sentAt time.Time) (subject, body string) {
+	brief := rep.Brief()
+	subject = fmt.Sprintf("AGENTS FAILING TURNS — %s (%s)", t.Name, rep.Reason)
+	if brief != "" {
+		subject += ": " + brief
+	}
 
 	var b strings.Builder
+	fmt.Fprintf(&b, "Sent %s. Every time below is UTC and absolute — date this page\n", sentAt.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "from that line, not from when you are reading it.\n\n")
 	fmt.Fprintf(&b, "pogod read %s's session transcript and found it answering turns\n", t.Name)
 	fmt.Fprintf(&b, "LOCALLY and failing them: %d zero-token failure turns between %s\n",
 		rep.Count, rep.First.UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "and %s.\n\n", rep.Last.UTC().Format(time.RFC3339))
+	if w := rep.WindowString(); w != "" {
+		fmt.Fprintf(&b, "THAT IS A COUNT OVER A TRAILING %s WINDOW, NOT A RATE. It does not say\n", strings.ToUpper(w))
+		fmt.Fprintf(&b, "every turn failed, and it does not say %s is failing now — an agent with\n", t.Name)
+		fmt.Fprintf(&b, "a handful of failures in this window can be completing turns throughout.\n")
+		fmt.Fprintf(&b, "Nor is the window the size of the fault: it can be narrower at either end.\n\n")
+	}
 	fmt.Fprintf(&b, "Reason: %s — %s\n", rep.Reason, rep.Reason.Human())
+	if rep.Reason == synthfail.ReasonServerError {
+		// The mayor prompt's enumeration for this state names only persistent
+		// causes, so a reader arrives expecting one. server_error is not.
+		fmt.Fprintf(&b, "  NOTE: server_error is a PROVIDER/NETWORK fault, not a credential, a rate\n")
+		fmt.Fprintf(&b, "  limit or a spend cap. It needs no action from you and it can be\n")
+		fmt.Fprintf(&b, "  intermittent — recurring for hours while most turns succeed. Do not go\n")
+		fmt.Fprintf(&b, "  looking for an expired credential on the strength of this page.\n")
+	}
 	if rep.Detail != "" {
 		fmt.Fprintf(&b, "Harness said: %q\n", rep.Detail)
 	}
@@ -438,7 +498,16 @@ func hitMail(t Target, rep synthfail.Report) (subject, body string) {
 	fmt.Fprintf(&b, "limit, the same cap — and the restart discards the live session's whole\n")
 	fmt.Fprintf(&b, "context. pogod has already suppressed restart-based remediation for\n")
 	fmt.Fprintf(&b, "affected agents; do not work around it.\n\n")
-	fmt.Fprintf(&b, "This class is characteristically fleet-wide (one shared credential).\n")
+	// Why it is fleet-wide differs by reason, and saying "one shared
+	// credential" under a server_error page contradicts the note above it —
+	// which is the mistake this whole page is being corrected for.
+	if rep.Reason == synthfail.ReasonServerError {
+		fmt.Fprintf(&b, "This will look fleet-wide, because a network or provider fault IS\n")
+		fmt.Fprintf(&b, "fleet-wide. That is not evidence of a shared credential; do not read it\n")
+		fmt.Fprintf(&b, "as one (mg-c058).\n")
+	} else {
+		fmt.Fprintf(&b, "This class is characteristically fleet-wide (one shared credential).\n")
+	}
 	fmt.Fprintf(&b, "Other agents joining this episode are added silently; you will get ONE\n")
 	fmt.Fprintf(&b, "follow-up mail naming all of them when it clears.\n\n")
 	fmt.Fprintf(&b, "Verify:  pogo agent diagnose %s --json   (health, transcript_check)\n", t.Name)
@@ -448,13 +517,27 @@ func hitMail(t Target, rep synthfail.Report) (subject, body string) {
 
 // clearMail builds the episode-close page, naming every agent that was in the
 // class so a human can confirm each one resumed.
-func clearMail(roster []string, when time.Time) (subject, body string) {
-	subject = fmt.Sprintf("turn failures cleared — %d agent(s) producing real turns again", len(roster))
+//
+// It states what was OBSERVED — no failing turns in the trailing window — and
+// not what a reader would like it to mean. "producing real turns again" was an
+// over-claim: the close fires on a QUIET transcript, and a quiet transcript is
+// equally consistent with an agent that has gone idle, and with a fault that is
+// merely between recurrences. On 2026-08-14 this alarm announced a clear at
+// 03:22Z and re-opened at 03:24Z, against a github.com reachability fault that
+// ran intermittently from at least 01:18Z to 03:16Z; the clear was not wrong
+// about its window, it was wrong about what its window proved (mg-c058).
+func clearMail(roster []string, when time.Time, window time.Duration) (subject, body string) {
+	subject = fmt.Sprintf("turn failures cleared — %d agent(s), no failing turns in the last %s", len(roster), window.String())
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "The synthetic-failure-turn episode cleared as of %s.\n\n", when.UTC().Format(time.RFC3339))
-	fmt.Fprintf(&b, "%d agent(s) were failing every turn during this episode. Each now shows\n", len(roster))
-	fmt.Fprintf(&b, "real model turns in its transcript, or has stopped. Restart suppression\n")
+	fmt.Fprintf(&b, "As of %s, no agent shows a failing turn in the trailing %s window.\n\n", when.UTC().Format(time.RFC3339), window)
+	fmt.Fprintf(&b, "THAT IS WHAT WAS MEASURED, AND IT IS LESS THAN \"THE FAULT IS OVER\". A\n")
+	fmt.Fprintf(&b, "quiet transcript is also what an idle agent writes, and an intermittent\n")
+	fmt.Fprintf(&b, "fault is quiet between recurrences — a clean reading lands in a good\n")
+	fmt.Fprintf(&b, "minute just as reliably as a clean probe does. If you need to establish\n")
+	fmt.Fprintf(&b, "recovery, look for a PERIOD with no instrument failures anywhere (refinery\n")
+	fmt.Fprintf(&b, "fetch retries, gh-intake, gh-teardown-watch), not one successful check.\n\n")
+	fmt.Fprintf(&b, "%d agent(s) were in this class during the episode. Restart suppression\n", len(roster))
 	fmt.Fprintf(&b, "is lifted. Confirm each resumed real work — the nudges consumed during\n")
 	fmt.Fprintf(&b, "the episode were destroyed, not queued, so the scheduled work of that\n")
 	fmt.Fprintf(&b, "window is GONE rather than late (mg-18d0):\n\n")

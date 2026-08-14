@@ -540,12 +540,36 @@ A stale heartbeat has two causes that look identical from the outside and take
 **opposite** responses. Before you nudge or restart anything, ask:
 
 ```bash
-pogo agent diagnose <name> --json | jq '{health, restart_suppressed, transcript_check}'
+pogo agent diagnose <name> --json | jq '{health, health_detail, restart_suppressed, transcript_check}'
 ```
 
 - `health: "failing_turns"` / `restart_suppressed: true` — the agent is **not
-  wedged**. It is alive, consuming every nudge on time, and failing each one
-  locally in ~10ms: an expired credential, a rate limit, a spend cap.
+  wedged**. It is alive, consuming nudges on time, and failing some of them
+  locally in ~10ms: an expired credential, a rate limit, a spend cap, or a
+  provider/network fault (`server_error`).
+
+  **`failing_turns` is a COUNT over a trailing window, not a statement about
+  this instant.** Read `health_detail` — or `transcript_check.count`,
+  `.window_seconds`, `.first`, `.last` — before you conclude anything from the
+  token. A reading of `failing_turns (2 errors in 30m, 02:24:50Z–02:33:27Z)` and
+  one of `failing_turns (143 errors in 30m, …)` are different facts, and the
+  token alone renders them identically. On 2026-08-14 seven of nine agents read
+  `failing_turns` off two errors each while **every one of them was completing
+  turns — including you, the agent that ran the query** (mg-c058).
+
+  Two things the count does not tell you, both of which were misread in one
+  night: it is not a rate (2 in 30m is not "every turn"), and the window is not
+  the size of the fault — it can be narrower at either end, so a fault can be
+  ongoing after the last counted error and can have started before the first.
+
+  `transcript_check.reason` decides who acts. `auth_failed`, `spend_limit` and
+  `invalid_request` need a **human**. `rate_limit`, `weekly_limit` and
+  `server_error` clear with **time** and need nobody — and `server_error` in
+  particular is a network/provider fault that will look fleet-wide, because it
+  is, without any credential being involved. Do not report a `server_error`
+  episode as a credential problem; gh-intake's identical-looking alerts held a
+  ticket on `human` for nine days on exactly that mistake (mg-fb29).
+
   **DO NOT RESTART IT, and do not nudge it either** — a nudge is just another
   turn for it to fail. A restart cannot help, because the replacement session
   inherits the same credential or limit, and it *destroys* both the session's
@@ -708,6 +732,11 @@ pogo schedule list              # the raw table: acked/delivered per schedule
 - **A `COHORT DARK` finding names a whole cohort, not an agent.** Do not restart
   four agents. Suspect the ack path, an auth outage, or pogod itself — check
   `pogo agent diagnose` for `health: failing_turns` and the credential first.
+  Read `transcript_check.reason` before you land on the credential: an
+  intermittent `server_error` produces the identical fleet-wide shape with no
+  credential involved, and that is what it was on 2026-08-14 — four instruments
+  hit the same network fault and only the credential-shaped readings were
+  believed (mg-c058).
 - **A `COHORT DARK` finding is about the last few hours, and it clears itself.**
   It is the absolute completion rate over the trailing window, not a lifetime
   ratio, so once the cohort completes fires again the alarm stops on its own —

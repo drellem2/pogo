@@ -497,7 +497,7 @@ func mailBody(rep Report, now, openedAt time.Time, p Params, notifyTo, escalateT
 
 	fmt.Fprintf(&b, "  pogo agent list                       # status, pid, uptime\n")
 	fmt.Fprintf(&b, "  pogo schedule list                    # unacked streaks per agent\n")
-	fmt.Fprintf(&b, "  pogo agent diagnose <name> --json     # transcript_check, health\n\n")
+	fmt.Fprintf(&b, "  pogo agent diagnose <name> --json     # health, health_detail, transcript_check\n\n")
 
 	fmt.Fprintf(&b, "Judged %d of %d agents. Not judged: %d too fresh, %d beyond the lookback,\n",
 		len(rep.Judged), rep.Scanned, len(rep.TooFresh), len(rep.BeyondLookback))
