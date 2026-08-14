@@ -18,12 +18,49 @@ import (
 // nothing else in the tree is responsible for the fleet being up.
 //
 // On 2026-08-08 that contingency was collected. The crew was stopped cleanly at
-// 00:44:20Z — five agents, exit_code=0, reason=requested, 0.42s apart: one
-// StopAll-shaped command. The nightly deploy then hung at 02:00:05Z inside an
-// unbounded git call and did not return for 31h39m. The fleet stayed dark for 33
-// hours. Every supervisor behaved correctly: a requested stop is not a crash, so
-// restart_on_crash did not fire, and nothing is entitled to undo a deliberate
-// shutdown it cannot distinguish from an intended one.
+// 00:44:20Z — five agents, exit_code=0, reason=requested, 0.42s apart. The
+// nightly deploy then hung at 02:00:05Z inside an unbounded git call and did not
+// return for 31h39m. The fleet stayed dark for 33 hours. Every supervisor
+// behaved correctly: a requested stop is not a crash, so restart_on_crash did
+// not fire, and nothing is entitled to undo a deliberate shutdown it cannot
+// distinguish from an intended one.
+//
+// THE MECHANISM IS MEASURED, THE CALLER IS NOT (mg-a95f). This paragraph used to
+// say "one StopAll-shaped command", which was an inference from the shape.
+// ~/Library/Logs/pogo/pogod.log.1 settles the first half:
+//
+//	2026/08/08 01:44:19 server: transitioning to index-only mode
+//	2026/08/08 01:44:20 agent architect: exited (err=<nil>)      (+4 more, to 01:44:21)
+//	2026/08/08 01:44:21 refinery: stopped
+//	2026/08/08 01:44:21 server: now in index-only mode
+//	2026/08/08 01:44:22 agent architect: restart failed: registry shut down  (+4 more)
+//
+// (local +01:00; 01:44:19 local is 00:44:19Z.) That is transitionToIndexOnly,
+// so it was one command, and the shutdown latch is why every restart_on_crash
+// respawn was refused three seconds later. It also settles what the fire it
+// PRECEDED cannot have been: predeploy-stop-noncritical-mayor was delivered at
+// 00:45:08Z, 48s after the fleet was already down.
+//
+// WHO POSTED IT REMAINS UNIDENTIFIED, and the reason is worth keeping because
+// it is the trap, not the answer. The obvious query — `pogo events list
+// --type=server_mode_changed` around that minute — returns nothing, and that
+// nothing is a NULL INSTRUMENT rather than a negative result. modeaudit.go
+// landed at 2026-08-07T18:49:27Z (bce9b08); the pogod that logged the line above
+// had been running since 17:37:28Z at the latest (its crew's duration_seconds at
+// exit), so it predated its own emitter by an hour. The first
+// server_mode_boot in events.log is 2026-08-09T09:41:19Z and the first
+// server_mode_changed is 2026-08-09T22:12:22Z — both more than 33 hours after
+// the stop. Merged is not running; see the same distinction in modeaudit.go.
+//
+// What was ruled out, so it is not re-derived a fourth time: the nightly deploy
+// (its log starts at 02:00:05Z, 1h16m later), a polecat (the mayor measured
+// `polecats: 0` at 00:44:16Z), an interactive `pogo server stop` (~/.zsh_history
+// has no such entry and has not been written since Jul 7), and `pogo service
+// install` / `install-deploy` — the leading candidate for the ANALOGOUS 08-07
+// stop, and the reason installorchestration.go quiesces at all — since neither
+// com.pogo.daemon.plist (Apr 28) nor com.pogo.deploy.plist (Aug 7 14:03) was
+// rewritten at that time. Ruling out is not identifying, and this has happened
+// once in the observable log.
 //
 // mg-6d2f (974edc1) closed the ALERTING half of this: a deploy run that leaves
 // the fleet stopped now exits 11/12 and says the fleet is down. That is real,

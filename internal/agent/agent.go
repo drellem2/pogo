@@ -220,6 +220,10 @@ type Agent struct {
 	// than agent_crashed.
 	stopRequested bool
 
+	// stopCause names WHICH stop path set stopRequested — see the StopCause
+	// constants. It rides onto agent_stopped as `stop_cause` (mg-a95f).
+	stopCause string
+
 	// lastWakeAt is when a WAKE nudge was last DELIVERED to this agent's PTY —
 	// the whole per-agent state of the wake-cycle policy (see wakepolicy.go).
 	// Guarded by wakeMu rather than mu on purpose: the policy is evaluated on
@@ -1294,6 +1298,13 @@ func (r *Registry) Remove(name string) {
 // (mg-fb13). The respawn path above deliberately keeps the claim: that agent is
 // coming back on the same item. See releasePolecatClaim.
 func (r *Registry) Stop(name string, timeout time.Duration) error {
+	return r.StopWithCause(name, timeout, StopCauseRequest)
+}
+
+// StopWithCause is Stop with the calling path named, so the agent_stopped
+// record says which of them ran. cause should be one of the StopCause
+// constants; anything else is passed through verbatim.
+func (r *Registry) StopWithCause(name string, timeout time.Duration, cause string) error {
 	agent := r.Get(name)
 	if agent == nil {
 		return fmt.Errorf("agent %q not found", name)
@@ -1327,6 +1338,7 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 		// requested (agent_stopped) rather than a crash.
 		agent.mu.Lock()
 		agent.stopRequested = true
+		agent.stopCause = cause
 		agent.mu.Unlock()
 		// Send SIGTERM via the process
 		if err := agent.cmd.Process.Signal(os.Interrupt); err != nil {
@@ -1363,6 +1375,61 @@ func (r *Registry) Stop(name string, timeout time.Duration) error {
 	return nil
 }
 
+// Stop causes, recorded on agent_stopped as `stop_cause` (mg-a95f).
+//
+// WHY THE STOP PATH IS PART OF THE RECORD. `reason` has two values —
+// "requested" and "task_complete" — and "requested" is every deliberate stop
+// in the tree collapsed into one word. Six call sites reach Registry.Stop and
+// only one of them is a person: the DELETE handler behind `pogo agent stop`.
+// The rest are pogod's own machinery (three polecat reapers), a park, and the
+// fleet-wide drain StopAll performs for a run-mode transition. From the event
+// alone they are indistinguishable.
+//
+// That is not a hypothetical. On 2026-08-08T00:44:20Z five crew agents stopped
+// 0.42s apart, all exit_code=0 reason=requested, and the fleet stayed dark for
+// 33 hours. Answering "was that one command or five?" took reading
+// ~/Library/Logs/pogo/pogod.log for a line ("server: transitioning to
+// index-only mode") that internal/server/modeaudit.go documents as unreliable
+// — pogod logs to inherited stderr, and four months of that file once held
+// zero copies of that very line. events.log had the effect and no cause.
+//
+// mg-293c closed the half of this above the registry: a run-mode change now
+// names the HTTP caller that asked for it. `stop_cause` closes the half below,
+// so the five records themselves say stop_all and the two events join up
+// without leaving the event log. A stop that carries no mode change is
+// likewise no longer mistakable for a drain.
+//
+// TWO RESIDUES, STATED RATHER THAN LEFT TO BE FOUND. The first is inherited and
+// is the whole reason mg-a95f exists: this is only in the log once the running
+// pogod carries it, so an ABSENT stop_cause means the field did not exist, never
+// that the stop was unattributed. docs/event-log.md says so where a reader of an
+// old record will meet it.
+//
+// The second is that a SEVENTH stop path added later inherits StopCauseRequest
+// by calling the bare Stop, and would then read as a person having asked. That is
+// the least-bad default — every existing caller of Stop IS the explicit path —
+// but it is a default, and nothing forces the new site to think about it. The
+// doc-drift test in stopcause_test.go catches an undocumented new CONSTANT, not
+// an unthinking reuse of this one.
+const (
+	// StopCauseRequest is a single explicit stop — DELETE /agents/{name},
+	// i.e. `pogo agent stop`. It is the default for a bare Stop call.
+	StopCauseRequest = "request"
+	// StopCauseStopAll is the fleet-wide drain in StopAll, whose only live
+	// caller is Server.transitionToIndexOnly.
+	StopCauseStopAll = "stop_all"
+	// StopCausePark is Registry.Park stopping the agent it just parked.
+	StopCausePark = "park"
+	// StopCauseMergeReap is pogod reaping a polecat whose branch merged.
+	StopCauseMergeReap = "merge_reap"
+	// StopCauseMergeBackstop is pogod's defer-done backstop reaping a polecat
+	// that merged but lingered past its deadline.
+	StopCauseMergeBackstop = "merge_backstop"
+	// StopCauseDoneReap is pogod reaping a polecat whose work item is done and
+	// which has been idle past the grace period.
+	StopCauseDoneReap = "done_reap"
+)
+
 // StopAll stops all agents and prevents subsequent Respawn() calls, so that
 // in-flight respawn goroutines scheduled by the OnExit hook do not bring
 // agents back after StopAll returns.
@@ -1389,7 +1456,7 @@ func (r *Registry) StopAll(timeout time.Duration) {
 	r.mu.Unlock()
 
 	for _, name := range names {
-		if err := r.Stop(name, timeout); err != nil {
+		if err := r.StopWithCause(name, timeout, StopCauseStopAll); err != nil {
 			log.Printf("agent %s: stop error: %v", name, err)
 		}
 		// During shutdown, Stop() leaves restart_on_crash agents in the
@@ -1944,6 +2011,7 @@ func (r *Registry) waitAndHandle(a *Agent) {
 		}
 	}
 	stopRequested := a.stopRequested
+	stopCause := a.stopCause
 	exitCode := a.ExitCode
 	duration := a.ExitTime.Sub(a.StartTime).Seconds()
 	a.mu.Unlock()
@@ -1958,7 +2026,7 @@ func (r *Registry) waitAndHandle(a *Agent) {
 	// recycled pid argue for a polecat we know is dead (mg-13a3).
 	noteWitnessExit(a)
 
-	a.emitExit(stopRequested, exitCode, duration)
+	a.emitExit(stopRequested, stopCause, exitCode, duration)
 
 	// Fire onExit callback BEFORE closing done, so that callers waiting on
 	// Done() (e.g. Stop/StopAll during shutdown) block until cleanup
@@ -1976,22 +2044,30 @@ func (r *Registry) waitAndHandle(a *Agent) {
 
 // emitExit records either agent_stopped (clean / requested exit) or
 // agent_crashed (unexpected exit). Best-effort: errors never propagate.
-func (a *Agent) emitExit(stopRequested bool, exitCode int, durationSeconds float64) {
+func (a *Agent) emitExit(stopRequested bool, stopCause string, exitCode int, durationSeconds float64) {
 	if stopRequested || exitCode == 0 {
 		reason := "task_complete"
 		if stopRequested {
 			reason = "requested"
 		}
+		details := map[string]any{
+			"pid":              a.PID,
+			"exit_code":        exitCode,
+			"reason":           reason,
+			"duration_seconds": durationSeconds,
+		}
+		// Only on the requested branch, and only when a path named itself: an
+		// agent that finished its own work was not stopped by anybody, and an
+		// empty stop_cause would read as an unattributed stop rather than as
+		// no stop at all (mg-a95f).
+		if stopRequested && stopCause != "" {
+			details["stop_cause"] = stopCause
+		}
 		events.Emit(context.Background(), events.Event{
 			EventType: "agent_stopped",
 			Agent:     a.eventAgent(),
 			Repo:      a.SourceRepo,
-			Details: map[string]any{
-				"pid":              a.PID,
-				"exit_code":        exitCode,
-				"reason":           reason,
-				"duration_seconds": durationSeconds,
-			},
+			Details:   details,
 		})
 		return
 	}

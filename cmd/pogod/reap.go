@@ -52,7 +52,7 @@ func notifyFiler(n filerNotifier, c filernotify.Completion) {
 // polecatReaper is the slice of agent.Registry that reapMergedPolecat needs.
 type polecatReaper interface {
 	GetByWorkItemOrName(id string) *agent.Agent
-	Stop(name string, timeout time.Duration) error
+	StopWithCause(name string, timeout time.Duration, cause string) error
 	// ReleaseClaimAfterExit returns the work item of a polecat that ended its
 	// own process to available/, reporting whether a held claim was actually
 	// released. Registry.Stop covers the polecats pogod tears down; this covers
@@ -398,7 +398,7 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	}
 
 	// Stop keys on the registry name, which is the bare id — not mr.Author.
-	if err := reg.Stop(a.Name, mergedPolecatStopTimeout); err != nil {
+	if err := reg.StopWithCause(a.Name, mergedPolecatStopTimeout, agent.StopCauseMergeReap); err != nil {
 		log.Printf("refinery: failed to stop merged polecat %s: %v", a.Name, err)
 		return
 	}
@@ -667,7 +667,7 @@ func (b *deferredBackstop) fire(name string, mr *refinery.MergeRequest) {
 	} else {
 		log.Printf("refinery: defer-done backstop FIRED for polecat %s — merged but did not complete within %s; reaping + escalating (gh #34/#35 slot protection, gh #81)", name, b.timeout)
 	}
-	if err := b.reg.Stop(a.Name, mergedPolecatStopTimeout); err != nil {
+	if err := b.reg.StopWithCause(a.Name, mergedPolecatStopTimeout, agent.StopCauseMergeBackstop); err != nil {
 		log.Printf("refinery: defer-done backstop failed to stop lingering polecat %s: %v", a.Name, err)
 	}
 	if !completed && b.escalate != nil {

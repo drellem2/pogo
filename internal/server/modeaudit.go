@@ -33,7 +33,22 @@ var logf = log.Printf
 //     event does not depend on it.
 //
 // The log line is kept because it is what an operator tailing the daemon sees,
-// and because losing it would be a regression in the ordinary case.
+// and because losing it would be a regression in the ordinary case. It is not
+// only a courtesy: on 2026-08-08 the log line is the ONLY thing that identified
+// the mechanism behind a 33-hour outage, because this event did not exist in the
+// binary that was running (below).
+//
+// WHEN THIS INSTRUMENT WENT LIVE, AND WHY THAT IS PART OF THE RECORD (mg-a95f).
+// The emitter merged at 2026-08-07T18:49:27Z. The first EventModeBoot in
+// ~/.pogo/events.log is 2026-08-09T09:41:19Z and the first EventModeChanged is
+// 2026-08-09T22:12:22Z — the daemon did not restart onto it for another 15 to 27
+// hours. So for any question about a transition BEFORE 2026-08-09T09:41Z, an
+// empty `pogo events list --type=server_mode_changed` says nothing whatsoever;
+// it is the instrument being absent, not the transition. That window contains
+// the 2026-08-08T00:44:20Z crew stop this file's first paragraph is about, and
+// reading its silence as evidence was the mistake the ticket was filed to
+// prevent. Any future reader asking "who stopped it?" of a date should check
+// that date against these two, first.
 const (
 	// EventModeChanged records an actual transition between run modes. It is
 	// emitted only when the mode really changed — a stop against an

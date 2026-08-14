@@ -18,7 +18,10 @@ import (
 type fakeReaper struct {
 	agents  map[string]*agent.Agent
 	stopped []string
-	stopErr error
+	// stopCauses is the cause argument of each StopWithCause call, positionally
+	// aligned with stopped (mg-a95f).
+	stopCauses []string
+	stopErr    error
 
 	// releaseHeld models the store: the ids whose claim is still held at exit.
 	// ReleaseClaimAfterExit reports (false, nil) for anything not in here,
@@ -43,8 +46,9 @@ func (f *fakeReaper) GetByWorkItemOrName(id string) *agent.Agent {
 	return nil
 }
 
-func (f *fakeReaper) Stop(name string, timeout time.Duration) error {
+func (f *fakeReaper) StopWithCause(name string, timeout time.Duration, cause string) error {
 	f.stopped = append(f.stopped, name)
+	f.stopCauses = append(f.stopCauses, cause)
 	return f.stopErr
 }
 

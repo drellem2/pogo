@@ -200,7 +200,7 @@ const doneReapIdleGrace = 2 * time.Minute
 // nudge, or spawn.
 type doneReapRegistry interface {
 	PolecatActivityAt(now time.Time) []agent.PolecatActivity
-	Stop(name string, timeout time.Duration) error
+	StopWithCause(name string, timeout time.Duration, cause string) error
 }
 
 // doneReaper stops polecats whose work item has concluded and which have gone
@@ -380,7 +380,7 @@ func (d *doneReaper) Check(now time.Time) []string {
 		}
 		log.Printf("donereap: stopping polecat %s — work item %s is done and it has been idle %s (>= %s); freeing its slot (mg-56d1)",
 			p.Name, p.WorkItemID, p.IdleFor.Truncate(time.Second), d.grace)
-		if err := d.reg.Stop(p.Name, mergedPolecatStopTimeout); err != nil {
+		if err := d.reg.StopWithCause(p.Name, mergedPolecatStopTimeout, agent.StopCauseDoneReap); err != nil {
 			// Losing the race with a clean exit lands here ("agent not found"),
 			// as does a genuine stop failure. Either way the next tick re-decides
 			// from a fresh snapshot, so there is nothing to retry inline.

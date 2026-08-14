@@ -295,7 +295,7 @@ func (r *Registry) Park(name string, timeout time.Duration) (int, error) {
 	}
 
 	if a != nil {
-		if err := r.Stop(name, timeout); err != nil {
+		if err := r.StopWithCause(name, timeout, StopCausePark); err != nil {
 			return len(paused), fmt.Errorf("park flag set but stop failed: %w", err)
 		}
 	}
