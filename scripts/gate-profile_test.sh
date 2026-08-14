@@ -446,11 +446,35 @@ else
     fail "build.sh leaves one of fmt/test/compile unprofiled"
 fi
 
-if printf '%s\n' "$TEST_SH_CODE" | grep -q "trap 'gate_profile_report' EXIT" &&
-    printf '%s\n' "$BUILD_SH_CODE" | grep -q "trap 'gate_profile_report' EXIT"; then
-    pass "both arm the report on EXIT, so a failed gate still profiles"
+# The property this pins is that the profile is ARMED ON EXIT rather than
+# appended at the bottom of the file — the run whose profile is most worth
+# having is the one that never reaches a bottom. It follows the trap to what it
+# CALLS rather than pinning one function name: since mg-82a6, test.sh arms
+# gate_exit_report (which calls gate_profile_report and then prints how much of
+# this gate GitHub CI runs), while build.sh still arms gate_profile_report
+# directly. Pinning the name would have to be edited again the next time either
+# gate script grows a second thing to say on its way out, and an assertion that
+# has to be edited to stay green is an assertion people edit without reading.
+GATE_EXIT_CODE="$(cat "$REPO_ROOT/scripts/lib/gate-exit.sh" 2>/dev/null || true)"
+trap_armed_on_exit() {
+    printf '%s\n' "$1" | sed -n "s/^trap '\([a-zA-Z_][a-zA-Z_0-9]*\)' EXIT\$/\1/p" | head -1
+}
+reaches_profile_report() {
+    case "$1" in
+        "") return 1 ;;
+        gate_profile_report) return 0 ;;
+    esac
+    # Some other handler: it must be defined in scripts/lib/gate-exit.sh and it
+    # must reach gate_profile_report from there.
+    printf '%s\n' "$GATE_EXIT_CODE" | grep -qE "^$1\(\)" &&
+        printf '%s\n' "$GATE_EXIT_CODE" | grep -q 'gate_profile_report'
+}
+TEST_SH_TRAP="$(trap_armed_on_exit "$TEST_SH_CODE")"
+BUILD_SH_TRAP="$(trap_armed_on_exit "$BUILD_SH_CODE")"
+if reaches_profile_report "$TEST_SH_TRAP" && reaches_profile_report "$BUILD_SH_TRAP"; then
+    pass "both arm the report on EXIT, so a failed gate still profiles (test.sh via ${TEST_SH_TRAP}, build.sh via ${BUILD_SH_TRAP})"
 else
-    fail "a gate script appends its report instead of arming it on EXIT"
+    fail "a gate script appends its report instead of arming it on EXIT (test.sh trap: '${TEST_SH_TRAP}', build.sh trap: '${BUILD_SH_TRAP}')"
 fi
 
 echo ""

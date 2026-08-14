@@ -47,6 +47,38 @@ top-level `bash <suite>` in `test.sh` sits outside a `gate_step`. A suite added
 without it joins the gate's cost silently and is invisible in the table that
 exists to rank it — which is the state the profile was built to end.
 
+### GitHub CI is a **subset** of the merge gate, not a second opinion on it (`mg-82a6`)
+
+The merge gate is `./build.sh`, which runs `./test.sh` on darwin. GitHub CI
+(`.github/workflows/ci.yml`) runs a **minority** of `test.sh`'s rows, on
+ubuntu-latest — and one row the two share is not even the same command, because
+the gate wraps it in the `$TMPDIR` leak guard and CI does not.
+
+```bash
+bash scripts/ci-coverage.sh            # the full breakdown, naming every row
+bash scripts/ci-coverage.sh --quiet    # the one-line count
+```
+
+`test.sh` prints that count at the end of every run, and prints more of it when
+the run **failed**. Read that block before concluding anything from a green CI:
+
+> **"CI is green on this commit but the gate is red"** is not a contradiction
+> and never was. The two answer different questions, about different rows, on
+> different operating systems. A green CI run is **not** evidence that a gate
+> failure is spurious, and a single failing gate run is **not** a reproduction.
+> Re-run the gate on the same commit, and say in your report whether the failure
+> reproduced.
+
+That is written here because the inference cost a night: on 2026-08-14 one
+unreproduced gate failure, set beside a green CI run on the same commit, was
+escalated as MAIN IS RED four minutes before a nightly deploy — on a tree that
+was green throughout (`mg-5fc8`).
+
+Adding a suite to `test.sh` does **not** oblige you to add it to `ci.yml`.
+Several gate rows are darwin-specific, several stand up live daemons, and one
+drives the live fleet; closing the gap is not the goal, and `ci-coverage.sh`
+does not treat it as one. Knowing the gap is the goal.
+
 ### Writing a test that touches pogo state: use `scripts/pogo-sandbox`
 
 A test must never read or write the developer's live `~/.pogo`, the live daemon,

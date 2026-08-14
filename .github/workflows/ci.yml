@@ -1,4 +1,30 @@
-name: CI
+# =============================================================================
+# THIS WORKFLOW IS A SUBSET OF THE MERGE GATE. IT IS NOT THE MERGE GATE.
+# =============================================================================
+#
+# The merge gate is `./build.sh`, which runs `./test.sh` on darwin, and the
+# refinery will not merge a branch that fails it. This workflow runs a MINORITY
+# of test.sh's rows, on ubuntu-latest. `bash scripts/ci-coverage.sh` counts the
+# overlap from these two files on demand, and the `gate-scope` job below prints
+# that count into every run of this workflow.
+#
+# So a green run here is not a second opinion on the gate, and the two cannot
+# contradict each other about a commit — they are answering different questions
+# about different rows on different operating systems. On 2026-08-14 that
+# inference ("CI is green on that same commit ... so one of them is wrong about
+# the tree that is about to be deployed") turned one unreproduced gate failure
+# into a MAIN IS RED alarm four minutes before a nightly deploy, on a tree that
+# was green throughout. mg-5fc8 is the incident; mg-82a6 is this notice.
+#
+# The remedy is NOT to widen this workflow until it matches. Several gate rows
+# are darwin-specific, several stand up live daemons, and one drives the live
+# fleet. Knowing the asymmetry is the remedy.
+#
+# The name below carries the same caveat, because the workflow name is what
+# appears in `gh run list`, in a PR's checks list, and in the sentence "CI is
+# green on that commit" — which is where the inference is actually made.
+# =============================================================================
+name: CI (subset of the merge gate)
 
 on:
   push:
@@ -10,6 +36,23 @@ permissions:
   contents: read
 
 jobs:
+  # How much of the merge gate this workflow actually runs, printed into this
+  # workflow's own output (mg-82a6). It is a job rather than a comment because a
+  # comment is not in the artifact anyone reads: whoever opens a run — or reads
+  # a report quoting one — sees a list of green jobs, and this is the one that
+  # says what that green covers.
+  #
+  # It measures rather than restating a number, so it cannot go stale against
+  # the two files it is measuring, and it exits 2 (failing this job, loudly)
+  # rather than reporting a confident zero if either parse stops working.
+  gate-scope:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: This workflow is a SUBSET of the merge gate — here is how much
+        run: bash scripts/ci-coverage.sh
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -138,6 +181,14 @@ jobs:
 
       - name: Run changelog coverage tests
         run: scripts/changelog-coverage_test.sh
+
+      # Here rather than only in the gate because this suite's subject is a
+      # cross-platform awk parse: the gate runs it against BSD awk on darwin and
+      # this job runs the same file against gawk/mawk on ubuntu. A parser that
+      # reports a different coverage number on the two hosts would be reporting
+      # a difference between awks as a difference between the files.
+      - name: Run CI-vs-gate coverage instrument tests
+        run: scripts/ci-coverage_test.sh
 
   version-check:
     if: false  # Disabled — re-enable by removing this line
