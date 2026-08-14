@@ -1423,8 +1423,17 @@ Flags:
 	// it every `gh` call pogod makes exits with "populate the GH_TOKEN
 	// environment variable", which is why the gh-issue teardown detector below
 	// reported every carrier as indeterminate on every run. Logged
-	// existence-only: the value never reaches the log.
-	log.Printf("pogod: %s", ghtoken.Ensure())
+	// existence-only: the value never reaches the log, and the line NAMES THE
+	// WINNING SOURCE — with three sources in the chain, a line that does not say
+	// which one won can no longer answer the question this line has already
+	// answered once (it is what refuted gh#113's premise, 163 occurrences deep).
+	//
+	// The Result is KEPT, not just logged (mg-fb29). Its OK() is the positive
+	// credential predicate the gh-issue intake detector arms on further down: one
+	// global evaluation, at startup, rather than each watched repo inferring the
+	// same fact from its own failed `gh issue list`.
+	ghCredential := ghtoken.Ensure()
+	log.Printf("pogod: %s", ghCredential)
 
 	// Bound every git repository lookup at POGO_HOME, before anything shells out
 	// to git or spawns an agent. Every repo pogod manages (polecats/*,
@@ -2370,25 +2379,54 @@ Flags:
 	// itself become the news — which is also the answer to what happens if the
 	// coordinator is down. REPORT-ONLY: it mails and never files or comments.
 	//
-	// Armed only when `gh` is actually available. Without it EVERY repo lookup
-	// fails, and the runner would faithfully report an environment gap as a wall of
-	// unreadable repos — noise that would get the detector muted before the run
-	// that matters. A missing gh is a precondition, not a finding.
+	// Armed only when `gh` is actually available AND a GitHub credential exists.
+	// Without either, EVERY repo lookup fails, and the runner would faithfully
+	// report one environment gap as a wall of unreadable repos — noise that would
+	// get the detector muted before the run that matters. A missing gh is a
+	// precondition, not a finding; mg-fb29 extends that same accepted argument
+	// from the BINARY to the CREDENTIAL, which is the identical shape (one global
+	// cause, invisible from any per-repo view) and was measured to cost more: the
+	// N-unreadable-repos message names a credential among four guesses, and nine
+	// days of a person's queue went to chasing the guess.
+	//
+	// The two are separate conditions with separate ids because their remedies do
+	// not overlap — a plist PATH edit versus `gh auth login` — and a shared id
+	// would let the first to fire suppress the second.
 	var intakeWatcher *ghintake.Watcher
 	if cfg.GHIntake.Enabled {
-		if _, err := exec.LookPath("gh"); err != nil {
+		// A13's second and third consequences route to this subsystem's own
+		// mailbox for the same reason A13 does, falling back to the coordinator if
+		// notify_to was explicitly blanked.
+		intakeTo := cfg.GHIntake.NotifyTo
+		if intakeTo == "" {
+			intakeTo = coordinator
+		}
+		_, ghPathErr := exec.LookPath("gh")
+		switch decideIntakeArming(ghPathErr == nil, ghCredential.OK()) {
+		case intakeBlockedNoGH:
 			log.Printf("pogod: gh-issue intake detector NOT armed — `gh` not on PATH (%v); "+
-				"open issues will not be reconciled against carriers", err)
-			// A13's second consequence — see conditionIntakeNotArmed. Routed to this
-			// subsystem's own mailbox for the same reason A13 is, falling back to the
-			// coordinator if notify_to was explicitly blanked.
-			intakeTo := cfg.GHIntake.NotifyTo
-			if intakeTo == "" {
-				intakeTo = coordinator
-			}
-			conditions.Raise(conditionIntakeNotArmed(intakeTo, err.Error()), time.Now())
-		} else {
+				"open issues will not be reconciled against carriers", ghPathErr)
+			// See conditionIntakeNotArmed. The credential condition is CLEARED
+			// rather than left standing: without `gh` the credential predicate is
+			// not measurable, so asserting it either way would be a claim nothing
+			// checked — and a stale raise would make the real credential fault
+			// read as "already known" when gh comes back, suppressing its mail for
+			// a renotify window. Exactly one A13-intake condition is live at once.
+			conditions.Clear(rowA13IntakeNoCred, time.Now())
+			conditions.Raise(conditionIntakeNotArmed(intakeTo, ghPathErr.Error()), time.Now())
+		case intakeBlockedNoCredential:
+			// gh is here and cannot authenticate. Reported ONCE, as the credential
+			// fault it is, instead of once per watched repo as an unreadable repo.
+			// Decidable only because ghtoken now asks `gh auth token`: before that,
+			// !OK() also covered every host authenticated by `gh auth login`, and
+			// this branch would have disarmed the detector on hosts where it works.
+			log.Printf("pogod: gh-issue intake detector NOT armed — no GitHub credential (%s); "+
+				"open issues will not be reconciled against carriers", ghCredential)
 			conditions.Clear(rowA13IntakeNotArmed, time.Now())
+			conditions.Raise(conditionIntakeNoCredential(intakeTo, ghCredential.String()), time.Now())
+		default:
+			conditions.Clear(rowA13IntakeNotArmed, time.Now())
+			conditions.Clear(rowA13IntakeNoCred, time.Now())
 			// The watch list is resolved ONCE at build time rather than per sample:
 			// it comes from the poller's state directory, and a repo added there
 			// mid-run is picked up on the next pogod restart. Resolving it per sample
@@ -2397,10 +2435,24 @@ Flags:
 			stateDir := filepath.Join(config.PogoHome(), ghintake.PollerStateDirName)
 			repos, repoSrc := ghintake.ResolveRepos(cfg.GHIntake.Repos, stateDir)
 			src := ghintake.MGSource{}
+			// The credential predicate is fixed at arm time, deliberately: it is
+			// one global fact, and re-deciding it per sample would mean a `gh auth
+			// token` subprocess every fifteen minutes to answer a question whose
+			// answer only changes when pogod restarts anyway. What the report
+			// carries is WHICH SOURCE won, so a reader can check the claim rather
+			// than take it, and the staleness it cannot see — a credential revoked
+			// after startup — is stated in the rendered report rather than implied.
+			//
+			// Derived from the same Result the gate above consulted rather than
+			// restated as a literal `true`: everything reaching this line has
+			// already passed OK(), but if the gate ever gains a branch that arms
+			// without a credential, the report follows it instead of asserting one
+			// that is not there.
+			cred, credSrc := ghintake.CredentialFor(ghCredential.OK(), string(ghCredential.Source))
 			intakeWatcher = ghintake.New(ghintake.Options{
 				Enabled: true,
 				Source: func() (ghintake.Inventory, error) {
-					return ghintake.Collect(repos, ghintake.GHOpenIssues, src.Carriers, src.Statuses())
+					return ghintake.Collect(repos, ghintake.GHOpenIssues, src.Carriers, src.Statuses(), cred, credSrc)
 				},
 				Mail:          client.SendMGMail,
 				Interval:      cfg.GHIntake.Interval,
@@ -2410,9 +2462,10 @@ Flags:
 				EscalateAfter: cfg.GHIntake.EscalateAfter,
 				EscalateTo:    escalationBox,
 			})
-			log.Printf("pogod: gh-issue intake detector enabled (interval=%s grace=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s repos=%v from %s, report-only)",
+			log.Printf("pogod: gh-issue intake detector enabled (interval=%s grace=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s repos=%v from %s credential=%s, report-only)",
 				cfg.GHIntake.Interval, cfg.GHIntake.Grace, cfg.GHIntake.RenotifyAfter,
-				cfg.GHIntake.NotifyTo, cfg.GHIntake.EscalateAfter, escalationBox, repos, repoSrc)
+				cfg.GHIntake.NotifyTo, cfg.GHIntake.EscalateAfter, escalationBox, repos, repoSrc,
+				ghCredential.Source)
 		}
 	}
 

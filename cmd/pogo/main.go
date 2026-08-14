@@ -1212,8 +1212,11 @@ something" from "the check could not run" without parsing the report).`,
 			// unauthenticated gh turns the whole report into indeterminates.
 			// In an authed shell this is a no-op; run from launchd, cron, or any
 			// other minimal environment it is the difference between an answer
-			// and a blind one (mg-03ea). Warned, not fatal — gh can also be
-			// authenticated by `gh auth login`, which this cannot see.
+			// and a blind one (mg-03ea). Warned, not fatal — but the warning now
+			// means what it says: since mg-fb29 the chain also asks `gh auth
+			// token`, so a host authenticated by `gh auth login` no longer trips
+			// it, and the `gh can also be authenticated by means this cannot see`
+			// caveat that used to sit here is retired.
 			if res := ghtoken.Ensure(); !res.OK() {
 				fmt.Fprintf(os.Stderr, "warning: %s\n", res)
 			}
@@ -1340,7 +1343,11 @@ Findings come in four kinds:
   unreadable   a watched repo whose open-issue list could NOT be fetched. NOT
                clean: a failed list and a repo with no open issues look identical
                to a careless check, so an unreadable repo is reported rather than
-               counted as covered.
+               counted as covered. The report NAMES THE CAUSE rather than listing
+               guesses: a missing GitHub credential is reported once, as one
+               credential fault with the failed repos as its consequences, and
+               when a credential IS configured the report says so and ranks the
+               remaining causes with network/DNS first.
   blind scan   the carrier scan examined ZERO work items. Reported as blindness
                rather than as "every open issue is uncarried", which is what
                joining against an empty carrier set would produce — a wall of
@@ -1365,17 +1372,26 @@ unreadable repo, or blind scan is found (so it can gate a schedule or CI step).`
 			// unauthenticated gh turns the whole report into unreadable repos. In an
 			// authed shell this is a no-op; run from launchd, cron, or any other
 			// minimal environment it is the difference between an answer and a blind
-			// one (mg-03ea). Warned, not fatal — gh can also be authenticated by
-			// `gh auth login`, which this cannot see.
-			if res := ghtoken.Ensure(); !res.OK() {
-				fmt.Fprintf(os.Stderr, "warning: %s\n", res)
+			// one (mg-03ea).
+			//
+			// Warned, not fatal — but the warning is no longer the only thing that
+			// happens with it. The result is CARRIED INTO THE REPORT (mg-fb29) as
+			// the credential predicate, which is what lets the unreadable-repo
+			// section name one credential fault instead of N repo faults, and lets
+			// it say "not an auth fault" when the credential is fine. Unlike the
+			// daemon this does NOT refuse to run: a person who typed the command is
+			// owed the report, including the part that says why it is empty.
+			ghRes := ghtoken.Ensure()
+			cred, credSrc := ghintake.CredentialFor(ghRes.OK(), string(ghRes.Source))
+			if !ghRes.OK() {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", ghRes)
 			}
 
 			stateDir := filepath.Join(config.PogoHome(), ghintake.PollerStateDirName)
 			repos, repoSrc := ghintake.ResolveRepos(intakeRepos, stateDir)
 
 			src := ghintake.MGSource{}
-			inv, err := ghintake.Collect(repos, ghintake.GHOpenIssues, src.Carriers, src.Statuses())
+			inv, err := ghintake.Collect(repos, ghintake.GHOpenIssues, src.Carriers, src.Statuses(), cred, credSrc)
 			if err != nil {
 				// A store we could not read is not "no carriers" — that would turn
 				// every open issue into a finding. Fail loudly instead.

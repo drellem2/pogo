@@ -36,6 +36,7 @@ const (
 	rowA11HeartbeatWrite   = "pogod_heartbeat_write_failed"
 	rowA13TeardownNotArmed = "ghteardown_not_armed"
 	rowA13IntakeNotArmed   = "ghintake_not_armed"
+	rowA13IntakeNoCred     = "ghintake_no_credential"
 	rowA14LogRotation      = "log_rotation_failed"
 
 	rowA9TicketIndex       = "gitgc_no_ticket_index"
@@ -510,6 +511,65 @@ func conditionIntakeNotArmed(to, detail string) pogodCondition {
 				"  3. In the meantime run the check by hand: `pogo check-intake`. It is the same\n"+
 				"     detector, and it will tell you immediately whether anything is uncarried.\n"+
 				"  4. Confirm with `pogo events --type gh_intake_watch_fired` after the next boot.",
+			detail),
+	}
+}
+
+// conditionIntakeNoCredential — A13's third condition (mg-fb29). Same row and
+// the same category of argument as the two above: an arming PRECONDITION, not a
+// finding.
+//
+// The comment beside the `gh` LookPath gate reads "A missing gh is a
+// precondition, not a finding", and this extends that accepted argument from the
+// BINARY to the CREDENTIAL. Both are one global cause, both are invisible to a
+// per-repo view, and both would otherwise be reported as N unreadable repos —
+// the detector faithfully amplifying an environment gap into a wall of findings,
+// which is the noise that gets a detector muted before the run that matters.
+//
+// It is SEPARATE from conditionIntakeNotArmed, which shares its row and its
+// reader, because the remedies do not overlap at all: one is a PATH edit in a
+// launchd plist, the other is `gh auth login`. A single id would let whichever
+// fired first suppress the other, and a host with neither gh nor a credential
+// would be told about one of its two problems.
+//
+// # Why this could not have been built before mg-fb29's first item
+//
+// The predicate is ghtoken's Result.OK(), and until `gh auth token` joined the
+// chain that predicate was not decidable. gh also authenticates from the
+// hosts.yml that `gh auth login` writes, which ghtoken could not see, so
+// !OK() included every host that had ever run `gh auth login` — and arming on it
+// would have disabled the detector on exactly the hosts where it works fine.
+// That is the false-alarm this row would have become.
+func conditionIntakeNoCredential(to, detail string) pogodCondition {
+	return pogodCondition{
+		ID:     rowA13IntakeNoCred,
+		Row:    "A13",
+		To:     to,
+		Detail: detail,
+		Subject: "[pogod] gh-issue INTAKE detector NOT ARMED — no GitHub credential on this host; " +
+			"run `gh auth login`",
+		Body: conditionBody("A13",
+			"The gh-issue intake detector is enabled and `gh` IS on pogod's PATH, but no GitHub\n"+
+				"credential could be established, so it did not arm.",
+			"Identical to the not-armed-for-PATH case: nothing is reconciling the OPEN issues on\n"+
+				"  the watched repos against the `gh:` carrier markers in the work-item store, so a\n"+
+				"  dropped `[gh]` mail leaves a reporter waiting with no record anywhere (measured:\n"+
+				"  drellem2/pogo#99, ~10 uncarried hours).\n"+
+				"  It is reported as ONE fault on purpose. Left to run, the detector would call\n"+
+				"  `gh issue list` once per watched repo, every repo would fail for this one reason,\n"+
+				"  and you would be mailed N unreadable-repo findings whose real cause appeared as\n"+
+				"  one of four guesses in a footnote. That message cost nine days of a person's\n"+
+				"  queue once already (mg-fb29).",
+			"1. `gh auth status` — confirm. Then `gh auth login`, or export GH_TOKEN somewhere a\n"+
+				"     non-interactive shell reads (on this box that is ~/.zshenv, NOT ~/.zshrc).\n"+
+				"  2. Restart pogod. The credential is read ONCE at startup by design, so a login\n"+
+				"     performed now is not picked up until the daemon restarts.\n"+
+				"  3. This is NOT a false alarm about a `gh auth login` host. All three sources are\n"+
+				"     checked — the environment, a user shell, and `gh auth token`, which reads the\n"+
+				"     credential `gh auth login` itself writes. The DETAIL below names each source\n"+
+				"     that was asked and what it said.\n"+
+				"  4. Confirm the repair with `pogo events --type gh_intake_watch_fired`, or run the\n"+
+				"     check by hand at any time with `pogo check-intake`.",
 			detail),
 	}
 }

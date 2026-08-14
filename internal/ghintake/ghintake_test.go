@@ -211,6 +211,184 @@ func TestUnreadableRepoIsAFindingNotSilence(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The credential predicate (mg-fb29)
+// ---------------------------------------------------------------------------
+
+// unreadableAll builds the exact shape both halves of this ticket are about: N
+// watched repos, every one of them failing. That is what a missing credential
+// produces and it is also what a network outage produces, which is the whole
+// problem — the shapes are identical and only the predicate tells them apart.
+func unreadableAll(detail string, repos ...string) Inventory {
+	in := inv(nil, nil, repos...)
+	for _, r := range repos {
+		in.RepoErrors = append(in.RepoErrors, RepoError{Repo: r, Detail: detail})
+	}
+	return in
+}
+
+// The titled ask: a missing credential is reported as a CREDENTIAL FAULT, not as
+// N unreadable repos. Both the body and — load-bearingly — the subject line,
+// which is the part that travels.
+func TestMissingCredentialIsOneFaultNotNRepoFaults(t *testing.T) {
+	in := unreadableAll("gh: authentication required", "drellem2/pogo", "drellem2/macguffin")
+	in.Credential = CredentialMissing
+
+	rep := Detect(in, scanTime, DefaultGrace)
+	if !rep.NoCredential() {
+		t.Fatal("the report must carry the predicate it was given")
+	}
+	if !rep.Actionable() {
+		t.Fatal("two unreadable repos are actionable regardless of the cause")
+	}
+
+	body := rep.Render()
+	if !strings.Contains(body, "NO GITHUB CREDENTIAL") {
+		t.Errorf("the body does not name the fault:\n%s", body)
+	}
+	if !strings.Contains(body, "ONE fault, not 2") {
+		t.Errorf("the body does not say the two repo errors share one cause:\n%s", body)
+	}
+	if !strings.Contains(body, "gh auth login") {
+		t.Errorf("the body does not name the single remedy:\n%s", body)
+	}
+	// Both repos still appear: naming the cause must not cost the reader the
+	// evidence for it.
+	for _, want := range []string{"drellem2/pogo", "drellem2/macguffin"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the body dropped %s while classifying the fault:\n%s", want, body)
+		}
+	}
+
+	subj := rep.MailSubject()
+	if !strings.Contains(subj, "NO GitHub credential") {
+		t.Errorf("the SUBJECT still counts repos instead of naming the cause: %q", subj)
+	}
+	// This ticket's title, and the nine days it spent parked as a human decision,
+	// both came from a subject line that led with the repo count.
+	if strings.HasPrefix(subj, "2 unreadable repo(s)") {
+		t.Errorf("the subject leads with the consequence, not the cause: %q", subj)
+	}
+}
+
+// The mirror case, and the one measured on this host on 2026-08-14: the
+// credential was valid with full scopes, gh-intake mailed "2 unreadable repo(s)"
+// four times, and each mail listed "expired or missing gh auth" FIRST among four
+// causes. The real cause was a network/DNS outage corroborated by four other
+// instruments in the same minutes. A message that cannot tell those apart sends
+// its reader at the wrong remedy.
+func TestPresentCredentialSaysTheUnreadableReposAreNotAnAuthFault(t *testing.T) {
+	in := unreadableAll("gh: Get \"https://api.github.com/...\": dial tcp: lookup api.github.com: no such host",
+		"drellem2/pogo", "drellem2/macguffin")
+	in.Credential, in.CredentialSource = CredentialPresent, "shell"
+
+	rep := Detect(in, scanTime, DefaultGrace)
+	body := rep.Render()
+
+	if !strings.Contains(body, "RULED OUT") {
+		t.Errorf("the body does not rule out the cause it can rule out:\n%s", body)
+	}
+	if !strings.Contains(body, "source=shell") {
+		t.Errorf("the body asserts a credential without naming its source, so the reader "+
+			"cannot check the claim:\n%s", body)
+	}
+	if strings.Contains(body, "Common causes: expired or missing gh auth") {
+		t.Errorf("the four-equal-guesses list survived into the case where the predicate "+
+			"has already settled one of them:\n%s", body)
+	}
+
+	// THE ORDERING IS THE FIX, so it is asserted rather than described. Listing
+	// the same four causes with auth still first would be a cosmetic change: the
+	// 2026-08-14 reader followed the first item.
+	iNet := strings.Index(body, "Network or DNS failure")
+	iAuth := strings.Index(body, "EXPIRED or REVOKED")
+	if iNet < 0 || iAuth < 0 {
+		t.Fatalf("the body does not rank the remaining causes:\n%s", body)
+	}
+	if iNet > iAuth {
+		t.Errorf("auth is still ranked above network/DNS after the predicate ruled the "+
+			"'not configured' case out:\n%s", body)
+	}
+
+	// Over-claiming is the failure mode of a once-at-startup predicate. The
+	// residual belongs in the text, and the auth cause must be RANKED LAST rather
+	// than excluded — a revoked credential still produces this shape.
+	if !strings.Contains(body, "cannot see a revocation since") {
+		t.Errorf("the body claims a live credential without stating that the predicate is a "+
+			"startup snapshot:\n%s", body)
+	}
+
+	// The subject line is the part that travels, so it must carry what was
+	// MEASURED — and must not carry more. "not an auth fault" is a conclusion the
+	// snapshot cannot support, and asserting it would rebuild this ticket's own
+	// defect with a stronger claim than the message it replaced.
+	subj := rep.MailSubject()
+	if !strings.Contains(subj, "credential WAS configured") {
+		t.Errorf("the subject does not carry the one thing this scan established: %q", subj)
+	}
+	if strings.Contains(subj, "NOT an auth fault") || strings.Contains(subj, "not an auth fault") {
+		t.Errorf("the subject asserts a conclusion a startup snapshot cannot support: %q", subj)
+	}
+}
+
+// CredentialUnknown is the honest zero value: a caller that did not evaluate the
+// predicate gets no claim made on its behalf in either direction. Without this,
+// adding the field would silently convert every existing caller into one
+// asserting "no credential", which is the loudest possible wrong answer.
+func TestUnknownCredentialClaimsNothing(t *testing.T) {
+	in := unreadableAll("gh: HTTP 401 Bad credentials", "drellem2/pogo")
+
+	rep := Detect(in, scanTime, DefaultGrace)
+	if rep.NoCredential() {
+		t.Fatal("an unevaluated predicate must not read as a missing credential")
+	}
+	body := rep.Render()
+	if strings.Contains(body, "NO GITHUB CREDENTIAL") || strings.Contains(body, "NOT an auth fault") {
+		t.Errorf("an unevaluated predicate produced a classification anyway:\n%s", body)
+	}
+	if !strings.Contains(body, "NOT evaluated") {
+		t.Errorf("the body does not say the predicate was skipped, so a reader cannot tell "+
+			"'unclassified' from 'classified as fine':\n%s", body)
+	}
+	if subj := rep.MailSubject(); !strings.Contains(subj, "unclassified") {
+		t.Errorf("subject does not state that nothing classified the cause: %q", subj)
+	}
+}
+
+// The three renderings must be mutually exclusive and each must be reachable —
+// a switch whose branches collapse to the same text is a classification that
+// classifies nothing.
+func TestTheThreeCredentialRenderingsAreDistinct(t *testing.T) {
+	seen := map[string]CredentialState{}
+	for _, st := range []CredentialState{CredentialUnknown, CredentialPresent, CredentialMissing} {
+		in := unreadableAll("boom", "drellem2/pogo")
+		in.Credential, in.CredentialSource = st, "shell"
+		rep := Detect(in, scanTime, DefaultGrace)
+		for _, text := range []string{rep.Render(), rep.MailSubject()} {
+			if other, dup := seen[text]; dup {
+				t.Errorf("credential states %q and %q render identically:\n%s", other, st, text)
+			}
+			seen[text] = st
+		}
+	}
+}
+
+// A missing credential with nothing to read is NOT a finding. Inventing one
+// would put a standing alarm on every host that watches no repos — the
+// never-clearing-notice failure the condition catalogue forbids most directly.
+func TestMissingCredentialAloneIsNotActionable(t *testing.T) {
+	in := inv(nil, nil)
+	in.Credential = CredentialMissing
+
+	rep := Detect(in, scanTime, DefaultGrace)
+	if rep.Actionable() {
+		t.Fatal("a missing credential with zero repo errors and zero findings must stay quiet")
+	}
+	if !rep.NoCredential() {
+		t.Error("the state should still be carried, just not alarmed on")
+	}
+}
+
 // A carrier scan that examined zero work items must report BLINDNESS, not a wall
 // of uncarried issues. This is the loud-and-wrong failure mode: joining against
 // an empty carrier set classifies every open issue as a miss, which looks like a

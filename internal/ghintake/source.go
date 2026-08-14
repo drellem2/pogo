@@ -499,7 +499,15 @@ type CarrierLister func() ([]CarrierRef, int, []ItemError, error)
 // A failure to LIST the store at all is fatal and returns an error: with no
 // carrier population there is nothing to reconcile, and a report built on that
 // would be fiction.
-func Collect(repos []string, list IssueLister, carriers CarrierLister, statuses []string) (Inventory, error) {
+//
+// cred and credSource are the credential predicate, evaluated ONCE by the caller
+// — see CredentialState. They are REQUIRED PARAMETERS rather than fields a
+// caller may remember to set afterwards, for the reason MGSource.resolveRoot
+// gives about its own test-safe default: an opt-in is remembered by exactly the
+// callers that least need it. Pass CredentialUnknown to state that nothing
+// checked; that is honest and renders as such.
+func Collect(repos []string, list IssueLister, carriers CarrierLister, statuses []string,
+	cred CredentialState, credSource string) (Inventory, error) {
 	refs, scanned, itemErrs, err := carriers()
 	if err != nil {
 		return Inventory{}, err
@@ -507,6 +515,7 @@ func Collect(repos []string, list IssueLister, carriers CarrierLister, statuses 
 	inv := Inventory{
 		Carriers: refs, ItemsScanned: scanned, ItemErrors: itemErrs,
 		Statuses: statuses, Repos: append([]string(nil), repos...),
+		Credential: cred, CredentialSource: credSource,
 	}
 	for _, repo := range repos {
 		issues, err := list(repo)
