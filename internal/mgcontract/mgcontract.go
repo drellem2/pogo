@@ -94,6 +94,7 @@ const (
 	DoneRefusesADeclaredItemWithNoSuccessor = "done/refuses-a-declared-item-with-no-successor"
 	DoneRefusalPreservesTheResultSidecar    = "done/refusal-preserves-the-result-sidecar"
 	DoneRefusesAnUnknownSuccessor           = "done/refuses-an-unknown-successor"
+	ListJSONCarriesThePredecessorEdge       = "list/json-carries-the-predecessor-edge"
 	MailSendRefusesAnUnknownRecipient       = "mail/send-refuses-an-unknown-recipient"
 	MailSendCreateRegistersANewMailbox      = "mail/send-create-registers-a-new-mailbox"
 	MailListJSONReportsUnreadCounts         = "mail/list-json-reports-unread-counts"
@@ -399,6 +400,81 @@ var clauses = []Clause{
 			}
 			if code == 0 {
 				return fmt.Errorf("`mg done --successor` accepted an id naming no work item:\n%s", out)
+			}
+			return nil
+		},
+	},
+	{
+		Name:  ListJSONCarriesThePredecessorEdge,
+		Since: "mg-27c0",
+		Why: "pogod's merge close resolves the successor a worker already filed by asking the store which item names the closing " +
+			"item as its PREDECESSOR; if `mg done --successor` stops writing that reverse half, or `mg list --json` stops carrying " +
+			"it as a field, the lookup finds nothing and every declares-remainder item silently returns to the pre-mg-27c0 behaviour " +
+			"of bouncing back to available/ with its link unstated",
+		Dependents: []string{
+			"internal/client (resolveSuccessorFromStore, CloseMGWorkItemAtMerge)",
+			"internal/client/mergeclose_test.go (the successor-resolution cases)",
+		},
+		probe: func(s *store) error {
+			parent, err := s.claimedTriage()
+			if err != nil {
+				return err
+			}
+			child, err := s.newItem("contract probe successor", "the item that carries the remainder forward")
+			if err != nil {
+				return err
+			}
+			out, code, err := s.run("done", parent, "--successor="+child)
+			if err != nil {
+				return err
+			}
+			if code != 0 {
+				return fmt.Errorf("`mg done --successor` exited %d on a declared item naming a real successor:\n%s", code, out)
+			}
+			// The half that matters here is the CHILD's, because that is the
+			// direction pogod searches: it holds the closing item's id and is
+			// looking for whoever points back at it.
+			pred, err := s.field(child, ".predecessor|join(\",\")")
+			if err != nil {
+				return err
+			}
+			if pred != parent {
+				return fmt.Errorf("after `mg done %s --successor=%s`, the successor's `predecessor` field is %q, want %q — "+
+					"the reverse link pogod's merge close searches on is not being written", parent, child, pred, parent)
+			}
+			// And it must be a FIELD on `mg list --json`, not only a tag: the
+			// resolver reads `.predecessor` precisely so it does not have to
+			// know the `predecessor:<id>` tag spelling.
+			listed, code, err := s.run("list", "--all", "--json")
+			if err != nil {
+				return err
+			}
+			if code != 0 {
+				return fmt.Errorf("`mg list --all --json` exited %d:\n%s", code, listed)
+			}
+			found := false
+			for _, line := range strings.Split(listed, "\n") {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				var item struct {
+					ID          string   `json:"id"`
+					Predecessor []string `json:"predecessor"`
+				}
+				if jerr := json.Unmarshal([]byte(line), &item); jerr != nil {
+					return fmt.Errorf("`mg list --all --json` emitted a line that is not JSON: %v\n%s", jerr, line)
+				}
+				if item.ID != child {
+					continue
+				}
+				found = true
+				if len(item.Predecessor) != 1 || item.Predecessor[0] != parent {
+					return fmt.Errorf("`mg list --all --json` reports %s with predecessor %v, want [%s] — the field pogod's "+
+						"resolver scans does not carry the edge", child, item.Predecessor, parent)
+				}
+			}
+			if !found {
+				return fmt.Errorf("`mg list --all --json` did not list %s at all, so the resolver's scan cannot see it:\n%s", child, listed)
 			}
 			return nil
 		},
@@ -971,8 +1047,9 @@ func (s *store) field(id, path string) (string, error) {
 	case ".body":
 		s, _ := item["body"].(string)
 		return s, nil
-	case ".tags|join(\",\")":
-		raw, _ := item["tags"].([]any)
+	case ".tags|join(\",\")", ".predecessor|join(\",\")", ".successor|join(\",\")":
+		key := strings.TrimSuffix(strings.TrimPrefix(path, "."), "|join(\",\")")
+		raw, _ := item[key].([]any)
 		parts := make([]string, 0, len(raw))
 		for _, t := range raw {
 			parts = append(parts, fmt.Sprint(t))
