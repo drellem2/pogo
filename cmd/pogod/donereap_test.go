@@ -55,11 +55,14 @@ func stripGoComments(src string) string {
 // calls. It models the two facts the reaper reads and nothing else — which is
 // the point of the narrow interface.
 type fakeDoneReg struct {
-	mu       sync.Mutex
-	live     []agent.PolecatActivity
-	stopped  []string
-	stopErr  map[string]error
-	snapshot int // how many times PolecatActivityAt was called
+	mu      sync.Mutex
+	live    []agent.PolecatActivity
+	stopped []string
+	// stopCauses is the cause argument of each StopWithCause call, positionally
+	// aligned with stopped (mg-a95f).
+	stopCauses []string
+	stopErr    map[string]error
+	snapshot   int // how many times PolecatActivityAt was called
 	// beforeSnapshot, when set, runs at the top of PolecatActivityAt. Used to
 	// drive the reentrancy control from inside a Check.
 	beforeSnapshot func()
@@ -77,10 +80,11 @@ func (f *fakeDoneReg) PolecatActivityAt(now time.Time) []agent.PolecatActivity {
 	return out
 }
 
-func (f *fakeDoneReg) Stop(name string, timeout time.Duration) error {
+func (f *fakeDoneReg) StopWithCause(name string, timeout time.Duration, cause string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stopped = append(f.stopped, name)
+	f.stopCauses = append(f.stopCauses, cause)
 	if err, ok := f.stopErr[name]; ok {
 		return err
 	}

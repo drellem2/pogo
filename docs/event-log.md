@@ -128,11 +128,25 @@ An agent process exited cleanly (received stop signal, completed task, or `pogo 
   - `pid` (int, required)
   - `exit_code` (int, required): process exit code (0 for clean exit)
   - `reason` (string, required): one of `"task_complete"`, `"signal"`, `"requested"`, `"idle_timeout"`. Use `"signal"` only for clean shutdown signals (SIGTERM); see `agent_crashed` for unexpected exits.
+  - `stop_cause` (string, optional): which stop path ran. Present only when `reason` is `"requested"` — an agent that finished its own work was not stopped by anybody, and an empty value there would read as an unattributed stop rather than as no stop at all. One of:
+    - `"request"` — a single explicit stop: `DELETE /agents/{name}`, i.e. `pogo agent stop`
+    - `"stop_all"` — the fleet-wide drain, whose only live caller is the transition to index-only mode. Pair it with the `server_mode_changed` at the same instant, which names the HTTP caller that asked
+    - `"park"` — `pogo agent park`
+    - `"merge_reap"` — pogod reaping a polecat whose branch merged
+    - `"merge_backstop"` — the defer-done backstop reaping a polecat that merged but lingered past its deadline
+    - `"done_reap"` — pogod reaping a polecat whose work item is done and which has gone idle
   - `duration_seconds` (number, optional): wall-clock seconds since `agent_spawned`
 
 ```json
 {"schema_version":1,"timestamp":"2026-04-25T10:23:14.555000000Z","event_type":"agent_stopped","agent":"cat-mg-0241","work_item_id":"mg-0241","details":{"pid":48213,"exit_code":0,"reason":"task_complete","duration_seconds":1394.555}}
+{"schema_version":1,"timestamp":"2026-08-08T00:44:20.124971000Z","event_type":"agent_stopped","agent":"crew-architect","details":{"pid":32439,"exit_code":0,"reason":"requested","stop_cause":"stop_all","duration_seconds":25611.635}}
 ```
+
+`stop_cause` was added by mg-a95f and is absent from every record written before it. Its
+absence in an old record means the field did not exist, **not** that the stop was
+unattributed — the same distinction `server_mode_changed` carries for transitions before
+2026-08-09T09:41Z. Records written by a daemon that has not yet restarted onto a build
+containing it are likewise silent.
 
 #### `agent_crashed`
 
