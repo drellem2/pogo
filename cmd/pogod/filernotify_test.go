@@ -192,6 +192,58 @@ func TestNoNoticeForAnItemThatIsStillOpen(t *testing.T) {
 	}
 }
 
+// The carve-out the coordinator prompt depends on (mg-bb99).
+//
+// pogod covers two closes: the one it performs itself at merge, and the one a
+// LIVE worker performs on itself, which this reaper observes. It covers no
+// third. The done-reaper reaches an item only through PolecatActivityAt, which
+// skips agents that are not alive — so a close performed by the COORDINATOR
+// after the worker has been stopped is seen by nothing here and the filer is
+// never told.
+//
+// That is not a hypothetical shape. It is the ordinary triage retirement: the
+// triage template forbids the worker to `mg done` its own item (the item
+// declares a remainder and no successor exists before the human gate), the
+// coordinator stops the worker when its packet lands, and retires the item at
+// the gate — by which point there is no live worker for this tick to find.
+// mayor.md carries the coordinator's half of that obligation; this is the
+// daemon half of the same claim, so a future change that DOES cover the path
+// fails here and sends someone to delete the paragraph.
+func TestACoordinatorCloseWithNoLiveWorkerTellsNobody(t *testing.T) {
+	// No live polecats: the triage worker was stopped before the item closed.
+	reg := &fakeDoneReg{}
+	filer := &capturingFiler{}
+	// Every item this reaper might ask about is terminal — the point is that it
+	// asks about none, because it enumerates live workers and there are none.
+	r := newDoneReaper(reg, func(string) (bool, error) { return true, nil }, noReviews, time.Minute)
+	r.SetFilerNotifier(filer)
+
+	r.Check(time.Now())
+
+	if n := len(filer.all()); n != 0 {
+		t.Fatalf("a close with no live worker is outside both pogod routes; expected no notice, got %d — "+
+			"if this path is now covered, the mayor.md filer-notification carve-out (mg-bb99) is stale "+
+			"and should be dropped rather than left telling coordinators to duplicate pogod's mail", n)
+	}
+
+	// The positive control, on the SAME reaper and the same terminal-item probe:
+	// liveness is the only thing that changed. Without this half the assertion
+	// above is satisfied by a reaper that notifies nobody ever, which is the
+	// shape of guard that reads armed and is not.
+	reg.mu.Lock()
+	reg.live = []agent.PolecatActivity{
+		{Name: "ptri", WorkItemID: "mg-tri", HasOutput: true, IdleFor: 5 * time.Minute},
+	}
+	reg.mu.Unlock()
+
+	r.Check(time.Now())
+
+	got := filer.all()
+	if len(got) != 1 || got[0].ItemID != "mg-tri" {
+		t.Fatalf("positive control: a live worker on the same closed item must be reported, got %+v", got)
+	}
+}
+
 // Both reap paths must tolerate an unwired notifier: a missing seam is a wiring
 // fault to be found in one place, never a nil dereference on the merge path.
 func TestBothReapPathsTolerateAnUnwiredNotifier(t *testing.T) {

@@ -331,6 +331,12 @@ That is why the map refuses an unmapped type rather than defaulting to the build
 
 Guessing converts a cheap loud failure into an expensive silent one. If you think an item is design work but its `type` says otherwise, do not re-route it — mail the filer or `human` and let them set `type`. Markers route; semantics inform humans.
 
+**If the item is tagged `declares-remainder`, say so in the body you pass.** That tag makes `mg done`
+refuse without a successor, so a {{.Worker}} that merges without filing one leaves a *finished* item sitting
+`available` and drawing stall-watch notices — and it is reaped at merge, so only you can clear it. The
+body is a snapshot the {{.Worker}} reads; telling it at dispatch is the only channel that reaches it in
+time. Cost twice on 2026-08-13 (mg-6e4f, mg-4020).
+
 Before spawning, check that no {{.Worker}} is already working on this item:
 ```bash
 pogo agent list
@@ -348,6 +354,13 @@ Look for:
      ```bash
      mg archive --days=0
      ```
+  2. **If the item's filer is not you, tell them it landed.** `mg show <id>` names the creator. pogod
+     mails the filer itself on merge and self-close, so this is only for the paths where the template
+     forbids the {{.Worker}} to close its own item — triage most clearly (drellem2/pogo#144, mg-1d9e).
+     The self-close notice is emitted by the done-reaper, which only inspects **live** {{.Worker}}s, so a
+     close *you* perform after stopping the {{.Worker}} — which is exactly the triage retirement at the
+     human gate — reaches nobody. Verified 2026-08-14 (mg-bb99).
+
   You are the **backstop** for {{.Worker}}s the event-driven stop missed (e.g. the merge resolved while pogod was restarting). If `pogo agent list` still shows the {{.Worker}} after a merge-success mail:
   1. Stop it:
      ```bash
