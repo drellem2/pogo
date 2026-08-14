@@ -896,6 +896,19 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			if live, ok := s.entries[key]; ok {
 				fire.PendingToken = issueFireTokenLocked(live, now)
 				fire.PendingSince = now
+				// Record the delivery HERE, alongside the token, and retract it
+				// below if Deliver fails — rather than recording it after
+				// Deliver returns. A nudge blocks on the harness's PTY idle
+				// gate for as long as the agent's current turn runs, and an ack
+				// landing in that window was being counted against a delivery
+				// that had not been recorded yet: FiresCompleted=1 against
+				// FiresDelivered=0, then a phantom UnackedStreak of 1 when the
+				// delivery record finally landed on top of the ack's reset
+				// (mg-57e9).
+				recordDeliveryLocked(live)
+				fire.FiresDelivered = live.FiresDelivered
+				fire.FiresCompleted = live.FiresCompleted
+				fire.UnackedStreak = live.UnackedStreak
 				if live.OneShot {
 					// Mark the one-shot spent HERE, in the same locked section
 					// that issues its token and BEFORE the bytes go out, not in
@@ -927,20 +940,32 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 				// a delivery failure is already visible as
 				// scheduler_fire_failed, and double-counting it as an unacked
 				// completion would blur the two distinct faults this pair of
-				// signals exists to separate.
+				// signals exists to separate. The delivery record issued above
+				// is retracted under the same token guard, for the same reason.
 				s.mu.Lock()
 				if live, ok := s.entries[key]; ok && live.PendingToken == fire.PendingToken {
 					live.PendingToken = ""
 					live.PendingSince = time.Time{}
+					retractDeliveryLocked(live)
+					fire.FiresDelivered = live.FiresDelivered
+					fire.FiresCompleted = live.FiresCompleted
+					fire.UnackedStreak = live.UnackedStreak
 				}
 				s.mu.Unlock()
 				s.emitSchedulerEvent("scheduler_fire_failed", fire, now, missed, derr)
 			} else {
+				// Re-read under the lock rather than reporting the values
+				// captured before delivery: a slow delivery is exactly the
+				// window in which the ack can land, and when it has, the honest
+				// streak for this delivery event is the 0 the ack set — not the
+				// 1 that was true when the bytes left. Reporting the stale 1 is
+				// how an already-answered fire used to be carried toward the
+				// stall threshold.
 				s.mu.Lock()
-				streak := 0
+				streak := fire.UnackedStreak
 				tracked := false
 				if live, ok := s.entries[key]; ok {
-					streak = recordDeliveryLocked(live)
+					streak = live.UnackedStreak
 					tracked = live.CompletionTracked()
 					fire.FiresDelivered = live.FiresDelivered
 					fire.FiresCompleted = live.FiresCompleted
