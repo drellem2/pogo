@@ -656,7 +656,7 @@ func TestCoverageIsReportedOnACleanRun(t *testing.T) {
 	rep, err := Scan(Options{
 		Items: board(
 			Item{ID: "mg-ffff", Status: "available", Repo: r.dir},
-			Item{ID: "mg-eeee", Status: "available"}, // no repo at all
+			Item{ID: "mg-dddd", Status: "available", Repo: r.dir},
 		),
 		LiveAgents: fleet(),
 		Target:     "main",
@@ -667,14 +667,305 @@ func TestCoverageIsReportedOnACleanRun(t *testing.T) {
 	if rep.ItemsScanned != 2 {
 		t.Errorf("ItemsScanned = %d, want 2", rep.ItemsScanned)
 	}
-	if rep.ItemsWithoutRepo != 1 {
-		t.Errorf("ItemsWithoutRepo = %d, want 1: an item naming no repo is a coverage gap, "+
-			"not a clean verdict", rep.ItemsWithoutRepo)
+	if rep.ItemsChecked != 2 {
+		t.Errorf("ItemsChecked = %d, want 2 — both items are in a listable repo", rep.ItemsChecked)
 	}
 	out := Render(rep, false)
-	for _, want := range []string{"2 open work item(s) scanned", "name no repo", "No open work item has work"} {
+	for _, want := range []string{"2 of 2 open work item(s) CHECKED", "No open work item has work"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("clean report is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "NOT CHECKED") {
+		t.Errorf("a fully covered run claims a coverage shortfall:\n%s", out)
+	}
+}
+
+// --- mg-8baa: an item whose repo could not be listed is a ROW ----------------
+
+// TestItemInAnUnlistableRepoIsAROWNotASilentSkip is the ticket's shape, on the
+// ticket's own instance: mg-7c32 carried the bare relative name
+// `onethird_program` rather than `/Users/daniel/research/onethird_program`, and
+// `pogo check-stranded` found three of four landed/stranded items and said
+// nothing about the fourth.
+//
+// The item must reach Rows. Everything else this ticket asks for — the header
+// bound, the exit code, a nameable id — is downstream of that, because Rows is
+// the only structure the report's verdict is computed from.
+func TestItemInAnUnlistableRepoIsAROWNotASilentSkip(t *testing.T) {
+	rep, err := Scan(Options{
+		Items: board(Item{
+			ID: "mg-7c32", Status: "available", Title: "work filed against a bare repo name",
+			Repo: "onethird_program", // relative: nothing resolves it
+		}),
+		LiveAgents: fleet(),
+		Target:     "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v — one unlistable repo must not abort the sweep", err)
+	}
+	row, ok := rowFor(rep, "mg-7c32")
+	if !ok {
+		t.Fatalf("mg-7c32 is in NO column of the report. Its repo could not be listed, so no "+
+			"branch was looked for — and the item vanished from the population instead of "+
+			"being reported as unchecked. That is the whole defect.\n%s", Render(rep, true))
+	}
+	if row.Kind != KindRepoUnreadable {
+		t.Errorf("Kind = %q, want %q", row.Kind, KindRepoUnreadable)
+	}
+	if row.Error == "" {
+		t.Error("Error is empty; the row must carry why the repo could not be listed")
+	}
+	if !rep.Actionable() {
+		t.Error("Actionable() = false — the command would exit 0 and every schedule reading " +
+			"the exit status would record this run as clean")
+	}
+	if rep.ItemsChecked != 0 {
+		t.Errorf("ItemsChecked = %d, want 0: nothing was checked", rep.ItemsChecked)
+	}
+	if rep.ItemsScanned != 1 {
+		t.Errorf("ItemsScanned = %d, want 1 — the population is still 1", rep.ItemsScanned)
+	}
+}
+
+// TestUnlistableRepoRowIsKeyedOnTheFAILURENotOnTheStringShape widens the
+// ticket's hypothesis, which was a correlation the ticket itself flagged as
+// unproven: "the three reported carry absolute repo paths. The one missed
+// carries a bare relative name."
+//
+// It does not hold. The same run that missed the two relative names ALSO missed
+// an item filed against `/Users/daniel/.claude` — absolute, present on disk, and
+// not a git repository. A rule keyed on `filepath.IsAbs` would have left that
+// one silent, so the row is keyed on the branch listing having failed.
+func TestUnlistableRepoRowIsKeyedOnTheFAILURENotOnTheStringShape(t *testing.T) {
+	notARepo := t.TempDir() // absolute, exists, has no .git
+
+	rep, err := Scan(Options{
+		Items:      board(Item{ID: "mg-abs1", Status: "available", Repo: notARepo}),
+		LiveAgents: fleet(),
+		Target:     "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	row, ok := rowFor(rep, "mg-abs1")
+	if !ok {
+		t.Fatalf("an ABSOLUTE repo path that is not a git repository was skipped silently. "+
+			"The ticket's `relative name` hypothesis is a subset of the real predicate, and "+
+			"keying on the string's shape reproduces the defect on this input.\n%s", Render(rep, true))
+	}
+	if row.Kind != KindRepoUnreadable {
+		t.Errorf("Kind = %q, want %q", row.Kind, KindRepoUnreadable)
+	}
+}
+
+// TestHeaderStatesCheckedNotPopulation is the mayor's explicit second ask:
+// "Please state the coverage bound in the header rather than only fixing the
+// skip. The skip is the defect; the header claiming full coverage is what made
+// it undetectable."
+func TestHeaderStatesCheckedNotPopulation(t *testing.T) {
+	r := newRepo(t)
+	rep, err := Scan(Options{
+		Items: board(
+			Item{ID: "mg-good", Status: "available", Repo: r.dir},
+			Item{ID: "mg-7c32", Status: "available", Repo: "onethird_program"},
+		),
+		LiveAgents: fleet(),
+		Target:     "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	out := Render(rep, false)
+	if !strings.Contains(out, "1 of 2 open work item(s) CHECKED") {
+		t.Errorf("the header does not state the coverage bound. It must not print the "+
+			"population as though it were the coverage — that is the line that read "+
+			"`112 open work item(s) scanned across 7 repo(s)` over three unchecked items:\n%s", out)
+	}
+	if !strings.Contains(out, "1 NOT CHECKED") {
+		t.Errorf("the shortfall is not on the header line. A reader must not have to subtract "+
+			"two numbers printed six lines apart to find it:\n%s", out)
+	}
+	if strings.Contains(out, "No open work item has work already sitting on a branch") {
+		t.Errorf("the report gives a flat all-clear over an item it never looked at:\n%s", out)
+	}
+	if !strings.Contains(out, "mg-7c32") {
+		t.Errorf("the unchecked item is not NAMEABLE in the report. A repo-level error line "+
+			"names no item id, so a reader who sees it cannot go and check anything:\n%s", out)
+	}
+}
+
+// TestItemNamingNoRepoReachesTheExitCode. This case was already COUNTED before
+// mg-8baa — `N open item(s) name no repo and were NOT checked` — and that line is
+// still printed. What it was not was a row, so Actionable() stayed false and the
+// command exited 0: a report that states a gap in prose and then exits clean is
+// read by every schedule as clean.
+func TestItemNamingNoRepoReachesTheExitCode(t *testing.T) {
+	rep, err := Scan(Options{
+		Items:      board(Item{ID: "mg-eeee", Status: "available"}),
+		LiveAgents: fleet(),
+		Target:     "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if rep.ItemsWithoutRepo != 1 {
+		t.Errorf("ItemsWithoutRepo = %d, want 1", rep.ItemsWithoutRepo)
+	}
+	row, ok := rowFor(rep, "mg-eeee")
+	if !ok {
+		t.Fatalf("an item naming no repo is counted but not reported:\n%s", Render(rep, true))
+	}
+	if row.Kind != KindRepoUnreadable {
+		t.Errorf("Kind = %q, want %q", row.Kind, KindRepoUnreadable)
+	}
+	if !rep.Actionable() {
+		t.Error("Actionable() = false; the prose gap does not reach the exit status")
+	}
+	out := Render(rep, false)
+	if !strings.Contains(out, "name no repo") {
+		t.Errorf("the existing coverage line was dropped along with the fix:\n%s", out)
+	}
+}
+
+// TestRepoUnreadableRemedyPrescribesNeitherDestructiveAction. Nothing here knows
+// whether the item has a branch at all, so neither `refinery submit` (which
+// would land unreviewed work) nor `mg done` (which would discard a branch) can
+// be advised. Same rule as conflict_suspect, for a stronger reason: there the
+// two instruments disagreed, here neither one ran.
+func TestRepoUnreadableRemedyPrescribesNeitherDestructiveAction(t *testing.T) {
+	for _, tc := range []struct{ name, repo, want string }{
+		{"bare relative name", "onethird_program", "bare name"},
+		{"no repo at all", "", "names NO repo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := Row{Item: Item{ID: "mg-7c32", Repo: tc.repo}, Kind: KindRepoUnreadable}
+			got := row.Remedy()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("Remedy() = %q, want it to name the shape (%q)", got, tc.want)
+			}
+			for _, banned := range []string{"refinery submit", "mg done"} {
+				if strings.Contains(got, banned) {
+					t.Errorf("Remedy() = %q prescribes %q on an item whose repo was never "+
+						"listed; nothing in this run knows whether it has a branch", got, banned)
+				}
+			}
+		})
+	}
+}
+
+// TestRepoUnreadableOutranksTheJudgedRows: an unchecked item might be a strand,
+// so it must not sort below rows already judged harmless.
+func TestRepoUnreadableOutranksTheJudgedRows(t *testing.T) {
+	if KindRepoUnreadable.Rank() >= KindLandedNotClosed.Rank() {
+		t.Errorf("repo_unreadable (%d) sorts at or below landed_not_closed (%d)",
+			KindRepoUnreadable.Rank(), KindLandedNotClosed.Rank())
+	}
+	if KindRepoUnreadable.Rank() >= KindConflictSuspect.Rank() {
+		t.Errorf("repo_unreadable (%d) sorts at or below conflict_suspect (%d)",
+			KindRepoUnreadable.Rank(), KindConflictSuspect.Rank())
+	}
+	if KindUnjudged.Rank() >= KindRepoUnreadable.Rank() {
+		t.Errorf("unjudged (%d) does not lead repo_unreadable (%d); unjudged at least FOUND "+
+			"a branch", KindUnjudged.Rank(), KindRepoUnreadable.Rank())
+	}
+}
+
+// TestOutOfScopeItemsAreStatedNotCountedAsCovered. The --repo restriction is a
+// narrowing the CALLER asked for, so it is not a finding — but it is still the
+// difference between the population and what was looked at, and the header
+// overstated its reach in exactly the same way.
+func TestOutOfScopeItemsAreStatedNotCountedAsCovered(t *testing.T) {
+	r := newRepo(t)
+	rep, err := Scan(Options{
+		Items: board(
+			Item{ID: "mg-in", Status: "available", Repo: r.dir},
+			Item{ID: "mg-out", Status: "available", Repo: "/somewhere/else"},
+		),
+		LiveAgents: fleet(),
+		Repos:      []string{r.dir},
+		Target:     "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if rep.ItemsOutOfScope != 1 {
+		t.Errorf("ItemsOutOfScope = %d, want 1", rep.ItemsOutOfScope)
+	}
+	if rep.ItemsChecked != 1 {
+		t.Errorf("ItemsChecked = %d, want 1", rep.ItemsChecked)
+	}
+	if len(rep.Rows) != 0 {
+		t.Fatalf("a --repo restriction produced findings; it is a narrowing, not a failure\n%s",
+			Render(rep, true))
+	}
+	out := Render(rep, false)
+	if !strings.Contains(out, "outside --repo") {
+		t.Errorf("the header does not say the sweep was restricted:\n%s", out)
+	}
+	if strings.Contains(out, "No open work item has work already sitting on a branch.\n") {
+		t.Errorf("the all-clear claims a scope it did not have; 1 item was never looked at:\n%s", out)
+	}
+}
+
+// TestEveryOpenItemIsAccountedForExactlyOnce is the guard against this fix
+// exhibiting the defect it repairs.
+//
+// The defect was not "one branch of Scan forgot a row". It was that the sweep
+// had a path on which an item left the population without landing in any
+// column, and NOTHING CHECKED THAT NO SUCH PATH EXISTED — which is why it
+// survived to be found by a mayor sweeping statuses by hand. Adding a row on the
+// two paths that were leaking fixes those two paths; it does not establish the
+// property. This does: over a board carrying every shape at once, the population
+// must partition into checked + out-of-scope + unchecked-and-reported, with no
+// remainder.
+//
+// A future path that drops an item fails here even if its author never reads
+// this file, which is the only form of the guarantee worth having.
+func TestEveryOpenItemIsAccountedForExactlyOnce(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-q9a19", "main")
+	r.commit("audit.md", "feat(audit): drift battery (mg-9a19)")
+	r.push("polecat-q9a19")
+	r.checkout("main")
+
+	notARepo := t.TempDir()
+	items := []Item{
+		{ID: "mg-9a19", Status: "available", Repo: r.dir},           // stranded
+		{ID: "mg-quiet", Status: "available", Repo: r.dir},          // checked, nothing to say
+		{ID: "mg-7c32", Status: "available", Repo: "relative_name"}, // unlistable: relative
+		{ID: "mg-abs1", Status: "available", Repo: notARepo},        // unlistable: absolute
+		{ID: "mg-none", Status: "available"},                        // no repo at all
+	}
+
+	rep, err := Scan(Options{Items: board(items...), LiveAgents: fleet(), Target: "main"})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	if rep.ItemsScanned != len(items) {
+		t.Fatalf("ItemsScanned = %d, want %d", rep.ItemsScanned, len(items))
+	}
+	unchecked := rep.ItemsScanned - rep.ItemsChecked - rep.ItemsOutOfScope
+	if got := rep.Count(KindRepoUnreadable); got != unchecked {
+		t.Errorf("the header claims %d item(s) were not checked, but only %d are REPORTED as "+
+			"repo_unreadable. The difference is items that left the population without "+
+			"appearing in any column — the shape of mg-8baa.\n%s", unchecked, got, Render(rep, true))
+	}
+	if unchecked != 3 {
+		t.Errorf("unchecked = %d, want 3 (two unlistable repos, one item naming none)", unchecked)
+	}
+
+	// And every id must be findable: a count nobody can turn into a list is the
+	// half of the old report that already existed and did not help.
+	for _, want := range []string{"mg-7c32", "mg-abs1", "mg-none"} {
+		if _, ok := rowFor(rep, want); !ok {
+			t.Errorf("%s was not checked and is not reported", want)
+		}
+	}
+	for _, want := range []string{"mg-9a19", "mg-quiet"} {
+		if _, ok := rowFor(rep, want); ok != (want == "mg-9a19") {
+			t.Errorf("%s: checked item reported wrongly\n%s", want, Render(rep, true))
 		}
 	}
 }

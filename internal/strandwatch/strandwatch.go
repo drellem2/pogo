@@ -48,6 +48,16 @@
 // two orders of magnitude less noise, and it is what the ticket asked for —
 // "rank on item status, not on branch count".
 //
+// THE POPULATION IS ITEMS, SO EVERY FAILURE HAS TO BE COUNTED IN ITEMS
+// (mg-8baa). The sweep groups items by repository to pay the fetch and the
+// branch listing once, and a repository whose listing fails used to be recorded
+// on the RepoCoverage and nowhere else. That states the failure in the wrong
+// units: the report's rows, its exit code and its closing sentence are all about
+// items, and the items behind a failed repo crossed none of them. Three of 112
+// open items were silently unchecked on 2026-08-14 while the header counted them
+// as scanned and the run exited 0. Every such item is now a KindRepoUnreadable
+// row, and the header states checked-of-population rather than population alone.
+//
 // REPORTS ONLY. It never submits and never closes. Submitting is cheap by hand
 // once you know; a wrong auto-submit lands unreviewed work, and a wrong auto-done
 // discards a branch.
@@ -56,6 +66,7 @@ package strandwatch
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -144,22 +155,73 @@ const (
 	// It is ACTIONABLE: an unjudged branch on an open item might be a strand, and
 	// the reader has to be the one who finds out.
 	KindUnjudged Kind = "unjudged"
+
+	// KindRepoUnreadable is an open item whose REPOSITORY could not be listed, so
+	// no branch was ever looked for. It is one step further out than
+	// KindUnjudged: there, a branch was found and could not be read; here the
+	// question was never asked.
+	//
+	// IT IS A ROW BECAUSE THE ALTERNATIVE WAS MEASURED AND IS SILENT (mg-8baa).
+	// The repo error was already recorded per-REPOSITORY, but the population this
+	// sweep reports on is ITEMS, and nothing carried the failure across that join:
+	// the items in an unlistable repo were dropped without appearing in any
+	// column. On 2026-08-14 that produced, verbatim,
+	//
+	//	112 open work item(s) scanned across 9 repo(s)
+	//	  ...
+	//	  onethird_program — COULD NOT LIST BRANCHES: ... No such file or directory
+	//	  riemann — COULD NOT LIST BRANCHES: ... No such file or directory
+	//	...
+	//	No open work item has work already sitting on a branch.
+	//
+	// exiting 0. Three of those 112 items were never checked, the header counted
+	// them as scanned anyway, the closing sentence is a flat all-clear over them,
+	// and no item id appears anywhere a reader could chase. The mayor caught the
+	// missed item only by having swept statuses by hand independently.
+	//
+	// THE PREDICATE IS "THE REPO COULD NOT BE LISTED", NOT "THE REPO FIELD IS
+	// RELATIVE. The ticket's hypothesis was the bare relative name — `repo:
+	// onethird_program` rather than `/Users/daniel/research/onethird_program` —
+	// and that is a real instance, but it is a subset. The third item in the run
+	// above was `/Users/daniel/.claude`: absolute, existing, and not a git
+	// repository. Keying the row on the shape of the string would have kept that
+	// one silent, so it is keyed on the failure instead.
+	//
+	// AN ITEM NAMING NO REPO AT ALL IS THE SAME ROW. That case was already
+	// counted (ItemsWithoutRepo) and printed as a line, but it was likewise not a
+	// row and so likewise did not survive into the exit code — a report that
+	// states a gap in prose and then exits 0 is read by a schedule as clean.
+	//
+	// IT IS ACTIONABLE for the same reason KindUnjudged is, and the direction of
+	// the error is the dangerous one: an item whose repo was never listed may be
+	// carrying a stranded branch, and the failure is on the side that reports
+	// nothing.
+	KindRepoUnreadable Kind = "repo_unreadable"
 )
 
 // Rank orders the kinds within an item status. Stranded first: it is the row
 // whose item is about to be dispatched at. Unjudged sits immediately behind it,
 // because an unjudged row MIGHT be a stranded one and nothing in the report can
 // say it is not.
+//
+// repo_unreadable sits third, behind unjudged and ahead of the two rows that
+// know what they are looking at. Both of the first two are "we do not know", and
+// unjudged leads because it at least FOUND a branch: something exists on that
+// item. A repo that could not be listed might hold a strand or might hold
+// nothing, and the report cannot say which — but it must not rank below a row
+// that has already been judged harmless.
 func (k Kind) Rank() int {
 	switch k {
 	case KindStranded:
 		return 0
 	case KindUnjudged:
 		return 1
-	case KindConflictSuspect:
+	case KindRepoUnreadable:
 		return 2
-	default:
+	case KindConflictSuspect:
 		return 3
+	default:
+		return 4
 	}
 }
 
@@ -238,6 +300,20 @@ func (r Row) Remedy() string {
 	case KindUnjudged:
 		return fmt.Sprintf("git -C %s cherry %s %s   # re-run; this branch was NOT judged either way",
 			r.Item.Repo, orDefault(r.Target, "origin/main"), orDefault(r.Ref, r.Branch))
+	case KindRepoUnreadable:
+		// The remedy is on the ITEM's repo field, not on this sweep, in all three
+		// shapes — which is why none of them prints a `refinery submit` or an `mg
+		// done`. Nothing here knows whether this item has a branch at all.
+		switch {
+		case r.Item.Repo == "":
+			return fmt.Sprintf("mg show %s   # names NO repo, so no branch was ever looked for", r.Item.ID)
+		case !filepath.IsAbs(r.Item.Repo):
+			return fmt.Sprintf("mg show %s   # repo is the bare name %q — this sweep has no base "+
+				"directory to resolve it against; set an absolute path", r.Item.ID, r.Item.Repo)
+		default:
+			return fmt.Sprintf("git -C %s for-each-ref 'refs/heads/%s*'   # reproduce the failure; "+
+				"this sweep can only answer for a git repository", r.Item.Repo, strandedwork.BranchPrefix)
+		}
 	default:
 		return fmt.Sprintf("git -C %s log --oneline %s..%s   # then submit OR close; do neither blind",
 			r.Item.Repo, r.Target, r.Ref)
@@ -265,13 +341,35 @@ type RepoCoverage struct {
 
 // Report is one sweep.
 type Report struct {
-	Rows         []Row          `json:"rows"`
-	Excluded     []Excluded     `json:"excluded"`
-	Repos        []RepoCoverage `json:"repos"`
-	ItemsScanned int            `json:"items_scanned"`
+	Rows     []Row          `json:"rows"`
+	Excluded []Excluded     `json:"excluded"`
+	Repos    []RepoCoverage `json:"repos"`
+	// ItemsScanned is the open population this sweep enumerated — the
+	// DENOMINATOR, not the coverage. It counts an item whose repo could not be
+	// listed exactly as it counts one that was fully checked, which is why it
+	// must never be rendered on its own: on the run that produced mg-8baa it read
+	// 112 over a population three of whose items were never looked at.
+	ItemsScanned int `json:"items_scanned"`
+	// ItemsChecked is how many of those items were actually joined against a
+	// SUCCESSFUL branch listing. This is the coverage numerator, and the pair
+	// (ItemsChecked, ItemsScanned) is the bound the header states.
+	//
+	// The split follows internal/ghintake, whose ItemsScanned counts successful
+	// body reads for the same reason: "a failed issue list and a repo with no
+	// open issues are indistinguishable to a careless check". The two commands
+	// disagreeing about that was itself worth removing.
+	ItemsChecked int `json:"items_checked"`
 	// ItemsWithoutRepo counts open items naming no repository. They cannot be
 	// checked at all, and that is a coverage gap rather than a clean verdict.
+	// Each one also produces a KindRepoUnreadable row: until mg-8baa this count
+	// was printed as prose and then dropped, so the run still exited 0.
 	ItemsWithoutRepo int `json:"items_without_repo"`
+	// ItemsOutOfScope counts open items dropped by the --repo restriction. NOT a
+	// coverage failure — the caller asked for the narrower sweep — but it is
+	// still the difference between the denominator and what was looked at, and a
+	// header that omits it overstates its own reach exactly as the unreadable-repo
+	// case did.
+	ItemsOutOfScope int `json:"items_out_of_scope"`
 	// InspectErrors are branches that could not be read. Collected rather than
 	// fatal: one unreadable ref must not turn a sweep of a hundred items into a
 	// single error a reader renders as "nothing stranded".
@@ -390,10 +488,19 @@ func Scan(opts Options) (Report, error) {
 	for _, it := range items {
 		rep.ItemsScanned++
 		if it.Repo == "" {
+			// A ROW, not just a count (mg-8baa). This branch used to increment and
+			// `continue`, which put the item in a prose line and nowhere else: it
+			// never reached Rows, so Actionable() stayed false and the command
+			// exited 0 over an item nothing had looked at.
 			rep.ItemsWithoutRepo++
+			rep.Rows = append(rep.Rows, Row{
+				Item: it, Kind: KindRepoUnreadable, Target: opts.Target,
+				Error: "the work item names no repository",
+			})
 			continue
 		}
 		if len(only) > 0 && !only[it.Repo] {
+			rep.ItemsOutOfScope++
 			continue
 		}
 		if _, seen := byRepo[it.Repo]; !seen {
@@ -412,11 +519,25 @@ func Scan(opts Options) (Report, error) {
 		}
 		branches, berr := strandedwork.PolecatBranches(repo)
 		if berr != nil {
+			// THE JOIN THIS SWEEP REPORTS ON IS ITEMS, AND THE FAILURE HAS TO CROSS
+			// IT (mg-8baa). Recording the error on the RepoCoverage — which is all
+			// this used to do — states the failure in the units the sweep does not
+			// report in. Every item in this repo then vanished from the population
+			// without appearing in any column, while the header went on counting
+			// them as scanned. One row per item, each nameable and each carrying
+			// the repo's own error.
 			cov.Error = berr.Error()
 			rep.Repos = append(rep.Repos, cov)
+			for _, it := range byRepo[repo] {
+				rep.Rows = append(rep.Rows, Row{
+					Item: it, Kind: KindRepoUnreadable, Target: opts.Target,
+					Error: berr.Error(),
+				})
+			}
 			continue
 		}
 		cov.Branches = len(branches)
+		rep.ItemsChecked += len(byRepo[repo])
 		rep.Repos = append(rep.Repos, cov)
 
 		for _, it := range byRepo[repo] {
