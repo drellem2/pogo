@@ -1600,13 +1600,42 @@ outward-facing and stays human-gated.
   `pogo check-teardown` calls it too so the CLI works from cron as well as from
   a terminal: when the environment has no token, a **user shell** is asked for
   one (`zsh -c` sources `~/.zshenv` on every invocation, so the secret stays
-  where it already lives). The token is never written to a plist, a log, or an
-  error message — pogod logs only *where* the token came from. Sibling of
+  where it already lives), and failing that **`gh auth token`** is asked for the
+  credential gh already holds (mg-fb29). The token is never written to a plist, a
+  log, or an error message — pogod logs only *where* the token came from, and the
+  startup line **names the winning source** (`source=ambient` / `source=shell` /
+  `source=gh-auth-token`), because with more than one source a line that does not
+  say which one won can no longer answer the question it was added to answer.
+  Sibling of
   `internal/pathenv`: that one fixes children that cannot be **found** under
   launchd, this one fixes children that run and cannot **authenticate**. The
   value is read once at startup, so a rotated token needs a pogod restart; the
   failure mode is a return to indeterminate, which is reported, never mistaken
   for closed.
+
+  **`gh auth token` is what makes "no credential" a decidable fact.** It is the
+  one link of the proposed configurable chain that writes no new copy of the
+  secret — it reads a credential gh already holds — which is why it ships while
+  the rest (an env-var name, a token file, a token command) stays reserved on
+  mg-7d62 as a secret-handling decision. Its value is less the extra host it
+  rescues than what it lets a caller conclude: before it, "no token harvested"
+  did **not** mean "gh cannot authenticate", because `gh auth login` writes a
+  `hosts.yml` this package could not see. After it, it does, and `cmd/pogod`
+  arms the gh-issue intake detector on exactly that predicate. A non-zero exit
+  from `gh auth token` is **ordinary**, not a fault — a host that never ran `gh
+  auth login` is a normal host — and nothing anywhere parses gh's stderr to
+  classify anything: an English-message matcher stops working *silently* the
+  first time gh rewords it. Residual, stated: it answers for gh's **default
+  host**, so a fleet authenticated only against a GitHub Enterprise host would
+  read as unauthenticated here.
+
+  **Verifying the harvest — not with `ps`.** `ps eww -p <pogod-pid> | grep
+  GH_TOKEN` returns nothing **even when the harvest succeeded**, because
+  `ghtoken.Ensure()` calls `os.Setenv` *after* exec and macOS `ps` reports the
+  exec-time environment. That false negative is the founding diagnostic of two
+  separate reports that the daemon was tokenless, and both were wrong. Check a
+  **child's** environment instead, or read the startup log line, which now names
+  the source it won from.
 
   Because every unit test in the package injects its lookup, they all pass just
   as happily when the real `gh` is unauthenticated. The guard against a silent
@@ -1755,10 +1784,44 @@ scope, a question) is a judgement that stays with the coordinator.
   (`ghintake_not_armed`) to the intake mailbox — a separate notice from the
   teardown detector's on the same row, because one root cause with two readers
   needs two notices or one reader learns nothing.
+- **Arming also requires a CREDENTIAL, not just the binary (mg-fb29).** Same
+  argument, one step further: a `gh` that runs and cannot authenticate fails
+  every repo lookup for one global reason, and the runner would report that one
+  reason as N unreadable repos. The predicate is `internal/ghtoken`'s result,
+  evaluated **once at startup** — not per poll, and never by inspecting the
+  per-repo failures. Without a credential the detector does not arm and raises
+  the A13 condition `ghintake_no_credential`, whose remedy (`gh auth login` plus
+  a pogod restart) has nothing in common with the PATH case's, which is why it
+  is a separate id rather than a sentence added to the other notice. The two are
+  ordered: a host with no `gh` is told about `gh`, never about a credential it
+  could not have obtained anyway.
+- **An unreadable repo now names its cause, in three shapes.** Before this, one
+  message covered every cause and listed *"expired or missing gh auth"* first
+  among four equally-weighted guesses. It was wrong in both directions. On
+  2026-08-14 it mailed *"2 unreadable repo(s)"* four times, leading with the auth
+  guess, while the credential was valid with full scopes and the actual cause was
+  a network/DNS outage corroborated by four other instruments in the same minutes
+  (mg-c058) — and in the mirror case a genuinely missing credential arrived as N
+  repo findings, none of which named the one thing to fix. So:
+  - **credential missing** → one `NO GITHUB CREDENTIAL` finding, with the failed
+    repos listed as its consequences and `gh auth login` as the single remedy;
+  - **credential present** → the repo errors are reported with *"a credential WAS
+    configured (source=…)"*, and the remaining causes are **ranked** — network/DNS
+    first, then rate limiting, then a renamed repo, then an expired or revoked
+    credential **last but not excluded**, since a startup predicate cannot see a
+    revocation since;
+  - **not evaluated** → says so, and claims nothing in either direction.
+
+  The distinction reaches the **mail subject**, not just the body, because the
+  subject line is the part that gets skimmed and forwarded — this ticket's own
+  title came from one that counted repos instead of naming a cause. The subject
+  states what was measured (*"a gh credential WAS configured"*) rather than the
+  conclusion (*"not an auth fault"*), which the snapshot cannot support.
 
 ```toml
 [gh_intake]
-enabled = true             # default true; skipped when `gh` is unavailable
+enabled = true             # default true; skipped when `gh` is off PATH, and
+                           # also when no GitHub credential can be established
 interval = "15m"           # coarse sample cadence (default 15m)
 grace = "30m"              # how long an issue may go uncarried before it counts
                            # (default 30m; negative reports immediately)

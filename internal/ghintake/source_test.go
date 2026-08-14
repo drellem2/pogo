@@ -199,7 +199,7 @@ func TestCollectRecordsPerRepoFailuresAndKeepsGoing(t *testing.T) {
 	}
 	carriers := func() ([]CarrierRef, int, []ItemError, error) { return nil, 12, nil, nil }
 
-	got, err := Collect([]string{"drellem2/pogo", "drellem2/macguffin"}, list, carriers, mgStatuses)
+	got, err := Collect([]string{"drellem2/pogo", "drellem2/macguffin"}, list, carriers, mgStatuses, CredentialUnknown, "")
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestCollectRecordsPerRepoFailuresAndKeepsGoing(t *testing.T) {
 func TestCollectFailsWholesaleOnACarrierScanError(t *testing.T) {
 	list := func(string) ([]Issue, error) { return nil, nil }
 	carriers := func() ([]CarrierRef, int, []ItemError, error) { return nil, 0, nil, errors.New("mg: no such store") }
-	if _, err := Collect([]string{"drellem2/pogo"}, list, carriers, mgStatuses); err == nil {
+	if _, err := Collect([]string{"drellem2/pogo"}, list, carriers, mgStatuses, CredentialUnknown, ""); err == nil {
 		t.Fatal("a carrier-scan failure must abort the scan, not produce a partial one")
 	}
 }
@@ -514,7 +514,7 @@ func TestFullStackPositiveAndNegativeControl(t *testing.T) {
 	}
 
 	// ---- ARM 1: no carrier for #99. The check must report it.
-	inv1, err := Collect([]string{"drellem2/pogo"}, list, src.Carriers, src.Statuses())
+	inv1, err := Collect([]string{"drellem2/pogo"}, list, src.Carriers, src.Statuses(), CredentialPresent, "shell")
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestFullStackPositiveAndNegativeControl(t *testing.T) {
 		t.Fatalf("filing the carrier: %v\n%s", err, out)
 	}
 
-	inv2, err := Collect([]string{"drellem2/pogo"}, list, src.Carriers, src.Statuses())
+	inv2, err := Collect([]string{"drellem2/pogo"}, list, src.Carriers, src.Statuses(), CredentialPresent, "shell")
 	if err != nil {
 		t.Fatalf("Collect after filing: %v", err)
 	}

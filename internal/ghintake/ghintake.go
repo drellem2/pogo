@@ -157,6 +157,71 @@ type RepoError struct {
 	Detail string
 }
 
+// CredentialState is the POSITIVE CREDENTIAL PREDICATE, evaluated ONCE for the
+// whole scan by whoever built the Inventory (mg-fb29).
+//
+// # Why a report needs it at all
+//
+// Every watched repo is read with the same one credential, so "no credential" is
+// ONE global cause. Without it in hand this detector could only see the
+// consequence — N failed `gh issue list` calls — and it amplified that one cause
+// into N per-repo faults, then listed "expired or missing gh auth" FIRST among
+// four equally-weighted guesses at what caused them.
+//
+// Both halves of that were wrong, in opposite directions, and both were measured
+// on the same host:
+//
+//   - On 2026-08-14, four runs mailed "2 unreadable repo(s)" leading with an auth
+//     guess. The credential was valid with full scopes throughout, and the actual
+//     cause was a network/DNS outage corroborated by four independent instruments
+//     in the same minutes. The message sent its reader at the wrong remedy.
+//   - The mirror case is the one this ticket is titled for: a host with genuinely
+//     no credential gets N repo findings, one per repo, none of which names the
+//     single thing that must be fixed.
+//
+// # It is a predicate, not an inference from the failures
+//
+// Nothing here reads gh's stderr to decide whether a failure was an auth
+// failure. That classifier stops working SILENTLY the first time gh rewords its
+// message — the check keeps passing and nobody learns anything. The state is
+// established up front by internal/ghtoken (whose `gh auth token` source is what
+// makes "no credential" decidable at all) and carried in.
+//
+// # What it does not claim
+//
+// CredentialPresent means a credential was established when the scan armed. It
+// does NOT mean the credential is valid right now: it can have expired or been
+// revoked since, and a once-at-startup predicate cannot see that. The rendering
+// says so rather than promising more than was measured.
+type CredentialState string
+
+const (
+	// CredentialUnknown: nobody evaluated the predicate for this scan. The
+	// honest zero value, and it renders the old four-cause list — a caller that
+	// did not check gets no claim made on its behalf.
+	CredentialUnknown CredentialState = ""
+	// CredentialPresent: a GitHub credential was established for this scan.
+	CredentialPresent CredentialState = "present"
+	// CredentialMissing: no GitHub credential could be established, by any
+	// source ghtoken knows — including the `gh auth login` store.
+	CredentialMissing CredentialState = "missing"
+)
+
+// CredentialFor maps a caller's credential predicate onto the pair of fields an
+// Inventory carries. ok is ghtoken.Result.OK(); source is the name of the
+// winning source, and is ignored when ok is false.
+//
+// It exists so cmd/pogod and cmd/pogo state the predicate identically in one
+// line each. This package deliberately does not import ghtoken — Detect and its
+// sources stay testable without a shell, a gh, or a real secret, the same reason
+// it does not import config.
+func CredentialFor(ok bool, source string) (CredentialState, string) {
+	if !ok {
+		return CredentialMissing, ""
+	}
+	return CredentialPresent, source
+}
+
 // ItemError records one work item whose body could not be read, and so could not
 // be checked for a `gh:` marker.
 //
@@ -229,6 +294,13 @@ type Inventory struct {
 	// Repos lists the watched repos the issue scan covered, whether or not each
 	// one succeeded.
 	Repos []string
+	// Credential is the once-per-scan credential predicate — see CredentialState
+	// for why a report cannot classify an unreadable repo without it.
+	Credential CredentialState
+	// CredentialSource names where that credential came from ("ambient",
+	// "shell", "gh-auth-token"). Reported so a reader can check the claim rather
+	// than take it, and empty unless Credential is CredentialPresent.
+	CredentialSource string
 }
 
 // Report is the outcome of one full reconciliation.
@@ -264,7 +336,23 @@ type Report struct {
 	ItemsScanned int
 	Statuses     []string
 	Repos        []string
+	// Credential and CredentialSource echo the Inventory's credential predicate.
+	// They classify RepoErrors rather than adding findings of their own — see
+	// NoCredential.
+	Credential       CredentialState
+	CredentialSource string
 }
+
+// NoCredential reports the condition this detector used to be unable to name: no
+// GitHub credential is configured, so every unreadable repo below has ONE cause
+// and one remedy.
+//
+// It is deliberately NOT a term in Actionable(). A missing credential with no
+// watched repo blinds nothing, and inventing a finding for it would be a
+// standing alarm on any host that watches no repos. What it changes is how the
+// repo errors that DO exist are reported: as one fault with N consequences,
+// instead of as N faults.
+func (r Report) NoCredential() bool { return r.Credential == CredentialMissing }
 
 // Actionable reports whether the scan found something a coordinator must act on.
 //
@@ -296,11 +384,13 @@ func carriersFor(carriers []CarrierRef) map[string][]CarrierRef {
 // immediately.
 func Detect(inv Inventory, now time.Time, grace time.Duration) Report {
 	rep := Report{
-		RepoErrors:   inv.RepoErrors,
-		ItemErrors:   inv.ItemErrors,
-		ItemsScanned: inv.ItemsScanned,
-		Statuses:     inv.Statuses,
-		Repos:        inv.Repos,
+		RepoErrors:       inv.RepoErrors,
+		ItemErrors:       inv.ItemErrors,
+		ItemsScanned:     inv.ItemsScanned,
+		Statuses:         inv.Statuses,
+		Repos:            inv.Repos,
+		Credential:       inv.Credential,
+		CredentialSource: inv.CredentialSource,
 	}
 
 	idx := carriersFor(inv.Carriers)
@@ -414,14 +504,7 @@ func (r Report) Render() string {
 	}
 
 	if len(r.RepoErrors) > 0 {
-		fmt.Fprintf(&b, "UNREADABLE — %d watched repo(s) whose open issues could NOT be listed:\n\n", len(r.RepoErrors))
-		for _, e := range r.RepoErrors {
-			fmt.Fprintf(&b, "  %s\n      %s\n\n", e.Repo, e.Detail)
-		}
-		b.WriteString("These are NOT clean. A failed issue list and a repo with no open issues are\n" +
-			"indistinguishable to a careless check, so an unreadable repo is reported rather\n" +
-			"than counted as covered. Common causes: expired or missing gh auth, rate\n" +
-			"limiting, offline, or a renamed/deleted repo in the watch list.\n\n")
+		r.renderRepoErrors(&b)
 	}
 
 	if len(r.ItemErrors) > 0 {
@@ -455,6 +538,71 @@ func (r Report) Render() string {
 	return b.String()
 }
 
+// renderRepoErrors writes the unreadable-repo section, in one of three shapes
+// chosen by the credential predicate (mg-fb29).
+//
+// The three-way split IS the fix. One shape said "N unreadable repos, common
+// causes: expired or missing gh auth, rate limiting, offline, renamed repo" for
+// every cause there is, which meant it was wrong in both directions: it hid a
+// missing credential behind N repo names, and it pointed at a credential when
+// the credential was fine. Two sibling instruments on this fleet already report
+// this class correctly — the refinery says *infrastructure, retrying* and
+// gh-teardown-watch says *this run measured nothing* — so the target is not
+// hypothetical.
+func (r Report) renderRepoErrors(b *strings.Builder) {
+	n := len(r.RepoErrors)
+
+	switch r.Credential {
+	case CredentialMissing:
+		fmt.Fprintf(b, "NO GITHUB CREDENTIAL — this host has no GitHub credential, so the %d watched\n"+
+			"repo(s) below could not be listed. That is ONE fault, not %d:\n\n", n, n)
+	case CredentialPresent:
+		fmt.Fprintf(b, "UNREADABLE — %d watched repo(s) whose open issues could NOT be listed. "+
+			"A credential WAS configured:\n\n", n)
+	default:
+		fmt.Fprintf(b, "UNREADABLE — %d watched repo(s) whose open issues could NOT be listed:\n\n", n)
+	}
+
+	for _, e := range r.RepoErrors {
+		fmt.Fprintf(b, "  %s\n      %s\n\n", e.Repo, e.Detail)
+	}
+
+	switch r.Credential {
+	case CredentialMissing:
+		b.WriteString("The per-repo errors above are consequences, not causes, and fixing them one at a\n" +
+			"time is not a thing anyone can do. There is one remedy:\n\n" +
+			"  gh auth login          # then restart pogod, which reads the credential at startup\n\n" +
+			"This was checked rather than guessed. `gh auth token` is asked for the credential\n" +
+			"gh already holds, so a host authenticated by `gh auth login` — with nothing in the\n" +
+			"environment and nothing in any shell profile — reads as CONFIGURED here. Only a\n" +
+			"host where none of those three sources yields anything reaches this message.\n\n")
+	case CredentialPresent:
+		fmt.Fprintf(b, "A GitHub credential WAS established for this scan (source=%s), so \"no gh\n"+
+			"credential configured\" is RULED OUT — that much was measured, not guessed. Causes\n"+
+			"still open, most likely first:\n\n"+
+			"  1. Network or DNS failure. An outage produces exactly this shape — every watched\n"+
+			"     repo failing at once — and on 2026-08-14 it produced it four times while this\n"+
+			"     message still led with an auth guess. Four other instruments on this fleet saw\n"+
+			"     the same minutes as ENOTFOUND / `ssh: connect to host github.com` (mg-c058).\n"+
+			"  2. Rate limiting.\n"+
+			"  3. A renamed or deleted repo in the watch list, or one this credential cannot see.\n"+
+			"  4. An EXPIRED or REVOKED credential. Last, not excluded: the predicate above was\n"+
+			"     evaluated when this scan armed and cannot see a revocation since. It is the one\n"+
+			"     cause here that is settled by a single command — `gh auth status`.\n\n"+
+			"That ORDER is the fix. The four causes used to be listed as equals with auth first,\n"+
+			"which is how one network outage became a nine-day credential question.\n\n",
+			r.CredentialSource)
+	default:
+		b.WriteString("The credential predicate was NOT evaluated for this scan, so this report cannot\n" +
+			"tell an auth fault from a network one. Common causes: expired or missing gh auth,\n" +
+			"rate limiting, offline, or a renamed/deleted repo in the watch list.\n\n")
+	}
+
+	b.WriteString("These are NOT clean. A failed issue list and a repo with no open issues are\n" +
+		"indistinguishable to a careless check, so an unreadable repo is reported rather\n" +
+		"than counted as covered.\n\n")
+}
+
 // MailSubject renders the one-line summary for the alert channel. Only called
 // when the report is actionable.
 func (r Report) MailSubject() string {
@@ -474,7 +622,32 @@ func (r Report) MailSubject() string {
 		for _, e := range r.RepoErrors {
 			repos = append(repos, e.Repo)
 		}
-		parts = append(parts, fmt.Sprintf("%d unreadable repo(s): %s", n, strings.Join(repos, ", ")))
+		// The subject line is the part that travels. "2 unreadable repo(s)" is
+		// what a reader skims, forwards, and files a ticket from — and the body's
+		// distinction between an auth fault and a network one does not survive
+		// that trip unless it is here too. This ticket exists because it wasn't:
+		// the title it was filed under, and the nine days it then spent parked as
+		// a credential question for a human, both came from a subject line that
+		// counted repos instead of naming a cause.
+		switch r.Credential {
+		case CredentialMissing:
+			parts = append(parts, fmt.Sprintf(
+				"NO GitHub credential configured — one fault, %d repo(s) unreadable as a result: %s",
+				n, strings.Join(repos, ", ")))
+		case CredentialPresent:
+			// States the MEASUREMENT, not the conclusion. "not an auth fault" would
+			// be the same over-claim in the other direction: the predicate is a
+			// startup snapshot and cannot see a credential revoked since, so a
+			// subject asserting it would be this ticket's own defect rebuilt with a
+			// stronger claim than the message it replaced. The body ranks the
+			// remaining causes; the subject says only what was checked.
+			parts = append(parts, fmt.Sprintf(
+				"%d unreadable repo(s) — a gh credential WAS configured (source=%s), so this is not "+
+					"a missing one: %s", n, r.CredentialSource, strings.Join(repos, ", ")))
+		default:
+			parts = append(parts, fmt.Sprintf("%d unreadable repo(s), cause unclassified "+
+				"(no credential check ran): %s", n, strings.Join(repos, ", ")))
+		}
 	}
 	return strings.Join(parts, "; ")
 }

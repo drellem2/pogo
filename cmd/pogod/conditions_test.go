@@ -94,10 +94,11 @@ func enumerationDisposition() []enumerationRow {
 				"measurement, not an annunciation of a boot-time capability check."},
 
 		{row: "A13", wired: true,
-			why: "gh-issue detectors NOT armed. The one row NOT routed to the coordinator: [gh_teardown] notify_to is a deliberately-chosen mailbox for this subsystem's findings (mg-b586) and its not-armed condition belongs to the same reader. TWO conditions on the one row (mg-039b): a missing `gh` is one fault, but the teardown and intake detectors report to different mailboxes by design, so one notice would leave one reader uninformed",
+			why: "gh-issue detectors NOT armed. The one row NOT routed to the coordinator: [gh_teardown] notify_to is a deliberately-chosen mailbox for this subsystem's findings (mg-b586) and its not-armed condition belongs to the same reader. TWO conditions on the one row (mg-039b): a missing `gh` is one fault, but the teardown and intake detectors report to different mailboxes by design, so one notice would leave one reader uninformed. A THIRD (mg-fb29): the intake detector's other arming precondition is a CREDENTIAL, not just the binary — same shape (one global cause, invisible from a per-repo view) and a disjoint remedy (`gh auth login`, not a plist PATH edit), so it cannot share an id with the PATH case without one suppressing the other",
 			conds: []pogodCondition{
 				conditionTeardownNotArmed("pm-pogo", "exec: gh not found"),
-				conditionIntakeNotArmed("mayor", "exec: gh not found")}},
+				conditionIntakeNotArmed("mayor", "exec: gh not found"),
+				conditionIntakeNoCredential("mayor", "GH_TOKEN: ABSENT (source=none)")}},
 
 		{row: "A14", wired: true,
 			why:   "log rotation failed — the post-mortem log the other thirteen fall back to may be lost or unbounded",
@@ -247,6 +248,14 @@ func TestConditionIDsAreDistinctPerSubject(t *testing.T) {
 	if a, b := conditionSchedulerLoadFailed("mayor", "/p", "e"),
 		conditionSchedulerNoHome("mayor", "e"); a.ID == b.ID {
 		t.Errorf("A2's two sites share the id %q", a.ID)
+	}
+	// A13's two intake preconditions, same reader and same consequence, disjoint
+	// remedies: a plist PATH edit versus `gh auth login`. A shared id means a host
+	// with neither gh nor a credential is told about one of its two problems, and
+	// fixing that one leaves the detector still disarmed with the alarm cleared.
+	if a, b := conditionIntakeNotArmed("mayor", "e"),
+		conditionIntakeNoCredential("mayor", "e"); a.ID == b.ID {
+		t.Errorf("A13's intake PATH and credential preconditions share the id %q", a.ID)
 	}
 	// Every wired id must be unique across the whole catalogue.
 	seen := map[string]string{}

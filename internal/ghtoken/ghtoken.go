@@ -34,6 +34,42 @@
 // a world-readable file, traded for a problem that has a solution which keeps
 // the secret exactly where it already is.
 //
+// # The second source, and why it makes SourceNone mean something (mg-fb29)
+//
+// After the shell, `gh auth token` is asked. That is the one source in the
+// proposed chain that writes NO new copy of the credential anywhere: it reads a
+// token gh already holds, from a store gh already wrote, and nothing else about
+// where secrets live changes. The rest of the configurable chain — an env-var
+// name, a token file, a token-command — each parks a fresh copy somewhere new,
+// which is a secret-handling decision and stays reserved (mg-7d62).
+//
+// Its value is not really the extra host it rescues. It is that it turns
+// SourceNone from a heuristic into a DECIDABLE PREDICATE. Before it, "no token
+// harvested" did not mean "gh cannot authenticate", because `gh auth login`
+// writes hosts.yml and this package could not see that file — so a caller that
+// treated SourceNone as "unauthenticated" would false-alarm on every host that
+// had ever run `gh auth login`. `gh auth token` reads exactly that file, so
+// after it, SourceNone means gh has no credential for the default host, and a
+// caller may act on it. cmd/pogod does: the gh-issue intake detector refuses to
+// arm without one, rather than letting one global cause be amplified into a
+// per-repo fault for every watched repo (mg-fb29).
+//
+// A non-zero exit from `gh auth token` is ORDINARY, not a fault. A host that
+// never ran `gh auth login` is a normal host; the probe reports and falls
+// through, and nothing here raises an alarm about it. What is alarmable is the
+// state at the END of the chain, and that is the caller's judgement to make.
+//
+// Nothing in this package parses gh's stderr to classify anything. The English
+// text of "you are not logged in" is not an interface: gh rewords its messages
+// and a matcher against them fails SILENTLY — the check keeps passing and
+// nobody learns anything. Exit status and the presence or absence of a token on
+// stdout are the whole contract.
+//
+// Residual, stated: `gh auth token` answers for gh's DEFAULT host. A fleet
+// authenticated only against a GitHub Enterprise host (GH_ENTERPRISE_TOKEN, or
+// a hosts.yml entry that is not the default) would read as SourceNone here.
+// Every repo this fleet watches is on github.com.
+//
 // # Secret discipline
 //
 // The value is held in memory, handed to os.Setenv, and never returned to a
@@ -80,40 +116,82 @@ const (
 	// SourceShell: the environment had no token and one was harvested from a
 	// user shell. This is the launchd case — the one this package exists for.
 	SourceShell Source = "shell"
-	// SourceNone: no token could be established. gh may still authenticate from
-	// its own config (`gh auth login` writes hosts.yml), so this is reported,
-	// not fatal — but it is the state in which the teardown detector goes blind,
-	// so it must be visible in the log rather than inferred from a wall of
-	// indeterminate findings.
+	// SourceGH: neither the environment nor the user shell had one, and `gh auth
+	// token` returned the credential gh already holds (typically written to
+	// hosts.yml by `gh auth login`). The last link in the chain, and the only one
+	// that creates no new copy of the secret — see the package doc.
+	SourceGH Source = "gh-auth-token"
+	// SourceNone: no credential could be established, by ANY of the three
+	// sources. Since `gh auth token` covers the `gh auth login` case this package
+	// used to be blind to, this is now a decidable statement about gh's default
+	// host rather than a heuristic: gh will not authenticate. Callers may act on
+	// it, and cmd/pogod does.
 	SourceNone Source = "none"
 )
+
+// Attempt records one source that was tried and did not yield. Existence-only,
+// like everything else here: it names the source and a reason that has been
+// through exitOnly or validate, never a value and never a probe's output.
+type Attempt struct {
+	Source Source
+	Err    error
+}
 
 // Result describes what Ensure did. It never carries the token value.
 type Result struct {
 	// Source is where the token came from, or SourceNone.
 	Source Source
-	// Err explains a failed harvest. Never contains the token, and never
-	// contains the probe shell's output.
+	// Err explains a failed harvest — the FIRST source's reason, which is the
+	// most specific one on a host that has a shell export and no gh login. Never
+	// contains the token, and never contains a probe's output.
 	Err error
+	// Tried lists every source attempted and why it did not yield, in order. On
+	// a SourceNone result this is the whole diagnosis, and it is what lets one
+	// log line distinguish "no shell export" from "no gh login" from both.
+	Tried []Attempt
 }
 
-// OK reports whether a token is now present in the process environment.
-func (r Result) OK() bool { return r.Source == SourceAmbient || r.Source == SourceShell }
+// OK reports whether a GitHub credential is now available to this process and
+// its children — which, for every source here, means GH_TOKEN is set in the
+// environment.
+//
+// This is the POSITIVE CREDENTIAL PREDICATE the intake detector arms on. It is
+// only worth that much because of SourceGH: without it, !OK() included every
+// host authenticated by `gh auth login`.
+func (r Result) OK() bool { return r.Source != SourceNone }
 
 // String renders the result for a log line. Existence-only by construction:
 // there is no branch of this method that can reach the value.
+//
+// It NAMES THE WINNING SOURCE, and that is load-bearing rather than tidy. The
+// "harvested from the user shell" line is the evidence that refuted gh#113's
+// premise — 163 occurrences in pogod.log proved the launchd daemon was not
+// tokenless. With more than one source in the chain, a line that does not say
+// WHICH one won can no longer answer the question it just answered.
 func (r Result) String() string {
 	switch r.Source {
 	case SourceAmbient:
-		return "GH_TOKEN: already present in the environment"
+		return "GH_TOKEN: present (source=ambient) — already in the process environment"
 	case SourceShell:
-		return "GH_TOKEN: absent from the environment, harvested from the user shell"
+		return "GH_TOKEN: present (source=shell) — absent from the environment, harvested from the user shell"
+	case SourceGH:
+		return "GH_TOKEN: present (source=gh-auth-token) — absent from the environment and from the user " +
+			"shell, read from the credential `gh` already holds"
 	default:
-		if r.Err != nil {
-			return fmt.Sprintf("GH_TOKEN: unset and could not be harvested (%v) — "+
-				"gh calls will fail unless gh is authenticated by other means", r.Err)
+		var b strings.Builder
+		b.WriteString("GH_TOKEN: ABSENT (source=none) — no GitHub credential could be established")
+		for _, a := range r.Tried {
+			fmt.Fprintf(&b, "; %s: %v", a.Source, a.Err)
 		}
-		return "GH_TOKEN: unset and could not be harvested"
+		// States which sources were asked and lets their own reasons above carry
+		// the rest. An unconditional "including `gh auth login` — that path is
+		// checked" would be FALSE on a host with no gh on PATH, where the probe
+		// could not run: a claim about coverage that is wrong exactly when
+		// coverage is missing.
+		b.WriteString(". `gh auth token` is in the chain, so a credential written by `gh auth login` " +
+			"is covered whenever gh itself is reachable — the per-source reasons above say whether " +
+			"it was")
+		return b.String()
 	}
 }
 
@@ -128,12 +206,19 @@ func (r Result) String() string {
 func Ensure() Result {
 	return ensure(os.Getenv, os.Setenv, func() (string, error) {
 		return shellHarvest(UserShell())
-	})
+	}, ghAuthToken)
 }
 
 // ensure is the injectable core, so every branch — including the failure
 // branches — is reachable without a shell, a network, or a real secret.
-func ensure(getenv func(string) string, setenv func(string, string) error, harvest func() (string, error)) Result {
+//
+// The sources are tried in order and the FIRST that yields a plausible token
+// wins. Shell before gh, deliberately: the shell probe is what this box actually
+// uses (163 startup lines' worth), it needs no subprocess of gh's own, and it
+// answers for whatever the operator configured rather than for whatever gh was
+// last logged into.
+func ensure(getenv func(string) string, setenv func(string, string) error,
+	shellHarvest, ghHarvest func() (string, error)) Result {
 	// GITHUB_TOKEN counts: gh reads it when GH_TOKEN is unset, so a process that
 	// has it is already authenticated and must not be second-guessed.
 	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN"} {
@@ -142,17 +227,34 @@ func ensure(getenv func(string) string, setenv func(string, string) error, harve
 		}
 	}
 
-	tok, err := harvest()
-	if err != nil {
-		return Result{Source: SourceNone, Err: err}
+	res := Result{Source: SourceNone}
+	for _, src := range []struct {
+		name    Source
+		harvest func() (string, error)
+	}{
+		{SourceShell, shellHarvest},
+		{SourceGH, ghHarvest},
+	} {
+		tok, err := src.harvest()
+		if err == nil {
+			err = validate(tok)
+		}
+		if err == nil {
+			if serr := setenv("GH_TOKEN", tok); serr != nil {
+				err = fmt.Errorf("setenv: %w", serr)
+			} else {
+				res.Source = src.name
+				return res
+			}
+		}
+		// Not a fault — just a source that had nothing. Recorded so the one log
+		// line can say which sources were asked, and fallen through.
+		res.Tried = append(res.Tried, Attempt{Source: src.name, Err: err})
+		if res.Err == nil {
+			res.Err = err
+		}
 	}
-	if err := validate(tok); err != nil {
-		return Result{Source: SourceNone, Err: err}
-	}
-	if err := setenv("GH_TOKEN", tok); err != nil {
-		return Result{Source: SourceNone, Err: fmt.Errorf("setenv: %w", err)}
-	}
-	return Result{Source: SourceShell}
+	return res
 }
 
 // validate rejects a probe result that cannot be a token. The checks are shape
@@ -245,6 +347,46 @@ func shellHarvest(shell string) (string, error) {
 		// Report the exit status only. The shell's own output is not repeated.
 		return "", fmt.Errorf("%s environment probe failed (exit status only, output withheld): %w",
 			filepath.Base(shell), exitOnly(err))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// GHTokenCommand is the argv `gh auth token` probe runs. Exported so a test can
+// assert the exact command rather than a paraphrase of it: `gh auth token`
+// prints the credential and nothing else, while `gh auth status` prints a
+// human-readable report whose wording is not an interface (see the package doc
+// on why nothing here reads gh's prose).
+var GHTokenCommand = []string{"auth", "token"}
+
+// ghAuthToken asks gh for the credential it already holds.
+//
+// Every non-success is an ORDINARY outcome reported as an error and nothing
+// more: gh absent from PATH, gh present but never logged in, gh slow. None of
+// them is a fault of this package's, none of them is logged as one, and the
+// caller decides whether the END of the chain is alarmable.
+//
+// The exit STATUS is the whole contract. gh's stderr is discarded by exitOnly
+// for two independent reasons: it can be prose that a matcher would silently
+// stop recognising after a gh release, and it is a string that ends up in logs
+// and mail.
+func ghAuthToken() (string, error) {
+	bin, err := exec.LookPath("gh")
+	if err != nil {
+		return "", fmt.Errorf("gh is not on PATH")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, GHTokenCommand...)
+	cmd.Stderr = nil // discarded on purpose; see the doc comment above.
+	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("`gh auth token` timed out after %s", probeTimeout)
+	}
+	if err != nil {
+		return "", fmt.Errorf("`gh auth token` exited non-zero (%w) — ordinary on a host that has "+
+			"never run `gh auth login`", exitOnly(err))
 	}
 	return strings.TrimSpace(string(out)), nil
 }

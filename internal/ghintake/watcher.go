@@ -431,9 +431,14 @@ func (w *Watcher) shouldMail(print string, now time.Time) bool {
 // across samples. Built from the ACTIONABLE findings only — fresh issues never
 // mail, so an issue ageing out of the grace window changes the print exactly
 // once, when it becomes a finding, which is the transition worth a mail.
+// The credential state is part of the print because it changes what the SAME
+// set of unreadable repos means and what the notice tells a reader to do: a
+// credential that has gone missing turns "two repos are unreadable, check the
+// network" into "one credential is gone, run gh auth login". That is news, and
+// without it here a 24h renotify window could sit on the transition for a day.
 func (r Report) fingerprint(escalated bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "escalated=%t blind=%t\n", escalated, r.BlindStore)
+	fmt.Fprintf(&b, "escalated=%t blind=%t cred=%s\n", escalated, r.BlindStore, r.Credential)
 	for _, f := range r.Uncarried {
 		fmt.Fprintf(&b, "uncarried|%s\n", f.Issue.Ref())
 	}

@@ -330,6 +330,51 @@ func TestUnreadableRepoMails(t *testing.T) {
 	}
 }
 
+// A credential that goes MISSING between samples is news, even though the set of
+// unreadable repos is byte-identical (mg-fb29). The same two repo names now mean
+// a different fault with a different remedy — `gh auth login` rather than "check
+// the network" — and without the credential state in the fingerprint the 24-hour
+// renotify window would sit on that transition for a day.
+func TestACredentialTransitionMailsImmediately(t *testing.T) {
+	mail, ev := &mailRecorder{}, &eventRecorder{}
+	cred := CredentialPresent
+	w := newWatcher(t, func() (Inventory, error) {
+		in := carriedInv(48 * time.Hour)
+		in.RepoErrors = []RepoError{
+			{Repo: "drellem2/macguffin", Detail: "gh: request failed"},
+			{Repo: "drellem2/pogo", Detail: "gh: request failed"},
+		}
+		in.Credential, in.CredentialSource = cred, "shell"
+		return in, nil
+	}, mail, ev, func(o *Options) { o.Interval = time.Minute })
+
+	w.Check(scanTime)
+	if mail.count() != 1 {
+		t.Fatalf("setup: want the first sample to mail, got %d", mail.count())
+	}
+
+	// Identical findings, identical credential: quiet, as before.
+	w.Check(scanTime.Add(2 * time.Minute))
+	if mail.count() != 1 {
+		t.Fatalf("an unchanged sample must stay quiet, got %d mails", mail.count())
+	}
+
+	// Identical findings, credential gone: news.
+	cred = CredentialMissing
+	w.Check(scanTime.Add(4 * time.Minute))
+	if mail.count() != 2 {
+		t.Fatalf("the credential going missing must mail at once even though the repo set "+
+			"is unchanged, got %d mails", mail.count())
+	}
+	if !strings.Contains(mail.subjects[1], "NO GitHub credential") {
+		t.Errorf("the second subject does not name the new fault: %q", mail.subjects[1])
+	}
+	if mail.subjects[0] == mail.subjects[1] {
+		t.Error("both subjects read alike, so the transition is invisible to the reader " +
+			"it was mailed to")
+	}
+}
+
 // A blind carrier scan mails too — a detector that cannot see is itself the
 // finding — and it must NOT arrive as a wall of per-issue findings.
 func TestBlindStoreMailsAsBlindnessNotAsFindings(t *testing.T) {
