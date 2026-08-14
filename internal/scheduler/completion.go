@@ -311,10 +311,58 @@ func issueFireTokenLocked(entry *Entry, now time.Time) string {
 // Caller must hold s.mu. Returns the streak after the increment, i.e. the count
 // of fires outstanding INCLUDING this one — so a healthy agent that acks
 // promptly reads 1 at delivery time, and a dead one climbs without bound.
+//
+// It is called in the SAME locked section as issueFireTokenLocked, BEFORE the
+// bytes go out, for the same reason the token is (mg-a754) and one more of its
+// own. A nudge delivery blocks on the harness's PTY idle gate, which for a busy
+// agent is tens of seconds — 59,985ms in the measured case (mg-57e9). An ack
+// landing inside that window used to be counted against a delivery not yet
+// recorded, so the entry read FiresCompleted=1 against FiresDelivered=0 — a
+// ratio above 1, which every reader of that column treats as impossible — and
+// the delivery record then landing afterwards drove UnackedStreak from the 0
+// the ack had just set back to 1, one increment below DefaultStallThreshold,
+// for a fire that was already answered.
+//
+// Recording early means a delivery that FAILS has to be retracted; see
+// retractDeliveryLocked. Recording late does not, which is why it was written
+// that way, and why the retraction has to be at least as careful as the
+// token-drop it mirrors.
 func recordDeliveryLocked(entry *Entry) int {
 	entry.FiresDelivered++
 	entry.UnackedStreak++
 	return entry.UnackedStreak
+}
+
+// retractDeliveryLocked undoes recordDeliveryLocked for a fire whose bytes
+// never went out. Caller must hold s.mu, and must have already established that
+// the entry still holds THIS fire's token — that check is what makes a
+// decrement safe rather than corrupting.
+//
+// Undelivered bytes triggered no turn, so there is nothing to complete; the
+// failure is already visible as scheduler_fire_failed, and leaving it in
+// FiresDelivered would blur the two distinct faults that pair of signals exists
+// to separate. The caller's token guard is load-bearing in both directions:
+//
+//   - If an ack landed anyway (the bytes reached the agent far enough to
+//     trigger a turn, and the deliverer then errored), the token is already
+//     cleared, no retraction happens, and the entry reads 1/1 rather than the
+//     1/0 that retracting would manufacture — the very defect this ordering
+//     exists to close.
+//   - If a newer fire superseded this one, the counters belong to that fire
+//     now. The failed fire stays counted; that is an overcount of one on a
+//     path already reported as failed, and it is strictly better than
+//     decrementing another fire's record.
+//
+// The UnackedStreak floor is belt and braces: with the token matched, only this
+// fire's increment can be outstanding, since Ack is the only other writer and
+// it clears the token as it zeroes the streak.
+func retractDeliveryLocked(entry *Entry) {
+	if entry.FiresDelivered > 0 {
+		entry.FiresDelivered--
+	}
+	if entry.UnackedStreak > 0 {
+		entry.UnackedStreak--
+	}
 }
 
 // emitCompletionEvent writes scheduler_fire_completed. It carries the running
