@@ -156,7 +156,16 @@ func (c FailureClass) TriageNote() string {
 	case ClassContention:
 		return "CONTENTION — lost a race with another merge. Resubmit; do NOT dispatch a fix."
 	case ClassDefect:
-		return "DEFECT — establishes a fact about the branch. A fix is warranted."
+		// The note states the class's COMMITMENT, not only its verdict (mg-67c9).
+		// "re-running establishes the same fact" is what suppresses the retry, and
+		// while it was true of every failure this class was written for, it was
+		// silently false for a gate that failed on DNS — so an operator who could
+		// see the commitment could notice it was untrue and resubmit. Saying it
+		// out loud is cheap and is the only part of this that works for a case
+		// nobody has classified yet.
+		return "DEFECT — establishes a fact about the branch: re-running establishes the SAME fact. A fix is warranted. " +
+			"If you can see a reason a re-run would differ — the box, the network, the clock — that commitment is false " +
+			"here and the classification is wrong; say so rather than working around it."
 	case ClassHost:
 		return "HOST — the host ran out of a resource while the gate ran, so the gate reported the BOX and not the branch. " +
 			"The package and test names in the error are NOT findings. Free the resource, then resubmit UNCHANGED. " +
@@ -284,6 +293,12 @@ type disposition struct {
 	// re-running would give the same answer. It becomes "not retryable: ..." in
 	// the record.
 	Reason string
+	// GateRerun says that a retry of this failure costs A WHOLE GATE RUN rather
+	// than a git command, so the retry loop must spend the gate-network budget
+	// and not the fetch-stage network budget. It is a property of what the retry
+	// COSTS, not of the class — which is why it is a field here and not another
+	// FailureClass (mg-67c9).
+	GateRerun bool
 }
 
 // networkSignal is one measured wording that means the attempt never reached
@@ -401,21 +416,33 @@ func outputReportsConflict(gitOutput string) bool {
 // verdictStages are the stages at which something RAN against the tree and
 // returned an answer about it. A failure here is a fact, per the ruling.
 //
-// Deliberate boundary: a quality gate that failed because IT could not reach
-// the network (a module download, say) is classified a defect here, because the
-// gate ran and reported. Retrying on gate output would mean pattern-matching
-// arbitrary test output for network wording, which is how a genuine assertion
-// failure that happens to print "connection refused" would be retried forever.
-// The gate's own output is preserved verbatim for the reader who needs to make
-// that call.
+// Deliberate boundary: gate output is arbitrary text and must not be matched
+// wholesale against the network table, because a genuine assertion failure that
+// happens to print "connection refused" would then be retried forever. The
+// gate's own output is preserved verbatim for the reader who needs to make that
+// call.
 //
-// ClassHost is the one carve-out, and it does not weaken that boundary because
-// it does not cross it: the boundary is about RETRY, and a host-resource failure
-// is not retried, so the runaway it protects against cannot occur. What it
-// changes is who is accused. See gatehostresource.go, and note that its signal
-// table contains only wordings measured to have occurred in this fleet's own
-// gate output — a speculative pattern there WOULD cross the boundary, by taking
-// a real defect away from its author.
+// TWO CARVE-OUTS CROSS THAT LINE, ONE PARTLY AND ONE FULLY, and both are
+// deliberate.
+//
+// ClassHost does not cross it at all: the boundary is about RETRY, and a
+// host-resource failure is not retried, so the runaway it protects against
+// cannot occur. What it changes is who is accused. See gatehostresource.go, and
+// note that its signal table contains only wordings measured to have occurred in
+// this fleet's own gate output — a speculative pattern there WOULD cross the
+// boundary, by taking a real defect away from its author.
+//
+// gateNetworkError DOES cross it — it is classified infrastructure and retried
+// (mg-67c9). The sentence this comment used to carry, "a quality gate that
+// failed because IT could not reach the network is classified a defect here", is
+// what mg-67c9 was filed against: on 2026-08-14 an unresolvable
+// proxy.golang.org inside the gate was recorded `class=defect  signal=stage=build`
+// and stopped a merge dead, while the same night's identical DNS fault at the
+// FETCH stage was retried and merged on attempt 11. What makes the crossing safe
+// is not a shorter table but a narrower match — the network wording and a Go
+// module-fetch marker must be on the SAME LINE — plus a retry budget sized for
+// a whole gate run rather than a git command. See gatenetwork.go for the
+// specimens, the corpus counts, and what the marker table does not cover.
 var verdictStages = map[string]string{
 	"build":             "the build gate ran on this tree and returned a verdict",
 	"test":              "the test gate ran on this tree and returned a verdict",
@@ -503,6 +530,27 @@ func classifyFailure(stage string, raw string, err error) disposition {
 				"own process group would be re-killed on every attempt; but unlike a red gate this is not " +
 				"reproduced by re-running, so RE-RUN IT ONCE — the error names which sources the evidence " +
 				"rules out",
+		}
+	}
+
+	// A gate whose OWN NETWORK I/O failed is judged before the stage table, for
+	// the same reason a host-resource failure is: the gate ran, but what it
+	// reported was the network and not the branch (mg-67c9).
+	//
+	// It is judged AFTER the timeout and signal checks above, and that ordering
+	// is the safe direction rather than an accident. A gate that hung and was
+	// killed at its timeout says nothing about whether the branch caused the
+	// hang, and this is the one carve-out that RETRIES — so preferring this
+	// answer over "the run was cut short" would let a branch that deadlocks,
+	// having earlier printed one module-fetch warning, spend three more full
+	// timeouts of the merge slot re-deriving nothing. A kill outranks the text.
+	var netErr *gateNetworkError
+	if errors.As(err, &netErr) {
+		return disposition{
+			Class:     ClassInfrastructure,
+			Retryable: true,
+			GateRerun: true,
+			Signal:    fmt.Sprintf("gate-network %q with %q on the same line", netErr.Signal, netErr.Marker),
 		}
 	}
 

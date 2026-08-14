@@ -291,6 +291,23 @@ Most "pogod is misbehaving" situations are better solved by **filing an mg (a wo
   both ways — a real rebase conflict in the same evening was written off as
   another network casualty.
 
+  **A `failed` on a quality gate is not automatically a verdict on the branch.**
+  `defect` commits to "re-running establishes the SAME fact", and that commitment
+  is what suppresses the retry — so when you can see a reason a re-run would
+  differ, the classification is wrong and the right move is to say so rather than
+  work around it. Three carve-outs exist because the commitment was measured
+  false: `host` (the box ran out of a resource — free it, then resubmit
+  unchanged, mg-b41f), `indeterminate` (the gate was killed before it returned a
+  verdict, mg-e565/mg-0502), and, since mg-67c9, a gate whose OWN network I/O
+  failed — a Go module fetch that could not resolve its proxy is reported
+  `infrastructure` and retried on a small budget, because on 2026-08-14 that
+  exact fault at the FETCH stage was retried and merged on attempt 11 while the
+  same fault inside the gate was called `defect` and stopped a merge dead. The
+  budget is 4 attempts, not the fetch stage's 28, because each retry re-runs the
+  whole gate on the single serial slot every queued merge waits behind — so a
+  long outage can still exhaust it, and the report still says `infrastructure`
+  when it does.
+
   `pogo refinery show <mr-id>` prints one block per failing attempt with its
   transport, the git command as invoked, and the far end's exact words; a
   terminal failure always states why no further retry was made. For the shape of

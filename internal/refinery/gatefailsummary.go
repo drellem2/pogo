@@ -61,9 +61,21 @@ func summarizeGateFailure(output string) string {
 	// downstream of it, about a tree that was provably fine. If the envelope did
 	// not stand up, the assertion names underneath it are not findings and must
 	// not be offered as the headline.
-	if idx := strings.Index(output, "SETUP FAILURE"); idx >= 0 {
-		line := strings.TrimSpace(firstLineAt(output, idx))
+	if line, ok := reportedSetupFailureLine(output); ok {
 		return truncate("test setup failed, not the branch: "+line, maxSummaryLen)
+	}
+
+	// A gate that could not reach the NETWORK is reported before anything it
+	// named, and INSTEAD of it — same shape and same reason as the host-resource
+	// clause below (mg-67c9). runQualityGates builds a gateNetworkError and
+	// returns before reaching this function, so this is a second lock on the same
+	// door; it is here because answering `[internal/agent]` for output whose only
+	// failure is `dial tcp: lookup proxy.golang.org: no such host` is wrong for
+	// every caller, not only that one. That sentence is the exact headline the
+	// 2026-08-14 merge died under.
+	if sig, marker, sample, n, ok := outputReportsGateNetworkFailure(output); ok {
+		return truncate(fmt.Sprintf("the GATE could not reach the network, not the branch (%q with %q x%d): %s",
+			sig, marker, n, sample), maxSummaryLen)
 	}
 
 	// A HOST that ran out of a resource is reported before anything the gate
@@ -116,6 +128,63 @@ func summarizeGateFailure(output string) string {
 		}
 	}
 	return ""
+}
+
+// reportedSetupFailureLine finds the line on which the gate BANNERED a setup
+// failure, ignoring the lines on which a test merely TALKS about one.
+//
+// The distinction is not hypothetical (mg-67c9). On 2026-08-14
+// mr-d9vah0atjv1vk5gh57c0 was reported as
+//
+//	quality gate: ./build.sh failed [test setup failed, not the branch:
+//	  PASS: a sandbox HOME that is a symlink to the developer's home:
+//	  prints the SETUP FAILURE banner]
+//
+// and that sentence was false in every part. Nothing had failed to set up: a
+// substring scan of the whole output had landed inside a PASSING line of a
+// positive control that exists to assert the banner is printed
+// (scripts/pogo-sandbox_test.sh prints `PASS: $1`). The run's actual failure was
+// `=== net-control.sh: 14 passed, 4 failed ===`, further down the same output,
+// and the reader was pointed away from it.
+//
+// The symmetric case is worse and is covered by the same guard: that suite's
+// FAILING branch prints `printed no 'SETUP FAILURE' banner`, so a control that
+// caught a REAL regression — a sandbox that failed to banner — would have been
+// summarised as "test setup failed, not the branch" and excused.
+//
+// So a harness's own verdict line can never be the banner. `PASS:`/`FAIL:`/
+// `PROVED:` at the start of a line is this repo's shell-suite verdict vocabulary
+// (scripts/pogo-sandbox_test.sh, and the `  FAIL: ` form shellFailRe already
+// matches); a line that opens with one is that suite stating a result, and a
+// result is not a banner whatever words it quotes. Everything the genuine
+// banners emit — `=== SETUP FAILURE — the sandbox could not be established`,
+// `SETUP FAILURE: <detail>`, and testsandbox.FailPrefix — starts with something
+// else, so nothing that should fire stops firing.
+func reportedSetupFailureLine(output string) (string, bool) {
+	for _, raw := range strings.Split(output, "\n") {
+		if !strings.Contains(raw, "SETUP FAILURE") {
+			continue
+		}
+		line := strings.TrimSpace(raw)
+		if isHarnessVerdictLine(line) {
+			continue
+		}
+		return line, true
+	}
+	return "", false
+}
+
+// harnessVerdictPrefixes are the shell suites' own result vocabulary. A line
+// opening with one is a verdict, not evidence.
+var harnessVerdictPrefixes = []string{"PASS:", "FAIL:", "PROVED:", "SKIP:"}
+
+func isHarnessVerdictLine(trimmed string) bool {
+	for _, p := range harnessVerdictPrefixes {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // failingGoPackages returns the import paths `go test` reported FAIL for, in the
