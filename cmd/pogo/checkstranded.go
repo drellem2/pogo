@@ -61,6 +61,8 @@ TWO ROW TYPES, WITH OPPOSITE REMEDIES:
                      the work. -> ` + "`mg done`" + `.
   conflict_suspect   the two instruments below DISAGREE. -> read it yourself.
   unjudged           the branch could not be READ. -> re-run; this is not clean.
+  repo_unreadable    the item's REPO could not be listed, so no branch was ever
+                     looked for. -> fix the item's repo field; not a clean row.
 
 The second row is the worse one and it needed its own repair: while a branch is
 unmerged the spawn-time guard refuses the dispatch, but the moment it merges the
@@ -116,6 +118,17 @@ EXCLUSIONS, all counted and all nameable with --all:
                     only when another branch both CARRIES and OWNS them, because
                     containment alone is symmetric and would silence the builder
                     (mg-1af2).
+
+THE HEADER STATES COVERAGE, NOT POPULATION (mg-8baa). It reads "N of M open work
+item(s) CHECKED", and any shortfall is named on that same line. It used to read
+"M open work item(s) scanned", which is the population enumerated rather than the
+population looked at: on 2026-08-14 that printed 112 over a board three of whose
+items sat in repos the sweep could not list — two named by a bare relative path
+(` + "`repo: onethird_program`" + `) and one absolute but not a git repository. Those items
+were dropped from the join without appearing in any column, the closing line read
+"No open work item has work already sitting on a branch", and the command exited
+0. Every unchecked item is now a ` + "`repo_unreadable`" + ` row with its own id and its own
+error, so the shortfall reaches the exit code as well as the page.
 
 A run that COULD NOT LOOK says so instead of exiting clean. An unreachable agent
 registry is fatal (exit ` + fmt.Sprint(exitInstrumentFailure) + `): without it every running polecat in the fleet
