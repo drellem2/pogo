@@ -53,6 +53,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -197,6 +198,24 @@ type Report struct {
 	// Files is how many transcript files were opened and read.
 	Files int `json:"files,omitempty"`
 
+	// ScannedAt is the clock this scan measured its window against, and
+	// WindowSeconds is the size of that trailing window. Together they are what
+	// turns Count from a number into a reading: N errors is meaningless without
+	// "over how long, ending when".
+	//
+	// They are stamped on EVERY report, including StateQuiet and
+	// StateUnavailable, because "we looked at 02:47 and saw nothing in the
+	// preceding 30 minutes" and "we could not look at 02:47" are both claims
+	// about a moment, and a reader who cannot date them will date them to now.
+	//
+	// mg-c058: a caller holding only Count renders a trailing COUNT as a
+	// present-tense statement about CAPACITY. On 2026-08-14 that produced a page
+	// to a sleeping human reading `AGENTS ARE FAILING EVERY TURN — mayor` off two
+	// errors in a 30-minute window, while mayor was completing turns and had in
+	// fact run the query that found them.
+	ScannedAt     time.Time `json:"scanned_at,omitempty"`
+	WindowSeconds int       `json:"window_seconds,omitempty"`
+
 	// Unavailable explains why State is StateUnavailable. It is always set in
 	// that state and always empty otherwise, so "we could not look" is never
 	// silently rendered as "we looked and saw nothing".
@@ -212,6 +231,125 @@ type Report struct {
 // at all. Not for StateQuiet — that agent's silence is an ordinary wedge, which
 // is exactly what restart is for.
 func (r Report) SuppressRestart() bool { return r.State == StateFailing }
+
+// Brief renders the trailing-window reading in ABSOLUTE terms only:
+//
+//	2 errors in 30m, 2026-08-14T02:24:50Z–02:33:27Z
+//
+// It is the string that must travel — into a mail subject, a mail body, an
+// event — because nothing in it decays.
+//
+// It is empty for any state but StateFailing: there is no window to report when
+// there were no failing turns, and an empty string renders as nothing rather
+// than as a confident zero.
+//
+// Callers must NOT render Count without this. "failing_turns" alone is a
+// present-tense claim about an agent's capacity; the form above is a count over
+// a stated window, and only the second lets a reader see that the counter's
+// window may be NARROWER than the fault it is sampling (mg-c058).
+func (r Report) Brief() string {
+	if r.State != StateFailing || r.Count == 0 {
+		return ""
+	}
+	unit := "errors"
+	if r.Count == 1 {
+		unit = "error"
+	}
+	out := fmt.Sprintf("%d %s", r.Count, unit)
+	if r.WindowSeconds > 0 {
+		out += " in " + compactDuration(time.Duration(r.WindowSeconds)*time.Second)
+	}
+	if span := spanString(r.First, r.Last); span != "" {
+		out += ", " + span
+	}
+	return out
+}
+
+// WindowString renders the trailing window this report was counted over
+// ("30m"), for the callers that state it in prose rather than inside Brief.
+// Empty when the report carries no window.
+//
+// It is a method rather than an expression each caller writes itself, because
+// the two that need it — the diagnose detail block and the page body — sit in
+// different packages and would otherwise render the same window two ways.
+func (r Report) WindowString() string {
+	if r.WindowSeconds <= 0 {
+		return ""
+	}
+	return compactDuration(time.Duration(r.WindowSeconds) * time.Second)
+}
+
+// Reading renders Brief plus the parts that are only true at the moment of
+// reading: how long ago the last failing turn was, and how old the scan itself
+// is. It is for a LIVE display (`pogo agent diagnose`) and must never be
+// persisted or mailed — "last 14m ago" is a lie the instant it is stored.
+//
+// A zero now degrades to Brief rather than computing a relative age against
+// time.Now() behind the caller's back.
+func (r Report) Reading(now time.Time) string {
+	out := r.Brief()
+	if out == "" || now.IsZero() {
+		return out
+	}
+	if !r.Last.IsZero() {
+		out += fmt.Sprintf(", last %s ago", compactDuration(now.Sub(r.Last)))
+	}
+	// The scan behind this report can be minutes old — pogod answers `diagnose`
+	// for a failing agent out of the watcher's cache rather than re-reading the
+	// transcript. Saying so is the difference between "this is happening" and
+	// "this is what a scan N minutes ago found".
+	if !r.ScannedAt.IsZero() {
+		if age := now.Sub(r.ScannedAt); age >= 30*time.Second {
+			out += fmt.Sprintf("; scan %s old", compactDuration(age))
+		}
+	}
+	return out
+}
+
+// spanString bounds the failing turns. Both ends are UTC and explicit. The
+// second end drops its date only when it shares the first's, so a window that
+// crosses midnight — the founding 23h30m outage did — never renders as a
+// thirteen-minute one.
+func spanString(first, last time.Time) string {
+	if first.IsZero() || last.IsZero() {
+		return ""
+	}
+	f, l := first.UTC(), last.UTC()
+	if f.Year() == l.Year() && f.YearDay() == l.YearDay() {
+		return f.Format(time.RFC3339) + "–" + l.Format("15:04:05Z")
+	}
+	return f.Format(time.RFC3339) + "–" + l.Format(time.RFC3339)
+}
+
+// compactDuration renders a duration for a human at the precision that matters:
+// seconds below a minute, whole minutes below a day, then hours — and drops the
+// zero tail Go's own String() leaves behind, so a 30-minute window reads "30m"
+// rather than "30m0s". These strings go in a mail subject line; every character
+// spent on a zero is one a truncating notifier takes off the far end.
+//
+// A negative duration (clock skew between the transcript's clock and pogod's)
+// clamps to zero rather than rendering "-2m ago", which reads as the future.
+func compactDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	var s string
+	switch {
+	case d < time.Minute:
+		return d.Round(time.Second).String()
+	case d < 24*time.Hour:
+		s = d.Round(time.Minute).String()
+	default:
+		s = d.Round(time.Hour).String()
+	}
+	// Strip the seconds tail and nothing else. Two cleverer rules were tried
+	// and both corrupted the reading — an unconditional "0m" trim turns "30m"
+	// into "3", and an hours-guarded one turns "1h30m" into "1h3". A renderer
+	// that renders wrong is worse than the bare token it replaced, which is
+	// this ticket's own defect committed inside its remedy. See
+	// TestCompactDuration.
+	return strings.TrimSuffix(s, "0s")
+}
 
 // Options tunes a scan. The zero value means the defaults.
 type Options struct {
@@ -366,12 +504,20 @@ func Locate(home string, globs []string, modifiedSince time.Time) []string {
 func Scan(home string, globs []string, opts Options) Report {
 	now, window, minTurns := opts.resolve()
 	cutoff := now.Add(-window)
+	// stamp dates every answer this function can give. It is applied on every
+	// return path deliberately: an unstamped report is a claim with no moment
+	// attached, and a reader supplies "now" for the missing moment every time.
+	stamp := func(r Report) Report {
+		r.ScannedAt = now.UTC()
+		r.WindowSeconds = int(window / time.Second)
+		return r
+	}
 
 	if home == "" {
-		return Report{Unavailable: "no home directory to resolve transcript paths against"}
+		return stamp(Report{Unavailable: "no home directory to resolve transcript paths against"})
 	}
 	if len(nonEmpty(globs)) == 0 {
-		return Report{Unavailable: "this harness declares no session transcript path"}
+		return stamp(Report{Unavailable: "this harness declares no session transcript path"})
 	}
 
 	// Locate deliberately does NOT filter by mtime here. A file whose last turn
@@ -381,7 +527,7 @@ func Scan(home string, globs []string, opts Options) Report {
 	// after the file has counted as evidence-of-readability.
 	paths := Locate(home, globs, time.Time{})
 	if len(paths) == 0 {
-		return Report{Unavailable: "no session transcript found at the declared path"}
+		return stamp(Report{Unavailable: "no session transcript found at the declared path"})
 	}
 
 	horizon := now.Add(futureTolerance)
@@ -409,19 +555,19 @@ func Scan(home string, globs []string, opts Options) Report {
 		if readErr != nil {
 			msg += ": " + readErr.Error()
 		}
-		return Report{Unavailable: msg}
+		return stamp(Report{Unavailable: msg})
 	}
 
 	if rep.Count < minTurns {
 		// Below threshold is QUIET, not failing — but the turns we did see are
 		// dropped from the report so a caller cannot mistake a stray transient
 		// for the class.
-		return Report{State: StateQuiet, Files: rep.Files}
+		return stamp(Report{State: StateQuiet, Files: rep.Files})
 	}
 
 	rep.State = StateFailing
 	rep.Reason = dominant(rep.Reasons)
-	return rep
+	return stamp(rep)
 }
 
 // scanFile appends the failing turns in one transcript file to rep.

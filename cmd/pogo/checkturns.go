@@ -216,7 +216,7 @@ func renderTurnReport(rep turnlog.Report, allTypes bool) string {
 			"before this artifact existed — check its uptime before concluding which.\n")
 	}
 	b.WriteString("This command took no action. Diagnose before restarting anything:\n" +
-		"  pogo agent diagnose <name> --json | jq '{health, restart_suppressed, transcript_check}'\n" +
+		"  pogo agent diagnose <name> --json | jq '{health, health_detail, restart_suppressed, transcript_check}'\n" +
 		"An agent failing every turn in 10ms is not wedged, and restarting it destroys\n" +
 		"the transcript that makes the condition diagnosable.\n")
 	return b.String()
