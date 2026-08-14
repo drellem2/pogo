@@ -150,7 +150,11 @@ func TestClearMail_ClaimsTheWindowItMeasuredAndNotRecovery(t *testing.T) {
 	w := build(rec, targets, verdicts)
 	w.Check(time.Date(2026, 8, 14, 2, 28, 12, 0, time.UTC))
 	verdicts["/w/mayor"] = synthfail.Report{State: synthfail.StateQuiet, WindowSeconds: 1800}
+	// 03:22:09Z is the real clear from that night. Since mg-70f3 it only STARTS
+	// the quiet hold — the mail goes at 04:22:09Z if nothing has failed since.
+	// (That night something did, at 03:24:38Z; see TestHold_* in synthwatch_test.go.)
 	w.Check(time.Date(2026, 8, 14, 3, 22, 9, 0, time.UTC))
+	w.Check(time.Date(2026, 8, 14, 4, 22, 9, 0, time.UTC))
 
 	if len(rec.mails) != 2 {
 		t.Fatalf("sent %d mails, want 2 (open + close)", len(rec.mails))
@@ -159,8 +163,11 @@ func TestClearMail_ClaimsTheWindowItMeasuredAndNotRecovery(t *testing.T) {
 	if strings.Contains(m.subject, "producing real turns again") {
 		t.Errorf("clear subject = %q asserts recovery; the close fires on a quiet transcript, which an idle agent also produces", m.subject)
 	}
-	if !strings.Contains(m.subject, "no failing turns in the last 30m") {
-		t.Errorf("clear subject = %q does not state the window it measured", m.subject)
+	if !strings.Contains(m.subject, "quiet 60m") {
+		t.Errorf("clear subject = %q does not state the continuous quiet it measured", m.subject)
+	}
+	if !strings.Contains(m.body, "trailing 30m window") {
+		t.Errorf("clear body does not state the scan window behind the readings:\n%s", m.body)
 	}
 	if !strings.Contains(m.body, "LESS THAN") {
 		t.Errorf("clear body does not distinguish its measurement from \"the fault is over\":\n%s", m.body)

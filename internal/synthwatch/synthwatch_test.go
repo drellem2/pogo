@@ -187,9 +187,12 @@ func TestCheck_EpisodeCloseSendsOneClearMail(t *testing.T) {
 	verdicts := map[string]synthfail.Report{"/w/pm-pogo": failing(synthfail.ReasonAuthFailed)}
 	w := build(rec, targets, verdicts)
 
-	w.Check(time.Now())
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	w.Check(t0)
 	verdicts["/w/pm-pogo"] = synthfail.Report{State: synthfail.StateQuiet}
-	w.Check(time.Now())
+	w.Check(t0.Add(time.Minute))
+	// The quiet reading starts the hold; the close needs the whole of it.
+	w.Check(t0.Add(time.Minute + DefaultClearHold))
 
 	if len(rec.mails) != 2 {
 		t.Fatalf("sent %d mails, want 2 (open + clear)", len(rec.mails))
@@ -302,16 +305,64 @@ func TestReapMissing_StoppedAgentClosesTheEpisode(t *testing.T) {
 		Emit:     rec.emit,
 		Interval: time.Nanosecond,
 	})
-	w.Check(time.Now())
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	w.Check(t0)
 
 	targets = nil // agent stopped and left the registry
-	w.Check(time.Now())
+	w.Check(t0.Add(time.Minute))
 
+	// Suppression is lifted the instant the agent leaves — that half is NOT
+	// held. Only the episode boundary and its mail wait out the quiet hold.
 	if w.SuppressRestart("pm-pogo", "crew-pm-pogo") {
 		t.Error("an agent pogod no longer runs is still suppressed; the episode would never close")
 	}
+	if len(rec.mails) != 1 {
+		t.Fatalf("sent %d mails before the hold elapsed, want 1 (open only)", len(rec.mails))
+	}
+	w.Check(t0.Add(time.Minute + DefaultClearHold))
 	if len(rec.mails) != 2 {
 		t.Fatalf("sent %d mails, want 2 (open + clear on departure)", len(rec.mails))
+	}
+}
+
+// TestReapMissing_ADepartingFleetCannotPostponeTheAllClear. The hold starts when
+// the LAST failing agent goes quiet and is not restarted by subsequent
+// departures — otherwise a fleet that drains one agent at a time would push the
+// all-clear out indefinitely and the episode would never close.
+func TestReapMissing_ADepartingFleetCannotPostponeTheAllClear(t *testing.T) {
+	rec := &recorder{}
+	targets := []Target{
+		{Name: "a", Workdir: "/w/a"},
+		{Name: "b", Workdir: "/w/b"},
+	}
+	verdicts := map[string]synthfail.Report{
+		"/w/a": failing(synthfail.ReasonAuthFailed),
+		"/w/b": failing(synthfail.ReasonAuthFailed),
+	}
+	globs, scan := scanByWorkdir(verdicts)
+	w := New(Options{
+		Targets:  func() []Target { return targets },
+		Globs:    globs,
+		Scan:     scan,
+		Mail:     rec.send,
+		Emit:     rec.emit,
+		Interval: time.Nanosecond,
+	})
+
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	w.Check(t0)
+	// Both go quiet at t0+1m: the hold runs from there.
+	verdicts["/w/a"] = synthfail.Report{State: synthfail.StateQuiet}
+	verdicts["/w/b"] = synthfail.Report{State: synthfail.StateQuiet}
+	w.Check(t0.Add(time.Minute))
+	// b then departs 20m in. That is not a new quiet reading and must not
+	// re-arm the hold.
+	targets = targets[:1]
+	w.Check(t0.Add(21 * time.Minute))
+	w.Check(t0.Add(time.Minute + DefaultClearHold))
+
+	if len(rec.mails) != 2 {
+		t.Fatalf("sent %d mails, want 2 — a departure after the hold began restarted the clock", len(rec.mails))
 	}
 }
 
@@ -433,7 +484,11 @@ func TestIncident_EmittedOnceAtAuthEpisodeClose(t *testing.T) {
 	for _, tg := range targets {
 		verdicts[tg.Workdir] = synthfail.Report{State: synthfail.StateQuiet}
 	}
-	closed := time.Date(2026, 7, 22, 22, 47, 0, 0, time.UTC)
+	// The quiet reading at 22:47 starts the hold; the episode closes when it
+	// elapses at 23:47, and closed_at is the end of the HOLD (the episode really
+	// was open until then).
+	w.Check(time.Date(2026, 7, 22, 22, 47, 0, 0, time.UTC))
+	closed := time.Date(2026, 7, 22, 23, 47, 0, 0, time.UTC)
 	w.Check(closed)
 
 	inc := rec.eventsOfType(claude.IncidentEpisodeClearedEvent)
@@ -509,12 +564,14 @@ func TestIncident_SequentialEpisodesGetDistinctIDs(t *testing.T) {
 
 	w.Check(time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC))
 	verdicts["/w/mayor"] = synthfail.Report{State: synthfail.StateQuiet}
-	w.Check(time.Date(2026, 7, 22, 1, 0, 5, 0, time.UTC)) // episode 1 closes
+	w.Check(time.Date(2026, 7, 22, 1, 0, 5, 0, time.UTC)) // quiet: the hold starts
+	w.Check(time.Date(2026, 7, 22, 2, 5, 0, 0, time.UTC)) // episode 1 closes
 
 	verdicts["/w/mayor"] = failing(synthfail.ReasonAuthFailed)
 	w.Check(time.Date(2026, 7, 22, 5, 0, 0, 0, time.UTC)) // episode 2 opens
 	verdicts["/w/mayor"] = synthfail.Report{State: synthfail.StateQuiet}
-	w.Check(time.Date(2026, 7, 22, 5, 30, 0, 0, time.UTC)) // episode 2 closes
+	w.Check(time.Date(2026, 7, 22, 5, 30, 0, 0, time.UTC)) // quiet: the hold starts
+	w.Check(time.Date(2026, 7, 22, 6, 35, 0, 0, time.UTC)) // episode 2 closes
 
 	inc := rec.eventsOfType(claude.IncidentEpisodeClearedEvent)
 	if len(inc) != 2 {

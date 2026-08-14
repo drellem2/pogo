@@ -1872,8 +1872,12 @@ Flags:
 	// diagnose reports the verdict, and ShouldRespawnAgent consults it before
 	// any restart_on_crash respawn.
 	agentRegistry.SetTranscriptScanner(synthScanner{w: synthWatcher})
-	log.Printf("pogod: synthetic-failure-turn detector enabled (interval=%s, page-only — restarts are SUPPRESSED, never issued)",
-		synthwatch.DefaultInterval)
+	// The hold and the floor are stated because they are the only two knobs that
+	// can make this channel say LESS than it did, and a reader diagnosing "why
+	// did I not get paged" must be able to read their values off the daemon
+	// rather than off the source of whatever revision they think is running.
+	log.Printf("pogod: synthetic-failure-turn detector enabled (interval=%s, clear-hold=%s, page-floor=%s, page-only — restarts are SUPPRESSED, never issued; the hold delays the ALL-CLEAR, never the alarm)",
+		synthwatch.DefaultInterval, synthwatch.DefaultClearHold, synthwatch.DefaultMinPageInterval)
 
 	agentRegistry.SetOnExit(func(a *agent.Agent, err error) {
 		// Settle any defer-done backstop for this polecat: its process has
