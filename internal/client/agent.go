@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -481,9 +482,21 @@ func ReopenMGWorkItem(id string) error {
 // gets to run mg done itself. An "already done" error just means the polecat
 // won the race — callers should log and move on.
 func CompleteMGWorkItem(id, resultJSON string) error {
+	return completeMGWorkItem(id, resultJSON, "")
+}
+
+// completeMGWorkItem is CompleteMGWorkItem with the `--successor` the caller
+// may have resolved. It is unexported because only CloseMGWorkItemAtMerge is in
+// a position to resolve one: the flag is meaningful for exactly the items that
+// declare a remainder, and knowing that takes a store read the plain completion
+// path deliberately does not make.
+func completeMGWorkItem(id, resultJSON, successor string) error {
 	args := []string{"done", id}
 	if resultJSON != "" {
 		args = append(args, "--result="+resultJSON)
+	}
+	if successor != "" {
+		args = append(args, "--successor="+successor)
 	}
 	cmd := execCommand("mg", args...)
 	cmd.Stderr = nil
@@ -508,21 +521,181 @@ var ErrMGWorkItemAlreadyDone = errors.New("work item is already done")
 // not evidence that it is finished. See CloseMGWorkItemAtMerge.
 var ErrMGWorkItemGated = errors.New("work item is gated and was deliberately not closed")
 
-// mgWorkItemStatus reads an item's status and assignee — the two fields that
-// decide whether the merge close may proceed, and how.
-func mgWorkItemStatus(id string) (status, assignee string, err error) {
+// ErrMGRemainderNoSuccessorFiled reports that the close was refused because the
+// item declares a remainder, names no successor, AND NOTHING IN THE STORE NAMES
+// IT AS A PREDECESSOR — so there is no successor to resolve and none was ever
+// filed. This is the "the worker skipped the step" cause.
+var ErrMGRemainderNoSuccessorFiled = errors.New("item declares a remainder and NO item in the store names it as a predecessor, so no successor was ever filed")
+
+// ErrMGRemainderAmbiguousSuccessor reports that the close was refused because
+// SEVERAL items name this one as their predecessor and the item itself names
+// none of them as its successor. A predecessor edge is not proof of succession —
+// see resolveSuccessorFromStore — so pogod declines to guess which child carries
+// the remainder, and says which ones it was choosing between.
+var ErrMGRemainderAmbiguousSuccessor = errors.New("item declares a remainder and SEVERAL items name it as their predecessor, so the successor cannot be resolved without guessing")
+
+// mgItemFacts is the part of `mg show --json` the merge close reads. Status and
+// assignee decide whether the close may proceed at all; DeclaresRemainder and
+// Successor decide whether `mg done` will refuse it for want of a successor.
+type mgItemFacts struct {
+	Status            string   `json:"status"`
+	Assignee          string   `json:"assignee"`
+	DeclaresRemainder bool     `json:"declares_remainder"`
+	Successor         []string `json:"successor"`
+}
+
+// mgWorkItemFacts reads the fields of one work item that the merge close keys on.
+func mgWorkItemFacts(id string) (mgItemFacts, error) {
+	var item mgItemFacts
 	out, err := mgShowJSON(id)
 	if err != nil {
-		return "", "", err
-	}
-	var item struct {
-		Status   string `json:"status"`
-		Assignee string `json:"assignee"`
+		return item, err
 	}
 	if err := json.Unmarshal(out, &item); err != nil {
-		return "", "", fmt.Errorf("mg show %s: unparseable JSON: %w", id, err)
+		return item, fmt.Errorf("mg show %s: unparseable JSON: %w", id, err)
 	}
-	return item.Status, item.Assignee, nil
+	return item, nil
+}
+
+// successorCandidate is one item that names the closing item as its predecessor.
+// Created is carried so an ambiguous refusal can order the candidates for the
+// human who has to pick between them — see resolveSuccessorFromStore.
+type successorCandidate struct {
+	ID      string `json:"id"`
+	Created string `json:"created"`
+}
+
+// resolveSuccessorFromStore returns every item that names id in its
+// `predecessor` field — the candidates for "the item that carries id's remainder
+// forward" — newest first.
+//
+// # Why this exists
+//
+// `mg done` refuses an item tagged `declares-remainder` that names no successor,
+// and that refusal is correct: it is the only thing standing between a
+// recommendation and its silent discard. But on the merge path the two halves of
+// satisfying it are held by different processes. The WORKER files the successor
+// before it submits and then exits; POGOD performs the close at merge time and
+// has never been told the id. Neither party can close the item and each has done
+// its half correctly, which is why every declares-remainder item merged on the
+// night of 2026-08-13 — four of four, mg-fa83/mg-bdc0/mg-365a/mg-cd8d — bounced
+// back to available/ carrying a successor that already existed (mg-27c0).
+//
+// The link is already in the store: `mg done --successor` writes it on BOTH
+// ends, so the child carries `predecessor:<parent>` from the moment it is filed.
+// Nothing has to be passed anywhere; it has to be LOOKED UP.
+//
+// # WHY IT RETURNS CANDIDATES AND NOT AN ANSWER
+//
+// "an item whose predecessor names the closing item IS its successor" holds in
+// every case that motivated this, and it is NOT a rule that can be applied
+// blind. Measured over the live store on 2026-08-14: of 41 items named as a
+// predecessor, 10 (24%) are named by TWO children, and in every one of those the
+// parent's own `successor` field names exactly ONE of the two. So a predecessor
+// edge is genuinely weaker than succession, a parent legitimately has several
+// children, and a resolver that took the first match would pick the wrong one
+// about half the time in a quarter of the population.
+//
+// Hence: this returns the set, and the caller resolves only when the set has
+// exactly one member. Ambiguity is reported, never broken by a tiebreak — a
+// wrong successor tag gates a live item on a ticket that will never carry the
+// work, which is worse than the open item it would have replaced, and mg cannot
+// catch it because a real-but-wrong id is a legal argument.
+//
+// # THE TIEBREAK THAT WAS MEASURED AND DELIBERATELY NOT TAKEN
+//
+// Two store facts were checked against those 10 ambiguous parents before
+// settling on "refuse", because this function's own remedy is subject to the
+// defect it remedies: declining while the answer sits unread in the store is the
+// very complaint mg-27c0 was filed about.
+//
+//   - The `<parent>-successor` tag does NOT disambiguate. Both children carry it
+//     in 9 of the 10 cases, so it marks membership in the chain, not succession.
+//   - Creation order DOES, in every case checked: the parent's own `successor`
+//     field named the MOST RECENTLY CREATED child 10 times out of 10.
+//
+// The second is not applied, and the reason is the denominator rather than the
+// hit rate. All 10 are `onethird` chains from a single night, so it is one
+// workflow observed ten times, not ten independent observations — and the
+// mechanism that would break it is ordinary: any follow-up child filed after the
+// merge and before the close is retried becomes "most recent" and would be
+// linked silently. A guess that is right 100% of the time on one night's data
+// and wrong invisibly is worse than a refusal that costs a coordinator one
+// glance, which is why the candidates are merely ORDERED newest-first and the
+// finding is stated in the refusal for the human who does have the context.
+//
+// # Why the field and not the tag
+//
+// The edge is visible as a `predecessor:<id>` tag too, and `mg list --tag=` would
+// filter it server-side. mg's own help says not to: it carries `successor`,
+// `predecessor` and `declares_remainder` as structured fields "so a check does
+// not have to know the tag spelling to be written". A whole-store read costs
+// ~0.06s against 2,889 items, which is not worth binding this to a spelling.
+func resolveSuccessorFromStore(id string) ([]successorCandidate, error) {
+	cmd := execCommand("mg", "list", "--all", "--json")
+	out, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(string(out))
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			detail = strings.TrimSpace(string(ee.Stderr))
+		}
+		return nil, fmt.Errorf("mg list --all --json: %s (%w)", detail, err)
+	}
+	// --all is required and not defensive: an archived or shelved child is still
+	// a child, and hiding one turns a two-candidate ambiguity into a
+	// one-candidate "resolution" that is a guess wearing a certainty.
+	var candidates []successorCandidate
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var item struct {
+			ID          string   `json:"id"`
+			Created     string   `json:"created"`
+			Predecessor []string `json:"predecessor"`
+		}
+		// One unparseable line is not a reason to abandon the scan, but it IS a
+		// reason not to report a count: a dropped line can only ever turn an
+		// ambiguity into a false resolution, so a parse failure fails the whole
+		// lookup rather than silently shrinking the candidate set.
+		if err := json.Unmarshal([]byte(line), &item); err != nil {
+			return nil, fmt.Errorf("mg list --all --json: unparseable line %q: %w", line, err)
+		}
+		// An item is never its own successor — mg refuses one, and a self-edge
+		// would also mask a genuine second candidate by making the set look
+		// resolvable. Matched the same way as the edge below, so the two cannot
+		// disagree about what counts as the same id.
+		if strings.EqualFold(strings.TrimSpace(item.ID), id) {
+			continue
+		}
+		for _, p := range item.Predecessor {
+			if strings.EqualFold(strings.TrimSpace(p), id) {
+				candidates = append(candidates, successorCandidate{ID: item.ID, Created: item.Created})
+				break
+			}
+		}
+	}
+	// Newest first. RFC3339 sorts lexically, and an item with no `created` sorts
+	// last rather than being dropped — the ordering is a convenience for a human
+	// reading a refusal, so it must never decide which candidates are reported.
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Created > candidates[j].Created })
+	return candidates, nil
+}
+
+// describeCandidates renders the ambiguous set for the human who has to choose,
+// newest first and with the creation stamps that order them.
+func describeCandidates(candidates []successorCandidate) string {
+	parts := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if c.Created == "" {
+			parts = append(parts, c.ID+" (created unknown)")
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s (created %s)", c.ID, c.Created))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // CloseMGWorkItemAtMerge closes a work item whose branch has just merged, and
@@ -568,7 +741,8 @@ func mgWorkItemStatus(id string) (status, assignee string, err error) {
 // having applied when it did not.
 func CloseMGWorkItemAtMerge(id, resultJSON string) error {
 	claimNote, tookClaim := "", false
-	status, assignee, probeErr := mgWorkItemStatus(id)
+	facts, probeErr := mgWorkItemFacts(id)
+	status, assignee := facts.Status, facts.Assignee
 	if probeErr == nil {
 		switch {
 		case status == "done" || status == "archived":
@@ -592,7 +766,65 @@ func CloseMGWorkItemAtMerge(id, resultJSON string) error {
 		}
 	}
 
-	err := CompleteMGWorkItem(id, resultJSON)
+	// RESOLVE THE SUCCESSOR THE WORKER ALREADY FILED (mg-27c0). An item that
+	// declares a remainder and names no successor is one `mg done` will refuse,
+	// and on the merge path the id it wants is in the store already — the worker
+	// filed the child before submitting, and `mg done --successor` wrote the
+	// reverse link, so the child carries `predecessor:<this item>`.
+	//
+	// THE REFUSAL IS NOT WEAKENED, and that is deliberate. Nothing below skips
+	// `mg done`, suppresses its exit status, or closes an item mg declined to
+	// close. The only thing that changes is whether pogod can SUPPLY the
+	// argument mg is asking for. When it cannot, mg refuses exactly as before
+	// and the refusal is annotated with WHICH of the two causes applied —
+	// nothing filed, or several candidates and no way to choose — because those
+	// were previously indistinguishable without reading the result sidecar by
+	// hand, which is how mg-5058 (a genuinely successorless item) looked
+	// identical to four items whose links merely went unstated.
+	successor, remainderNote := "", ""
+	var remainderCause error
+	if probeErr == nil && facts.DeclaresRemainder && len(facts.Successor) == 0 {
+		candidates, rerr := resolveSuccessorFromStore(id)
+		switch {
+		case rerr != nil:
+			remainderNote = fmt.Sprintf(" (%s declares a remainder and names no successor; the store could not be searched for one: %v)", id, rerr)
+		case len(candidates) == 1:
+			successor = candidates[0].ID
+			remainderNote = fmt.Sprintf(" (--successor=%s was NOT supplied by the author: %s declares a remainder, named no successor, "+
+				"and %s is the only item in the store naming %s as its predecessor, so the refinery resolved the link the author had "+
+				"already filed — mg-27c0)", successor, id, successor, id)
+		case len(candidates) == 0:
+			remainderCause = ErrMGRemainderNoSuccessorFiled
+			remainderNote = fmt.Sprintf(" (%s declares a remainder, names no successor, and NO item in the store names it as a predecessor — "+
+				"nothing was filed to carry its remainder forward, so this is not a lost link but missing work; file the successor, then "+
+				"`mg claim %s; mg done %s --successor=<id>`)", id, id, id)
+		default:
+			remainderCause = ErrMGRemainderAmbiguousSuccessor
+			remainderNote = fmt.Sprintf(" (%s declares a remainder and names no successor; %d items name it as their predecessor — %s — "+
+				"and a predecessor edge is not proof of succession, so the refinery declined to guess. Listed newest first: over the 10 "+
+				"ambiguous parents in the live store on 2026-08-14 the most recently created child was the right successor 10 times out "+
+				"of 10, but all 10 are one workflow's chains from one night, so that is a hint for you and not a rule this code applies. "+
+				"Pick the one that carries the remainder and run `mg claim %s; mg done %s --successor=<id>`)",
+				id, len(candidates), describeCandidates(candidates), id, id)
+		}
+	}
+
+	// The RESOLUTION IS RECORDED WHERE IT SURVIVES, and that is the sidecar
+	// rather than a log line or this function's return. A link pogod inferred
+	// and one the author stated leave the store in the same state — two tags,
+	// on both ends — and the inferred half is the one that can be wrong, so a
+	// reader with no way to tell them apart has no way to audit it.
+	//
+	// It goes NEXT TO `completed_by: refinery`, which is the existing record of
+	// "the refinery did this, not the worker", and it never displaces the
+	// caller's payload: a result that is empty or is not a JSON object is passed
+	// through untouched, because a provenance note is not worth breaking a
+	// verdict for.
+	if successor != "" {
+		resultJSON = withResolvedSuccessor(resultJSON, successor)
+	}
+
+	err := completeMGWorkItem(id, resultJSON, successor)
 	if err == nil {
 		return nil
 	}
@@ -624,7 +856,39 @@ func CloseMGWorkItemAtMerge(id, resultJSON string) error {
 				"exactly as it was before this attempt)", id)
 		}
 	}
-	return fmt.Errorf("%w%s", err, claimNote)
+	// NAME THE CAUSE, when the store answered which one it was. mg's own
+	// refusal is carried verbatim either way — this only prefixes a sentinel a
+	// caller can branch on, and prose a reader can act on without opening the
+	// result sidecar by hand.
+	if remainderCause != nil {
+		return fmt.Errorf("%w: %w%s%s", remainderCause, err, remainderNote, claimNote)
+	}
+	return fmt.Errorf("%w%s%s", err, remainderNote, claimNote)
+}
+
+// withResolvedSuccessor records in the result sidecar that the successor link
+// was RESOLVED BY THE REFINERY rather than named by the item's author, beside
+// the `completed_by` key that already says who performed the close.
+//
+// It is deliberately total: a result that is empty, or is not a JSON object, is
+// returned unchanged. The provenance note is worth having and is not worth
+// corrupting a worker's verdict for, and this function's failure mode has to be
+// "the note is missing" rather than "the payload is".
+func withResolvedSuccessor(resultJSON, successor string) string {
+	if strings.TrimSpace(resultJSON) == "" {
+		return resultJSON
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(resultJSON), &obj); err != nil || obj == nil {
+		return resultJSON
+	}
+	obj["successor_resolved_by"] = "refinery"
+	obj["successor_resolved"] = successor
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return resultJSON
+	}
+	return string(out)
 }
 
 // workItemIDRe is the SHAPE of a macguffin work-item id: an `mg-` or `gh-`

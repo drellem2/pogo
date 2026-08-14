@@ -331,11 +331,41 @@ That is why the map refuses an unmapped type rather than defaulting to the build
 
 Guessing converts a cheap loud failure into an expensive silent one. If you think an item is design work but its `type` says otherwise, do not re-route it — mail the filer or `human` and let them set `type`. Markers route; semantics inform humans.
 
-**If the item is tagged `declares-remainder`, say so in the body you pass.** That tag makes `mg done`
-refuse without a successor, so a {{.Worker}} that merges without filing one leaves a *finished* item sitting
-`available` and drawing stall-watch notices — and it is reaped at merge, so only you can clear it. The
-body is a snapshot the {{.Worker}} reads; telling it at dispatch is the only channel that reaches it in
+**If the item is tagged `declares-remainder`, say so in the body you pass.** Tell the {{.Worker}} to
+FILE the successor before it submits. That tag makes `mg done` refuse without a successor. The body
+is a snapshot the {{.Worker}} reads; telling it at dispatch is the only channel that reaches it in
 time. Cost twice on 2026-08-13 (mg-6e4f, mg-4020).
+
+**Do NOT tell it to pass `--successor` on `mg done` — that instruction asks for something it never
+does.** On the merge path the {{.Worker}} submits and exits, and *pogod* performs the close. Since
+mg-27c0 pogod resolves the successor itself: it asks the store which item names the closing item as
+its `predecessor` — the reverse link `mg done --successor` writes when the {{.Worker}} files the child —
+and passes that id. **The {{.Worker}}'s only duty is to file the successor before submitting.**
+
+That covers the common case and leaves two you still clear by hand, and the close now tells you
+*which* rather than leaving you to read the result sidecar:
+
+- **Nothing names the item as a predecessor.** No successor was ever filed — this is missing work,
+  not a lost link. File one, then close the item by hand.
+- **Several items name it.** A predecessor edge is not proof of succession — 10 of the 41 parents in
+  the store carried two children when this was measured on 2026-08-14 — so pogod lists the candidates
+  newest-first and declines to guess. Pick the one that carries the remainder, then close it by hand.
+  **The newest-first ordering is a hint, not a ranking pogod acted on**: the most recently created
+  child was the right successor in all 10 of those cases, but they are one workflow's chains from one
+  night, so read it as a place to start rather than an answer.
+
+Closing by hand is two commands, and `mg claim` comes first because `mg done` refuses an item that is
+not in `claimed/`:
+
+```bash
+mg claim <id>
+mg done <id> --successor=<successor id>
+```
+
+Before mg-27c0 both failures looked identical: the item back in `available`, exit 4, and a sidecar
+read per incident to tell them apart. Four items merged the night of 2026-08-13 with their successors
+already filed and correctly linked on the child's side (mg-fa83, mg-bdc0, mg-365a, mg-cd8d) — 4 of 4,
+every one recovered by hand.
 
 Before spawning, check that no {{.Worker}} is already working on this item:
 ```bash
