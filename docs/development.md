@@ -70,6 +70,43 @@ developer's live `HOME`, and stdout is already captured for the run it describes
 A measured breakdown, and what it implies for making the gate faster, is in
 [docs/investigations/gate-step-profile-2026-08-09.md](investigations/gate-step-profile-2026-08-09.md).
 
+## What GitHub CI covers of that gate, and what it does not
+
+Every gate run also ends with a **CI COVERAGE** block, because the profile above
+is a profile of rows GitHub CI mostly does not run:
+
+```
+=============================================================================
+CI COVERAGE — GitHub CI is a SUBSET of this gate, not a second opinion on it
+
+  gate rows in test.sh             28
+  also run by GitHub CI             6   (1 of them NOT identically)
+  run ONLY by this gate            22
+  platform                       this gate darwin, CI ubuntu-latest
+```
+
+`bash scripts/ci-coverage.sh` prints the full breakdown, naming every row CI
+never executes and the one it runs differently (the gate wraps the shared Go row
+in `scripts/tmpdir-leak-guard.sh`; CI does not, and that wrapper is a `$TMPDIR`
+count assertion that can fail on its own with every Go test passing). The numbers
+are parsed from `test.sh` and `.github/workflows/ci.yml` on every run rather than
+written down, so they cannot drift from the files they describe; if either parse
+stops working the script exits `2` and says it could not measure, rather than
+reporting a confident zero.
+
+**Why this is printed at all.** A green CI run and a red gate on the same commit
+are not a contradiction — they answer different questions, about different rows,
+on different operating systems. On 2026-08-14 that inference turned one
+unreproduced gate failure into a MAIN IS RED alarm four minutes before a nightly
+deploy, on a tree that was green throughout (`mg-5fc8`). On a **failing** run the
+block therefore adds the two sentences that report needed: a green CI is not
+evidence the failure is spurious, and one failing run is not a reproduction —
+re-run on the same commit and report whether it reproduced.
+
+Suppress it with `POGO_CI_COVERAGE_NOTICE=0`. Widening CI until the two agree is
+deliberately **not** the implied remedy: several gate rows are darwin-specific,
+several stand up live daemons, and one drives the live fleet.
+
 ## Pre-commit hook
 
 ```sh

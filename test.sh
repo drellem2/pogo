@@ -11,10 +11,20 @@ set -e
 # armed on EXIT rather than appended at the bottom, because the run whose
 # profile is most worth having is the one that FAILED, and that run never
 # reaches the bottom of this file.
+#
+# The same EXIT trap also prints how many of the rows below GitHub CI actually
+# runs (mg-82a6). That number belongs next to the RESULT, not in a document,
+# because the inference it exists to stop is made in the seconds after a gate
+# goes red: on 2026-08-14 a single unreproduced failure here, set beside a green
+# CI run on the same commit, was reported as MAIN IS RED four minutes before a
+# nightly deploy — on a tree that was green throughout. CI runs a MINORITY of
+# the rows below, on a different operating system, so the two were never in a
+# position to contradict each other (mg-5fc8).
 TEST_SH_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$TEST_SH_DIR/scripts/lib/gate-profile.sh"
+. "$TEST_SH_DIR/scripts/lib/gate-exit.sh"
 gate_profile_begin "test.sh"
-trap 'gate_profile_report' EXIT
+trap 'gate_exit_report' EXIT
 
 echo "Step 2: Testing..."
 echo "Making test directories"
@@ -296,3 +306,13 @@ gate_step "Testing work-item scope guard" bash scripts/mg-scope-guard_test.sh
 # case that motivated it. A genuinely-simultaneous pair sits beside it as the
 # positive control, so the negative cannot pass by the population being empty.
 gate_step "Testing the expired-premise rate instrument" bash scripts/premise-expiry-rate_test.sh
+
+# The CI-vs-gate coverage instrument and the EXIT trap that prints it (mg-82a6).
+# Runs against fixture gate/workflow files in a temp dir, so the assertions do
+# not move when a row is added to this file — the count is measured, never
+# pinned. The load-bearing cases are the two positive controls: a script path
+# that appears ONLY in a YAML comment must NOT count as covered, and a parse
+# that finds nothing must exit 2 and SAY it could not measure, because "0 rows
+# shared" is the most alarming reading this instrument can emit and must never
+# be producible by the parser having rotted.
+gate_step "Testing the CI-vs-gate coverage instrument" bash scripts/ci-coverage_test.sh
