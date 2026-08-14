@@ -104,8 +104,14 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 	// is hard-capped at their sum so a pathological alternation still ends.
 	contentionBudget := maxAttempts
 	netBudget := networkMaxAttempts
+	// A fourth budget, for the infrastructure failures whose retry costs a WHOLE
+	// GATE RUN rather than a git command (mg-67c9). Same class as netBudget, and
+	// separate for the same reason the other three are separate from each other:
+	// spending 28 attempts here would hold one repo's lane for hours. See the
+	// sizing note in gatenetwork.go.
+	gateNetBudget := gateNetworkMaxAttempts
 	unclassifiedBudget := defaultUnclassifiedAttempts
-	var contentionUsed, netUsed, unclassifiedUsed int
+	var contentionUsed, netUsed, gateNetUsed, unclassifiedUsed int
 	var backoffSpent time.Duration
 	// gatesReached records whether any attempt has got as far as the quality
 	// gates. It gates skip_on_retry — see the call site below.
@@ -115,7 +121,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 	// per-merge-request and revalidated against the rebased tree on every
 	// attempt — see gateHold.
 	hold := &gateHold{}
-	hardCap := contentionBudget + netBudget + unclassifiedBudget
+	hardCap := contentionBudget + netBudget + gateNetBudget + unclassifiedBudget
 
 	for attempt := 1; attempt <= hardCap; attempt++ {
 		// Cancellation is honoured at attempt boundaries as well as inside the
@@ -126,8 +132,8 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 			return mergeResult{GateOutput: gateOutput}, cancelledMergeError("before-attempt")
 		}
 		if attempt > 1 {
-			log.Printf("refinery: MR %s step=retry attempt=%d (cap=%d) contention=%d/%d network=%d/%d unclassified=%d/%d backoff_spent=%s",
-				mr.ID, attempt, hardCap, contentionUsed, contentionBudget, netUsed, netBudget, unclassifiedUsed, unclassifiedBudget, backoffSpent.Round(time.Second))
+			log.Printf("refinery: MR %s step=retry attempt=%d (cap=%d) contention=%d/%d network=%d/%d gate-network=%d/%d unclassified=%d/%d backoff_spent=%s",
+				mr.ID, attempt, hardCap, contentionUsed, contentionBudget, netUsed, netBudget, gateNetUsed, gateNetBudget, unclassifiedUsed, unclassifiedBudget, backoffSpent.Round(time.Second))
 		}
 
 		emitMergeAttempted(mr, attempt)
@@ -201,6 +207,20 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 		case !disp.Retryable:
 			// reason is the classifier's sentence for why re-running would give
 			// the same answer.
+		case disp.Class == ClassInfrastructure && disp.GateRerun:
+			// Ahead of the plain infrastructure arm: same class, different price.
+			gateNetUsed++
+			next := gateNetworkBackoffFor(gateNetUsed)
+			switch {
+			case gateNetUsed >= gateNetBudget:
+				reason = fmt.Sprintf("not retryable: the gate-network retry budget is spent — %d of %d attempts used over %s of backoff, each one a whole gate run on the single serial slot every queued merge waits behind. The class is still INFRASTRUCTURE: the GATE could not reach the network, so this is not a verdict on the branch and no fix is warranted. The outage outlasted the refinery's patience — resubmit unchanged once the network is back",
+					gateNetUsed, gateNetBudget, backoffSpent.Round(time.Second))
+			case backoffSpent+next > networkRetryBudget:
+				reason = fmt.Sprintf("not retryable: waiting %s more would exceed the %s retry budget (%s already slept). The class is still INFRASTRUCTURE — the GATE could not reach the network, not a verdict on the branch",
+					next, networkRetryBudget, backoffSpent.Round(time.Second))
+			default:
+				retry, backoff = true, next
+			}
 		case disp.Class == ClassInfrastructure:
 			netUsed++
 			next := networkBackoffFor(netUsed)
@@ -1111,6 +1131,19 @@ func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, 
 			var sigErr *gateSignalError
 			if errors.As(err, &sigErr) {
 				return allOutput.String(), ran, sigErr
+			}
+			// The GATE could not reach the network. Judged here for the same two
+			// reasons the host-resource error is (mg-67c9, gatenetwork.go): this
+			// is the last place the FULL output exists, and the summary below
+			// would otherwise name the package the toolchain failed to fetch FOR
+			// — `[internal/agent]`, on the 2026-08-14 specimen — which reads as a
+			// finding against that package and is not one.
+			//
+			// After the two kills above on purpose: a gate that was killed says
+			// nothing about whether the branch caused the hang, and this is the
+			// carve-out that retries.
+			if gne := newGateNetworkError(gate, output, err); gne != nil {
+				return allOutput.String(), ran, gne
 			}
 			// Name what failed INSIDE the gate. `./build.sh failed: exit status 1`
 			// is the sentence that travels — onto the MR, into `pogo refinery

@@ -76,6 +76,97 @@ FAIL	github.com/drellem2/pogo/internal/agent	0.104s
 	}
 }
 
+// TestSummarizeDoesNotReadAPassLineAsASetupFailure is mg-67c9's second finding,
+// pinned against the sentence the refinery actually recorded for
+// mr-d9vah0atjv1vk5gh57c0 on 2026-08-14:
+//
+//	quality gate: ./build.sh failed [test setup failed, not the branch:
+//	  PASS: a sandbox HOME that is a symlink to the developer's home:
+//	  prints the SETUP FAILURE banner]
+//
+// Every part of that was false. Nothing had failed to set up — the substring
+// scan had landed inside a PASSING line of the positive control that exists to
+// assert the banner is printed. The run's real failure, `net-control.sh: 14
+// passed, 4 failed`, was further down the same output and the reader was pointed
+// away from it.
+//
+// That sentence was then read, by three separate parties including this ticket's
+// dispatch note, as the gate having self-diagnosed "not the branch" — evidence
+// offered for trusting gate text is the strongest form this error takes.
+func TestSummarizeDoesNotReadAPassLineAsASetupFailure(t *testing.T) {
+	const output = `--- 2. a sandbox HOME that is a symlink to the developer's home ---
+PASS: a sandbox HOME that is a symlink to the developer's home: prints the SETUP FAILURE banner
+--- 7. namespace hygiene ---
+  PASS: sourcing the library leaves the caller's NC and probe_tcp alone
+
+=== net-control.sh: 14 passed, 4 failed ===
+`
+	// POSITIVE CONTROL, so a green result here cannot come from a fixture that
+	// never exercised the defect: the reading this replaced was
+	// `strings.Index(output, "SETUP FAILURE")`, and it still matches.
+	if strings.Index(output, "SETUP FAILURE") < 0 {
+		t.Fatal("the fixture does not contain the substring the old reading matched — it is not a specimen of the defect")
+	}
+	got := summarizeGateFailure(output)
+	if strings.Contains(got, "setup failed") {
+		t.Fatalf("a PASSING control line was reported as a setup failure: %q", got)
+	}
+	if strings.Contains(got, "not the branch") {
+		t.Fatalf("the summary claims %q on a run where nothing said so", got)
+	}
+}
+
+// TestSummarizeDoesNotExcuseAControlThatCaughtAMissingBanner is the symmetric
+// half, and it is the worse direction. The same suite's FAILING branch prints
+// `printed no 'SETUP FAILURE' banner` — so before this guard, a control that
+// caught a REAL regression (a sandbox that failed to banner) was summarised as
+// "test setup failed, not the branch" and excused.
+func TestSummarizeDoesNotExcuseAControlThatCaughtAMissingBanner(t *testing.T) {
+	const output = `--- 2. a broken sandbox ---
+FAIL: a sandbox HOME that is a symlink: printed no 'SETUP FAILURE' banner; output was: ok|ok|
+=== pogo-sandbox.sh: 3 passed, 1 failed ===
+`
+	got := summarizeGateFailure(output)
+	if strings.Contains(got, "not the branch") {
+		t.Fatalf("a control's own failure was excused as a setup failure: %q", got)
+	}
+	if !strings.Contains(got, "printed no") {
+		t.Errorf("summary %q does not name what the suite reported", got)
+	}
+}
+
+// TestSummarizeStillFiresOnEveryRealBanner is the control on the guard: none of
+// the three genuine banner forms in this repo opens with a harness verdict
+// prefix, so nothing that should fire stopped firing.
+func TestSummarizeStillFiresOnEveryRealBanner(t *testing.T) {
+	banners := []string{
+		"SETUP FAILURE (internal/testsandbox): POGO_HOME resolves onto the live tree",
+		"SETUP FAILURE: /repo has no git HEAD; this suite has nothing to compare against",
+		"=== SETUP FAILURE — the sandbox could not be established (exit 3) ===",
+	}
+	for _, b := range banners {
+		got := summarizeGateFailure("Testing Go packages\n" + b + "\nFAIL\n")
+		if !strings.Contains(got, "setup failed") {
+			t.Errorf("banner %q no longer reported as a setup failure: %q", b, got)
+		}
+	}
+}
+
+// TestSummarizeSaysTheGateCouldNotReachTheNetwork pins the headline mg-67c9
+// replaces. mr-d9v8pgatjv1vk5gh576g was reported as
+// `./build.sh failed [internal/agent]` — a package name, which reads as a
+// finding against that package. The toolchain had simply failed to fetch a
+// module FOR it.
+func TestSummarizeSaysTheGateCouldNotReachTheNetwork(t *testing.T) {
+	got := summarizeGateFailure(incidentGateDNS)
+	if !strings.Contains(got, "could not reach the network") {
+		t.Fatalf("summary %q does not say the gate could not reach the network", got)
+	}
+	if !strings.Contains(got, "not the branch") {
+		t.Errorf("summary %q does not say whose failure this is not", got)
+	}
+}
+
 func TestSummarizeNamesAPackageThatDidNotCompile(t *testing.T) {
 	const output = `Testing Go packages
 # github.com/drellem2/pogo/internal/agent [github.com/drellem2/pogo/internal/agent.test]
