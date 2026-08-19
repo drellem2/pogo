@@ -227,6 +227,33 @@
 #     recovered and how long it took — the same "leave a positive artifact"
 #     argument the ticket makes about fires that did not happen.
 #
+# WHEN THE DEPLOY CANNOT RUN AT ALL, BOUNCE THE FLEET ANYWAY (mg-9fc9)
+# ----------------------------------------------------------------------
+# Everything above this line makes the deploy more patient about a network it
+# needs. None of it helps on the night the network never comes back, and the
+# nightly deploy is this box's ONLY automatic recovery path: it restarts the
+# fleet, and a restart is what clears a wedged agent. On 2026-08-15..19 that path
+# was unavailable for five consecutive nights — `ssh: Could not resolve hostname
+# github.com`, 30 retries over 7980s, rc=10, every night — and the fleet sat in a
+# 118-hour blackout that any one of those nights would have ended. Nothing
+# misbehaved. THE RECOVERY MECHANISM SHARES A DEPENDENCY WITH THE FAILURE IT
+# RECOVERS FROM, which is a property of the topology and not a defect in a part.
+#
+# A restart needs no remote. So after POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER (2)
+# consecutive nights lost at the TRANSPORT step, this runner calls
+# `pogo-self-deploy bounce`: the same drain gate, the same out-of-band guard, the
+# same verifies, and no fetch, no build, no do_prove. It delivers no new code —
+# that genuinely needs the remote — and it ends a blackout the agents were only in
+# because nothing had restarted them.
+#
+# Four things about it that are not incidental: it is keyed on the TRANSPORT class
+# specifically (a bad TREE must never bounce a fleet), the threshold is config and
+# is greater than one, it announces itself through the LOCAL maildir and the LOCAL
+# event log because the network is what is broken, and it respects the drain
+# absolutely — --force is refused, so a polecat holding unpushed commits stops it
+# and gets reported. Section 5c has the whole argument, including what the
+# fallback still does not reach.
+#
 # WHY A LONG SINGLE DRAIN, AND ONLY THEN A RETRY
 # -----------------------------------------------
 # Retries are the weaker half of this and must not be mistaken for the fix.
@@ -394,6 +421,17 @@
 #                              allows (1800)
 #   POGO_DEPLOY_NC           pin an nc for the probe (still checked by execution)
 #   GIT                      pin a specific git (still checked by execution)
+#   POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER  after this many CONSECUTIVE nights lost at
+#                            the TRANSPORT step, bounce the fleet with no remote
+#                            (2; 0 disables the fallback entirely) — see section 5c
+#   POGO_DEPLOY_TRANSPORT_STREAK  where that count is kept across nights
+#                            ($POGO_HOME/deploy-transport-streak.stamp)
+#   POGO_DEPLOY_BOUNCE_RESERVE  seconds of the window the FALLBACK keeps back for
+#                            its restart+verify (300). Deliberately not RESERVE:
+#                            a bounce owes no build and no do_prove, and charging
+#                            it the deploy's 1200s would zero its budget on every
+#                            night the vigil used the window — i.e. exactly the
+#                            nights it exists for
 #
 # HOW THE RED ALERT KNOWS WHAT FAILED (mg-0155). Not from the exit code. This
 # runner passes POGO_DEPLOY_REASON_FILE to pogo-self-deploy, which writes the
@@ -1125,13 +1163,19 @@ load_gh_token() {
 # from an ordinary failed deploy — "the fleet is not dispatching" and "tonight's
 # deploy did not land" want different reactions, and the subject line is the
 # wrong place for a consumer to look for the difference.
+# The fourth argument is the EVENT TYPE, and it defaults to the one this function
+# was written for. A detector filters on the type, not on a subject string, so the
+# mg-9fc9 fallback — which is an action taken, not a deploy that failed — must not
+# arrive under `deploy_nightly_failed`. Defaulted rather than required so the
+# existing callers, all of which really are reporting a failed deploy, are
+# unchanged.
 alert() {
-    local subject="$1" body="$2" extra="${3:-}" bf rc=0
+    local subject="$1" body="$2" extra="${3:-}" etype="${4:-deploy_nightly_failed}" bf rc=0
     err "ALERT: $subject"
     printf '%s\n' "$body" >&2
 
     if [ -n "$POGO_CLI" ]; then
-        "$POGO_CLI" events emit --type=deploy_nightly_failed --agent=pogo-deploy \
+        "$POGO_CLI" events emit --type="$etype" --agent=pogo-deploy \
             --details="{\"subject\":\"$subject\"${extra:+,$extra}}" >/dev/null 2>&1 || true
     fi
     [ -n "$MG" ] || { err "alert: no macguffin resolved — NOTHING WAS MAILED"; return 1; }
@@ -2095,6 +2139,438 @@ about it. What it did NOT do is guess a cause to go with that.
 EOF
             ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# 5c. THE FALLBACK THAT NEEDS NO REMOTE (mg-9fc9)
+# ---------------------------------------------------------------------------
+# THE PROPERTY, MEASURED. The nightly deploy restarts the fleet, and it is this
+# box's only AUTOMATIC recovery path. On any of the five nights 2026-08-15..19 it
+# would have ended a 118-hour blackout. It could not, because it needs the same
+# network the fault had taken out: `ssh: Could not resolve hostname github.com`,
+# 30 retries over 7980s, rc=10. Nothing above misbehaved — every tier retried,
+# the classifier refused to guess a cause the transport never let it establish,
+# and both mayor and human were paged. It is a property of the topology, not a
+# defect in a component: THE RECOVERY MECHANISM SHARES A DEPENDENCY WITH THE
+# FAILURE IT RECOVERS FROM. Recovery, when it came, came from outside the system
+# entirely — Daniel typed a message.
+#
+# So: after N consecutive nights lost at the TRANSPORT step, do the half of a
+# deploy that needs no remote. Restart the fleet. It delivers no new code — that
+# genuinely needs the network — but the agents were not broken by anything a
+# restart could not clear, so it ends the blackout on night N instead of on
+# whichever night a human notices.
+#
+# FOUR CONSTRAINTS, each from something the incident showed:
+#
+# 1. KEYED ON THE TRANSPORT, NOT ON "THE DEPLOY FAILED". A night that failed
+#    because the TREE is bad has a different fault and a different remedy, and
+#    bouncing the fleet over it is destructive noise. transport_streak_verdict
+#    below is that discriminator, and it has THREE answers rather than two —
+#    `config` fails before any network call at all, so it is evidence in neither
+#    direction and must not be counted as either.
+#
+# 2. N > 1, AND IN THE CONFIG. One failed night is a bad night; the signal is the
+#    run. POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER defaults to 2 — the earliest
+#    defensible threshold, because the cost of being wrong is one drained,
+#    announced restart of a fleet that had already gone two nights without one,
+#    and the cost of waiting is a night of blackout per increment. 0 disables it.
+#
+# 3. IT ANNOUNCES ITSELF OUT OF BAND. If the network is down the announcement
+#    cannot go through the network, so it goes to the LOCAL maildir (mayor and
+#    human, via alert) and to the LOCAL event log. Both survive exactly this
+#    fault; a webhook or an issue comment would not.
+#
+# 4. A BOUNCE IS NOT FREE, SO THE DRAIN STILL RULES. `pogo-self-deploy bounce`
+#    runs the same drain gate a redeploy does and REFUSES --force. If the drain
+#    refuses — polecats holding commits that exist only in their worktree, or a
+#    fleet whose state could not be established — this reports and does not
+#    bounce. That refusal is correct and is not something a 03:00 job overrides.
+#
+# HOW THIS FIX COULD EXHIBIT THE DEFECT IT REMEDIES. It is a recovery path, so
+# the question is which of ITS dependencies the fault it recovers from can take:
+#
+#   - THE WINDOW. The vigil probes until drain_budget hits zero (~05:30 under the
+#     production window), which is the deploy's budget — RESERVE is 1200s of
+#     build, do_prove, kickstart and verification. A bounce owes none of the
+#     build and none of the prove, so charging it the deploy's reserve would have
+#     left ZERO window on precisely the nights the vigil ran long: the fallback
+#     would have been disabled by the patience that discovered the outage. Hence
+#     BOUNCE_RESERVE (300s) and a budget recomputed against it.
+#   - THE SCRIPT. `bounce` lives in $SRC/scripts/pogo-self-deploy — the checkout
+#     the sync just failed to advance. Stale is fine (a bounce reads no tree),
+#     ABSENT is not: a first-ever run whose clone never happened has no script
+#     there at all. So the resolver tries the bootstrap checkout too, and each
+#     candidate must PROVE it has a `bounce` by running --help, the same
+#     execution-not-existence check `mg` and `git` get here (mg-b72a).
+#   - THE ANNOUNCEMENT. mg writes to a local maildir; `pogo events emit` talks to
+#     pogod over loopback — and pogod is the process being killed. So the event
+#     is emitted BEFORE the kickstart and re-emitted after with the outcome, both
+#     best-effort, and the mail is the channel that is actually relied on.
+#   - THE STREAK RECORD ITSELF. It lives under POGO_HOME, is read with the same
+#     tolerance as the attempt stamp, and an unreadable one reads as "no streak"
+#     — so a corrupt file costs a delayed bounce, never a spurious one.
+#
+# WHAT IT STILL DOES NOT REACH, stated because it would otherwise read as solved.
+# Two of these are the ticket's own structure surviving inside its fix, and they
+# are named rather than quietly accepted:
+#
+#   - THE DRAIN COUPLING, and it is the sharp one. The fallback fires because the
+#     fleet has gone N nights without a restart, which is a state in which agents
+#     are MORE likely to be wedged — and a wedged polecat that committed and never
+#     pushed is exactly what makes the drain refuse. So the condition the fallback
+#     exists for can produce the condition that blocks it. `--force` is the lever
+#     that would cut through it and it is refused, deliberately and on the
+#     ticket's instruction: the work in that worktree exists nowhere else, and an
+#     unattended 03:00 job is the last caller that should decide to destroy it.
+#     What this fix owes that case is not an override but VISIBILITY — the refusal
+#     is mailed, names the holders, and says the fleet is still owed a restart.
+#   - THE HOST. This fallback lives inside the nightly job. A fault that stops
+#     the job from firing at all — the mac asleep through the window, launchd not
+#     loading the plist — takes the fallback with it, which is mg-f867's shape one
+#     level up. It is not the fault being handled here (a transport outage does
+#     not stop launchd), and the detector for a fire that did not happen is
+#     internal/staleness/nofire.go, which is a different mechanism on purpose.
+#   - AND A BOUNCE CANNOT HELP A FAULT A RESTART CANNOT CLEAR. It delivers no
+#     code, so a box that needs a merge to become healthy stays unhealthy.
+
+# The night's transport-failure streak: "<date> <count> <last_bounce_date>".
+#
+# Its own line, not a field on the attempt stamp: the attempt stamp answers "what
+# happened TONIGHT" and is meaningless the moment the date rolls, while this one
+# exists only to survive that roll. Fusing them would mean a stamp read by
+# attempt_disposition carrying a field only this cares about, and the count would
+# be lost the first time a night wrote a stamp without it.
+TRANSPORT_STREAK="${POGO_DEPLOY_TRANSPORT_STREAK:-${POGO_HOME:-$HOME/.pogo}/deploy-transport-streak.stamp}"
+TRANSPORT_BOUNCE_AFTER="${POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER:-2}"
+
+# What the fallback owes after its drain returns: the kickstart, verify_running's
+# 60s, verify_orchestration's 60s, the mail-check post-check and some slack. Not
+# RESERVE's 1200s — that number is mostly `go install` and do_prove, and a bounce
+# runs neither. Charging the deploy's reserve here is the failure mode described
+# in the header: it zeroes the budget on every night the vigil used the window.
+BOUNCE_RESERVE="${POGO_DEPLOY_BOUNCE_RESERVE:-300}"
+
+# transport_streak_verdict CLASS -> bump | clear | leave. Pure.
+#
+#   bump  — the transport was the fault. `network`, `remote`, `unclassified` and
+#           `timeout` all mean the sync never reached the tree, so this night
+#           delivered nothing AND restarted nothing. Exactly the class of night
+#           that costs a blackout. (It is the same set sync_class_retryable
+#           returns true for, and for the same underlying reason — but it is
+#           asked here as its own question, because "retry in ten minutes" and
+#           "the fleet has now gone N nights without a restart" are different
+#           decisions that happen to share a discriminator today.)
+#   clear — the sync DID reach the tree. `dirty`, `diverged` and `checkout` are
+#           all read AFTER a successful fetch, so the transport worked tonight
+#           whatever else went wrong. The streak is broken, and a tree fault must
+#           never accumulate toward a fleet bounce.
+#   leave — the run never got as far as the transport. `config` fails before any
+#           network call is made. A night that never asked the question is
+#           evidence in neither direction, and counting it either way would be
+#           this file's oldest defect: asserting something that was not
+#           established.
+transport_streak_verdict() {
+    case "${1:-}" in
+        network|remote|unclassified|timeout) echo bump ;;
+        dirty|diverged|checkout)             echo clear ;;
+        config)                              echo leave ;;
+        # An empty or unknown class reaching here means sync_src failed in a way
+        # nothing has classified. `leave` rather than `bump`: an unrecognised
+        # class is not a measured transport failure, and the asymmetry is the
+        # right way round — a missed bounce costs a night, a wrong one costs a
+        # fleet-wide restart nobody asked for.
+        *)                                   echo leave ;;
+    esac
+}
+
+# transport_streak_field LINE N — field N of the record, with the defaults a
+# missing or malformed record must degrade to. Same tolerance as the attempt
+# stamp (section 1d): unreadable reads as "nothing recorded", so a corrupt file
+# delays a bounce rather than inventing one.
+transport_streak_field() {
+    local line="$1" n="$2" d c b
+    read -r d c b <<<"${line:-}"
+    case "${c:-}" in ''|*[!0-9]*) c=0 ;; esac
+    case "$n" in
+        1) printf '%s' "${d:--}" ;;
+        2) printf '%s' "$c" ;;
+        3) printf '%s' "${b:--}" ;;
+    esac
+}
+
+# transport_streak_next TODAY LINE — the count after recording a transport-lost
+# night for TODAY. IDEMPOTENT PER DATE, and that is load-bearing: a night can
+# reach the settling path more than once (three fires all reopened by rc=10 with
+# a schedule this run could not read), and a streak that counted fires instead of
+# nights would cross any threshold in a single night.
+transport_streak_next() {
+    local today="$1" line="$2" d c
+    d="$(transport_streak_field "$line" 1)"
+    c="$(transport_streak_field "$line" 2)"
+    if [ "$d" = "$today" ]; then printf '%s' "$c"; else printf '%s' "$(( c + 1 ))"; fi
+}
+
+# transport_streak_save FILE DATE COUNT LAST_BOUNCE
+transport_streak_save() {
+    mkdir -p "$(dirname "$1")" 2>/dev/null
+    printf '%s %s %s\n' "$2" "$3" "$4" > "$1"
+}
+
+# transport_bounce_due COUNT [THRESHOLD] — is the fallback owed? A threshold of
+# 0 (or one that is not a number) disables it, and disabled is reported by the
+# caller rather than passed over silently.
+transport_bounce_due() {
+    # ${2-...}, NOT ${2:-...}: an explicitly EMPTY threshold means "there is no
+    # threshold", and reading it as "use the default" would turn an unset config
+    # value into a fleet bounce. Only an ABSENT second argument falls back.
+    local count="$1" after="${2-$TRANSPORT_BOUNCE_AFTER}"
+    case "${after:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$after" -gt 0 ] || return 1
+    [ "$count" -ge "$after" ]
+}
+
+# The script that can bounce, resolved by EXECUTION (mg-b72a's rule, applied to a
+# third primitive). Two candidates, both LOCAL:
+#
+#   $SRC/scripts/pogo-self-deploy         the deploy checkout. Stale is fine — a
+#                                         bounce reads no tree and no ref.
+#   $BOOTSTRAP_REPO/scripts/pogo-self-deploy
+#                                         the dev checkout, for the one case the
+#                                         first cannot cover: a box whose clone
+#                                         never happened, which is the `clone`
+#                                         arm of the very failure being handled.
+#
+# The dev tree is otherwise never touched by this job, and the exception is
+# narrow and specific: a bounce runs no `go install`, reads no tree and cannot
+# deploy anything from it, so a dirty or half-rebased dev checkout is harmless
+# here in a way it would never be for a build.
+#
+# Each candidate must ADVERTISE the subcommand. A pogo-self-deploy older than
+# mg-9fc9 exits 2 on `bounce` with "unknown subcommand", which is a correct
+# refusal reported in the wrong voice — the fallback would read as broken rather
+# than as absent. Asking --help first turns that into a named, reported cause.
+BOUNCE_SCRIPT=""
+resolve_bounce_script() {
+    local cand
+    local -a cands=("$SRC/scripts/pogo-self-deploy" "$BOOTSTRAP_REPO/scripts/pogo-self-deploy")
+    for cand in "${cands[@]}"; do
+        [ -x "$cand" ] || continue
+        if ! run_bounded "$TOOL_PROBE_TIMEOUT" "$cand" --help 2>/dev/null | grep -q 'pogo-self-deploy bounce'; then
+            log "fallback: $cand runs but its --help does not advertise a 'bounce' subcommand — it predates mg-9fc9, so it is not a usable fallback"
+            continue
+        fi
+        BOUNCE_SCRIPT="$cand"
+        log "fallback: bounce script resolved at $BOUNCE_SCRIPT"
+        return 0
+    done
+    err "fallback: no local pogo-self-deploy with a 'bounce' subcommand among ${cands[*]}"
+    return 1
+}
+
+# Set by fallback_bounce so the sync alert can cross-reference what the fallback
+# did without re-deriving it. `not-considered` is the value on every path that
+# never reached the fallback at all, which is most of them.
+FALLBACK_STATUS="not-considered"
+FALLBACK_DETAIL=""
+
+# fallback_bounce TODAY STREAK — decide, act, and announce.
+#
+# It owns the announcement rather than leaving it to the caller's alert, because
+# a fleet-wide restart is a DIFFERENT event from "tonight's deploy did not land"
+# and a reader has to be able to tell them apart in a subject line. The sync
+# alert gets one cross-reference line; this gets its own mail.
+fallback_bounce() {
+    local today="$1" streak="$2" rc=0 bbudget
+    if ! transport_bounce_due "$streak"; then
+        case "${TRANSPORT_BOUNCE_AFTER:-}" in
+            ''|*[!0-9]*|0)
+                FALLBACK_STATUS="disabled"
+                FALLBACK_DETAIL="POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER=${TRANSPORT_BOUNCE_AFTER:-} disables the fallback" ;;
+            *)
+                FALLBACK_STATUS="not-due"
+                FALLBACK_DETAIL="$streak consecutive transport-lost night(s); the fallback fires at $TRANSPORT_BOUNCE_AFTER" ;;
+        esac
+        log "fallback: $FALLBACK_STATUS — $FALLBACK_DETAIL"
+        return 0
+    fi
+
+    log "fallback: $streak consecutive nights lost at the TRANSPORT step (threshold $TRANSPORT_BOUNCE_AFTER) — the fleet has gone that long without the restart the nightly would have given it. Bouncing it WITHOUT a remote (mg-9fc9)."
+
+    # The bounce's own budget, on the bounce's own reserve. See BOUNCE_RESERVE.
+    bbudget="$(drain_budget "$WINDOW_END" "$BOUNCE_RESERVE" "$MAX_DRAIN" "$MIN_DRAIN")"
+    if [ "$bbudget" -le 0 ]; then
+        FALLBACK_STATUS="refused-window"
+        FALLBACK_DETAIL="under ${MIN_DRAIN}s of usable window is left before ${WINDOW_END}:00 (bounce reserve ${BOUNCE_RESERVE}s), and a drain that cannot finish stops dispatch for its whole length and delivers nothing"
+        err "fallback: NOT bouncing — $FALLBACK_DETAIL"
+        fallback_announce "$streak" 0
+        return 0
+    fi
+
+    if ! resolve_bounce_script; then
+        FALLBACK_STATUS="refused-noscript"
+        FALLBACK_DETAIL="no local pogo-self-deploy advertising a 'bounce' subcommand could be found (tried $SRC and $BOOTSTRAP_REPO)"
+        fallback_announce "$streak" 0
+        return 0
+    fi
+
+    # BEFORE the kickstart: the emit goes to pogod over loopback and the bounce
+    # kills pogod. An event emitted after would be racing the daemon's boot.
+    if [ -n "$POGO_CLI" ]; then
+        "$POGO_CLI" events emit --type=deploy_transport_fallback_bounce --agent=pogo-deploy \
+            --details="{\"phase\":\"start\",\"streak\":$streak,\"threshold\":$TRANSPORT_BOUNCE_AFTER,\"sync_class\":\"${SYNC_CLASS:-unclassified}\",\"sync_vigil_s\":$SYNC_VIGIL_SPENT,\"drain_timeout\":$bbudget}" >/dev/null 2>&1 || true
+    fi
+
+    local reason_file="$HOME/Library/Logs/pogo/pogo-bounce-reason.$today"
+    mkdir -p "$(dirname "$reason_file")" 2>/dev/null || true
+    rm -f "$reason_file" 2>/dev/null || true
+    # NOT under run_bounded, and for the same reason the redeploy call below is
+    # not: this is a long-running orchestration step whose legitimate duration IS
+    # the drain budget, and a second bound would either duplicate that number or
+    # contradict it. What bounds it is arm_run_deadline — armed at the top of the
+    # run, in a separate process, covering whichever stage the run is wedged in
+    # (mg-56ac). The fallback is downstream of that arming, so it inherits it.
+    log "fallback: $BOUNCE_SCRIPT bounce --yes --drain-timeout $bbudget"
+    POGO_DEPLOY_REASON_FILE="$reason_file" "$BOUNCE_SCRIPT" bounce --yes --drain-timeout "$bbudget" || rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+        FALLBACK_STATUS="bounced"
+        FALLBACK_DETAIL="the fleet was drained and restarted onto the binaries already installed; no code was delivered"
+        log "fallback: BOUNCED — $FALLBACK_DETAIL"
+        # The streak resets on a bounce, so a prolonged outage bounces once every
+        # N nights rather than every night. Re-arming on the same evidence is what
+        # makes a fleet that re-wedges recoverable a second time; not resetting
+        # would make every remaining night of an outage a fleet restart.
+        transport_streak_save "$TRANSPORT_STREAK" "$today" 0 "$today"
+    else
+        # exit 7 (drain stalled), 6/12 (drain precondition), 5/8/11 (the restart
+        # itself). Each already wrote its own sentence into the reason record and,
+        # for 7, mailed the deploy-stalled sink. What this adds is the ONE thing
+        # only the caller knows: that this was the mg-9fc9 fallback firing, and
+        # that the fleet therefore did NOT get the restart it is owed.
+        FALLBACK_STATUS="failed"
+        FALLBACK_DETAIL="$(bounce_reason_line "$reason_file" "$rc")"
+        err "fallback: the bounce exited $rc — $FALLBACK_DETAIL"
+        # The streak is NOT reset. Nothing was bounced, so the count still
+        # measures how long the fleet has gone without a restart — and tomorrow
+        # night is a fresh chance at a drain that may no longer refuse.
+    fi
+    fallback_announce "$streak" "$rc"
+    if [ -n "$POGO_CLI" ]; then
+        "$POGO_CLI" events emit --type=deploy_transport_fallback_bounce --agent=pogo-deploy \
+            --details="{\"phase\":\"end\",\"status\":\"$FALLBACK_STATUS\",\"exit\":$rc,\"streak\":$streak,\"threshold\":$TRANSPORT_BOUNCE_AFTER}" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# bounce_reason_line FILE RC — the sentence the bounce itself wrote, or an honest
+# statement that it left none. Same channel and same reader as the deploy's
+# reason record (mg-0155): the caller does not re-derive a story from an integer.
+bounce_reason_line() {
+    local f="$1" rc="$2" reason=""
+    [ -f "$f" ] && reason="$(sed -n 's/^reason=//p' "$f" | head -1)"
+    if [ -n "$reason" ]; then
+        printf 'exit %s at stage %s: %s' "$rc" "$(sed -n 's/^stage=//p' "$f" | head -1)" "$reason"
+    else
+        printf 'exit %s (%s) — the bounce left no reason record at %s' "$rc" "$(describe_exit "$rc")" "$f"
+    fi
+}
+
+# fallback_subject STREAK — the part that travels. A reader skimming a phone at
+# 07:00 has to be able to tell "the fleet was restarted" from "the fallback could
+# not restart it", because those need opposite reactions, so the status is in the
+# subject and not only in the body.
+fallback_subject() {
+    local streak="$1"
+    case "$FALLBACK_STATUS" in
+        bounced) echo "[pogo-deploy] FLEET BOUNCED by the no-remote fallback — $streak nights lost to the transport" ;;
+        failed)  echo "[pogo-deploy] no-remote fallback COULD NOT bounce the fleet — $streak nights lost to the transport" ;;
+        *)       echo "[pogo-deploy] no-remote fallback DECLINED to bounce — $streak nights lost to the transport" ;;
+    esac
+}
+
+# fallback_body STREAK — the announcement's body.
+#
+# A FUNCTION that cats a heredoc, not a heredoc inside the callsite's `$( )`.
+# macOS ships bash 3.2 and its command-substitution scanner does not reliably
+# survive a heredoc whose text contains apostrophes and parentheses — `$(cat
+# <<EOF ...)` with this body in it fails to parse outright, which is a whole
+# runner that will not start. Every other long body in this file is built the
+# same way for the same reason (red_alert_body, lost_schedule_body).
+fallback_body() {
+    local streak="$1" headline vigil
+    case "$FALLBACK_STATUS" in
+        bounced)
+            headline="THE FLEET WAS RESTARTED. Not deployed — restarted. No new code was
+delivered, because delivering code needs the remote and the remote is what has
+been unreachable." ;;
+        failed)
+            headline="THE FALLBACK FIRED AND DID NOT COMPLETE. The fleet has now gone $streak
+nights without the restart the nightly deploy would have given it, and this run
+could not supply one either." ;;
+        *)
+            headline="THE FALLBACK WAS DUE AND DID NOT RUN. The fleet has gone $streak nights
+without the restart the nightly deploy would have given it." ;;
+    esac
+    if [ "${SYNC_VIGIL_SPENT:-0}" -gt 0 ]; then
+        vigil="${SYNC_VIGIL_SPENT}s — a LOWER BOUND on how long the transport was unreachable tonight"
+    else
+        vigil="none tonight (the failure was not one the vigil covers, or the vigil is off)"
+    fi
+    cat <<EOF
+$headline
+
+  nights lost:  $streak consecutive, at the TRANSPORT step (threshold $TRANSPORT_BOUNCE_AFTER)
+  tonight:      sync class ${SYNC_CLASS:-unclassified} — $(describe_sync_class "$SYNC_CLASS")
+  vigil:        $vigil
+  outcome:      $FALLBACK_STATUS — $FALLBACK_DETAIL
+  streak file:  $TRANSPORT_STREAK
+  log:          $HOME/Library/Logs/pogo/pogo-deploy.log
+
+WHY THIS EXISTS. The nightly deploy is this box's only automatic recovery path
+and it needs the same network a network fault takes away. Between 2026-08-15 and
+2026-08-19 that cost a 118-hour blackout: five nights, five correct refusals, and
+recovery only when a human typed a message. A restart needs no remote, so after
+$TRANSPORT_BOUNCE_AFTER consecutive nights lost at the transport step the fleet gets one anyway.
+
+WHAT A BOUNCE DOES AND DOES NOT FIX. It clears anything a restart clears — wedged
+agents, stale sessions, a scheduler that stopped firing. It delivers NO code, so
+this box is no more current than it was, and every merge waiting on main is still
+waiting. The deploy is still owed and will be attempted again tomorrow night.
+
+THE DRAIN STILL RULES. The bounce runs the same drain gate a redeploy does and it
+refuses --force, so a polecat holding commits that exist only in its worktree
+stops it — reported, not overridden. If the outcome above is a refusal, it is
+either that or the window running out, and both are the designed answer rather
+than a malfunction.
+
+Worth knowing when you read a refusal: the state this fallback fires in makes
+that refusal MORE likely, not less. A fleet that has gone $streak nights without
+a restart is a fleet more likely to hold a wedged polecat, and a wedged polecat
+that committed without pushing is precisely what the drain refuses to orphan. So
+a drain refusal here is not noise — it is naming the agent that has to be dealt
+with by hand before anything can restart the fleet.
+
+WHAT TO DO
+  - outcome 'bounced': nothing, unless the fleet is still not working. Check with
+    pogo agent list, and curl -s http://127.0.0.1:10000/server/mode
+  - a refusal or a failure: read the outcome line above, then the deploy log. A
+    drain refusal names the polecats holding unpushed work.
+  - Either way the NETWORK is the ticket, not the deploy: $streak consecutive
+    nights unable to reach the remote is the fault to chase.
+  - To change the threshold, set POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER. 0 disables
+    the fallback entirely.
+EOF
+}
+
+# fallback_announce STREAK RC — the out-of-band announcement, constraint 3.
+#
+# Through alert(), which mails ALERT_TO and human out of the LOCAL maildir and
+# writes the body to the deploy log. Nothing here goes near the network, which is
+# the point: on the night this fires, the network is what is broken.
+fallback_announce() {
+    local streak="$1" rc="$2"
+    alert "$(fallback_subject "$streak")" "$(fallback_body "$streak")" "\"fallback\":\"$FALLBACK_STATUS\",\"streak\":$streak,\"threshold\":$TRANSPORT_BOUNCE_AFTER,\"bounce_exit\":$rc,\"sync_class\":\"${SYNC_CLASS:-unclassified}\"" deploy_transport_fallback
 }
 
 # ---------------------------------------------------------------------------
@@ -3265,6 +3741,37 @@ deployed and the running pogod is untouched.
             fi
             exit "$sync_rc"
         fi
+        # THE NIGHT IS OUT OF FIRES AND THE TRANSPORT NEVER LET THIS RUN REACH
+        # THE TREE (mg-9fc9). That is the condition the no-remote fallback is
+        # keyed on, and this is the only place in the run where it is true: past
+        # the blip tier, past the vigil, and past retry_will_follow, so no later
+        # fire tonight can still deploy. See section 5c.
+        #
+        # $ATTEMPT_ARMED, not "we got here": a dry run reaches this line and must
+        # neither count a night nor bounce a fleet.
+        local tv streak=0
+        tv="$(transport_streak_verdict "$SYNC_CLASS")"
+        if $ATTEMPT_ARMED; then
+            local sline; sline="$(stamp_read "$TRANSPORT_STREAK")"
+            case "$tv" in
+                bump)
+                    streak="$(transport_streak_next "$today" "$sline")"
+                    transport_streak_save "$TRANSPORT_STREAK" "$today" "$streak" \
+                        "$(transport_streak_field "$sline" 3)"
+                    log "transport streak: $streak consecutive night(s) lost at the transport step (class ${SYNC_CLASS:-unclassified}); the fallback fires at ${TRANSPORT_BOUNCE_AFTER:-0}"
+                    fallback_bounce "$today" "$streak" ;;
+                clear)
+                    transport_streak_save "$TRANSPORT_STREAK" "$today" 0 \
+                        "$(transport_streak_field "$sline" 3)"
+                    log "transport streak: CLEARED — class ${SYNC_CLASS} is read after a successful fetch, so the transport worked tonight and this is a tree fault, which must never accumulate toward a fleet bounce" ;;
+                *)
+                    log "transport streak: left at $(transport_streak_field "$sline" 2) — class ${SYNC_CLASS:-unclassified} failed before any network call, so tonight is evidence in neither direction" ;;
+            esac
+        else
+            # Logged rather than silent, on this file's own rule: a skip that says
+            # nothing is indistinguishable from a mechanism that is not there.
+            log "transport streak: not recorded — this fire never armed an attempt (dry run, or it skipped a gate), so it decides nothing about tonight"
+        fi
         alert "[pogo-deploy] ABORTED: could not sync $SRC — $(describe_sync_class "$SYNC_CLASS")" \
 "The nightly redeploy refused to advance its dedicated checkout. Nothing was
 deployed and the running pogod is untouched. Daniel's dev tree was NOT touched.
@@ -3275,6 +3782,7 @@ deployed and the running pogod is untouched. Daniel's dev tree was NOT touched.
   vigil:    $([ "$SYNC_VIGIL_SPENT" -gt 0 ] && printf '%ss — a LOWER BOUND on how long the transport was unreachable' "$SYNC_VIGIL_SPENT" || printf 'none (the failure was not one the vigil covers, or the vigil is off)')
   exit:     $sync_rc$([ "$sync_rc" -eq 10 ] && printf ' (retryable class — but %s)' "$(fires_left_phrase | sed 's/^and //')")
   log:      $HOME/Library/Logs/pogo/pogo-deploy.log
+  fallback: $FALLBACK_STATUS$([ -n "$FALLBACK_DETAIL" ] && printf ' — %s' "$FALLBACK_DETAIL") (the no-remote fleet bounce, mg-9fc9 — mailed separately when it fires)
 
 WHAT THE UNDERLYING TOOL ACTUALLY SAID, verbatim:
 
@@ -3287,6 +3795,22 @@ $(remedy_for_sync_class "$SYNC_CLASS")"
         exit "$sync_rc"
     fi
     sync_recovery_notice "$SYNC_TRIES" "$SYNC_RETRY_SPENT"
+
+    # THE STREAK IS CLEARED HERE, on the observation and not on an exit code
+    # (mg-9fc9). This line is the one place in the run where "the transport
+    # worked tonight" is a measured fact: the fetch returned and the tree was
+    # read. Everything after it can still fail — a build, a do_prove RED, a
+    # stalled drain — and none of those is evidence about the network, so keying
+    # the reset on the run's final rc would let a build failure look like a
+    # transport recovery, and a transport recovery followed by a build failure
+    # look like another lost night.
+    if $ATTEMPT_ARMED; then
+        local sline0 prev0
+        sline0="$(stamp_read "$TRANSPORT_STREAK")"
+        prev0="$(transport_streak_field "$sline0" 2)"
+        transport_streak_save "$TRANSPORT_STREAK" "$today" 0 "$(transport_streak_field "$sline0" 3)"
+        [ "$prev0" -gt 0 ] && log "transport streak: CLEARED (was $prev0) — the sync reached the tree, so the transport is working from this box tonight"
+    fi
 
     # Backoff sleeps come out of the drain's share of the window, so the budget
     # computed at gate 4 is stale by exactly that much. Recompute rather than

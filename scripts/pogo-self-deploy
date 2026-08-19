@@ -49,8 +49,18 @@
 # USAGE
 #   pogo-self-deploy check                 # three-way drift report; NEVER acts
 #   pogo-self-deploy redeploy [flags]      # guarded rebuild+prove+restart
+#   pogo-self-deploy bounce [flags]        # guarded restart ONLY — no remote
 #
-# redeploy flags:
+# `bounce` is `redeploy` with everything that needs the network removed: no
+# fetch, no build, no do_prove. It keeps the drain gate, the out-of-band guard
+# and both verifies, and it refuses --force. It exists because the nightly deploy
+# is this box's only automatic recovery path and it needs the same network a
+# network fault takes away — five consecutive nights of that cost a 118-hour
+# blackout (mg-9fc9). A restart delivers no new code; it ends a blackout the
+# agents were only in because nothing had restarted them. See cmd_bounce.
+#
+# redeploy flags (bounce takes --yes, --skip-drain, --drain-timeout and --port;
+# it REFUSES --force, and --repo is meaningless to it because it reads no tree):
 #   --yes                 proceed without the interactive confirmation prompt
 #   --force               permit a HARD BOUNCE the drain would otherwise refuse.
 #                         Two refusals, both overridden by this flag:
@@ -920,13 +930,19 @@ cmd_check() {
 # ---------------------------------------------------------------------------
 # redeploy — guarded rebuild + restart
 # ---------------------------------------------------------------------------
+# confirm [WHAT] — WHAT names the action in both the refusal and the prompt, and
+# defaults to the redeploy that was the only caller. `bounce` passes its own noun
+# rather than getting a second copy of this: the tty rule, the --yes rule and the
+# exit code are one policy about one hazard (a fleet-wide bounce), and both
+# subcommands end in exactly that.
 confirm() {
+    local what="${1:-redeploy pogod}"
     $ASSUME_YES && return 0
     if [ ! -t 0 ]; then
-        err "refusing to redeploy non-interactively without --yes (fleet-wide bounce)"
+        err "refusing to $what non-interactively without --yes (fleet-wide bounce)"
         exit 3
     fi
-    printf 'Redeploy pogod (this WILL bounce the whole fleet)? [y/N] '
+    printf 'Confirm: %s — this WILL bounce the whole fleet. [y/N] ' "$what"
     read -r ans
     case "$ans" in y|Y|yes|YES) return 0 ;; *) log "aborted by user"; exit 0 ;; esac
 }
@@ -3840,6 +3856,194 @@ verify_orchestration() {
     done
 }
 
+# How long verify_bounced waits for a pogod to answer again. Same default as
+# verify_running's 60s and overridable for the same reason.
+BOUNCE_VERIFY_TIMEOUT="${BOUNCE_VERIFY_TIMEOUT:-60}"
+
+# verify_bounced — the bounce's liveness check, and the one place it deliberately
+# asks LESS than verify_running (mg-9fc9).
+#
+# verify_running asserts the answering pogod reports MAIN's revision, which is
+# the right assertion for a deploy: it just installed main, so anything else
+# means the install or the restart did not take. A bounce installs nothing and
+# never reads main — it has no repo, no ref and no $MAIN — so asserting a
+# revision here would be asserting a fact this run never established, and the
+# only revision it could compare against is the one it would have had to fetch.
+# That is the dependency the whole subcommand exists to shed.
+#
+# So the question is the one a bounce can answer and the only one it owes:
+# is a pogod answering again? An UNSTAMPED answer counts — a daemon that talks
+# but cannot say what it is has still come back, and refusing it here would fail
+# a recovery over a missing vcs stamp. verify_orchestration, next, is what turns
+# "a process answered" into "the fleet is dispatching".
+verify_bounced() {
+    local deadline=$(( $(date +%s) + BOUNCE_VERIFY_TIMEOUT )) rev
+    while :; do
+        rev="$(running_rev)"
+        if [ "$rev" != "$REV_UNREACHABLE" ]; then
+            log "verified: pogod is answering again at $(short "$rev") (this run installed nothing, so the revision is whatever was already on disk — NOT a claim that it is main)"
+            return 0
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            err "pogod did not answer $(base_url)/version within ${BOUNCE_VERIFY_TIMEOUT}s of the kickstart"
+            err "  the bounce KILLED the old daemon and no replacement is answering, so the fleet is"
+            err "  down harder than it was before this ran. Check it by hand now:"
+            err "    launchctl print gui/$(id -u)/${DAEMON_LABEL} | head -40"
+            err "    curl -s $(base_url)/version"
+            return 1
+        fi
+        sleep 3
+    done
+}
+
+# ---------------------------------------------------------------------------
+# THE DRAIN GATE, as one function with one caller-independent policy (mg-9fc9)
+# ---------------------------------------------------------------------------
+# This was cmd_redeploy's step 1 and nothing else could reach it. `bounce` needs
+# EXACTLY it — the same POST, the same four refusals, the same wait, the same
+# refusal to orphan unpushed work — so the choice was to call it or to write a
+# second one, and a second drain policy is the defect mg-9fc9's own ticket names:
+# "it must respect the existing drain logic ... do not force past it". Two copies
+# would respect it on the day they were written and diverge on the first fix that
+# landed in one of them.
+#
+# It sets two globals rather than printing, because it has two answers and both
+# are needed after it returns: how many polecats were left holding local-only
+# commits, and the pre-kickstart snapshot the orphan cleanup works from. It never
+# returns on a refused precondition (refuse_drain_precondition exits), and it
+# exits 7 itself on a stall without --force. Callers therefore get control back
+# only when the fleet is safe to bounce.
+DRAIN_SNAPSHOT=""
+DRAIN_LEFTOVER=0
+drain_gate() {
+    DRAIN_SNAPSHOT=""
+    DRAIN_LEFTOVER=0
+    deploy_stage "drain"
+    if $SKIP_DRAIN; then
+        # Operator-directed skip (or the bootstrap remedy). No drain, no fleet
+        # quiesce, no snapshot — the kickstart -k that follows will bounce whatever
+        # is running. Explicit acknowledgement of the un-drained bounce.
+        log "--skip-drain: skipping drain phase (no fleet quiesce, no orphan cleanup)"
+    else
+        log "enabling drain mode"
+        # Read dispatch as it stands BEFORE we touch it, then arm the restore.
+        # Armed BEFORE the POST, not after, on purpose: a POST that times out
+        # AFTER pogod set the flag comes back "000" and classifies as `down`,
+        # so the one path where we cannot tell whether we mutated anything is a
+        # path that must still restore. A restore POST on a genuinely-down or
+        # bootstrap daemon fails harmlessly and says so; the reverse mistake is
+        # a silent fleet-wide outage.
+        DRAIN_PRIOR="$(drain_state)"
+        DRAIN_ARMED=true
+        # ONLY the EXIT trap restores. INT/TERM merely convert the signal into an
+        # exit, because a bash signal handler that RETURNS resumes the script
+        # where it was interrupted: `trap on_deploy_exit EXIT INT TERM` would
+        # restore dispatch on Ctrl-C and then carry on building and kickstarting
+        # with the fleet live — a cleanup that fires and then un-fires itself.
+        # Routing both through exit gives one restore, on one path, with the
+        # signal's status preserved.
+        #
+        # The EXIT trap itself is installed at the top of the subcommand —
+        # cmd_redeploy or cmd_bounce (mg-0155, mg-9fc9) — and is NOT re-installed
+        # here: DRAIN_ARMED, not the trap, is what says
+        # whether there is dispatch to put back. Re-installing it would replace a
+        # trap that also writes the reason record with one that only restores.
+        trap 'err "interrupted (SIGINT) during the drain window"; exit 130' INT
+        trap 'err "terminated (SIGTERM) during the drain window"; exit 143' TERM
+        # One hop, both facts (mg-08e9). The status decides which refusal this
+        # is; the body is what lets the next morning check that ruling instead
+        # of taking it on faith.
+        local dp_raw dp_body
+        dp_raw="$(drain_post true)"
+        dp_body="$(http_body "$dp_raw")"
+        local disp; disp="$(classify_drain_precondition "$(http_status "$dp_raw")")"
+        case "$disp" in
+            drain)
+                # Take drain_wait's OWN verdict and its OWN number, rather than
+                # re-reading the endpoint for a third opinion (mg-65b2). The old
+                # re-fetch was redundant on the timeout path and actively wrong
+                # on the new one: when drain_wait refuses because pogod went
+                # silent, that curl fails too, `${leftover:-?}` renders "?", and
+                # the script announced "? polecat(s) still active after 1800s
+                # drain timeout" — a confident story about a deadline that never
+                # passed, over a state we had just admitted we could not read.
+                # Telling a timeout's story about an unknown is this ticket's own
+                # defect rebuilt inside its fix.
+                local drain_rc=0
+                DRAIN_LEFTOVER="$(drain_wait)" || drain_rc=$?
+                if [ "$drain_rc" -eq 0 ]; then
+                    report_drain_complete
+                else
+                    DRAIN_LEFTOVER="${DRAIN_LEFTOVER:-?}"
+                    if ! $FORCE; then
+                        if [ "$drain_rc" -eq 2 ]; then
+                            # The drain could not establish the fleet's state and
+                            # has already said why, in detail, above.
+                            err "the drain could not establish whether the fleet is idle (see above)"
+                            err "refusing to bounce a fleet whose state is unknown; restoring dispatch"
+                        else
+                            err "$DRAIN_LEFTOVER polecat(s) still hold commits that exist only in their worktree after ${DRAIN_TIMEOUT}s (named above)"
+                            err "refusing to orphan unpushed work without --force; restoring dispatch"
+                        fi
+                        # The two err lines above are the ATTENDED report: they
+                        # work because a human ran this and is reading them. The
+                        # sink below is the UNATTENDED one, and it is not a
+                        # louder version of them — it leaves the script (mg-f206).
+                        # Fired BEFORE the exit, not from the trap: the trap runs
+                        # on every armed exit path, and a sink that fires on all
+                        # of them announces failures that are already reported by
+                        # something else. This one is scoped to the single outcome
+                        # nothing else can see — the run that changed NOTHING.
+                        # The sink is told WHICH refusal this is: a busy fleet
+                        # and an unreadable one need opposite reactions from the
+                        # operator, and one story for both would mis-advise half
+                        # the pages it sends (mg-65b2).
+                        if [ "$drain_rc" -eq 2 ]; then
+                            alert_drain_stalled unknown "$DRAIN_LEFTOVER"
+                        else
+                            alert_drain_stalled timeout "$DRAIN_LEFTOVER"
+                        fi
+                        # The restore is the trap's job now — and the trap puts
+                        # back the PRIOR value, where the bare `drain_post false`
+                        # that used to live here asserted `false` unconditionally.
+                        # This path was the ONLY one that restored anything; every
+                        # other exit between here and the kickstart leaked drain.
+                        exit 7
+                    fi
+                    if [ "$drain_rc" -eq 2 ]; then
+                        # Do not promise the cleanup here. The snapshot below is
+                        # fetched from the daemon we just failed to read, so on
+                        # this path it comes back EMPTY and cleanup_orphans has
+                        # nothing to work from — no unclaim, no worktree removal.
+                        # The timeout path's message can promise cleanup because
+                        # pogod is answering there; saying it here would be one
+                        # more confident claim about a state we cannot see, which
+                        # is the whole thing this ticket removes.
+                        log "--force: bouncing WITHOUT knowing whether polecats are live (the drain could not tell)"
+                        log "--force: if any are, they will survive the bounce and keep their claims + worktrees;"
+                        log "--force: no snapshot is readable from a silent pogod, so nothing will be cleaned up"
+                    else
+                        log "--force: hard-bouncing with $DRAIN_LEFTOVER polecat(s) still holding unpushed commits; will clean up after"
+                    fi
+                fi
+                # Capture the pre-kickstart polecat snapshot for post-bounce cleanup.
+                DRAIN_SNAPSHOT="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
+                ;;
+            *)
+                # bootstrap | stopped | down | error:<code> — four refusals that
+                # all stop before anything is built, installed or bounced (on
+                # `bounce` there was never a build to stop before, and the
+                # refusal is the same one), each needing a different operator
+                # reaction. They live in one function (mg-0155) because that
+                # function is the only place that knows which one this is, and
+                # what it writes is what the operator reads: the runner carries
+                # the sentence across rather than re-deriving one from the code.
+                refuse_drain_precondition "$disp" "$dp_body"   # never returns
+                ;;
+        esac
+    fi
+}
+
 cmd_redeploy() {
     # The reason channel, before anything that can fail (mg-0155). ERR_LOG must
     # exist before the first `err` call or that line is missing from the record,
@@ -3874,132 +4078,11 @@ cmd_redeploy() {
     confirm
 
     # 1. Signal drain (stop dispatching new polecats) and let the fleet quiesce.
-    #    Disambiguate three POST /agents/drain outcomes (mg-065e): endpoint
-    #    present (drain), endpoint absent but server up (bootstrap — a pogod
-    #    predating mg-cae1), and pogod genuinely down. Each has a DIFFERENT
-    #    remedy, so they must not collapse into one "is pogod up?" message.
-    local snapshot leftover=0
-    deploy_stage "drain"
-    if $SKIP_DRAIN; then
-        # Operator-directed skip (or the bootstrap remedy). No drain, no fleet
-        # quiesce, no snapshot — the kickstart -k below will bounce whatever is
-        # running. Explicit acknowledgement of the un-drained bounce.
-        log "--skip-drain: skipping drain phase (no fleet quiesce, no orphan cleanup)"
-    else
-        log "enabling drain mode"
-        # Read dispatch as it stands BEFORE we touch it, then arm the restore.
-        # Armed BEFORE the POST, not after, on purpose: a POST that times out
-        # AFTER pogod set the flag comes back "000" and classifies as `down`,
-        # so the one path where we cannot tell whether we mutated anything is a
-        # path that must still restore. A restore POST on a genuinely-down or
-        # bootstrap daemon fails harmlessly and says so; the reverse mistake is
-        # a silent fleet-wide outage.
-        DRAIN_PRIOR="$(drain_state)"
-        DRAIN_ARMED=true
-        # ONLY the EXIT trap restores. INT/TERM merely convert the signal into an
-        # exit, because a bash signal handler that RETURNS resumes the script
-        # where it was interrupted: `trap on_deploy_exit EXIT INT TERM` would
-        # restore dispatch on Ctrl-C and then carry on building and kickstarting
-        # with the fleet live — a cleanup that fires and then un-fires itself.
-        # Routing both through exit gives one restore, on one path, with the
-        # signal's status preserved.
-        #
-        # The EXIT trap itself is installed at the top of cmd_redeploy (mg-0155)
-        # and is NOT re-installed here: DRAIN_ARMED, not the trap, is what says
-        # whether there is dispatch to put back. Re-installing it would replace a
-        # trap that also writes the reason record with one that only restores.
-        trap 'err "interrupted (SIGINT) during the drain window"; exit 130' INT
-        trap 'err "terminated (SIGTERM) during the drain window"; exit 143' TERM
-        # One hop, both facts (mg-08e9). The status decides which refusal this
-        # is; the body is what lets the next morning check that ruling instead
-        # of taking it on faith.
-        local dp_raw dp_body
-        dp_raw="$(drain_post true)"
-        dp_body="$(http_body "$dp_raw")"
-        local disp; disp="$(classify_drain_precondition "$(http_status "$dp_raw")")"
-        case "$disp" in
-            drain)
-                # Take drain_wait's OWN verdict and its OWN number, rather than
-                # re-reading the endpoint for a third opinion (mg-65b2). The old
-                # re-fetch was redundant on the timeout path and actively wrong
-                # on the new one: when drain_wait refuses because pogod went
-                # silent, that curl fails too, `${leftover:-?}` renders "?", and
-                # the script announced "? polecat(s) still active after 1800s
-                # drain timeout" — a confident story about a deadline that never
-                # passed, over a state we had just admitted we could not read.
-                # Telling a timeout's story about an unknown is this ticket's own
-                # defect rebuilt inside its fix.
-                local drain_rc=0 leftover
-                leftover="$(drain_wait)" || drain_rc=$?
-                if [ "$drain_rc" -eq 0 ]; then
-                    report_drain_complete
-                else
-                    leftover="${leftover:-?}"
-                    if ! $FORCE; then
-                        if [ "$drain_rc" -eq 2 ]; then
-                            # The drain could not establish the fleet's state and
-                            # has already said why, in detail, above.
-                            err "the drain could not establish whether the fleet is idle (see above)"
-                            err "refusing to bounce a fleet whose state is unknown; restoring dispatch"
-                        else
-                            err "$leftover polecat(s) still hold commits that exist only in their worktree after ${DRAIN_TIMEOUT}s (named above)"
-                            err "refusing to orphan unpushed work without --force; restoring dispatch"
-                        fi
-                        # The two err lines above are the ATTENDED report: they
-                        # work because a human ran this and is reading them. The
-                        # sink below is the UNATTENDED one, and it is not a
-                        # louder version of them — it leaves the script (mg-f206).
-                        # Fired BEFORE the exit, not from the trap: the trap runs
-                        # on every armed exit path, and a sink that fires on all
-                        # of them announces failures that are already reported by
-                        # something else. This one is scoped to the single outcome
-                        # nothing else can see — the run that changed NOTHING.
-                        # The sink is told WHICH refusal this is: a busy fleet
-                        # and an unreadable one need opposite reactions from the
-                        # operator, and one story for both would mis-advise half
-                        # the pages it sends (mg-65b2).
-                        if [ "$drain_rc" -eq 2 ]; then
-                            alert_drain_stalled unknown "$leftover"
-                        else
-                            alert_drain_stalled timeout "$leftover"
-                        fi
-                        # The restore is the trap's job now — and the trap puts
-                        # back the PRIOR value, where the bare `drain_post false`
-                        # that used to live here asserted `false` unconditionally.
-                        # This path was the ONLY one that restored anything; every
-                        # other exit between here and the kickstart leaked drain.
-                        exit 7
-                    fi
-                    if [ "$drain_rc" -eq 2 ]; then
-                        # Do not promise the cleanup here. The snapshot below is
-                        # fetched from the daemon we just failed to read, so on
-                        # this path it comes back EMPTY and cleanup_orphans has
-                        # nothing to work from — no unclaim, no worktree removal.
-                        # The timeout path's message can promise cleanup because
-                        # pogod is answering there; saying it here would be one
-                        # more confident claim about a state we cannot see, which
-                        # is the whole thing this ticket removes.
-                        log "--force: bouncing WITHOUT knowing whether polecats are live (the drain could not tell)"
-                        log "--force: if any are, they will survive the bounce and keep their claims + worktrees;"
-                        log "--force: no snapshot is readable from a silent pogod, so nothing will be cleaned up"
-                    else
-                        log "--force: hard-bouncing with $leftover polecat(s) still holding unpushed commits; will clean up after"
-                    fi
-                fi
-                # Capture the pre-kickstart polecat snapshot for post-bounce cleanup.
-                snapshot="$(curl -sf --max-time 5 "$(base_url)/agents/drain" 2>/dev/null)"
-                ;;
-            *)
-                # bootstrap | stopped | down | error:<code> — four refusals that
-                # all stop BEFORE the build, each needing a different operator
-                # reaction. They live in one function (mg-0155) because that
-                # function is the only place that knows which one this is, and
-                # what it writes is what the operator reads: the runner carries
-                # the sentence across rather than re-deriving one from the code.
-                refuse_drain_precondition "$disp" "$dp_body"   # never returns
-                ;;
-        esac
-    fi
+    #    The gate itself is drain_gate (mg-9fc9) — shared verbatim with `bounce`,
+    #    which needs the identical policy and must not carry a second copy of it.
+    #    It leaves DRAIN_LEFTOVER and DRAIN_SNAPSHOT behind; it does not return at
+    #    all on a refused precondition or an un-forced stall.
+    drain_gate
 
     # 2. Build (only if a build is owed — a restart-only drift skips go install
     #    so we do not pay a rebuild we do not need).
@@ -4107,9 +4190,9 @@ cmd_redeploy() {
     report_prompt_refresh
 
     # 4. If a forced bounce killed active polecats, clean up the wreckage.
-    if [ "$leftover" != "0" ] && [ "$leftover" != "?" ]; then
-        log "cleaning up $leftover polecat(s) orphaned by the forced bounce"
-        cleanup_orphans "$snapshot"
+    if [ "$DRAIN_LEFTOVER" != "0" ] && [ "$DRAIN_LEFTOVER" != "?" ]; then
+        log "cleaning up $DRAIN_LEFTOVER polecat(s) orphaned by the forced bounce"
+        cleanup_orphans "$DRAIN_SNAPSHOT"
     fi
 
     # 5. Assert the fleet's mail loop survived the bounce. Reports only — the
@@ -4122,8 +4205,8 @@ cmd_redeploy() {
     #    mail-check to lose: the count hands out an allowance nothing earned,
     #    and a real crew loss disappears under it without a word.
     local mail_slack=""
-    if [ -n "$mail_pre_body" ] && [ "$leftover" != "0" ] && [ "$leftover" != "?" ]; then
-        mail_slack="$(expected_lost_mail_checks "$mail_pre_body" "$snapshot")"
+    if [ -n "$mail_pre_body" ] && [ "$DRAIN_LEFTOVER" != "0" ] && [ "$DRAIN_LEFTOVER" != "?" ]; then
+        mail_slack="$(expected_lost_mail_checks "$mail_pre_body" "$DRAIN_SNAPSHOT")"
     fi
     deploy_stage "post-check"
     verify_mail_checks_restored "$mail_pre" "$mail_slack"
@@ -4133,10 +4216,157 @@ cmd_redeploy() {
 }
 
 # ---------------------------------------------------------------------------
+# `bounce` — the recovery half of a deploy, with the remote taken out (mg-9fc9)
+# ---------------------------------------------------------------------------
+# WHAT IT IS FOR. On 2026-08-15..19 this box was in a 118-hour blackout and the
+# nightly deploy is its only automatic recovery path. The deploy could not run:
+# it needs the network the fault had taken out — `ssh: Could not resolve hostname
+# github.com`, 30 retries over 7980s, rc=10 — on all five nights. Nothing
+# misbehaved. The recovery mechanism simply shares a dependency with the failure
+# it recovers from, and recovery, when it came, came from outside the system:
+# Daniel typed a message.
+#
+# A restart needs no remote. It delivers no new code — that genuinely needs the
+# remote — but the agents were not broken by anything a restart could not clear,
+# so it would have ended the blackout on night one instead of night five. This
+# subcommand is that restart, and scripts/launchd/pogo-deploy.sh is what decides
+# when to reach for it (after N consecutive nights lost at the TRANSPORT step).
+#
+# WHAT IT DELIBERATELY DOES NOT DO, and why each omission is not a shortcut:
+#
+#   NO SYNC. There is nothing to sync — the caller reaches this only because the
+#     sync is impossible. A bounce reads no tree and no ref, so a checkout that
+#     is stale, dirty or mid-fetch does not stop it. That independence is the
+#     whole point: every dependency this path keeps is one the fault can take.
+#
+#   NO BUILD. `go install` would install whatever the un-syncable checkout
+#     happens to be at, which is either what is already installed (pointless) or
+#     an older revision (a silent DOWNGRADE nobody asked for). The binaries on
+#     disk are left exactly as they are; this restarts the fleet onto them.
+#
+#   NO do_prove. do_prove exists because `go install` ships an artifact whose
+#     detector has never been exercised against it, and a redeploy must not
+#     kickstart into an unproven binary. A bounce installs nothing, so the
+#     artifact it restarts into is the one ALREADY RUNNING — restarting the same
+#     binary establishes nothing new about its detector, and proving is a
+#     question about a CHANGE. Running it here would also mean a RED (exit 9)
+#     could refuse the recovery for a reason unrelated to the outage, which is
+#     the very shape — a remedy disabled by a condition it does not depend on —
+#     that this ticket is about.
+#
+#   NO report_activation. That audit compares the installed plists against the
+#     plist the asked binary renders, and its whole justification (mg-b9e7) is
+#     that it runs immediately after a VERIFIED build from main — the one moment
+#     of the day when "which build?" has a right answer. A bounce has not earned
+#     that moment, so it does not borrow the reading.
+#
+# WHAT IT KEEPS, and these are not optional:
+#
+#   THE DRAIN GATE, unchanged and unforced. drain_gate is called, not copied
+#     (see its header). A bounce kills in-flight polecats, so the refusal to
+#     orphan commits that exist only in a worktree applies here exactly as it
+#     does to a redeploy — and `--force` is REFUSED outright below rather than
+#     merely left unset, because the caller is an unattended 03:00 job and the
+#     ticket is explicit: if the drain refuses, report and do not bounce.
+#
+#   THE OUT-OF-BAND GUARD. kickstart -k kills pogod's whole process tree, so a
+#     caller inside it kills the fleet and itself mid-run (mg-1bbf). Unchanged.
+#
+#   THE VERIFIES. verify_bounced (a pogod is answering again) and
+#     verify_orchestration (mode=full, i.e. the fleet can actually dispatch).
+#     The second is the one that closes this: a bounce whose daemon came back in
+#     index-only mode has replaced a blackout with a quieter blackout.
+cmd_bounce() {
+    # Same reason channel as cmd_redeploy, armed the same way and for the same
+    # reason: the runner reads the sentence this run wrote rather than deriving
+    # one from an integer (mg-0155). The record's `installed=` field is `no` on
+    # every path out of here — a bounce has no mutation point that could move it
+    # — which makes it the honest answer rather than a default.
+    if [ -n "$REASON_FILE" ]; then
+        ERR_LOG="$(mktemp -t pogo-self-deploy-err 2>/dev/null)" || ERR_LOG=""
+    fi
+    trap on_deploy_exit EXIT
+    deploy_stage "startup"
+
+    assert_out_of_band
+
+    resolve_mg || { err "cannot resolve the macguffin 'mg' — refusing to bounce with an unusable alert path"; exit 1; }
+
+    # Refused, not ignored. --force overrides the two drain refusals, and both of
+    # them are refusals to destroy work whose only copy is in a worktree. An
+    # unattended fallback firing on a night nobody is awake for is the last caller
+    # that should be able to make that call, and a flag that is merely "not
+    # passed" is one edit away from being passed.
+    if $FORCE; then
+        err "--force is not accepted by 'bounce': the fallback exists to restart a fleet SAFELY, and forcing past the drain would orphan commits that exist only in a polecat's worktree"
+        err "if you mean to hard-bounce, that is 'redeploy --force' run by a human who has read mg-0b77 and mg-13a3"
+        exit 2
+    fi
+
+    log "bounce: restarting the fleet onto the binaries ALREADY INSTALLED — no fetch, no build, no install. This delivers no new code (that needs the remote); it clears state a restart can clear."
+    confirm "bounce pogod"
+
+    # 1. The drain, verbatim: same POST, same four refusals, same wait, same
+    #    refusal to orphan unpushed work. It does not return if the fleet is not
+    #    safe to bounce.
+    drain_gate
+
+    # 2. Read the fleet's mail-checks BEFORE the kickstart — the old pogod is the
+    #    only thing that can say what there was to preserve (mg-de08). Kept for a
+    #    bounce because the post-check at step 4 is the strongest local evidence
+    #    that the restart actually helped, which is the question a recovery bounce
+    #    is answering.
+    local mail_pre_body="" mail_pre
+    if mail_pre_body="$(schedules_body)"; then
+        mail_pre="$(printf '%s' "$mail_pre_body" | extract_mail_check_ids)"
+    else
+        mail_pre="?"
+    fi
+
+    # Disarm before the kickstart, for cmd_redeploy's reason: it kills the pogod
+    # whose dispatch flag we mutated, so past this line there is no state left to
+    # restore and no process to restore it on. The EXIT trap STAYS — it still
+    # writes the reason record.
+    DRAIN_ARMED=false
+    trap - INT TERM
+    deploy_stage "restart"
+    local spawns_pre; spawns_pre="$(spawn_snapshot)"; spawns_pre="${spawns_pre%%	*}"
+    do_restart
+    deploy_stage "verify"
+    local verify_rc=0
+    verify_bounced || verify_rc=$?
+    report_spawns "$spawns_pre"
+    [ "$verify_rc" -eq 0 ] || exit 8
+    verify_orchestration || exit 11
+
+    # 3. Who launchd actually supervises. A bounce is a launchctl kickstart, so
+    #    "an orphan pogod answered the port" is the reading that would make this
+    #    whole path a no-op while every check went green (mg-fa79). Report-only.
+    report_supervision
+    # Act 3 happens on pogod's own boot (InstallPrompts), and a bounce boots
+    # pogod, so the record is as meaningful here as after a deploy. Report-only.
+    report_prompt_refresh
+
+    # 4. Did the fleet's mail loop come back? Report-only, and there is no force
+    #    slack to allow for: this path cannot orphan a polecat, so any schedule
+    #    that failed to return is a real loss.
+    deploy_stage "post-check"
+    verify_mail_checks_restored "$mail_pre" ""
+
+    deploy_stage "done"
+    log "bounce complete — the fleet was restarted onto the installed binaries. NOTHING was fetched, built or installed, so the box is no more current than it was; what changed is that every agent is freshly started."
+}
+
+# ---------------------------------------------------------------------------
 # Arg parsing
 # ---------------------------------------------------------------------------
+# usage — the header, bounded by the `set -u` sentinel rather than by a line
+# number. `2,40p` was the bound, and the USAGE block sits at line 49: every
+# subcommand and every flag this script has was OUTSIDE what --help printed, and
+# had been since the header grew past forty lines. The identical drift, with the
+# identical fix, is recorded in scripts/launchd/pogo-deploy.sh's own -h handler.
 usage() {
-    sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^set -u/p' "${BASH_SOURCE[0]}" | sed -n 's/^# \{0,1\}//p'
 }
 
 main() {
@@ -4159,6 +4389,7 @@ main() {
     case "$subcmd" in
         check)     cmd_check ;;
         redeploy)  cmd_redeploy ;;
+        bounce)    cmd_bounce ;;
         -h|--help) usage; exit 0 ;;
         *)         err "unknown subcommand: $subcmd"; usage; exit 2 ;;
     esac

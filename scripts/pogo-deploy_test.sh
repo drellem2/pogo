@@ -3005,6 +3005,377 @@ run_net_control >/dev/null 2>&1
     || fail "run_net_control ran the control $NC_CALLS times in one run"
 
 # ---------------------------------------------------------------------------
+# THE FALLBACK THAT NEEDS NO REMOTE (mg-9fc9)
+# ---------------------------------------------------------------------------
+# WHAT IS BEING TESTED, and it is not "does the bounce work". The bounce is
+# pogo-self-deploy's, and its own suite covers it. What lives here is the
+# TRIGGER's four decisions, each of which was a constraint in the ticket because
+# each has a way of being wrong that reads as working:
+#
+#   which failures count      — a bad TREE must never accumulate toward a fleet
+#                               bounce, and it is one careless `*)` away from
+#                               doing so
+#   how many nights           — N > 1, from config, and counted in NIGHTS rather
+#                               than in fires
+#   whether there is window    — the fallback must not be disabled by the very
+#                               patience that discovered the outage
+#   what gets said, and where — locally, because on the night this fires the
+#                               network is what is broken
+
+# --- transport_streak_verdict: the discriminator, and it has THREE answers ---
+for c in network remote unclassified timeout; do
+    [ "$(transport_streak_verdict "$c")" = "bump" ] \
+        && pass "verdict($c) = bump — the sync never reached the tree, so the night delivered nothing AND restarted nothing" \
+        || fail "verdict($c) = $(transport_streak_verdict "$c")"
+done
+# THE ONE THAT MATTERS MOST. Constraint 1: "a deploy that fails because the tree
+# is bad must NOT trigger a fleet bounce — that is a different fault with a
+# different remedy, and bouncing on it would be destructive noise." All three of
+# these are read AFTER a successful fetch, so each is positive evidence that the
+# transport works.
+for c in dirty diverged checkout; do
+    [ "$(transport_streak_verdict "$c")" = "clear" ] \
+        && pass "verdict($c) = clear — a tree fault is evidence the transport WORKED, and must never accumulate toward a bounce" \
+        || fail "verdict($c) = $(transport_streak_verdict "$c") — a tree fault must not count toward a fleet bounce"
+done
+# `config` fails before any network call is made, so it is evidence in neither
+# direction. `leave` is the third answer, and the reason there are three.
+[ "$(transport_streak_verdict config)" = "leave" ] \
+    && pass "verdict(config) = leave — it fails before any network call, so the night establishes nothing about the transport either way" \
+    || fail "verdict(config) = $(transport_streak_verdict config)"
+[ "$(transport_streak_verdict '')" = "leave" ] && [ "$(transport_streak_verdict wat)" = "leave" ] \
+    && pass "verdict: an empty or unrecognised class LEAVES the count — a missed bounce costs a night, a wrong one costs a fleet restart nobody asked for" \
+    || fail "verdict: unknown class does not default to leave"
+
+# COHERENCE WITH THE OTHER LIST. Two predicates ask "did this failure establish
+# anything about the tree?" — sync_class_retryable for the retry decision and
+# transport_streak_verdict for this one. They are separate functions on purpose
+# (they answer different questions and could legitimately diverge), which is
+# exactly why a drift between them has to be visible rather than silent: a class
+# that bumps the streak but is NOT retryable would mean the fallback counting a
+# night the retry tier considers settled.
+DRIFT=""
+for c in network remote unclassified timeout dirty diverged checkout config; do
+    if [ "$(transport_streak_verdict "$c")" = "bump" ]; then
+        sync_class_retryable "$c" || DRIFT="$DRIFT $c"
+    fi
+done
+[ -z "$DRIFT" ] \
+    && pass "every class that BUMPS the streak is also one sync_class_retryable calls established-nothing — the two lists agree today, and this is where they stop agreeing quietly" \
+    || fail "classes bump the streak but are not retryable:$DRIFT"
+
+# --- transport_streak_next: NIGHTS, not fires ------------------------------
+[ "$(transport_streak_next 2026-08-19 "")" = "1" ] \
+    && pass "streak: an absent record reads as no streak, and tonight makes it 1" || fail "streak from empty"
+[ "$(transport_streak_next 2026-08-19 "2026-08-18 1 -")" = "2" ] \
+    && pass "streak: last night's 1 becomes tonight's 2 — the threshold is crossed by consecutive nights" || fail "streak increment across nights"
+[ "$(transport_streak_next 2026-08-19 "2026-08-18 4 2026-08-16")" = "5" ] \
+    && pass "streak: a long run keeps counting past the threshold" || fail "streak increment from 4"
+# IDEMPOTENT PER DATE, and this is load-bearing rather than tidy. Three fires a
+# night can each reach the settling path (rc=10 reopens the night, and a run that
+# could not read its own schedule believes no retry is coming). A streak that
+# counted FIRES would cross a threshold of 2 in a single night — turning "two
+# nights of evidence" into "two attempts an hour apart", which is the whole
+# difference constraint 2 is about.
+[ "$(transport_streak_next 2026-08-19 "2026-08-19 1 -")" = "1" ] \
+    && pass "streak: a SECOND fire on the same night does not increment — the unit is a night, not a fire (three fires cannot manufacture a threshold)" \
+    || fail "streak double-counted two fires of the same night"
+[ "$(transport_streak_next 2026-08-19 "garbage")" = "1" ] \
+    && pass "streak: a corrupt record reads as no streak — a bad file DELAYS a bounce, it cannot invent one" || fail "streak from garbage"
+[ "$(transport_streak_field '' 1)" = "-" ] && [ "$(transport_streak_field '' 2)" = "0" ] && [ "$(transport_streak_field '' 3)" = "-" ] \
+    && pass "streak fields: an absent record degrades to '- 0 -' rather than to an unset expansion under set -u" || fail "streak field defaults"
+[ "$(transport_streak_field '2026-08-18 2 2026-08-15' 3)" = "2026-08-15" ] \
+    && pass "streak: the last-bounce date survives a bump, so the mail can say when the fallback last fired" || fail "streak last-bounce field"
+
+# --- transport_bounce_due: N > 1, and from the config ----------------------
+transport_bounce_due 1 2 && fail "one lost night fired the fallback — N must be > 1" \
+    || pass "one lost night does NOT fire the fallback (a bad night is not a run)"
+transport_bounce_due 2 2 && pass "two consecutive lost nights DO fire it" || fail "N=2 at count 2"
+transport_bounce_due 3 2 && pass "and it stays due past the threshold" || fail "N=2 at count 3"
+transport_bounce_due 9 0 && fail "threshold 0 still bounced" || pass "POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER=0 disables the fallback entirely"
+transport_bounce_due 9 '' && fail "an empty threshold bounced" || pass "a non-numeric threshold disables rather than crashes"
+[ "$TRANSPORT_BOUNCE_AFTER" -gt 1 ] \
+    && pass "the shipped default threshold is $TRANSPORT_BOUNCE_AFTER — greater than one, as the ticket requires, and stated in the config rather than hardcoded at the callsite" \
+    || fail "the default threshold is $TRANSPORT_BOUNCE_AFTER — one bad night must not bounce the fleet"
+[ "$(POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER=3 bash -c 'source "'"$RUNNER"'"; echo "$TRANSPORT_BOUNCE_AFTER"')" = "3" ] \
+    && pass "the threshold is env-overridable — it is config, not a constant" || fail "POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER is not honoured"
+
+# --- THE SELF-DEFEAT CHECK: the fallback must survive the vigil ------------
+# This is the way this fix would most plausibly have exhibited the defect it
+# remedies. The vigil probes until drain_budget hits ZERO on the DEPLOY's reserve
+# (1200s of build + do_prove + kickstart + verify). If the fallback were charged
+# that same reserve, then on every night the vigil ran to its end — which is
+# every night this fallback exists for — the budget would already be zero and the
+# bounce would refuse for lack of window. The remedy would have been disabled by
+# the patience that discovered the outage.
+[ "$BOUNCE_RESERVE" -lt "$RESERVE" ] \
+    && pass "the bounce's reserve (${BOUNCE_RESERVE}s) is smaller than the deploy's (${RESERVE}s) — it owes no build and no do_prove" \
+    || fail "BOUNCE_RESERVE ($BOUNCE_RESERVE) is not smaller than RESERVE ($RESERVE); the fallback would be starved on exactly the nights it exists for"
+# Walk the window and find the first hour at which the DEPLOY budget is zero:
+# that instant is where the vigil gives up and the fallback is asked to act.
+VIGIL_END_H=""
+for h in 02 03 04 05; do
+    if [ "$(POGO_DEPLOY_NOW=$h drain_budget 6 "$RESERVE" "$MAX_DRAIN" "$MIN_DRAIN")" -le 0 ]; then VIGIL_END_H="$h"; break; fi
+done
+# Under the production window (2-6) the deploy budget is still positive at 05:00
+# and reaches zero between hours, so assert the property at the last hour the
+# vigil can be alive rather than at a synthetic instant: the bounce must have
+# strictly more window than the deploy at the same moment.
+D_BUDGET="$(POGO_DEPLOY_NOW=05 drain_budget 6 "$RESERVE" "$MAX_DRAIN" "$MIN_DRAIN")"
+B_BUDGET="$(POGO_DEPLOY_NOW=05 drain_budget 6 "$BOUNCE_RESERVE" "$MAX_DRAIN" "$MIN_DRAIN")"
+[ "$B_BUDGET" -gt "$D_BUDGET" ] \
+    && pass "at 05:00 the deploy has ${D_BUDGET}s of drain and the bounce has ${B_BUDGET}s — the fallback outlives the deploy's own budget inside the same window" \
+    || fail "the bounce budget ($B_BUDGET) does not exceed the deploy's ($D_BUDGET) at 05:00"
+# And a window with genuinely nothing left still refuses. A drain that cannot
+# finish has stopped dispatch for its whole length and delivered nothing, which
+# is worse than not bouncing.
+[ "$(POGO_DEPLOY_NOW=05 drain_budget 5 "$BOUNCE_RESERVE" "$MAX_DRAIN" "$MIN_DRAIN")" -eq 0 ] \
+    && pass "a fallback at the very edge of the window gets a ZERO budget and will refuse — patience is not a licence to bounce into the working day" \
+    || fail "the bounce budget did not go to zero at the window edge"
+
+# --- the announcement: LOCAL, and it says what a bounce is not -------------
+FALLBACK_STATUS=bounced FALLBACK_DETAIL="drained and restarted" SYNC_CLASS=network SYNC_VIGIL_SPENT=9000
+BODY="$(fallback_body 2)"
+case "$BODY" in *"NO code"*|*"no new code"*|*"No new code"*) pass "the mail says the bounce delivered NO CODE — a reader must not take a bounce for a deploy" ;; *) fail "the fallback mail does not say that no code was delivered" ;; esac
+case "$BODY" in *"drain"*) pass "and that the drain still ruled" ;; *) fail "the fallback mail does not mention the drain" ;; esac
+case "$BODY" in *"2 consecutive"*) pass "and how many nights were lost, which is the evidence the decision was made on" ;; *) fail "the fallback mail does not carry the streak" ;; esac
+case "$BODY" in *"9000s"*) pass "and the vigil duration, as the measured lower bound on the outage" ;; *) fail "the fallback mail drops the vigil measurement" ;; esac
+case "$BODY" in *POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER*) pass "and the knob that changes the threshold, including that 0 disables it" ;; *) fail "the fallback mail does not name the threshold env var" ;; esac
+# THE SUBJECT IS THE PART THAT TRAVELS. "the fleet was restarted" and "the
+# fallback could not restart it" need opposite reactions from the reader, so they
+# must be distinguishable without opening the mail.
+S_OK="$(FALLBACK_STATUS=bounced; fallback_subject 2)"
+S_FAIL="$(FALLBACK_STATUS=failed; fallback_subject 2)"
+S_REF="$(FALLBACK_STATUS=refused-drain; fallback_subject 2)"
+{ [ "$S_OK" != "$S_FAIL" ] && [ "$S_FAIL" != "$S_REF" ] && [ "$S_OK" != "$S_REF" ]; } \
+    && pass "the three outcomes get three different SUBJECTS — bounced / could not / declined are not one story" \
+    || fail "fallback subjects collapse: [$S_OK] [$S_FAIL] [$S_REF]"
+case "$S_OK" in *BOUNCED*) pass "and a successful bounce says so in the subject, because that is a fleet-wide event a reader has to know happened" ;; *) fail "the bounced subject does not name the bounce: $S_OK" ;; esac
+
+# THE ANNOUNCEMENT PATH TOUCHES NOTHING REMOTE. Constraint 3: on the night this
+# fires, the network is what is broken, so an announcement that needed it would
+# be the ticket's own defect rebuilt inside its remedy. The maildir is local and
+# `pogo events emit` is loopback; nothing that ACTS may reach for git, curl, gh,
+# ssh or the reachability probe.
+#
+# Scoped to the three functions that act. fallback_body is excluded on purpose and
+# the exclusion is the interesting part: its text QUOTES `curl -s
+# http://127.0.0.1:10000/server/mode` as advice to the operator, which is loopback
+# and is exactly what a reader should run — a probe that cannot tell a quoted
+# remedy from a call would have to be satisfied by deleting the most useful line
+# in the mail.
+FALLBACK_SRC="$(sed -n '/^fallback_bounce() {/,/^}/p;/^fallback_announce() {/,/^}/p;/^resolve_bounce_script() {/,/^}/p' "$RUNNER")"
+{ [ -n "$FALLBACK_SRC" ] && ! grep -qE '(^|[^_[:alnum:]])(curl|gh|ssh|probe_tcp|remote_endpoint|git_step|sync_src)([^_[:alnum:]]|$)' <<<"$FALLBACK_SRC"; } \
+    && pass "no acting part of the fallback path calls curl, git, gh, ssh or the reachability probe — the announcement cannot need the resource whose loss it is announcing" \
+    || fail "the fallback path reaches for the network: $(grep -nE '(^|[^_[:alnum:]])(curl|gh|ssh|probe_tcp|remote_endpoint|git_step|sync_src)([^_[:alnum:]]|$)' <<<"$FALLBACK_SRC" | head -3)"
+# And the body is text, not a program: the only substitutions in it are into
+# strings this runner already holds.
+BODY_SRC="$(sed -n '/^fallback_body() {/,/^}/p' "$RUNNER")"
+{ [ -n "$BODY_SRC" ] && ! grep -qE '\$\((curl|git|gh|ssh)' <<<"$BODY_SRC"; } \
+    && pass "and fallback_body substitutes no command that could block on a network — its 127.0.0.1 line is quoted advice, not a call" \
+    || fail "fallback_body runs a network command while composing the announcement"
+{ grep -q '"\$MG" mail send' "$RUNNER" && grep -q 'alert "\$(fallback_subject' "$RUNNER"; } \
+    && pass "and it announces through alert(), which mails the LOCAL maildir — the one channel this fault leaves standing" \
+    || fail "the fallback does not announce through alert()"
+# A DETECTOR FILTERS ON THE TYPE, NOT ON A SUBJECT STRING. A fleet bounce arriving
+# as `deploy_nightly_failed` would be indistinguishable, to anything downstream,
+# from the ordinary failed night it is a response to.
+grep -q 'deploy_transport_fallback' "$RUNNER" \
+    && pass "the fallback's event carries its own type — a bounce is an action taken, not a deploy that failed" \
+    || fail "the fallback emits no distinct event type"
+
+# --- resolve_bounce_script: EXECUTION, not existence ----------------------
+# A pogo-self-deploy older than mg-9fc9 exits 2 on `bounce` with "unknown
+# subcommand" — a correct refusal in the wrong voice, which would read as a
+# broken fallback rather than an absent one. So each candidate is asked.
+BSDIR="$(mktemp -d)"
+mkdir -p "$BSDIR/src/scripts" "$BSDIR/boot/scripts"
+cat > "$BSDIR/src/scripts/pogo-self-deploy" <<'STUB'
+#!/bin/bash
+echo "pogo-self-deploy check   # drift report"
+echo "pogo-self-deploy redeploy [flags]"
+STUB
+cat > "$BSDIR/boot/scripts/pogo-self-deploy" <<'STUB'
+#!/bin/bash
+echo "pogo-self-deploy bounce [flags]        # guarded restart ONLY"
+STUB
+chmod +x "$BSDIR/src/scripts/pogo-self-deploy" "$BSDIR/boot/scripts/pogo-self-deploy"
+BOUNCE_SCRIPT=""
+( SRC="$BSDIR/src" BOOTSTRAP_REPO="$BSDIR/boot"; resolve_bounce_script >/dev/null 2>&1; echo "$BOUNCE_SCRIPT" ) > "$WORK/bs1"
+[ "$(cat "$WORK/bs1")" = "$BSDIR/boot/scripts/pogo-self-deploy" ] \
+    && pass "resolve_bounce_script SKIPS a pogo-self-deploy that predates the subcommand and takes the one that advertises it — an old script is reported absent, not broken" \
+    || fail "resolve_bounce_script picked [$(cat "$WORK/bs1")]"
+BOUNCE_SCRIPT=""
+( SRC="$BSDIR/src" BOOTSTRAP_REPO="$BSDIR/src"; resolve_bounce_script >/dev/null 2>&1 && echo FOUND || echo NONE ) > "$WORK/bs2"
+[ "$(cat "$WORK/bs2")" = "NONE" ] \
+    && pass "and it FAILS rather than returning a script it could not confirm — the fallback reports that it has no bouncer" \
+    || fail "resolve_bounce_script accepted a script with no bounce subcommand"
+rm -rf "$BSDIR"
+
+# --- fallback_bounce end to end, with a stubbed bouncer -------------------
+# The five outcomes and what each leaves in the streak file. This is the code that
+# decides whether a fleet gets restarted, so it is exercised rather than read.
+#
+# Each case runs in a CHILD bash that sources the runner fresh, for two reasons.
+# The runner derives SRC, TRANSPORT_STREAK and the rest from POGO_DEPLOY_* at
+# source time, so the fixture has to be in the environment BEFORE the source (an
+# `SRC=...` in a subshell after it is simply overwritten — that mistake is what
+# the first version of these assertions measured). And alert() is stubbed there
+# rather than here, so no later assertion in this file is reading a fixture.
+FB_DIR="$(mktemp -d)"
+mkdir -p "$FB_DIR/src/scripts"
+FB_MAIL="$FB_DIR/mail"; : > "$FB_MAIL"
+fb_bouncer() {   # fb_bouncer RC — a pogo-self-deploy that advertises `bounce` and exits RC
+    cat > "$FB_DIR/src/scripts/pogo-self-deploy" <<STUB
+#!/bin/bash
+[ "\$1" = "--help" ] && { echo "  pogo-self-deploy bounce [flags]        # guarded restart ONLY"; exit 0; }
+echo "\$*" >> "$FB_DIR/calls"
+exit $1
+STUB
+    chmod +x "$FB_DIR/src/scripts/pogo-self-deploy"
+}
+fb_run() {  # fb_run STREAK_LINE COUNT WINDOW NOW -> echoes FALLBACK_STATUS
+    : > "$FB_DIR/calls"
+    printf '%s\n' "$1" > "$FB_DIR/streak"
+    POGO_DEPLOY_SRC="$FB_DIR/src" POGO_DEPLOY_BOOTSTRAP_REPO="$FB_DIR/src" \
+    POGO_DEPLOY_TRANSPORT_STREAK="$FB_DIR/streak" POGO_DEPLOY_WINDOW="$3" POGO_DEPLOY_NOW="$4" \
+    HOME="$FB_DIR" FB_MAIL="$FB_MAIL" COUNT="$2" \
+    bash -c 'source "'"$RUNNER"'"
+             parse_window "$POGO_DEPLOY_WINDOW"
+             POGO_CLI=""; MG=""; SYNC_CLASS=network; SYNC_VIGIL_SPENT=9000
+             alert() { printf "SUBJECT: %s\n" "$1" >> "$FB_MAIL"; printf "%s\n" "$2" >> "$FB_MAIL"; return 0; }
+             fallback_bounce 2026-08-19 "$COUNT" >/dev/null 2>&1
+             printf "%s\n" "$FALLBACK_STATUS"'
+}
+
+# not-due: below the threshold, nothing is invoked and nothing is mailed.
+fb_bouncer 0
+ST="$(fb_run '2026-08-19 1 -' 1 2-6 03)"
+{ [ "$ST" = "not-due" ] && [ ! -s "$FB_DIR/calls" ]; } \
+    && pass "fallback_bounce below the threshold reports not-due and invokes NOTHING — one lost night must cost nothing at all" \
+    || fail "below-threshold fallback: status=$ST calls=[$(cat "$FB_DIR/calls" 2>/dev/null)]"
+
+# bounced: the bouncer runs, the streak resets, the fleet event is announced.
+: > "$FB_MAIL"; fb_bouncer 0
+ST="$(fb_run '2026-08-18 1 -' 2 2-6 03)"
+[ "$ST" = "bounced" ] && pass "fallback_bounce at the threshold runs the bouncer and reports bounced" || fail "at-threshold fallback status=$ST"
+grep -q '^bounce --yes --drain-timeout [0-9][0-9]*$' "$FB_DIR/calls" \
+    && pass "it calls 'bounce --yes --drain-timeout N' — the window-derived budget, and --yes because there is no tty at 03:00" \
+    || fail "the bouncer was called as [$(cat "$FB_DIR/calls")]"
+grep -q -- '--force' "$FB_DIR/calls" \
+    && fail "the fallback passed --force — it must never orphan commits that exist only in a worktree" \
+    || pass "and NEVER --force: a drain refusal is reported, not overridden"
+{ [ "$(cut -d' ' -f2 "$FB_DIR/streak")" = "0" ] && [ "$(cut -d' ' -f3 "$FB_DIR/streak")" = "2026-08-19" ]; } \
+    && pass "a completed bounce RESETS the streak and records the date — a week-long outage bounces once every N nights, not every night" \
+    || fail "streak after a bounce: [$(cat "$FB_DIR/streak")]"
+grep -q 'SUBJECT: .*FLEET BOUNCED' "$FB_MAIL" \
+    && pass "and it announces the bounce out of band, on the local channel" || fail "no bounce announcement mailed: [$(cat "$FB_MAIL")]"
+
+# failed: exit 7 is the drain refusing. The streak is NOT reset — nothing was
+# restarted, so the count still measures what it measured.
+: > "$FB_MAIL"; fb_bouncer 7
+ST="$(fb_run '2026-08-18 1 -' 2 2-6 03)"
+[ "$ST" = "failed" ] && pass "a bouncer that exits 7 (the drain stalled) reports failed — the refusal is respected, not retried past" || fail "failed-bounce status=$ST"
+[ "$(cut -d' ' -f2 "$FB_DIR/streak")" = "1" ] \
+    && pass "and a refused bounce does NOT reset the streak — the count still measures how long the fleet has gone without a restart" \
+    || fail "a refused bounce reset the streak: [$(cat "$FB_DIR/streak")]"
+grep -q 'SUBJECT: .*COULD NOT bounce' "$FB_MAIL" \
+    && pass "and the refusal is mailed too — a fallback that fired and did nothing is exactly what must not be silent" || fail "no refusal announcement mailed"
+
+# refused-window: a fire too late to finish a drain must not start one.
+: > "$FB_MAIL"; fb_bouncer 0
+ST="$(fb_run '2026-08-18 1 -' 2 2-5 05)"
+{ [ "$ST" = "refused-window" ] && [ ! -s "$FB_DIR/calls" ]; } \
+    && pass "with no usable window left the fallback refuses and never invokes the bouncer — a drain that cannot finish freezes dispatch and delivers nothing" \
+    || fail "window-refusal: status=$ST calls=[$(cat "$FB_DIR/calls" 2>/dev/null)]"
+grep -q 'SUBJECT: .*DECLINED' "$FB_MAIL" \
+    && pass "and the DECLINED outcome is mailed — the fleet is still owed a restart and somebody has to know" || fail "a declined fallback went unannounced"
+
+# refused-noscript: the checkout the sync could not advance may not exist at all,
+# which is the `clone` arm of the very failure being handled.
+: > "$FB_MAIL"; rm -f "$FB_DIR/src/scripts/pogo-self-deploy"
+ST="$(fb_run '2026-08-18 1 -' 2 2-6 03)"
+[ "$ST" = "refused-noscript" ] \
+    && pass "a box with no local bouncer at all reports refused-noscript rather than dying inside the fallback" \
+    || fail "no-script refusal: status=$ST"
+unset -f fb_bouncer fb_run
+rm -rf "$FB_DIR"
+# The stubs above lived in child processes; this is the witness for that claim,
+# because every assertion after this point would otherwise be reading a fixture.
+declare -f alert | grep -q 'mail send' \
+    && pass "the real alert() is intact after the fallback fixtures — the stubs were confined to child shells" \
+    || fail "alert() is still stubbed; later assertions in this file would be measuring the fixture"
+
+
+# --- bounce_reason_line: the runner reads the bounce's own sentence -------
+# Same channel, same rule as the deploy's (mg-0155): the caller does not
+# re-derive a story from an integer. The fallback's mail is the only
+# announcement on a night the network is down, so it is the last place that can
+# afford a guess about why the bounce did not happen.
+BRF="$WORK/bounce-reason"
+cat > "$BRF" <<'REC'
+exit=7
+stage=drain
+installed=no
+reason=3 polecat(s) still hold commits that exist only in their worktree after 900s
+--- verbatim ---
+3 polecat(s) still hold commits that exist only in their worktree after 900s
+refusing to orphan unpushed work without --force; restoring dispatch
+REC
+OUT="$(bounce_reason_line "$BRF" 7)"
+case "$OUT" in
+    *"stage drain"*"3 polecat(s) still hold commits"*) pass "bounce_reason_line reports the stage and the bounce's OWN headline, not a story derived from the code" ;;
+    *) fail "bounce_reason_line: $OUT" ;;
+esac
+OUT="$(bounce_reason_line "$WORK/no-such-record" 5)"
+case "$OUT" in
+    *"left no reason record"*"$WORK/no-such-record"*) pass "and with no record it SAYS there is none, naming the path — an absent record is reported, never filled in" ;;
+    *) fail "bounce_reason_line with no record: $OUT" ;;
+esac
+case "$(bounce_reason_line "$WORK/no-such-record" 5)" in
+    *"$(describe_exit 5)"*) pass "falling back to describe_exit for the code alone, which is all an integer can honestly carry" ;;
+    *) fail "the no-record fallback does not describe the exit code" ;;
+esac
+
+# --- WIRING: the trigger is reached, and only where it should be ----------
+# A fallback nothing calls is the mg-b9e7 shape — a detector that existed and
+# only fired when a person ran it. And a fallback called from the WRONG place is
+# worse than none: before retry_will_follow it would bounce the fleet at 03:00 on
+# a night the 04:00 fire could still have deployed properly.
+RWF_LINE="$(grep -n 'if retry_will_follow "\$sync_rc"; then' "$RUNNER" | cut -d: -f1)"
+FB_LINE="$(grep -n '^                    fallback_bounce "\$today" "\$streak" ;;$' "$RUNNER" | cut -d: -f1)"
+SYNC_ALERT_LINE="$(grep -n 'ABORTED: could not sync' "$RUNNER" | head -1 | cut -d: -f1)"
+{ [ -n "$RWF_LINE" ] && [ -n "$FB_LINE" ] && [ "$FB_LINE" -gt "$RWF_LINE" ] && [ "$FB_LINE" -lt "$SYNC_ALERT_LINE" ]; } \
+    && pass "fallback_bounce is called AFTER retry_will_follow and BEFORE the sync alert (lines $RWF_LINE < $FB_LINE < $SYNC_ALERT_LINE) — no bounce while a later fire could still deploy, and the alert can report what the fallback did" \
+    || fail "fallback_bounce is wired at line ${FB_LINE:-?}, outside (${RWF_LINE:-?}, ${SYNC_ALERT_LINE:-?})"
+# AND IT IS INSIDE THE RUN DEADLINE'S COVERAGE. The bounce is a long-running
+# orchestration call and is deliberately not wrapped in run_bounded — its
+# legitimate duration IS the drain budget, and a second bound would either
+# duplicate that number or contradict it. What bounds it is arm_run_deadline, a
+# watchdog in a separate process that covers whichever stage the run is wedged in
+# (mg-56ac). That only holds if the fallback runs after the arming.
+ARM_LINE="$(grep -n 'arm_run_deadline "\$DEADLINE_S" "\$\$"' "$RUNNER" | cut -d: -f1)"
+{ [ -n "$ARM_LINE" ] && [ "$FB_LINE" -gt "$ARM_LINE" ]; } \
+    && pass "the fallback runs downstream of arm_run_deadline (line $ARM_LINE), so a bounce that wedges is killed by the same watchdog as every other stage" \
+    || fail "fallback_bounce (${FB_LINE:-?}) is not covered by the run deadline (${ARM_LINE:-?})"
+
+# A DRY RUN MUST NOT BOUNCE A FLEET. ATTEMPT_ARMED is false for --dry-run and for
+# every fire that skipped, and it is the guard on both the bump and the reset.
+sed -n "${RWF_LINE},${SYNC_ALERT_LINE}p" "$RUNNER" | grep -q 'if \$ATTEMPT_ARMED; then' \
+    && pass "the whole streak-and-bounce block is guarded by \$ATTEMPT_ARMED — a dry run decides nothing and bounces nothing" \
+    || fail "the fallback block is not guarded by ATTEMPT_ARMED"
+# The reset lives on the OBSERVATION, not on an exit code: this line is the one
+# place a run has proved the transport works.
+SR_LINE="$(grep -n 'sync_recovery_notice "\$SYNC_TRIES"' "$RUNNER" | cut -d: -f1)"
+CLR_LINE="$(grep -n 'transport streak: CLEARED (was' "$RUNNER" | cut -d: -f1)"
+{ [ -n "$SR_LINE" ] && [ -n "$CLR_LINE" ] && [ "$CLR_LINE" -gt "$SR_LINE" ] && [ "$CLR_LINE" -lt "$RWF_LINE" ]; } \
+    && fail "the streak reset sits before the sync-failure branch — check the line numbers, it must follow a SUCCESSFUL sync" \
+    || pass "the streak is cleared on the successful-sync path, keyed on the fetch having returned rather than on the run's final exit code"
+grep -q '  fallback: \$FALLBACK_STATUS' "$RUNNER" \
+    && pass "and the sync-abort alert cross-references what the fallback did, so one mail is not read without the other" \
+    || fail "the sync alert does not report the fallback's outcome"
+
+# ---------------------------------------------------------------------------
 echo
 echo "--- Results ---"
 grep -c '^PASS' "$RESULTS_FILE" | sed 's/^/passed: /'
