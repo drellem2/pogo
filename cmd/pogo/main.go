@@ -3085,7 +3085,7 @@ the schedule fires exactly once and reschedules to the next future occurrence.`,
 					nextFire = "— (fired, awaiting ack)"
 				}
 				fmt.Printf("%-20s  %-20s  %-25s  %-16s  %s\n",
-					e.ID, e.Agent, nextFire, kind, renderAckCell(e))
+					e.ID, e.Agent, nextFire, kind, renderAckCell(e, gatherTurnEvidence(e, time.Now())))
 			}
 			// The ceiling belongs UNDER THE NUMBERS, not in a package comment
 			// three repositories deep. mg-a14c's 46-hour escalation was read off
@@ -3176,28 +3176,8 @@ rather than counted, so an old token cannot manufacture a healthy ratio.`,
 	var cmdScheduleCompletion = &cobra.Command{
 		Use:   "completion",
 		Short: "Show the delivered:completed ratio across schedules",
-		Long: `Report how many delivered fires were actually acknowledged as complete.
-
-This is the query the 2026-07-22 events log could not answer. Schedules that
-have never acked are counted as UNKNOWN, not failing — only a schedule that has
-proven it can ack, and then stopped, is evidence of anything.
-
-"Never acked" spans re-registrations. A schedule re-registered at agent boot
-keeps its tracked status but restarts its counters, and is reported separately
-so a thin denominator is visible rather than inferred.
-
-The shape to watch for is fleet-wide: one agent skipping one ack is noise,
-every tracked schedule going to zero within the same minute is an outage.
-
-WHAT THE RATIO IS NOT (mg-a14c). It is not the fraction of scheduled work that
-got done, and 100% is not available. Only the newest fire's token is redeemable,
-so a run of fires landing inside one agent turn yields at most one ack however
-completely the work was done. The ratio is exactly the reciprocal of the mean
-attention gap — a TURN LENGTH in cadence periods — which is why this command
-prints it both ways. An alarm built on the percentage measures how long turns
-are; the number that separates a busy agent from a dead one is the unacked
-streak, because it is the one that does not saturate.`,
-		Args: cobra.NoArgs,
+		Long:  scheduleCompletionLong,
+		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			stats, err := client.SchedulerCompletion(schedComplAgent, schedComplThreshold)
 			if err != nil {
