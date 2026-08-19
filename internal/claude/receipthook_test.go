@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/drellem2/pogo/internal/hookarm"
 )
 
 func readSettingsFile(t *testing.T, dir string) map[string]any {
@@ -297,5 +300,66 @@ func TestProviderCarriesBothHooks(t *testing.T) {
 	if Provider.MailRecipientHook == nil {
 		t.Error("the Claude provider has no MailRecipientHook: no agent will ever be warned " +
 			"that it just mailed a stopped agent (mg-d924)")
+	}
+}
+
+// TestTheInstallerWritesWhatTheReaderRecognises is the seam between the two
+// halves of the arming report: this package WRITES the registration, and pogod
+// READS it through internal/hookarm to answer "which running agents are armed?"
+// They are different binaries and can be at different revisions, so a drift
+// between them would report a whole fleet as unarmed while every agent was
+// perfectly armed — or, worse, the reverse.
+//
+// The chain was also observed live on 2026-08-20 (mg-503d): this installer
+// wrote the settings, a real Claude Code session loaded them, the real
+// `pogo hook mail-recipient` binary ran and stamped, and Resolve answered
+// "armed". This test is what keeps that true.
+func TestTheInstallerWritesWhatTheReaderRecognises(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Now()
+
+	if state, _ := hookarm.Resolve(dir, start); state != hookarm.StateOff {
+		t.Fatalf("before install: state = %q, want %q", state, hookarm.StateOff)
+	}
+
+	if err := InstallMailRecipientHook(dir, "/opt/pogo/bin/pogo hook mail-recipient"); err != nil {
+		t.Fatalf("InstallMailRecipientHook: %v", err)
+	}
+	state, why := hookarm.Resolve(dir, start)
+	if state != hookarm.StatePending {
+		t.Fatalf("after install: state = %q, want %q — the reader did not recognise what the installer wrote (%s)",
+			state, hookarm.StatePending, why)
+	}
+
+	if err := hookarm.RecordFire(dir); err != nil {
+		t.Fatal(err)
+	}
+	future := start.Add(time.Minute)
+	if err := os.Chtimes(hookarm.StampPath(dir), future, future); err != nil {
+		t.Fatal(err)
+	}
+	if state, why := hookarm.Resolve(dir, start); state != hookarm.StateArmed {
+		t.Fatalf("after a firing: state = %q, want %q (%s)", state, hookarm.StateArmed, why)
+	}
+}
+
+// TestReinstallingDoesNotStackASecondEntry: the reader takes the first match,
+// so a duplicate would be harmless to it — but a second copy of the hook would
+// print every warning twice, and the marker-based upsert is what prevents it.
+// Asserted through the reader so both halves are exercised together.
+func TestReinstallingDoesNotStackASecondEntry(t *testing.T) {
+	dir := t.TempDir()
+	if err := InstallMailRecipientHook(dir, "/old/path/pogo hook mail-recipient"); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallMailRecipientHook(dir, "/new/path/pogo hook mail-recipient"); err != nil {
+		t.Fatal(err)
+	}
+	cmd, ok, err := hookarm.Registered(dir)
+	if err != nil || !ok {
+		t.Fatalf("Registered = (%q, %v, %v)", cmd, ok, err)
+	}
+	if cmd != "/new/path/pogo hook mail-recipient" {
+		t.Errorf("the moved binary's path did not replace the old one: %q", cmd)
 	}
 }

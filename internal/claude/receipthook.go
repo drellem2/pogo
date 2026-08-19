@@ -16,13 +16,21 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/drellem2/pogo/internal/hookarm"
 )
 
 // settingsRelPath is where the hook is registered. settings.local.json is
 // Claude Code's documented per-project, not-checked-in settings file — the
 // right shelf for a daemon's private wiring, and one this repo's .gitignore
 // (and every worktree's, via .claude/) already keeps out of a diff.
-var settingsRelPath = filepath.Join(".claude", "settings.local.json")
+//
+// It is hookarm's constant rather than a local literal because pogod READS this
+// file to report which running agents are armed, and pogod cannot import this
+// package (internal/claude imports internal/agent). A second copy of the path
+// would be a reader that can disagree with the writer about where the answer
+// lives — the same class of defect the report exists to catch.
+var settingsRelPath = hookarm.SettingsRelPath
 
 // InstallSubmitReceiptHook registers hookCommand as a UserPromptSubmit hook in
 // dir's Claude Code project settings.
@@ -183,8 +191,9 @@ func hasSuffix(s, suffix string) bool {
 }
 
 // mailRecipientMarker identifies pogo's mail-recipient hook entry. Same rule as
-// pogoHookMarker: the tail of the command, so the binary can move.
-const mailRecipientMarker = "hook mail-recipient"
+// pogoHookMarker: the tail of the command, so the binary can move. Shared with
+// the reader for the reason settingsRelPath is.
+const mailRecipientMarker = hookarm.MailRecipientMarker
 
 // mailRecipientMatcher is the tool this hook watches. `mg mail send` is a shell
 // command, so Bash is the only tool that can carry one.
@@ -224,25 +233,5 @@ func InstallMailRecipientHook(dir, hookCommand string) error {
 // A remedy for an invisible failure that fails invisibly itself is worth
 // exactly nothing, so it is made ASKABLE rather than assumed.
 func MailRecipientHookCommand(dir string) (string, bool, error) {
-	if dir == "" {
-		return "", false, errors.New("no directory to check")
-	}
-	settings, err := readSettings(filepath.Join(dir, settingsRelPath))
-	if err != nil {
-		return "", false, err
-	}
-	hooks, _ := settings["hooks"].(map[string]any)
-	groups, _ := hooks["PostToolUse"].([]any)
-	for _, g := range groups {
-		group, _ := g.(map[string]any)
-		entries, _ := group["hooks"].([]any)
-		for _, e := range entries {
-			entry, _ := e.(map[string]any)
-			cmd, _ := entry["command"].(string)
-			if hasSuffix(cmd, mailRecipientMarker) {
-				return cmd, true, nil
-			}
-		}
-	}
-	return "", false, nil
+	return hookarm.Registered(dir)
 }
