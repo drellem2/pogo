@@ -328,6 +328,53 @@ func FindFrom(root, id string) (WorkItem, bool, error) {
 	return WorkItem{}, false, nil
 }
 
+// liveStatusDirs are the directories holding an item that has NOT passed
+// through done — the population "is this parent still outstanding" is asked of.
+// It deliberately excludes done/ and the archive, and the exclusion is the
+// point: a dependency is satisfied once its parent has completed, and the two
+// terminal locations are exactly where a completed parent lives.
+var liveStatusDirs = []string{"available", "claimed", "pending"}
+
+// FindLiveFrom is FindFrom restricted to the directories a NOT-YET-COMPLETED
+// item can be in, and widened to include pending/ — which FindFrom skips,
+// because adding pending/ to the by-id lookup would have moved every existing
+// caller's answer (see statusDirs.byDefault).
+//
+// It exists for one question, asked by the depends dispatch gate: is this work
+// item's parent still outstanding? That question needs pending/ — a parent
+// parked behind its own dependency is as unfinished as one sitting in
+// available/ — and must NOT treat "absent" as "outstanding", because pogo
+// cannot see the archive at all and completed work is archived within minutes.
+// So absence is reported as not-found and the caller reads it as satisfied,
+// which is the fail-open direction every gate in this package takes.
+func FindLiveFrom(root, id string) (WorkItem, bool, error) {
+	if id == "" || strings.ContainsAny(id, `/\`) || id == ".." {
+		return WorkItem{}, false, nil
+	}
+	for _, status := range liveStatusDirs {
+		dir := filepath.Join(root, status)
+		item, err := parseWorkItem(filepath.Join(dir, id+".md"), status)
+		if err == nil {
+			return item, true, nil
+		}
+		// In claimed/ the file carries a .<pid> suffix, so an exact-name miss
+		// is not an absence until the prefix scan has also missed.
+		name, ok, err := findByPrefix(dir, id+".md")
+		if err != nil {
+			return WorkItem{}, false, err
+		}
+		if !ok {
+			continue
+		}
+		item, err = parseWorkItem(filepath.Join(dir, name), status)
+		if err != nil {
+			continue // present but unparseable — same treatment as ListFrom
+		}
+		return item, true, nil
+	}
+	return WorkItem{}, false, nil
+}
+
 // resultFileTime returns the mtime of the `<id>.result.json` that mg writes
 // beside a completed item, or the zero time when there is none.
 //

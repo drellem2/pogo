@@ -535,6 +535,40 @@ failure mode — and is not a proof that no worker can reach gated work. Failing
 closed was rejected because `--id` is optional and because one bad path in
 macguffin would then halt the whole fleet.
 
+**The third condition the same gate answers: an unmet `depends:` (mg-e7ff).**
+The gate object reads the item once and answers three questions, not one — the
+assignee, the carrier's `stage: gated`, and now whether any `depends:` parent is
+still outstanding. All three are the same class of "this item is deliberately
+not ready", and unmet depends was the only one with no check at the spawn point.
+It is not configurable: unlike `non_dispatchable_assignees` there is no
+vocabulary to pick, because the condition is a fact about other work items
+rather than a value someone types.
+
+The refusal names each outstanding parent and what it is doing —
+`mg-12aa (claimed)` — because "chase it, someone is on it" and "it is sitting in
+`available/` unstarted" call for different next moves and the bare id cannot
+tell them apart. When the gated item is itself in `available/`, the refusal also
+says the **store is inconsistent**: mg parks a gated dependent in `pending/`,
+which nothing dispatches from, so an item that is both gated and available was
+placed there by a path that did not consult the edge. `mg schedule` reports
+every item in that state.
+
+This gate is *defence in depth* and is deliberately redundant with mg. mg's rule
+is expressed as a **directory**, and a directory is a placement that some path
+can get wrong. One did: releasing a claim returned an item to `available/`
+without reading its depends (fixed in macguffin under the same ticket), and
+status `available` is exactly what this gate's callers key on.
+
+It fails open in the two directions that matter, **by construction rather than
+by a check**: a parent is unmet only when positively found in `available/`,
+`claimed/` or `pending/`, and every other answer — `done/`, the archive, a typo,
+an unreadable store — is treated as satisfied. `internal/workitem` does not scan
+the archive and mg archives completed work within minutes of `mg done`, so a
+gate that read "absent" as "unfinished" would refuse nearly every dispatch whose
+item has any dependency at all, which is how a gate gets disarmed rather than
+fixed. mg remains the authority on satisfaction; this is the subset of it pogo
+can verify without one.
+
 **The gate's twin, which fails the other way (mg-9a04).** Sitting immediately
 beside it in `handleSpawnPolecat` is the type→template router: with no
 `--template`, the work item's `type` selects the worker template through a
