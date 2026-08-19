@@ -122,6 +122,19 @@ type StepProgress struct {
 	// CPUUnavailable states why no measurement exists, so "could not measure"
 	// is never rendered as "measured, and idle".
 	CPUUnavailable string `json:"cpu_unavailable,omitempty"`
+	// CPUEverFound is the POSITIVE CONTROL for the measurement above: true
+	// once the sampler has located GatePID in the process table at least once
+	// since this gate started. It is what licenses the sampler to report an
+	// empty subtree as "the gate process is gone" — without it, an empty
+	// subtree is equally the answer of a check that cannot see this process
+	// at all (wrong pid, a table the daemon may not read, a pid namespace it
+	// is not in), and reporting that as "GONE" invents a fact.
+	//
+	// mg-48d8: a process check was proposed, shipped nowhere, and reported a
+	// healthy gate as absent — because nothing ever established that it could
+	// find a gate that existed. A "not found" is only evidence when the
+	// finder has been shown to find.
+	CPUEverFound bool `json:"cpu_ever_found,omitempty"`
 	// CPUSource names the process-table source the numbers came from and the
 	// precision of its CPU column. Recorded because whether this measurement
 	// works at all is a property of the host: the same gate reads 1.00 cores
@@ -146,8 +159,18 @@ const (
 	// grounds for a closer look, never for automatic intervention: a process
 	// blocked on I/O or a lock is idle and healthy.
 	SubtreeIdle
-	// SubtreeGone means the gate's process no longer exists.
+	// SubtreeGone means the gate's process no longer exists — and, crucially,
+	// that the sampler HAD found it before it vanished. Only that pairing
+	// makes an empty subtree evidence of an exit.
 	SubtreeGone
+	// SubtreeNeverFound means the sampler has looked and found nothing, and
+	// has never found anything since this gate started. That is a statement
+	// about the INSTRUMENT, not about the gate: a check with no positive
+	// control cannot report an absence. It is kept apart from SubtreeGone
+	// because the two lead to opposite actions — "the runner is supervising
+	// nothing, look now" versus "this reading means nothing, use another
+	// signal".
+	SubtreeNeverFound
 )
 
 // Subtree classifies the recorded CPU measurement.
@@ -156,6 +179,9 @@ func (p *StepProgress) Subtree() SubtreeState {
 		return SubtreeUnknown
 	}
 	if p.CPUProcs == 0 {
+		if !p.CPUEverFound {
+			return SubtreeNeverFound
+		}
 		return SubtreeGone
 	}
 	if p.CPUCores >= subtreeIdleCores || p.CPUChurn > 0 {
@@ -178,7 +204,10 @@ func (p *StepProgress) CPUSummary() string {
 		}
 		return "UNKNOWN (" + reason + ")"
 	case SubtreeGone:
-		return "process gone"
+		return "process gone (it was found earlier, so this absence is a real exit)"
+	case SubtreeNeverFound:
+		return fmt.Sprintf("NEVER LOCATED (pid %d has not once appeared in the process table since this "+
+			"gate started, so this check has no positive control here and its absence proves nothing)", p.GatePID)
 	case SubtreeBusy:
 		s := fmt.Sprintf("%.1f cores busy, %s over %s", p.CPUCores, plural(p.CPUProcs, "proc"), p.CPUWindow)
 		if p.CPUChurn > 0 {
@@ -289,7 +318,7 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 	}
 	elapsed := roundDur(p.Elapsed(now))
 	if !p.RunnerAlive(now) {
-		return fmt.Sprintf("DEAD: no heartbeat for %s, which is more than %d intervals of %s — "+
+		return fmt.Sprintf("RUNNER DEAD: no heartbeat for %s, which is more than %d intervals of %s — "+
 			"the process running this gate is gone, not slow. Waiting will not help.",
 			roundDur(p.HeartbeatAge(now)), heartbeatStaleAfter, p.HeartbeatInterval)
 	}
@@ -299,15 +328,23 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 	// computing. Either one alone is confidently wrong in a case that happens
 	// routinely (see subtreecpu.go).
 	if p.OutputFresh(now) {
+		// The GATE's own evidence leads, and the runner's heartbeat is named
+		// as the runner's and parenthesised. mg-48d8: this sentence used to
+		// open with the heartbeat, which made a supervisor's liveness read as
+		// the supervised process's progress — it printed "ALIVE and working"
+		// over a gate whose last output was 26 minutes old, and would have
+		// printed the same over a deadlock.
+		//
 		// The contention note matters here as much as in the silent cases, and
 		// for a different reason: this is the shape of the run that prompted
 		// mg-1b8c. A gate talking steadily and healthily, on track to blow a
 		// timeout, purely because it is sharing the host. Nothing about
 		// "ALIVE and working" would tell a reader that.
-		return fmt.Sprintf("ALIVE and working: runner heartbeat is %s old, gate has produced %s, "+
-			"last %s ago, running %s. Slow, not hung — waiting is correct.%s",
-			roundDur(p.HeartbeatAge(now)), plural(p.OutputLines, "line"), roundDur(now.Sub(p.LastOutput)),
-			elapsed, p.contentionNote())
+		return fmt.Sprintf("GATE ALIVE and working: the gate itself has produced %s, last %s ago, "+
+			"running %s — that is the gate's own output, which only a running gate can produce. "+
+			"(RUNNER: supervisor heartbeat %s old.) Slow, not hung — waiting is correct.%s",
+			plural(p.OutputLines, "line"), roundDur(now.Sub(p.LastOutput)), elapsed,
+			roundDur(p.HeartbeatAge(now)), p.contentionNote())
 	}
 
 	// Silent. Describe the silence precisely, then let the process table
@@ -319,13 +356,29 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 	} else {
 		silence = fmt.Sprintf("the gate has produced no output at all in %s", elapsed)
 	}
-	beat := fmt.Sprintf("runner heartbeat is %s old", roundDur(p.HeartbeatAge(now)))
+	// The heartbeat is labelled with the LAYER it belongs to every time it is
+	// quoted, because in every branch below it is the one fact that is NOT
+	// about the gate. A reader who takes it for the gate's own liveness has
+	// been told the opposite of what was measured (mg-48d8).
+	beat := fmt.Sprintf("the RUNNER (the pogod-side supervisor, not the gate) heartbeat is %s old, "+
+		"which proves the supervisor is alive and says nothing about the gate under it",
+		roundDur(p.HeartbeatAge(now)))
 
 	switch p.Subtree() {
 	case SubtreeBusy:
-		return fmt.Sprintf("ALIVE and computing: %s, and %s — but its process subtree is %s. "+
+		return fmt.Sprintf("GATE ALIVE and computing: %s, and %s — but its process subtree is %s. "+
 			"Silence here is a gate that logs at boundaries, not a stall. Waiting is correct.%s",
 			beat, silence, p.CPUSummary(), p.contentionNote())
+	case SubtreeNeverFound:
+		// Deliberately NOT "gone". The sampler failing to find the gate is a
+		// fact about the sampler until it has found one, and this branch is
+		// the whole reason SubtreeNeverFound exists as a state.
+		return fmt.Sprintf("GATE UNPROVEN: %s; %s; and the subtree check has NEVER located the gate "+
+			"process (pid %d) in the process table — not once since this gate started, so it has no "+
+			"positive control here. That is a broken instrument, not an absent gate: a check that has "+
+			"never found what it looks for cannot report an absence. Read the gate's log or ps the pid "+
+			"by hand; do not conclude the runner is supervising nothing from this line. %s",
+			beat, silence, p.GatePID, p.timeoutNote(now))
 	case SubtreeIdle:
 		return fmt.Sprintf("SUSPECT: %s, %s, AND its process subtree is %s. "+
 			"Silent and idle together is the shape of a stall — but it is not proof: a process "+
@@ -335,11 +388,13 @@ func (p *StepProgress) Diagnosis(now time.Time) string {
 			beat, silence, p.CPUSummary(), p.contentionNote(), p.timeoutNote(now))
 	case SubtreeGone:
 		return fmt.Sprintf("SUSPECT: %s, %s, and the gate process (pid %d) is GONE from the process "+
-			"table. The runner is still beating, so this should resolve on its own within a beat "+
-			"or two; if it does not, the runner is waiting on something that will not return. %s",
+			"table — the sampler found it earlier in this run and no longer does, which is what makes "+
+			"this absence a real exit rather than a blind check. The runner is still beating, so this "+
+			"should resolve on its own within a beat or two; if it does not, the runner is waiting on "+
+			"something that will not return. %s",
 			beat, silence, p.GatePID, p.timeoutNote(now))
 	default:
-		return fmt.Sprintf("ALIVE but UNDETERMINED: %s, %s, and its process subtree could not be "+
+		return fmt.Sprintf("GATE UNDETERMINED: %s, %s, and its process subtree could not be "+
 			"measured (%s) — so whether the gate is working or stuck cannot be told from here. "+
 			"Output staleness ALONE does not settle it: a healthy gate was observed silent for "+
 			"8m31s while burning four cores, so a long silence is not evidence of a stall.%s %s",
