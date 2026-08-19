@@ -284,6 +284,29 @@ type Finding struct {
 	// "there is no branch", not "the branch is merged".
 	Found bool `json:"found"`
 
+	// TipTime is the COMMITTER date of Ref's tip: when this branch was last
+	// written to. Zero when it could not be read, and TipTimeError says why.
+	//
+	// IT EXISTS TO DATE A BRANCH AGAINST AN EXTERNAL RECORD (mg-441f). The
+	// refinery keeps a history of merge requests, and "this branch was already
+	// refused" is only a claim about the branch AS IT NOW STANDS if the refusal
+	// came AFTER the last commit on it. A branch that was refused, fixed and
+	// pushed again is an ordinary resubmit, and a check that read the refusal
+	// without reading this would suppress the one remedy that works — the same
+	// shape of error, in the opposite direction, as the one that check repairs.
+	//
+	// COMMITTER date and not author date: a rebase or an amend rewrites the
+	// former and preserves the latter, and the question here is when the ref
+	// last changed, not when the work was first written.
+	//
+	// A failure to read it is NOT fatal and NOT zero-by-default-is-fine: a zero
+	// TipTime must be read as "unknown", never as "the epoch", because every
+	// external record postdates the epoch and an unknown tip that compared as
+	// very old would make every stale record look current.
+	TipTime time.Time `json:"tip_time,omitempty"`
+	// TipTimeError is why TipTime could not be read. Empty when it could.
+	TipTimeError string `json:"tip_time_error,omitempty"`
+
 	// Disposition is what to do. See the constants.
 	Disposition Disposition `json:"disposition"`
 
@@ -494,6 +517,7 @@ func Inspect(repo, branch, target string) (Finding, error) {
 		return f, nil
 	}
 	f.Ref, f.Pushed, f.Found = ref, pushed, true
+	f.TipTime, f.TipTimeError = tipTime(repo, ref)
 
 	unmerged, equivalent, err := cherry(repo, targetRef, ref)
 	if err != nil {
@@ -847,6 +871,29 @@ func ResolveTarget(repo, target string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no default branch in %s: origin/HEAD is unset and neither main nor master exists", repo)
+}
+
+// tipTime reads the committer date of a ref's tip.
+//
+// It is best-effort by design: an unreadable date must not turn a branch that
+// `git cherry` answered for into an unjudged row, because the primary question
+// — is there unmerged work — has already been answered by then. What it must
+// not do is return a zero time that a caller reads as a real one, so the error
+// is returned alongside rather than logged and dropped.
+func tipTime(repo, ref string) (time.Time, string) {
+	out, err := git(repo, "log", "-1", "--format=%cI", ref)
+	if err != nil {
+		return time.Time{}, fmt.Sprintf("git log -1 --format=%%cI %s in %s: %v", ref, repo, err)
+	}
+	raw := strings.TrimSpace(out)
+	if raw == "" {
+		return time.Time{}, fmt.Sprintf("git log -1 --format=%%cI %s in %s printed nothing", ref, repo)
+	}
+	t, perr := time.Parse(time.RFC3339, raw)
+	if perr != nil {
+		return time.Time{}, fmt.Sprintf("parsing committer date %q of %s in %s: %v", raw, ref, repo, perr)
+	}
+	return t, ""
 }
 
 // cherry returns the commits on branchRef that targetRef does not have (oldest

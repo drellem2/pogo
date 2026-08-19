@@ -1381,6 +1381,7 @@ Exit 0 clean, 1 at least one finding, 2 usage, 3 this run measured nothing.
 | kind | what it is | remedy |
 |---|---|---|
 | `rescue_unbuilt` | stranded, **and** the unmerged work is a `RESCUE` commit: recovered from a dead polecat's worktree with the pre-commit hook bypassed | read it, then build it. **No submit command is printed for these rows** |
+| `refused_before` | stranded, **and** the refinery has already been given this branch and refused it, with a failure its own class table commits to reproducing | the branch has to **change** first. **No submit command is printed for these rows** |
 | `stranded` | the branch has commits the target does not | `pogo refinery submit`; do **not** dispatch |
 | `landed_not_closed` | the branch is fully merged, the item still asks for it | `mg done` |
 | `conflict_suspect` | the two instruments below disagree | read it yourself; **neither** command |
@@ -1420,6 +1421,78 @@ across the three repositories, from two rescue events (`mg-51bf`, 5; `mg-11fa`,
 27) that disagree about what goes inside the parentheses — a work item in the
 first, an agent name in the second — which is why the predicate is the prefix and
 nothing else.
+
+#### `refused_before` — the third external fact one line of remedy had to learn
+
+For `mg-5058` the sweep printed
+
+```
+-> pogo refinery submit polecat-p5058 …
+```
+
+as its single recommended action, for a branch the refinery had **already** failed
+at `stage=rebase` on a content conflict, classed `defect`, and explicitly declined
+to retry. Its recorded reason reads, verbatim:
+
+> the rebase reached the tree and the tree disagreed — exactly as true on the next
+> attempt. Resubmitting unchanged re-runs the same conflict forever; the branch has
+> to be rebased and the conflict resolved by hand before it can land
+
+So the tool printed, with confidence and as the one thing to do, the one command
+that provably cannot work. A fresh instance was measured while fixing it: `mg-6b2d`,
+open on 2026-08-19, whose branch carries the identical record.
+
+`Row.Remedy` computed the stranded command from `r.Pushed` alone, and this is the
+**third** external fact it has had to learn:
+
+| ticket | the fact | why the bare submit was wrong |
+|---|---|---|
+| `mg-bfe0` | the branch is not on origin | `refinery submit` refuses it outright |
+| `mg-aed4` | the branch is a `RESCUE` commit, never built | a **passing** gate merges unreviewed code |
+| `mg-441f` | the refinery already refused this branch | an unchanged resubmit re-runs the same failure |
+
+None of the three implies another — the five `mg-51bf` rescue branches have no
+refinery history at all, and a refused branch is usually perfectly well pushed.
+
+**Severity is lower here than for `rescue_unbuilt`, and that is worth stating.**
+A refused branch resubmitted unchanged costs a gate run and a second `failed` row
+for somebody to interpret; a rescue branch a gate *passes* merges never-reviewed
+code. The remedy is still withheld, for `mg-bfe0`'s reason rather than `mg-aed4`'s:
+a prose caveat beside a runnable command loses to the command, and here the
+runnable command is known-futile.
+
+**Only a class that commits to reproducing suppresses the remedy.** That is
+`refinery.FailureClass.ResubmitUnchangedRepeats`, and today only `defect` answers
+yes — its own triage note says *"re-running establishes the SAME fact"*. An
+`infrastructure` or `contention` failure establishes nothing about the branch and a
+straight resubmit is the correct remedy, so those rows stay `stranded` and merely
+report that an earlier attempt failed. `host` is deliberately excluded even though
+its note also says not to resubmit yet: its prerequisite is on the box, and its
+eventual remedy *is* an unchanged resubmit.
+
+**Two things the check is careful about, because each would make it a new defect:**
+
+- **A stale record.** A branch that was refused, *fixed* and pushed again is an
+  ordinary resubmit. A refusal submitted before the branch's tip commit is reported
+  and explicitly does **not** stand — withholding the remedy on an expired fact is
+  the same error as computing it from no fact at all. The row prints *"That record
+  PREDATES this branch's last commit"* and keeps its submit line.
+- **A pruned window.** The refinery's history is a window, not an archive: it
+  prunes destructively past a count cap and an age cap, so *"no record"* and *"the
+  record was deleted"* are the same absence from the same map. A **stranded** row
+  whose answer depends on what was pruned prints `REMEDY NOT CHECKED AGAINST
+  REFINERY HISTORY` with the reason, instead of falling back silently to the bare
+  submit — and it is printed on that row alone, because a caveat that appears on
+  every row is one readers learn to skip — `mg-8baa`'s
+  coverage lesson, applied rather than re-learned.
+
+The window's **floor** — the completion time of the oldest record it still holds —
+is what makes the second bound cheap rather than blanket. A branch whose tip is
+newer than the floor cannot have been submitted-since-that-tip outside the window,
+because every such submission would have completed inside it. So a truncated window
+still answers conclusively for every branch committed to since the window opened,
+which on this fleet is most of them; only the genuinely old branches carry the
+caveat. The report's frame states the window's reach on every run.
 
 `landed_not_closed` is the worse one and it has an **upstream fix**, so it should
 stay near-empty: pogod used to close an author's item at merge only when a polecat

@@ -167,8 +167,13 @@ func TestRescueAndOrdinaryStrandedRowsAreDistinguishable(t *testing.T) {
 	if strings.Contains(out, "refinery submit polecat-p516e") {
 		t.Errorf("the report still prints a submit line for the rescue branch:\n%s", out)
 	}
-	if !strings.Contains(out, "1 RESCUE-UNBUILT, 1 stranded") {
-		t.Errorf("the findings header does not separate the two counts:\n%s", out)
+	// The two counts, not their adjacency: mg-441f inserted ALREADY-REFUSED
+	// between them, and an assertion on the literal neighbouring text would have
+	// failed for a change that kept every property this one is about.
+	for _, want := range []string{"1 RESCUE-UNBUILT", "1 stranded"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the findings header does not separate the two counts (%q missing):\n%s", want, out)
+		}
 	}
 }
 

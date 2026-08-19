@@ -1007,6 +1007,18 @@ were the other:
   the sweep printed a paste-ready submit for five such branches while each of
   those items' own body said in bold not to submit it, and a coordinator nearly
   acted on it (mg-aed4).
+- `refused_before` — stranded, **and** the refinery has **already been given this
+  branch and refused it**, with a failure its own class table commits to
+  reproducing (today: `class=defect` — a rebase conflict, a red gate, a refused
+  commit message). The report prints **no submit command** for these rows either:
+  an unchanged resubmit re-runs the same failure, costing a gate slot and leaving
+  a second `failed` row for somebody to interpret. The branch has to **change**
+  first — rebase it onto the target, fix what the refinery names, push, and then
+  it is a different request. This row exists because for mg-5058 the sweep printed
+  a paste-ready submit for a branch the refinery had failed at `stage=rebase` and
+  explicitly declined to retry (mg-441f). A failure that establishes nothing about
+  the branch — `infrastructure`, `contention` — is **not** this row: it stays
+  `stranded`, keeps its submit line, and merely reports that an attempt failed.
 - `landed_not_closed` — the branch is **merged** and the item is still asking for
   the work. **`mg done`**. This is the one that used to be invisible: on
   2026-08-09, priority-wake told you to "claim or dispatch now: mg-6c90" *four
@@ -1016,6 +1028,13 @@ were the other:
 - `conflict_suspect` and `unjudged` **recommend neither command.** The first is
   two instruments disagreeing; the second is a branch nobody could read. Both mean
   *you* look.
+
+A stranded row can also carry **`REMEDY NOT CHECKED AGAINST REFINERY HISTORY`**.
+That is not a finding about the branch — it says the refinery's memory could not
+answer for it, because the history was unreadable, or because the branch is older
+than the retained window and a refusal of it has since been pruned. Read the
+submit line on such a row as unverified: check `pogo refinery history --since` or
+just look before you paste.
 
 The spawn-time refusal (`work item … already has PUSHED, UNMERGED work`) is a
 third mechanism and it is not a substitute for either. Two limits:

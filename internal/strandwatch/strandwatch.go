@@ -114,6 +114,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/drellem2/pogo/internal/strandedwork"
 )
@@ -204,6 +205,62 @@ const (
 	// THE REMEDY IS DELIBERATELY NOT A PASTE-READY SUBMIT, and withholding that
 	// one string is the repair. See Row.Remedy.
 	KindRescueUnbuilt Kind = "rescue_unbuilt"
+
+	// KindRefusedBefore is a stranded row whose branch HAS ALREADY BEEN THROUGH
+	// THE REFINERY and was refused, with a failure the refinery's own record
+	// commits to reproducing. Resubmitting it unchanged re-runs the same refusal.
+	//
+	// THE REMEDY WAS COMPUTED FROM r.Pushed AND NOTHING ELSE (mg-441f). For
+	// mg-5058 this sweep printed
+	//
+	//	-> pogo refinery submit polecat-p5058 ...
+	//
+	// as its single recommended action, for a branch the refinery had already
+	// failed at stage=rebase on a content conflict, classed `defect`, and
+	// explicitly declined to retry — its recorded reason being, verbatim,
+	// "Resubmitting unchanged re-runs the same conflict forever; the branch has to
+	// be rebased and the conflict resolved by hand before it can land". The tool
+	// printed, with confidence and as the one thing to do, the one command that
+	// provably cannot work. (That observation is the mayor's, 2026-08-14, and is
+	// not re-derived here. A fresh instance WAS measured for this change: mg-6b2d,
+	// open on 2026-08-19, whose branch polecat-p6b2d carries the same
+	// stage=rebase/class=defect record and which the pre-change build printed a
+	// bare submit line for.)
+	//
+	// IT IS THE THIRD CORRECTION TO ONE LINE AND THEY DO NOT IMPLY EACH OTHER.
+	// mg-bfe0 taught it that a branch not on origin needs a push first, because
+	// submit refuses it. mg-aed4 taught it that a RESCUE branch has never been
+	// built, so no submit may be printed at all. This is a third external fact the
+	// remedy depends on and did not read — and it catches neither of the others:
+	// the five mg-51bf rescue branches have no refinery history whatsoever, and a
+	// refused branch is usually perfectly well pushed.
+	//
+	// THE SEVERITY IS LOWER THAN mg-aed4'S AND SAYING SO IS PART OF THE RECORD. A
+	// rescue branch that a gate PASSES merges never-reviewed code; a refused branch
+	// resubmitted unchanged costs a gate run and a second `failed` row for somebody
+	// to interpret. The remedy is still withheld, for mg-bfe0's reason rather than
+	// mg-aed4's: a prose caveat beside a runnable command loses to the command, and
+	// here the runnable command is known-futile rather than merely unqualified.
+	//
+	// WHAT IT REQUIRES, AND EACH TERM IS LOAD-BEARING:
+	//
+	//   - a COMPLETED merge request for this (repo, branch), failed;
+	//   - whose class COMMITS to repeating — see
+	//     refinery.FailureClass.ResubmitUnchangedRepeats. An infrastructure or
+	//     contention failure establishes nothing about the branch and its correct
+	//     remedy IS the bare resubmit, so those rows stay `stranded` and merely
+	//     say that a prior attempt failed;
+	//   - submitted AT OR AFTER the branch's tip commit. A branch that was refused,
+	//     fixed and pushed again is an ordinary resubmit, and suppressing its
+	//     remedy would be this ticket's own defect in the opposite direction — a
+	//     remedy computed from a fact that has expired. See Row.PriorStale.
+	//
+	// WHEN ANY OF THOSE CANNOT BE ESTABLISHED the row stays `stranded` and says on
+	// its own line WHY the history question has no conclusive answer, rather than
+	// falling back silently to the bare submit. That is mg-8baa's lesson applied
+	// here before it could be re-learned: "no record" and "record aged out of the
+	// retained window" must not render alike. See Row.HistoryGap.
+	KindRefusedBefore Kind = "refused_before"
 
 	// KindLandedNotClosed is an open item whose branch is fully merged. The work
 	// is done and on the target; the item is what is out of date. Close it.
@@ -351,18 +408,25 @@ func (k Kind) Rank() int {
 		// stranded row can never be read as a rescue one, because the marker is on
 		// the commit.
 		return 0
-	case KindStranded:
+	case KindRefusedBefore:
+		// AHEAD OF STRANDED on the same argument, one notch weaker. A refused row
+		// read as an ordinary stranded row gets a command that cannot work; an
+		// ordinary stranded row can never be read as a refused one, because the
+		// marker is in the refinery's record. It sits BEHIND rescue_unbuilt because
+		// a wasted gate run is not a merge of unreviewed code.
 		return 1
-	case KindUnjudged:
+	case KindStranded:
 		return 2
-	case KindRepoUnreadable:
+	case KindUnjudged:
 		return 3
-	case KindConflictSuspect:
+	case KindRepoUnreadable:
 		return 4
-	case KindOrphanBranch:
+	case KindConflictSuspect:
 		return 5
-	default:
+	case KindOrphanBranch:
 		return 6
+	default:
+		return 7
 	}
 }
 
@@ -391,6 +455,109 @@ func statusRank(status string) int {
 	default:
 		return 4
 	}
+}
+
+// PriorSubmission is one COMPLETED merge request the refinery still remembers
+// for a branch: the record that says this branch has already been through the
+// queue and how that came out.
+//
+// IT IS A PLAIN STRUCT AND NOT refinery.MergeRequest, for the reason every other
+// external fact in this package is injected: the detector has to be exercisable
+// against a synthetic refinery, and importing the refinery would make the sweep
+// testable only against a real one. The two fields that carry the refinery's
+// JUDGEMENT rather than its data — Triage and Repeats — are computed at the
+// injection site from the refinery's own table, so a class added there flows
+// through without this package changing. See
+// refinery.FailureClass.ResubmitUnchangedRepeats.
+type PriorSubmission struct {
+	MR     string `json:"mr"`
+	Status string `json:"status"`
+	// Stage is the step that refused — "rebase", "build", "fetch". Taken from
+	// the LAST recorded attempt, which is the one that ended the request.
+	Stage string `json:"stage,omitempty"`
+	// Class is the refinery's failure classification.
+	Class string `json:"class,omitempty"`
+	// Target is the ref that request was aimed at.
+	//
+	// IT IS REPORTED RATHER THAN MATCHED ON, and that is a stated bound rather
+	// than an oversight. This sweep keys a branch by (repo, branch) — the same
+	// identity the refinery queue exclusion uses — so a refusal recorded against
+	// `main` is attached to a row that may be comparing the branch against some
+	// other --target. Comparing the two would mean reconciling a submitter's short
+	// ref with a resolved remote-tracking ref, and a comparison that got that
+	// wrong would silently drop a real refusal. Naming the target on the row lets
+	// a reader see the mismatch in the one case it arises; a rule that guessed
+	// would hide it in all of them.
+	Target string `json:"target,omitempty"`
+	// Reason is the refinery's own not-retried reason, VERBATIM. It is the most
+	// useful string in this record and it is never summarised: for a rebase
+	// conflict it already reads "Resubmitting unchanged re-runs the same conflict
+	// forever; the branch has to be rebased and the conflict resolved by hand
+	// before it can land", which is the whole of what a reader of this row needs.
+	Reason string `json:"reason,omitempty"`
+	// Triage is the class's own triage note, VERBATIM.
+	Triage string `json:"triage,omitempty"`
+	// Error is the terminal error text.
+	Error string `json:"error,omitempty"`
+	// Attempts is how many attempts the request took.
+	Attempts int `json:"attempts,omitempty"`
+	// SubmittedAt is when the request entered the queue; FinishedAt when it
+	// resolved. The first is what dates the record against the branch's tip —
+	// what was submitted is what existed when it was submitted.
+	SubmittedAt time.Time `json:"submitted_at"`
+	FinishedAt  time.Time `json:"finished_at,omitempty"`
+	// Repeats is the refinery's commitment that an UNCHANGED resubmit gets the
+	// same answer. It is NOT "was it retried": a retry budget that ran out leaves
+	// a retryable failure un-retried, and reading that as futility would suppress
+	// the one remedy that works.
+	Repeats bool `json:"repeats"`
+}
+
+// Refuses reports whether this record stands against submitting the branch again
+// unchanged.
+func (p *PriorSubmission) Refuses() bool {
+	return p != nil && p.Status == "failed" && p.Repeats
+}
+
+// RefineryHistory is the sweep's view of the refinery's completed merge
+// requests: what it remembers, and HOW FAR BACK it remembers.
+//
+// THE WINDOW IS THE HALF THAT IS EASY TO DROP (mg-8baa's lesson, applied before
+// it could be re-learned here). The refinery prunes completed requests
+// destructively past a count cap and an age cap, so "this branch has no record"
+// and "this branch's record has been deleted" are the same absence from the same
+// map. A check that read only the map would answer "never submitted" for a branch
+// refused a fortnight ago and print the bare submit line with the same confidence
+// as for a branch genuinely ready to go.
+//
+// Floor is what separates them, and it makes the answer conclusive far more often
+// than a bare "the window is truncated" flag would: a branch whose TIP is newer
+// than the floor cannot have been submitted-since-that-tip outside the window,
+// because every such submission would have completed inside it. So a truncated
+// window still answers conclusively for every branch committed to since the
+// window opened, which on this fleet is most of them.
+type RefineryHistory struct {
+	// Latest maps QueueKey(repo, branch) to the MOST RECENT completed merge
+	// request for that branch. Only the most recent one bears on what to do now:
+	// a branch that failed and was later merged is not refused, and a branch with
+	// three old failures and one recent one is described by the recent one.
+	Latest map[string]PriorSubmission `json:"latest,omitempty"`
+	// Floor is the completion time of the OLDEST retained record — the moment
+	// this window starts observing. Zero when the window holds nothing, which is
+	// NOT "it observes everything": it observes nothing, and Covers says so.
+	Floor time.Time `json:"floor,omitempty"`
+	// Retention is the daemon's own description of its retention bound, for the
+	// frame. Empty when it could not be asked.
+	Retention string `json:"retention,omitempty"`
+	// Records is how many completed requests the window holds.
+	Records int `json:"records"`
+}
+
+// Covers reports whether this window observes every submission that could have
+// been made after t. It is false for an unknown t and for an empty window: the
+// strong claim needs evidence, and neither supplies any.
+func (h RefineryHistory) Covers(t time.Time) bool {
+	return !h.Floor.IsZero() && !t.IsZero() && !t.Before(h.Floor)
 }
 
 // Row is one finding: an open work item joined to a branch that has something to
@@ -439,6 +606,41 @@ type Row struct {
 	// Subjects are the unmerged commit subjects, so a reader can recognise the
 	// work without a git round-trip.
 	Subjects []string `json:"subjects,omitempty"`
+
+	// TipTime is when this branch was last committed to, and it is what dates
+	// Prior. Zero when it could not be read.
+	TipTime time.Time `json:"tip_time,omitempty"`
+
+	// Prior is the most recent COMPLETED merge request the refinery remembers for
+	// this branch, when it remembers one (mg-441f).
+	//
+	// IT OUTLIVES THE KIND, on the same rule as Rescue: only the stranded cell
+	// becomes KindRefusedBefore, because that is the one cell whose remedy is a
+	// paste-ready submit. A conflict_suspect row that was already refused keeps
+	// its own Kind — its remedy already recommends neither action — but a reader
+	// deciding what to do about it still needs to know the refinery has an
+	// opinion, so the field is set and the renderer prints it either way.
+	Prior *PriorSubmission `json:"prior,omitempty"`
+
+	// PriorStale is true when Prior was submitted BEFORE this branch's tip
+	// commit: the refinery refused content this branch no longer has, so the
+	// record does not stand against submitting what is on it now.
+	//
+	// IT IS THE TERM THAT KEEPS THIS FIX FROM BECOMING ITS OWN DEFECT. Suppressing
+	// the submit line on a stale refusal would withhold the correct remedy from a
+	// branch that had already been fixed — a remedy computed from an expired fact,
+	// which is the same error as a remedy computed from no fact at all.
+	PriorStale bool `json:"prior_stale,omitempty"`
+
+	// HistoryGap is why the refinery's records give no conclusive answer for this
+	// branch, and "" when they do.
+	//
+	// It is a string and not a bool because the reasons are not interchangeable —
+	// not consulted, unreadable, aged out of the retained window, and "the branch
+	// could not be dated" are four different things a reader can act on
+	// differently, and collapsing them is exactly the shape mg-8baa was filed
+	// about.
+	HistoryGap string `json:"history_gap,omitempty"`
 
 	// Error is why a KindUnjudged row could not be answered. Empty otherwise.
 	Error string `json:"error,omitempty"`
@@ -515,6 +717,25 @@ func (r Row) Remedy() string {
 			"bypassed the pre-commit hook and has NEVER been built; NO submit command is printed "+
 			"for this row on purpose — if the gate passed it would merge unreviewed work to %s",
 			r.Item.Repo, r.Target, orDefault(r.Ref, r.Branch), sha, r.Target)
+	case KindRefusedBefore:
+		// NO PASTE-READY SUBMIT, for mg-bfe0's reason rather than mg-aed4's. There
+		// the withheld string was a command that would RUN and do damage; here it
+		// is a command that runs and cannot work, and the fix mg-bfe0 used —
+		// chaining the missing prerequisite with `&&` — is unavailable for the same
+		// reason it was unavailable to mg-aed4: the prerequisite is a person
+		// resolving a conflict or fixing what a gate found, and no string makes
+		// that runnable. So the command printed is the one that shows the reader
+		// what the refinery objected to, and the sequence that CAN work is stated
+		// in words, unchained, because its middle step is not a command.
+		//
+		// The refinery's own not-retried reason is quoted verbatim and is the
+		// substance of this line: for a rebase conflict it already says what has to
+		// happen and says it better than a paraphrase would.
+		return fmt.Sprintf("pogo refinery show %s   # ALREADY SUBMITTED and FAILED %s: %s "+
+			"No submit command is printed for this row on purpose — the branch has to CHANGE "+
+			"first (rebase onto %s, fix what that names, push), and only then is it a different "+
+			"request",
+			r.Prior.MR, r.priorWhere(), r.priorWhy(), r.Target)
 	case KindStranded:
 		return fmt.Sprintf("%s   # do NOT dispatch at %s",
 			strandedwork.SubmitRemedy(r.Item.Repo, r.Branch, r.Item.ID, r.Pushed), r.Item.ID)
@@ -550,6 +771,66 @@ func (r Row) Remedy() string {
 		return fmt.Sprintf("git -C %s log --oneline %s..%s   # then submit OR close; do neither blind",
 			r.Item.Repo, r.Target, r.Ref)
 	}
+}
+
+// priorWhere names where and when the prior request came out, as a phrase that
+// already carries its own leading preposition.
+//
+// The preposition has to move with the content because the phrase is used after
+// two different verbs and a MERGED request has no stage: "FAILED at stage=rebase
+// (class=defect) on ..." and "MERGED against main on ..." are both grammatical,
+// while a fixed "at" would produce "MERGED at an unrecorded stage" — a sentence
+// that invents a failure out of a missing field.
+func (r Row) priorWhere() string {
+	if r.Prior == nil {
+		return "in an earlier merge request"
+	}
+	where := ""
+	switch {
+	case r.Prior.Stage != "" && r.Prior.Class != "":
+		where = "at stage=" + r.Prior.Stage + " (class=" + r.Prior.Class + ")"
+	case r.Prior.Stage != "":
+		where = "at stage=" + r.Prior.Stage
+	case r.Prior.Class != "":
+		where = "with class=" + r.Prior.Class
+	}
+	if r.Prior.Target != "" {
+		where = strings.TrimSpace(where + " against " + r.Prior.Target)
+	}
+	if !r.Prior.SubmittedAt.IsZero() {
+		where = strings.TrimSpace(where + " on " + r.Prior.SubmittedAt.UTC().Format("2006-01-02T15:04Z"))
+	}
+	if where == "" {
+		return "with nothing else recorded"
+	}
+	return where
+}
+
+// priorWhy is the refinery's own account of the failure, preferred in the order
+// it was written to be read: the not-retried reason states what re-running would
+// establish, the triage note states what the class commits to, and the raw error
+// is the fallback when neither was recorded.
+func (r Row) priorWhy() string {
+	if r.Prior == nil {
+		return ""
+	}
+	switch {
+	case r.Prior.Reason != "":
+		return ensureStop(r.Prior.Reason)
+	case r.Prior.Triage != "":
+		return ensureStop(r.Prior.Triage)
+	case r.Prior.Error != "":
+		return ensureStop(truncate(r.Prior.Error, 160))
+	}
+	return "the refinery recorded no reason."
+}
+
+func ensureStop(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.HasSuffix(s, ".") {
+		return s
+	}
+	return s + "."
 }
 
 // Excluded is a branch/item pair this sweep deliberately did not report, and
@@ -665,6 +946,17 @@ type Report struct {
 	// QueueUnreadable is set when the refinery queue could not be consulted, so
 	// branches already awaiting merge could not be excluded. Stated, not fatal.
 	QueueUnreadable string `json:"queue_unreadable,omitempty"`
+	// History is what the refinery remembered, and how far back. Zero when it was
+	// not consulted; HistoryUnreadable is set when it was and failed.
+	History RefineryHistory `json:"history"`
+	// HistoryConsulted distinguishes "not asked" from "asked and empty". An empty
+	// window and no window at all are the same zero value otherwise, and they
+	// license different readings of every stranded row below.
+	HistoryConsulted bool `json:"history_consulted"`
+	// HistoryUnreadable is set when the refinery's history could not be read, so
+	// no row could be checked against whether its branch was already refused.
+	// Stated, not fatal — the queue's rule, for the same reason.
+	HistoryUnreadable string `json:"history_unreadable,omitempty"`
 	// ReposRequested echoes Options.Repos, so a reader of the JSON can see what
 	// the run was ASKED about as well as what it found.
 	ReposRequested []string `json:"repos_requested,omitempty"`
@@ -770,6 +1062,14 @@ type Options struct {
 	// "could not be consulted" — the report distinguishes them.
 	QueuedBranches func() (map[string]bool, error)
 
+	// History returns the refinery's completed merge requests, so a stranded
+	// row's remedy can be checked against whether that branch has ALREADY been
+	// submitted and refused. Optional: nil means "not consulted", an error means
+	// "could not be consulted", and every stranded row says which — a remedy that
+	// falls back silently to the bare submit is the defect mg-441f was filed for,
+	// one level down.
+	History func() (RefineryHistory, error)
+
 	// Worktrees enumerates the polecat worktrees present on this host. Optional:
 	// nil means "not consulted", and the report's frame says so rather than
 	// implying there are none.
@@ -840,6 +1140,22 @@ func Scan(opts Options) (Report, error) {
 			queued = q
 		}
 	}
+
+	// The refinery's memory of what has ALREADY been submitted (mg-441f). Read
+	// once for the whole sweep, like the queue, and never fatal: the rest of the
+	// answer is worth having without it, and every row that needed it says so.
+	hv := historyView{consulted: opts.History != nil}
+	if opts.History != nil {
+		h, herr := opts.History()
+		if herr != nil {
+			hv.err = herr.Error()
+			rep.HistoryUnreadable = herr.Error()
+		} else {
+			hv.h = h
+			rep.History = h
+		}
+	}
+	rep.HistoryConsulted = hv.consulted
 
 	// Group by repository: the branch listing and the fetch are per-repo costs
 	// paid once, not once per item.
@@ -984,7 +1300,7 @@ func Scan(opts Options) (Report, error) {
 					rep.Excluded = append(rep.Excluded, Excluded{ItemID: it.ID, Branch: branch, Reason: reason})
 					continue
 				}
-				row, carried, rerr := classify(repo, branch, it, opts.Target)
+				row, carried, rerr := classify(repo, branch, it, opts.Target, hv)
 				if rerr != nil {
 					// NOT skipped, and not folded into either verdict — see
 					// KindUnjudged. A branch nobody could read is a row.
@@ -1094,7 +1410,7 @@ func excludedBecause(branch string, it Item, live, queued map[string]bool, repo 
 // (`refinery submit <reviewer branch>`) submits the builder's work a second time
 // under the wrong authorship. It goes in Excluded rather than being dropped,
 // because a suppression nobody can see is indistinguishable from a miss.
-func classify(repo, branch string, it Item, target string) (*Row, string, error) {
+func classify(repo, branch string, it Item, target string, hv historyView) (*Row, string, error) {
 	f, err := strandedwork.Inspect(repo, branch, target)
 	if err != nil {
 		return nil, "", err
@@ -1111,7 +1427,9 @@ func classify(repo, branch string, it Item, target string) (*Row, string, error)
 		Unmerged: len(f.Unmerged), Equivalent: f.Equivalent,
 		PreRegistration: f.PreRegistration,
 		Rescue:          f.Rescue,
+		TipTime:         f.TipTime,
 	}
+	row.Prior, row.PriorStale, row.HistoryGap = hv.forBranch(repo, branch, f.TipTime, f.TipTimeError)
 	for _, c := range f.Unmerged {
 		row.Subjects = append(row.Subjects, c.Subject)
 	}
@@ -1144,10 +1462,106 @@ func classify(repo, branch string, it Item, target string) (*Row, string, error)
 	// disagree, go and look" for a narrower statement, and would lose the fact
 	// that the target may ALREADY hold this work. Row.Rescue stays set either
 	// way, so the renderer says "unreviewed rescue work" on both.
-	if row.Kind == KindStranded && row.Rescue != nil {
+	// THE REFUSED KIND DISPLACES ONLY KindStranded, on exactly the argument
+	// KindRescueUnbuilt's promotion makes (mg-441f). KindStranded is the one cell
+	// whose remedy is a paste-ready submit, so it is the one cell where a branch
+	// the refinery has already refused is handed a command that cannot work.
+	// conflict_suspect recommends neither remedy and says why; overwriting it here
+	// would trade a correct "two instruments disagree, go and look" for a narrower
+	// statement and would lose the fact that the target may already hold the work.
+	// Row.Prior stays set either way, so the renderer reports the refusal on both.
+	if row.Kind == KindStranded && row.Prior.Refuses() && !row.PriorStale {
+		row.Kind = KindRefusedBefore
+	}
+	// AND RESCUE DISPLACES BOTH. The two causes are independent — a rescue branch
+	// has typically never been submitted at all, and a refused branch is ordinary
+	// built work — but where they coincide the rescue label is the one that must
+	// survive: its failure mode is a PASSING gate merging unreviewed code, which
+	// is worse than a wasted gate run, and its remedy (read it, build it) is a
+	// prerequisite of the refused row's remedy anyway.
+	if (row.Kind == KindStranded || row.Kind == KindRefusedBefore) && row.Rescue != nil {
 		row.Kind = KindRescueUnbuilt
 	}
 	return &row, "", nil
+}
+
+// historyView is the sweep's answer source for "has this branch already been
+// through the refinery", together with everything needed to say when it CANNOT
+// answer.
+type historyView struct {
+	consulted bool
+	err       string
+	h         RefineryHistory
+}
+
+// forBranch returns the record that bears on submitting this branch as it now
+// stands, whether that record is stale, and the reason there is no conclusive
+// answer.
+//
+// EVERY BRANCH THAT RETURNS WITHOUT A CONCLUSIVE ANSWER GETS A REASON. That is
+// the whole of mg-8baa's lesson carried into this instrument: the natural way to
+// write this is a map lookup whose miss means "never submitted", and that answer
+// is indistinguishable from "the record was pruned last Tuesday". Both produce
+// the bare submit line, one of them correctly.
+func (v historyView) forBranch(repo, branch string, tip time.Time, tipErr string) (*PriorSubmission, bool, string) {
+	if !v.consulted {
+		return nil, false, "the refinery's merge history was NOT consulted on this run, so nothing " +
+			"here knows whether this branch has already been submitted and refused"
+	}
+	if v.err != "" {
+		return nil, false, fmt.Sprintf("the refinery's merge history COULD NOT BE READ (%s), so "+
+			"whether this branch has already been submitted and refused is unknown", v.err)
+	}
+	p, found := v.h.Latest[QueueKey(repo, branch)]
+
+	// A branch that cannot be DATED cannot have a record dated against it. The
+	// record is still reported — it is real and a reader wants it — but it cannot
+	// be told from an expired one, so it does not promote the row.
+	if tip.IsZero() {
+		gap := "this branch's tip could not be dated"
+		if tipErr != "" {
+			gap += " (" + tipErr + ")"
+		}
+		gap += ", so a refinery record could not be told from one that predates the branch's " +
+			"current commits"
+		if found {
+			return &p, false, gap
+		}
+		return nil, false, gap
+	}
+
+	if !found {
+		if v.h.Covers(tip) {
+			// The one conclusive negative: the window opened before this branch was
+			// last written to, so any submission of what is on it now would be in
+			// the window, and there is none.
+			return nil, false, ""
+		}
+		if v.h.Records == 0 {
+			return nil, false, "the refinery's retained merge history is EMPTY, so it observes no " +
+				"submission of this branch either way"
+		}
+		return nil, false, fmt.Sprintf("the refinery's retained merge history begins %s, AFTER this "+
+			"branch's last commit (%s) — a refusal of this branch in between has been pruned and "+
+			"cannot be seen from here",
+			v.h.Floor.UTC().Format("2006-01-02T15:04Z"), tip.UTC().Format("2006-01-02T15:04Z"))
+	}
+
+	// STALE means the refinery refused content this branch no longer has. The
+	// record is reported and explicitly does NOT stand: withholding the remedy on
+	// an expired fact is the same error as computing it from no fact at all, which
+	// is what this whole check repairs.
+	if p.SubmittedAt.IsZero() {
+		// A record with no submit time is not a STALE record — it is an undated
+		// one, and calling it stale would quietly clear a branch on the strength of
+		// a missing field. Reported, with the gap that says so.
+		return &p, false, fmt.Sprintf("the refinery's record for this branch (%s) carries no submit "+
+			"time, so it could not be dated against the branch's own commits", p.MR)
+	}
+	if p.SubmittedAt.Before(tip) {
+		return &p, true, ""
+	}
+	return &p, false, ""
 }
 
 // orphanBranchRows reports the polecat worktrees on this host whose branch holds
@@ -1276,6 +1690,36 @@ func BuildFrame(rep Report, opts Options) []string {
 				"measured by nothing here — see worktrees_unreadable_list; they are named, not "+
 				"dropped.", n))
 		}
+	}
+	// THE REFINERY'S MEMORY IS A WINDOW AND THE FRAME HAS TO SAY SO (mg-441f). A
+	// stranded row's remedy is checked against whether that branch was already
+	// refused, and that check can only see as far back as the refinery still
+	// remembers. A report that used the check without stating its reach would
+	// invite exactly the reading mg-8baa was filed about: a bounded answer read as
+	// a census.
+	switch {
+	case !rep.HistoryConsulted:
+		frame = append(frame,
+			"The refinery's merge history was NOT consulted on this run, so no row here knows "+
+				"whether its branch has already been submitted and refused.")
+	case rep.HistoryUnreadable != "":
+		frame = append(frame,
+			fmt.Sprintf("The refinery's merge history COULD NOT BE READ (%s), so no row here knows "+
+				"whether its branch has already been submitted and refused.", rep.HistoryUnreadable))
+	default:
+		floor := "nothing — the window is EMPTY"
+		if !rep.History.Floor.IsZero() {
+			floor = "back to " + rep.History.Floor.UTC().Format("2006-01-02T15:04Z")
+		}
+		retention := ""
+		if rep.History.Retention != "" {
+			retention = fmt.Sprintf(" (retention: %s)", rep.History.Retention)
+		}
+		frame = append(frame,
+			fmt.Sprintf("The refinery's merge history was read and observes %s%s, over %d completed "+
+				"request(s). A branch refused before that has been PRUNED and this report cannot see "+
+				"it; every row whose answer depends on that says so on its own line.",
+				floor, retention, rep.History.Records))
 	}
 	if len(opts.Repos) > 0 {
 		frame = append(frame,

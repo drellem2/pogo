@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The tests below run against REAL git repositories rather than a faked command
@@ -870,5 +871,67 @@ func TestPreRegistrationSummaryCarriesTheProvenanceToo(t *testing.T) {
 	// The pre-registration advice itself must survive the addition.
 	if !strings.Contains(s, "PRE-REGISTRATION") || !strings.Contains(s, "unamended") {
 		t.Errorf("Summary() = %q dropped the pre-registration instruction", s)
+	}
+}
+
+// --- The branch's own date (mg-441f) -----------------------------------------
+
+// TestInspectDatesTheBranchTip. A finding is compared against EXTERNAL records —
+// the refinery's memory of what it has already refused — and "this branch was
+// already refused" is only a claim about what is on the branch now if the refusal
+// came after the branch's last commit. Without a date the comparison cannot be
+// made, and a check that made it anyway would suppress the remedy on a branch
+// somebody had already fixed.
+func TestInspectDatesTheBranchTip(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-441f", "main")
+	before := time.Now().Add(-2 * time.Second)
+	r.commit("audit.md", "feat(audit): work whose date matters (mg-441f)")
+	r.push("polecat-441f")
+	r.checkout("main")
+
+	f, err := Inspect(r.dir, "polecat-441f", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if f.TipTimeError != "" {
+		t.Fatalf("TipTimeError = %q on a readable branch", f.TipTimeError)
+	}
+	if f.TipTime.IsZero() {
+		t.Fatal("TipTime is zero on a branch that was just committed to; a zero here reads as " +
+			"UNKNOWN downstream and makes every external record look current")
+	}
+	if f.TipTime.Before(before) {
+		t.Errorf("TipTime = %s, before the commit was made (%s)", f.TipTime, before)
+	}
+	if f.TipTime.After(time.Now().Add(time.Minute)) {
+		t.Errorf("TipTime = %s is in the future", f.TipTime)
+	}
+}
+
+// TestInspectTipDateFailureIsNotFatal. `git cherry` has already answered the
+// primary question by the time the date is read, so an unreadable date must not
+// turn a branch that WAS judged into an unjudged row. What it must do is return
+// the zero time WITH its reason, so a caller cannot mistake it for a real date.
+func TestInspectTipDateFailureIsNotFatal(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-441f", "main")
+	r.commit("audit.md", "feat(audit): work (mg-441f)")
+	r.push("polecat-441f")
+	r.checkout("main")
+
+	// The ref resolves, so Inspect proceeds; the date read is exercised directly
+	// against a ref that does not, which is the only way to reach the failure
+	// without corrupting the repository under test.
+	when, why := tipTime(r.dir, "refs/heads/no-such-branch-anywhere")
+	if !when.IsZero() {
+		t.Errorf("tipTime returned %s for an unresolvable ref", when)
+	}
+	if why == "" {
+		t.Error("tipTime returned a zero time and NO reason; the two together are what stop a " +
+			"caller reading the zero as the epoch")
+	}
+	if !strings.Contains(why, "no-such-branch-anywhere") {
+		t.Errorf("the reason does not name the ref that failed: %q", why)
 	}
 }
