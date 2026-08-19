@@ -18,9 +18,12 @@ import (
 //     address, and `mg show --json` was measured on 2026-08-12 to carry no
 //     `result` key at all, so which fields it does carry is not a safe guess.
 //  2. The result sidecar mg writes at `mg done` survives being archived, and is
-//     reachable from its new home. The refinery runs `mg archive --days=0`
-//     immediately after a merge, so a verdict reader that only knew done/ would
-//     work or not depending on which side of that call it ran.
+//     reachable from its new home. The coordinator archives a merged item by id
+//     during its cleanup pass, so a verdict reader that only knew done/ would
+//     work or not depending on which side of that archive it ran. (This said
+//     the REFINERY ran `mg archive --days=0` after every merge until mg-eadd —
+//     that call went in 2026-03-26, the archive race did not. The sweep form
+//     below is safe only because `--root` pins it to this test's own store.)
 //
 // The unit tests establish that the code takes the right branch. Only this one
 // establishes that the branch is pointed at something that exists.

@@ -30,9 +30,11 @@ func TestReadResultFindsASidecarInDone(t *testing.T) {
 }
 
 // The archive race is the whole reason this reader exists in this shape: the
-// refinery runs `mg archive --days=0` right after a merge, so an item can leave
-// done/ within seconds of closing. A reader that knew only done/ would find the
-// verdict or not depending on which side of that call it ran.
+// coordinator archives a merged item by id during its cleanup pass, so an item
+// can leave done/ at any moment after it closes. A reader that knew only done/
+// would find the verdict or not depending on which side of that archive it ran.
+// (This said "the refinery runs `mg archive --days=0` right after a merge"
+// until mg-eadd. That call went in 2026-03-26; the race did not.)
 func TestReadResultReachesAnAlreadyArchivedItem(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "done"), 0o755); err != nil {

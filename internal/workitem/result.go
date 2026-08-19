@@ -27,11 +27,17 @@ func ReadResult(id string) (string, error) { return ReadResultFrom(workspaceDir(
 //
 // It looks in done/ first and then in each archive/<YYYY-MM>/ directory, newest
 // month first, because a completed item does not stay in done/ for long: the
-// refinery runs `mg archive --days=0` after a successful merge, so an item can
-// be archived within seconds of closing. A reader that only knew done/ would
-// find the sidecar or not depending on which side of that call it ran — which
-// is precisely the kind of timing-dependent silence this package's consumers
-// exist to remove.
+// coordinator archives merged items by id as part of its cleanup pass, so an
+// item can leave done/ at any moment after it closes. A reader that only knew
+// done/ would find the sidecar or not depending on which side of that archive
+// it ran — which is precisely the kind of timing-dependent silence this
+// package's consumers exist to remove.
+//
+// This comment used to name `mg archive --days=0`, run by the refinery after a
+// merge, as the reason. That call was removed on 2026-03-26 (mg-1f67) and the
+// helper behind it deleted on 2026-08-19 (mg-eadd); the reason was stale, the
+// SHAPE was not — a coordinator archiving by id races this reader exactly the
+// same way.
 func ReadResultFrom(root, id string) (string, error) {
 	if id == "" {
 		return "", nil

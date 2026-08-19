@@ -54,7 +54,9 @@
   mg-1f67 on 2026-03-26. Left in place (out of this ticket's scope, which is
   the shipped prompt) and noted in `mayor.md`, because re-wiring it would put
   the estate-wide sweep back into code where no session's judgement is in the
-  path at all.
+  path at all. **Deleted by mg-eadd** before this release shipped — see the
+  Removed section; the note in `mayor.md` is now a record of the deletion
+  rather than a standing pointer at the helper.
 
 - **The coupling with `pm/pm-template.md` is now written down in both
   directions**, in the same spirit as `cad63fe`. That template's "Recently
