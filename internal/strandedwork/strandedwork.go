@@ -147,6 +147,18 @@ const (
 type Commit struct {
 	SHA     string `json:"sha"`
 	Subject string `json:"subject"`
+
+	// Body is the commit message below the subject, as `git log --format=%b`
+	// reports it, with the trailing newlines trimmed. Empty when the commit has
+	// no body OR when the bodies could not be read — Finding.BodiesUnread says
+	// which, and a reader that treats an unread body as an absent one re-creates
+	// the defect this field was added to close.
+	//
+	// IT IS READ BECAUSE THE ACTIONABLE HALF OF A RESCUE COMMIT LIVES HERE
+	// (mg-0c37). The subject says the work is unreviewed; the body is where the
+	// rescuer names what specifically was left undone, and that is the sentence a
+	// successor ticket gets written from. See declaration.go.
+	Body string `json:"body,omitempty"`
 }
 
 // IsPreRegistration reports whether c records predictions made in advance.
@@ -357,6 +369,18 @@ type Finding struct {
 	// how a scan attributes an orphaned branch to an item, and it is empty for a
 	// branch whose commits never named one.
 	WorkItemID string `json:"work_item_id,omitempty"`
+
+	// BodiesUnread is why Commit.Body is empty on every unmerged commit, and ""
+	// when the bodies were read.
+	//
+	// IT IS A SEPARATE FIELD BECAUSE AN UNREAD BODY MUST NOT READ AS A CLEAN ONE.
+	// Every self-declaration predicate in declaration.go answers false on an
+	// empty body, so a failed read would silently convert "this commit declares a
+	// remainder" into "it declares nothing" — the failure direction this package
+	// refuses everywhere else (see MeasurePresence's error paths). A body read is
+	// not load-bearing enough to fail an Inspect over, so it degrades to a stated
+	// gap instead of a silent one.
+	BodiesUnread string `json:"bodies_unread,omitempty"`
 }
 
 // Stranded reports whether the branch holds work the target does not.
@@ -526,6 +550,11 @@ func Inspect(repo, branch, target string) (Finding, error) {
 	f.Unmerged, f.Equivalent = unmerged, equivalent
 	if len(unmerged) == 0 {
 		return f, nil
+	}
+	// The commit BODIES, which `git cherry -v` does not report and nothing in
+	// this package read before mg-0c37. See Commit.Body and declaration.go.
+	if berr := loadBodies(repo, f.Unmerged); berr != nil {
+		f.BodiesUnread = berr.Error()
 	}
 
 	f.Disposition = DispositionResubmit
@@ -924,6 +953,66 @@ func cherry(repo, targetRef, branchRef string) ([]Commit, int, error) {
 		}
 	}
 	return unmerged, equivalent, nil
+}
+
+// bodyBatch is how many commits one `git log` invocation is asked for. A branch
+// with hundreds of unmerged commits would otherwise build an argv long enough to
+// hit the platform limit, and an E2BIG here would lose the bodies for the whole
+// branch rather than for one batch.
+const bodyBatch = 100
+
+// LoadBodies fills Commit.Body for each commit in place, for callers that got
+// their commits from something other than Inspect (LocalOnlyCommits). The error
+// belongs in a field a reader can see — see Finding.BodiesUnread for why an
+// unread body must not be allowed to read as an absent declaration.
+func LoadBodies(repo string, commits []Commit) error { return loadBodies(repo, commits) }
+
+// loadBodies fills Commit.Body for each commit in place.
+//
+// `git cherry -v` reports the subject and nothing else, so this is a second
+// round-trip. It is one process per 100 commits and it runs only when a branch
+// already has unmerged work, which is the population this package is already
+// paying `git cherry`, `for-each-ref` and a per-file content probe for.
+//
+// A commit git does not report is left with an empty body rather than dropped,
+// and a batch that fails aborts the whole load: a PARTIALLY filled set would
+// make "this commit declares nothing" true of some commits for a reason nobody
+// could see, and Finding.BodiesUnread can only say that about all of them.
+func loadBodies(repo string, commits []Commit) error {
+	index := make(map[string]int, len(commits))
+	for i := range commits {
+		index[commits[i].SHA] = i
+	}
+	for start := 0; start < len(commits); start += bodyBatch {
+		end := start + bodyBatch
+		if end > len(commits) {
+			end = len(commits)
+		}
+		// %x00 and not a literal NUL in the format string: exec argv cannot carry a
+		// NUL byte at all, so building the separator on this side fails before git
+		// runs. git emits the byte from the escape.
+		args := []string{"log", "--no-walk=unsorted", "--format=%H%n%b%x00"}
+		for _, c := range commits[start:end] {
+			args = append(args, c.SHA)
+		}
+		out, err := git(repo, args...)
+		if err != nil {
+			return fmt.Errorf("git log --format=%%b in %s: %w", repo, err)
+		}
+		for _, rec := range strings.Split(out, "\x00") {
+			rec = strings.TrimLeft(rec, "\n")
+			if rec == "" {
+				continue
+			}
+			sha, body, _ := strings.Cut(rec, "\n")
+			i, ok := index[strings.TrimSpace(sha)]
+			if !ok {
+				continue
+			}
+			commits[i].Body = strings.TrimRight(body, "\n")
+		}
+	}
+	return nil
 }
 
 // workItemID recovers the work item a branch's unmerged commits name, if any.

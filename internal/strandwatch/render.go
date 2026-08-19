@@ -3,6 +3,7 @@ package strandwatch
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/drellem2/pogo/internal/strandedwork"
 )
@@ -159,10 +160,11 @@ func Render(rep Report, all bool) string {
 			fmt.Fprintf(&b, "    in %s — %s\n", r.Item.Repo, strandedwork.LocalOnlyWarning)
 			fmt.Fprintf(&b, "    %d commit(s) on NO remote ref, and no OPEN work item names this branch:\n", r.Unmerged)
 			for _, s := range r.Subjects {
-				fmt.Fprintf(&b, "      %s\n", truncate(s, 92))
+				fmt.Fprintf(&b, "      %s\n", truncateSubject(s, 92))
 			}
 			b.WriteString("    This is the row the open-item join cannot produce. There is no owner to ask\n" +
 				"    and no item to submit under, so the first move is to make the object durable.\n")
+			declarationLines(&b, r)
 			fmt.Fprintf(&b, "    -> %s\n", r.Remedy())
 			continue
 		}
@@ -199,7 +201,7 @@ func Render(rep Report, all bool) string {
 		default:
 			fmt.Fprintf(&b, "    %d unmerged commit(s); %s.\n", r.Unmerged, r.Presence.Describe())
 			for _, s := range r.Subjects {
-				fmt.Fprintf(&b, "      %s\n", truncate(s, 92))
+				fmt.Fprintf(&b, "      %s\n", truncateSubject(s, 92))
 			}
 		}
 		if r.PreRegistration != nil {
@@ -266,12 +268,61 @@ func Render(rep Report, all bool) string {
 				"    it means nobody has compiled this and nobody has reviewed it. A PASSING gate is the\n" +
 				"    worse outcome here, not the good one — it merges half-implemented code.\n")
 		}
+		declarationLines(&b, r)
 		fmt.Fprintf(&b, "    -> %s\n", r.Remedy())
 	}
 
 	b.WriteString("\nThis command submitted nothing and closed nothing. Both remedies are one command\n" +
 		"and both are destructive in the wrong direction, so they stay with a reader.\n")
 	return b.String()
+}
+
+// declarationLines prints what the branch's own commits say about themselves,
+// immediately above the remedy.
+//
+// IT IS THE THIRD OF THIS TICKET'S THREE PLACES AND THE WEAKEST OF THEM, and
+// that ordering is deliberate. The clip fix (truncateSubject) keeps the marker
+// from being destroyed; the remedy note (Row.DeclarationNote) puts it on the
+// line that gets copied; this puts the CONTENT next to both, because a reader
+// who does stop needs to know what was declared without leaving the report. A
+// context line on its own is what already existed and what already failed —
+// `UNREVI…` was a context line.
+//
+// The remainder is printed in the rescuer's own words rather than paraphrased. A
+// paraphrase of "no accompanying test, and the repo's
+// internal/agent/prompt_test.go does assert over the shipped template corpus"
+// loses the file name, and the file name is the whole of what makes it a
+// successor ticket rather than a worry.
+func declarationLines(b *strings.Builder, r Row) {
+	if r.BodiesUnread != "" {
+		// NOT SILENT, on this package's standing rule that a failed measurement is
+		// not a clean one. Every self-declaration predicate answers "no" on an empty
+		// body, so without this line an unreadable commit message renders exactly
+		// like a commit that declared nothing.
+		fmt.Fprintf(b, "    COMMIT BODIES NOT READ (%s) — this row has NOT been checked for a\n"+
+			"    declared remainder, and the absence of one below is not evidence there is none.\n",
+			r.BodiesUnread)
+	}
+	if r.Declared != nil && r.Rescue == nil {
+		// Suppressed under a rescue row only because the RESCUE block four lines up
+		// already says this at length, in stronger words. On any other row it is new
+		// information: the mg-11fa rescue spelling carries no UNREVIEWED token at
+		// all, and an ordinary commit can carry one without being a rescue.
+		fmt.Fprintf(b, "    COMMIT %s DECLARES ITSELF UNREVIEWED — its own subject says nobody has read\n"+
+			"    this. A gate can establish that it builds; it cannot establish that it is right.\n",
+			short(r.Declared.SHA))
+	}
+	if r.Remainder == nil {
+		return
+	}
+	fmt.Fprintf(b, "    COMMIT BODY NAMES A REMAINDER (%s) — the commit itself says something\n"+
+		"    specific was NOT done. This is the successor ticket, and it is not in the diff:\n",
+		short(r.Remainder.SHA))
+	for _, line := range wrap(r.Remainder.RemainderNote(), 82) {
+		fmt.Fprintf(b, "      %s\n", line)
+	}
+	fmt.Fprintf(b, "      (full message: git -C %s log -1 %s)\n",
+		orDefault(r.Item.Repo, "."), short(r.Remainder.SHA))
 }
 
 // coverageShortfall names the gap between the population and what was looked at,
@@ -323,7 +374,87 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	return clip(s, n-1) + "…"
+}
+
+// truncateSubject shortens a commit subject WITHOUT losing a self-declaration.
+//
+// THE CLIP IS WHAT THIS TICKET IS ABOUT. `truncate` at 92 columns rendered
+//
+//	RESCUE(mg-516e): fleet-progress detector recovered from preserved worktree p516e — UNREVI…
+//
+// out of a subject ending `— UNREVIEWED, not this committer's work (mg-51bf)`.
+// It landed mid-word on the one token that should stop a reader: legible to
+// somebody looking for it, invisible to somebody scanning a list. A marker that
+// carries the fact and defeats it is worse than no marker, because a reader who
+// skims past it has been shown the evidence and is now on record as having seen
+// it.
+//
+// So the ELISION MOVES TO THE MIDDLE. The head is cut and the declaration is
+// kept, running to the end of the subject, because what follows a marker is the
+// qualification that makes it mean something — "not this committer's work" is
+// the half that says who to ask.
+//
+// AND THE WIDTH YIELDS TO THE MARKER, not the other way round. When the tail
+// from the marker onward is longer than the budget by itself, this returns it in
+// full and overruns: n is a reading convenience and the marker is the point of
+// the line. A subject long enough for that to matter is already pathological,
+// and a report line that wraps is a smaller defect than one that lies.
+func truncateSubject(s string, n int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	if len(s) <= n {
+		return s
+	}
+	at := strandedwork.DeclarationIndex(s)
+	if at < 0 {
+		return clip(s, n-1) + "…"
+	}
+	if at == 0 {
+		// The marker opens the subject, so an ordinary end-clip already keeps it and
+		// a middle elision would print a leading "… " on a line nothing was cut from
+		// the front of.
+		return clip(s, n-1) + "…"
+	}
+	tail := s[at:]
+	if len(tail)+2 >= n {
+		return "… " + tail
+	}
+	// The elision is a SEPARATE TOKEN with a space on each side. Butted straight
+	// against the marker it renders `…UNREVIEWED`, which is one glyph away from
+	// the shape this whole function exists to stop being printed — a reader who
+	// has learned that `UNREVI…` means "clipped" reads `…UNREVIEWED` the same way
+	// for the length of one glance.
+	head := strings.TrimRight(trimPartialWord(clip(s, n-2-len(tail))), " ")
+	return head + "… " + tail
+}
+
+// trimPartialWord drops a trailing fragment of a word, so a head cut ends on a
+// word rather than in the middle of one. "…prompt clause c… UNREVIEWED" reads as
+// damage; "…prompt clause… UNREVIEWED" reads as an elision. Whitespace-free
+// input is returned unchanged rather than emptied.
+func trimPartialWord(s string) string {
+	i := strings.LastIndexByte(s, ' ')
+	if i <= 0 {
+		return s
+	}
+	return s[:i]
+}
+
+// clip cuts s to at most n bytes, on a rune boundary. Subjects in this repo
+// carry em dashes and typographic quotes; a byte cut through one renders as a
+// replacement character, which reads as a rendering bug and is one more reason
+// to skip the line.
+func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func short(sha string) string {
