@@ -363,7 +363,7 @@ func TestCleanupAgentWorktreeKeepsUndeterminable(t *testing.T) {
 func TestCleanupAgentWorktreeRecordsAnUndeliveredNotice(t *testing.T) {
 	spine := filepath.Join(t.TempDir(), "events.log")
 	events.SetLogPathForTesting(spine)
-	t.Cleanup(func() { events.SetLogPathForTesting("") })
+	t.Cleanup(func() { events.SetLogPathForTesting(testEventLogPath) })
 
 	for _, tc := range []struct {
 		name    string
@@ -741,7 +741,7 @@ func TestPreservedWorktreeIsOnTheEventSpine(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spine := filepath.Join(t.TempDir(), "events.log")
 			events.SetLogPathForTesting(spine)
-			t.Cleanup(func() { events.SetLogPathForTesting("") })
+			t.Cleanup(func() { events.SetLogPathForTesting(testEventLogPath) })
 
 			repo, wt := wtRepo(t)
 			tc.setup(t, wt)
@@ -804,7 +804,7 @@ func TestPreservedWorktreeIsOnTheEventSpine(t *testing.T) {
 func TestPreservedWorktreeEventSurvivesAFailedNotice(t *testing.T) {
 	spine := filepath.Join(t.TempDir(), "events.log")
 	events.SetLogPathForTesting(spine)
-	t.Cleanup(func() { events.SetLogPathForTesting("") })
+	t.Cleanup(func() { events.SetLogPathForTesting(testEventLogPath) })
 
 	repo, wt := wtRepo(t)
 	if err := os.WriteFile(filepath.Join(wt, "wip.go"), []byte("package wip\n"), 0644); err != nil {
@@ -853,7 +853,7 @@ func TestPreservedWorktreeEventSurvivesAFailedNotice(t *testing.T) {
 func TestReapedWorktreeEmitsNothing(t *testing.T) {
 	spine := filepath.Join(t.TempDir(), "events.log")
 	events.SetLogPathForTesting(spine)
-	t.Cleanup(func() { events.SetLogPathForTesting("") })
+	t.Cleanup(func() { events.SetLogPathForTesting(testEventLogPath) })
 
 	repo, wt := wtRepo(t)
 	if got := cleanupAgentWorktree(catAgent("cat1", "mg-clean", repo, wt), "mayor",

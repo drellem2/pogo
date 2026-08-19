@@ -128,6 +128,17 @@ type SpawnPolecatAPIRequest struct {
 	//
 	// It overrides the PRESERVED-WORKTREE gate alone. See preservedgate.go.
 	PreservedOverride string `json:"preserved_override,omitempty"`
+	// MergedOverride dispatches an item whose branch has ALREADY MERGED, and
+	// states why. Same shape and same reasoning as the three above.
+	//
+	// It has a legitimate use that the other three do not, and the flag exists as
+	// much for it as for a false positive: an item can genuinely have work AFTER
+	// its merge — a release that still has to tag, a change to be verified in
+	// place — and the person dispatching it knows that while the gate cannot.
+	// The written reason is what tells a later reader which of the two this was.
+	//
+	// It overrides the MERGED-WORK gate alone. See mergedgate.go.
+	MergedOverride string `json:"merged_override,omitempty"`
 }
 
 // DrainAPIRequest is the JSON body for POST /agents/drain. Toggling drain mode
@@ -1577,6 +1588,40 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		if override := strings.TrimSpace(spawnReq.PreservedOverride); override != "" {
 			emitPolecatPreservedOverridden(spawnReq, override, refusal)
 			log.Printf("dispatch preserved-worktree: OVERRIDDEN for %s by explicit request: %s (refusal was: %s)",
+				spawnReq.Id, override, refusal)
+		} else {
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+			return
+		}
+	}
+
+	// Merged-work gate: refuse to put a worker on an item whose branch has
+	// ALREADY MERGED (mg-9d4e). The gate above asks whether this item's work
+	// still needs merging; this one asks whether it has already landed, and the
+	// two together cover a work item's whole post-push life.
+	//
+	// It is here because pogod's close-at-merge can be REFUSED, correctly: an
+	// item tagged `declares-remainder` names work that must outlive it, and `mg
+	// done` turns such an item away until a successor is named. The merge lands,
+	// the close is refused, the polecat is stopped, its claim is released, and
+	// the item is back in available/ — unclaimed, open, and finished. On
+	// 2026-08-12 that happened twice inside 66 minutes and priority-wake
+	// advertised both as ready within minutes of their branches merging.
+	//
+	// 409 and placed with the conflict gates, for their reasons: retrying it
+	// unchanged is refused identically until the item is closed, and a refused
+	// dispatch must leave no worktree, agent dir, or prompt file behind
+	// (mg-ef80). Fails OPEN on an absent gate, an absent id, or a merge the
+	// refinery's bounded history has forgotten — see mergedWorkRefusal.
+	//
+	// Overridable, and unlike the three above the override has a use that is not
+	// a false positive: an item can legitimately have work after its merge. What
+	// the flag costs is a written reason, recorded as an event beside the
+	// refusal it bypassed.
+	if refusal := r.mergedWorkRefusal(spawnReq.Id); refusal != "" {
+		if override := strings.TrimSpace(spawnReq.MergedOverride); override != "" {
+			emitPolecatMergedOverridden(spawnReq, override, refusal)
+			log.Printf("dispatch merged-work: OVERRIDDEN for %s by explicit request: %s (refusal was: %s)",
 				spawnReq.Id, override, refusal)
 		} else {
 			failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)

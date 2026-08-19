@@ -19,7 +19,7 @@ func spine(t *testing.T) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "events.log")
 	events.SetLogPathForTesting(p)
-	t.Cleanup(func() { events.SetLogPathForTesting("") })
+	t.Cleanup(func() { events.SetLogPathForTesting(testEventLogPath) })
 	return p
 }
 

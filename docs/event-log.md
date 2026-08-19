@@ -431,6 +431,75 @@ Additive — no `schema_version` bump.
 {"schema_version":1,"timestamp":"2026-08-19T07:31:04.000000000Z","event_type":"dispatch_preserved_worktree_overridden","agent":"cat-q516e","work_item_id":"mg-516e","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"q516e","reason":"read all 16 files; every one is regenerated suite output","refusal":"work item mg-516e already has UNCOMMITTED work in a RETAINED WORKTREE: /Users/daniel/.pogo/polecats/p516e holds 16 uncommitted path(s) — 14 modified, 2 untracked ..."}}
 ```
 
+#### `work_item_merged_not_closed`
+
+A branch merged and its work item did **not** close: pogod called `mg done` on the
+author's behalf, the call was refused, and the store still does not report the
+item as done or archived. The common cause is the `declares-remainder` guard
+doing its job on an item whose successor was never filed — `mg done` correctly
+refuses such an item — so the merge lands, the close is turned away, the polecat
+is stopped, its claim is released, and the item returns to `available/` with its
+work already on the target. On 2026-08-12 that happened twice inside 66 minutes
+and priority-wake advertised both as ready and unclaimed. Until mg-9d4e this and
+the benign "the worker won the race" case were one ambiguous log line.
+
+The discriminator is the **store**, not the error text: `mg done` answers "already
+done" and "declares a remainder" with the same exit code. A status probe that
+FAILS still emits — an unreadable store is not evidence that the item closed —
+and says so via `status_unknown`. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **Optional envelope:** `repo`
+- **`details` fields:**
+  - `worker` (string, required): the polecat that did the work, or `""` when no polecat was running (a hand-submitted branch, mg-be37)
+  - `branch` (string, required): the branch that merged
+  - `mr` (string, required): the merge request id, so `pogo refinery show <id>` reaches the record
+  - `target` (string, required): the ref it landed on
+  - `merged_sha` (string, required): the commit on the target, so the claim is checkable with one `git log`
+  - `close_error` (string, required): what `mg done` said, verbatim — the only field that names the reason
+  - `status_unknown` (bool, required): true when the item's status could not be read, in which case the event asserts only that nothing established the item is closed
+
+```json
+{"schema_version":1,"timestamp":"2026-08-12T23:51:04.000000000Z","event_type":"work_item_merged_not_closed","agent":"pogod","work_item_id":"mg-ac0c","repo":"/Users/daniel/dev/pogo","details":{"worker":"ac0c","branch":"polecat-ac0c","mr":"mr-d9ugdoitjv1ohvj2fd20","target":"main","merged_sha":"abc123def4567890","close_error":"mg done failed: declares a remainder and names no successor (exit status 4)","status_unknown":false}}
+```
+
+#### `work_item_merged_not_closed_undelivered`
+
+The mail half of the above bounced. The event above is already durable by the time
+the mail is attempted — that ordering is the point, so a machine with no `mg` on
+`PATH` loses the improvement and not the record — and this makes the delivery
+layer itself observable, so "the alert was never raised" and "the alert was raised
+and the mail bounced" are not the same silence. Additive.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **Optional envelope:** `repo`
+- **`details` fields:**
+  - `recipient` (string, required): the mailbox the notice was addressed to
+  - `branch` (string, required), `mr` (string, required): which merge it was about
+  - `error` (string, required): why the send failed
+
+#### `dispatch_merged_work_overridden`
+
+A dispatch went ahead over the merged-work gate's refusal, with a stated reason
+(`pogo agent spawn-polecat --merged-override="<why>"`). Unlike the three dispatch
+overrides above it, this one has a use that is not a false positive: an item can
+genuinely owe work **after** its merge — a release that still has to tag, a
+change to be verified in place — and the person dispatching knows that while the gate cannot.
+The written reason is what tells a later reader which of the two this was.
+Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **Optional envelope:** `repo`
+- **`details` fields:**
+  - `agent_type` (string, required): always `"polecat"` in v1
+  - `agent_name` (string, required): the name of the polecat that was dispatched anyway
+  - `reason` (string, required): the operator's stated why
+  - `refusal` (string, required): the bypassed refusal verbatim
+
+```json
+{"schema_version":1,"timestamp":"2026-08-13T00:04:22.000000000Z","event_type":"dispatch_merged_work_overridden","agent":"cat-ac0c2","work_item_id":"mg-ac0c","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"ac0c2","reason":"release item: the tag step follows the merge","refusal":"work item mg-ac0c HAS ALREADY MERGED: ..."}}
+```
+
 #### `work_item_completion_notice`
 
 pogod decided what to tell the agent that FILED a work item, at the moment the
