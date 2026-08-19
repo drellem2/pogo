@@ -603,6 +603,31 @@ type Row struct {
 	// from becoming permanent once a rescue branch actually merges.
 	Rescue *strandedwork.Commit `json:"rescue,omitempty"`
 
+	// Declared is the oldest unmerged commit whose SUBJECT declares its content
+	// unreviewed, when the branch carries one (mg-0c37).
+	//
+	// IT IS NOT THE SAME PREDICATE AS Rescue AND IT IS NOT REDUNDANT AGAINST IT.
+	// Rescue matches the `RESCUE(` marker, which is a convention about HOW a
+	// commit was made; this matches the words an author wrote about whether
+	// anybody has read the result. The two coincide on today's rescue commits and
+	// come apart in both directions: the mg-11fa rescue spelling carries no
+	// UNREVIEWED token (27 of the 32 rescue commits in the fleet's repos), and an
+	// ordinary hand-made commit can declare itself unreviewed without being a
+	// rescue at all. A row is marked when EITHER is true.
+	Declared *strandedwork.Commit `json:"declared_unreviewed,omitempty"`
+
+	// Remainder is the oldest unmerged commit whose BODY names a specific
+	// artifact that was NOT produced — the half of a rescue commit that no
+	// version of this report printed, and the half that should become a successor
+	// ticket (mg-0c37). See strandedwork.Commit.RemainderNote for why a hedge is
+	// not one.
+	Remainder *strandedwork.Commit `json:"remainder,omitempty"`
+
+	// BodiesUnread is why the commit bodies could not be read, and "" when they
+	// were. A row carrying it has NOT been checked for a remainder, and the
+	// renderer says so rather than letting the absent flag read as a clean one.
+	BodiesUnread string `json:"bodies_unread,omitempty"`
+
 	// Subjects are the unmerged commit subjects, so a reader can recognise the
 	// work without a git round-trip.
 	Subjects []string `json:"subjects,omitempty"`
@@ -686,6 +711,75 @@ func (r Row) StatusLabel() string {
 // into the command via strandedwork.SubmitRemedy, which is the same rule the
 // dispatch refusal prints.
 func (r Row) Remedy() string {
+	return withDeclaration(r.remedy(), r.DeclarationNote())
+}
+
+// DeclarationNote is the marker that rides ON THE REMEDY LINE, and "" when this
+// row's commits declare nothing.
+//
+// IT GOES ON THE REMEDY BECAUSE THE REMEDY IS WHAT GETS COPIED (mg-0c37). The
+// context lines above it are what gets skimmed: a batch of six branches was
+// submitted on this report's recommendation without a commit message being read,
+// and the declaration was on disk, in the commits being submitted, before the
+// submit. Naming the fact one line higher had already failed by then — the
+// subject line carrying it was clipped to `— UNREVI…`, which is the worst
+// available outcome for a marker because it carries the fact and defeats it.
+//
+// It names a runnable command rather than saying "read the commit first",
+// because "read it first" is the instruction that lost. The `git log -1` is the
+// one command that shows both halves — the subject's declaration and the body's
+// remainder — and it is short enough to sit inside a shell comment.
+func (r Row) DeclarationNote() string {
+	sha, what := "", ""
+	switch {
+	case r.Declared != nil && r.Remainder != nil:
+		sha, what = r.Remainder.SHA, "COMMIT DECLARES ITSELF UNREVIEWED AND NAMES A REMAINDER"
+	case r.Remainder != nil:
+		sha, what = r.Remainder.SHA, "COMMIT BODY NAMES A REMAINDER"
+	case r.Declared != nil:
+		sha, what = r.Declared.SHA, "COMMIT DECLARES ITSELF UNREVIEWED"
+	case r.Rescue != nil && r.Kind != KindRescueUnbuilt:
+		// The mg-11fa rescue spelling — 27 of the 32 rescue commits in the fleet's
+		// repos — carries no UNREVIEWED token at all, so nothing above would mark
+		// it. This is the fact that has to travel with the command.
+		//
+		// NOT ON A KindRescueUnbuilt ROW, and only there is it withheld: that row's
+		// own remedy already IS this sentence in stronger words ("READ IT, THEN
+		// BUILD IT … has NEVER been built"), and repeating it in the same shell
+		// comment spends the marker's attention on a line that already had it. A
+		// conflict_suspect row carrying a rescue commit has no such sentence.
+		sha, what = r.Rescue.SHA, "RESCUE COMMIT — NEVER BUILT, NEVER REVIEWED"
+	default:
+		return ""
+	}
+	repo := r.Item.Repo
+	if repo == "" {
+		repo = "."
+	}
+	return fmt.Sprintf("%s — read `git -C %s log -1 %s` FIRST", what, repo, short(sha))
+}
+
+// withDeclaration folds note into remedy's shell comment, AHEAD of whatever else
+// that comment already says.
+//
+// Ahead, and not appended, because the comment is read left to right after a
+// long command and the existing text is a different kind of caution — "do NOT
+// dispatch at mg-xxxx" is about the work item, this is about whether the command
+// should be run at all. Folding into the SAME comment rather than adding a
+// second line keeps the remedy one copyable line, which is the property that
+// made it the thing readers act on.
+func withDeclaration(remedy, note string) string {
+	if note == "" {
+		return remedy
+	}
+	cmd, rest, found := strings.Cut(remedy, "   # ")
+	if !found {
+		return remedy + "   # " + note
+	}
+	return cmd + "   # " + note + "; " + rest
+}
+
+func (r Row) remedy() string {
 	switch r.Kind {
 	case KindRescueUnbuilt:
 		// NO SUBMIT LINE, AND THAT OMISSION IS THE WHOLE REPAIR (mg-aed4). Every
@@ -1427,6 +1521,9 @@ func classify(repo, branch string, it Item, target string, hv historyView) (*Row
 		Unmerged: len(f.Unmerged), Equivalent: f.Equivalent,
 		PreRegistration: f.PreRegistration,
 		Rescue:          f.Rescue,
+		Declared:        f.FirstUnreviewed(),
+		Remainder:       f.FirstRemainder(),
+		BodiesUnread:    f.BodiesUnread,
 		TipTime:         f.TipTime,
 	}
 	row.Prior, row.PriorStale, row.HistoryGap = hv.forBranch(repo, branch, f.TipTime, f.TipTimeError)
@@ -1619,12 +1716,32 @@ func orphanBranchRows(repo string, worktrees []Worktree, items []Item, live map[
 			Item: Item{Repo: repo}, Branch: w.Branch, Kind: KindOrphanBranch,
 			Ref: "refs/heads/" + w.Branch, Unmerged: len(commits),
 		}
+		// An orphan branch is the row with NO OWNER TO ASK, so a self-declaration on
+		// it is worth at least as much as one on an owned row: the reader deciding
+		// what to do with it has no work item, no author and no ticket to read.
+		if berr := strandedwork.LoadBodies(repo, commits); berr != nil {
+			row.BodiesUnread = berr.Error()
+		}
+		row.Declared = firstDeclaring(commits, strandedwork.Commit.DeclaresUnreviewed)
+		row.Remainder = firstDeclaring(commits, strandedwork.Commit.DeclaresRemainder)
 		for _, c := range commits {
 			row.Subjects = append(row.Subjects, c.Subject)
 		}
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// firstDeclaring returns the first commit satisfying pred, or nil. The
+// orphan-branch path has no Finding to ask, so it asks the commits directly.
+func firstDeclaring(commits []strandedwork.Commit, pred func(strandedwork.Commit) bool) *strandedwork.Commit {
+	for i := range commits {
+		if pred(commits[i]) {
+			c := commits[i]
+			return &c
+		}
+	}
+	return nil
 }
 
 // claimedByOpenItem reports whether any open item's id matches this branch, by

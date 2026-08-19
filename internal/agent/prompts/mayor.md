@@ -1029,6 +1029,21 @@ were the other:
   two instruments disagreeing; the second is a branch nobody could read. Both mean
   *you* look.
 
+**A row of any kind can carry a SELF-DECLARATION, and it is printed on the remedy
+line itself.** `COMMIT DECLARES ITSELF UNREVIEWED` means the commit's own subject
+says nobody has read it; `COMMIT BODY NAMES A REMAINDER` means the commit says
+something **specific** was not done — a missing test, an absent changelog entry —
+and that sentence is a successor ticket you have to file. Both name a
+`git -C <repo> log -1 <sha>` to run first. **Run it.** On 2026-08-19 six branches
+were submitted in one batch off a remedy line that carried neither marker; one
+merged as 4dd1b9d, an UNREVIEWED prompt change across all six {{.Worker}}
+templates, and its item was closed with no successor. The declaration was in the
+commit being submitted, before the submit. A gate does not cover this: p1d05's
+build ran and **passed**, because a missing test is what a passing gate cannot
+see (mg-0c37). Note what the marker does **not** say — "completeness
+unestablished" is a rescuer declining to judge and is deliberately not reported,
+so a row with no remainder marker is not a row somebody vouched for.
+
 A stranded row can also carry **`REMEDY NOT CHECKED AGAINST REFINERY HISTORY`**.
 That is not a finding about the branch — it says the refinery's memory could not
 answer for it, because the history was unreadable, or because the branch is older

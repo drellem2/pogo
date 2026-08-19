@@ -85,6 +85,24 @@ an author's item at merge whatever submitted the branch, so this row should be
 empty in steady state — it is reported anyway, because that repair cannot see an
 item stranded before it shipped or one whose close was refused.
 
+WHAT THE COMMITS SAY ABOUT THEMSELVES IS READ, AND IT RIDES ON THE REMEDY LINE.
+A commit whose SUBJECT declares its content unreviewed is marked, and the marker
+is never clipped away: the subject line is elided in the middle so the
+declaration survives, because ` + "`— UNREVI…`" + ` is worse than no marker at all — it
+carries the fact and defeats it. The mark also goes into the remedy's own
+comment, because the remedy is the line that gets COPIED and the context above it
+is the line that gets skimmed. Six branches were submitted in one batch off an
+unmarked remedy on 2026-08-19 and an UNREVIEWED prompt change merged (mg-0c37).
+
+THE COMMIT BODY IS READ TOO, FOR ONE THING ONLY: a claim that a SPECIFIC NAMED
+ARTIFACT is missing — "no accompanying test", "No changelog entry is present".
+That sentence is the successor ticket, it is never in the diff, and no gate can
+find it: the p1d05 build ran and PASSED, because a missing test is exactly what
+a passing gate cannot see. A rescuer writing "treat completeness as
+unestablished" is DECLINING TO JUDGE and is NOT reported — over the four rescue
+commits of 2026-08-19 that split is 2 and 2, and a detector at 4-of-4 would put
+the one actionable row back in a list nobody reads.
+
 THE INSTRUMENT, AND ITS MEASURED BLIND SPOT.
 ` + "`git rev-list --count main..<branch>`" + ` DOES NOT WORK and will report every healthy
 merged branch as stranded forever: the refinery merges by rebasing, so a landed
