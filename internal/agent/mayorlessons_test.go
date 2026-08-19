@@ -100,7 +100,16 @@ func TestMayorPromptTellsTheFilerTheItemLanded(t *testing.T) {
 	// Placement: in the completed-worker cleanup list, after the archive step
 	// and before the backstop paragraph. That list is what the coordinator
 	// actually walks when a merge lands.
-	archive := strings.Index(s, "mg archive --days=0")
+	// Anchored on the list ITEM, not on the command it contains. This bound
+	// used to read `strings.Index(s, "mg archive --days=0")`, which was the
+	// archive step's only distinctive string until mg-c2e1 replaced that
+	// prescription with the per-id form. The test kept passing afterwards —
+	// but only because the prose that FORBIDS the mass form still contains the
+	// literal, several paragraphs further down. The bound had quietly stopped
+	// meaning "the start of the cleanup list" and started meaning "wherever the
+	// prohibition happens to sit", which is a silent pass waiting for the next
+	// edit to that paragraph.
+	archive := strings.Index(s, "1. Archive the work item")
 	backstop := strings.Index(s, "You are the **backstop** for {{.Worker}}s")
 	if archive < 0 || backstop < 0 {
 		t.Fatalf("mayor.md: could not bound the completed-worker list (archive=%d backstop=%d)",

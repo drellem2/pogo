@@ -6841,3 +6841,174 @@ func TestMayorAckWatchRatioIsNotActionable(t *testing.T) {
 			"and 100%% is not reachable by an agent whose turns outlast its cadence")
 	}
 }
+
+// mayor.md prescribed the mass archive; the single-id form made it obsolete a
+// month before this test was written (mg-c2e1).
+//
+// `mg archive --days=0` existed in the cleanup step for one reason: the
+// single-id form used to silently no-op. That was fixed and verified live on
+// 2026-07-21, so the reason was gone and only the blast radius was left. Two
+// independent things make the sweep the wrong instrument, and neither is
+// visible from the callsite:
+//
+//  1. It is estate-wide, and the coordinator's own items are the ones LEAST
+//     likely to be in it — they get archived as they close. Measured 2026-08-19
+//     with `mg archive --days=0 --dry-run`: 4 items would have been taken and
+//     none of them was mayor's (architect's two in ~/.claude, pm-onethird's in
+//     ~/research/onethird_program, and a request Daniel filed that morning).
+//
+//  2. It cannot see a workflow gate, structurally rather than by omission.
+//     Carrier state is pogod's parse, not mg's: `mg show --json` has no
+//     `workflow` key and no `stage` key, while pogod's `GET /workitems` reports
+//     mg-3050 as workflow=gh-issue stage=gated. `mg archive` is mg, so the gate
+//     is absent from the data model the sweep reads. It has eaten live gh-issue
+//     carriers twice.
+//
+// Pinned rather than patched because the exposure is a session property, not a
+// code property: the running coordinator had been using the per-id form all day
+// out of a memory note, while the prompt still said otherwise. A fresh session
+// reads the prompt and does what it says, and mayor is restarted routinely.
+//
+// The assertions split the way mg-e52c's did, and for the same reason: the
+// PRESCRIPTION lives in the bash fences and the PROHIBITION has to quote the
+// forbidden form in prose to explain it, so a whole-document substring check
+// would score the correction as the defect.
+func TestMayorArchivesByIdNotByMassSweep(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read embedded mayor.md: %v", err)
+	}
+	body := string(data)
+
+	cmds := mayorBashCommands(t, body)
+
+	// The regression itself. Scoped to command lines: the prose says the words
+	// `mg archive --days=0` several times on purpose.
+	if m := regexp.MustCompile(`(?m)^.*mg archive\s+--days=0.*$`).FindString(cmds); m != "" {
+		t.Errorf("mayor.md: a bash fence still tells the coordinator to run the mass archive (%q) — "+
+			"it is estate-wide and gate-blind, and the single-id form it was standing in for has worked "+
+			"since 2026-07-21 (mg-c2e1)", strings.TrimSpace(m))
+	}
+	if !regexp.MustCompile(`mg archive <id>`).MatchString(cmds) {
+		t.Error("mayor.md: no bash fence prescribes `mg archive <id>` — removing the mass form without " +
+			"putting the per-id form in its place leaves the coordinator with no archiving instruction at all (mg-c2e1)")
+	}
+	// The gate is the substance of the fix, not decoration: the sweep's second
+	// defect is that it archives items whose agent is still running. A per-id
+	// archive with no liveness check keeps that half.
+	if !strings.Contains(cmds, `pogo agent list | grep "work-item=`) {
+		t.Error("mayor.md: the archive fence does not check that the {{.Worker}} has exited — " +
+			"per-id archiving fixes the blast radius, not the missing liveness gate (mg-c2e1)")
+	}
+
+	// Matched against whitespace-collapsed prose: every fragment below is a
+	// sentence fragment inside a wrapped paragraph, so a raw substring match
+	// would break on the next rewrap.
+	flat := strings.Join(strings.Fields(body), " ")
+
+	for _, want := range []struct{ frag, why string }{
+		// The prohibition has to be explicit. "Stopped prescribing it" is not
+		// the same as "told not to do it" for a reader who remembers the old
+		// step, and the whole ticket is about what a fresh session does.
+		{"**Never `mg archive --days=0`.**",
+			"the mass form must be forbidden by name, not merely omitted"},
+		// Why it was there, so nobody restores it as a lost convenience.
+		{"the single-id form used to silently no-op",
+			"the sweep's only justification has to be recorded as spent, or it reads as a capability someone deleted"},
+		// Defect 1, with the measurement that makes it concrete.
+		{"not one of them was yours",
+			"the sweep's blast radius is other agents' work, and that is the fact that makes it dangerous rather than merely broad"},
+		// Defect 2, at the level that stops it being read as a fixable oversight.
+		{"absent from the data model the sweep reads",
+			"gate-blindness is structural — a callsite cannot compensate for state mg does not carry"},
+		{"has eaten live `gh-issue` gate carriers twice",
+			"the cost has to travel with the rule"},
+		// The guards exist and are NOT gate checks. Without this, the next
+		// reader meets a refusal, concludes the sweep is guarded, and uses it.
+		{"neither is a gate check",
+			"the design/blocked-on guards must not be mistaken for the gate the sweep lacks"},
+		// The safe way to get the batch view, so the rule does not cost a
+		// capability and get worked around.
+		{"`mg archive --days=0 --dry-run` is safe",
+			"forbidding the sweep without naming its safe form invites the sweep back"},
+
+		// The coupling, in the same spirit as cad63fe's — the two prompts
+		// constrain each other and neither said so.
+		{"This step is coupled to `pm/pm-template.md`, in both directions.",
+			"the archiving step is what empties `done`, which is what pm-template's shipped query had to be corrected for (mg-e52c)"},
+		{"not** `{{.Coordinator}}.md`",
+			"the literal filename needs its reason attached, or a later pass placeholder-ises it and breaks the pointer (mg-04ce)"},
+
+		// The contradiction found in the same pass. §Work item archival told
+		// the coordinator the refinery archives automatically, which is what
+		// made the sweep look like harmless catch-up.
+		{"You are the only archiver",
+			"the section that said the refinery archives automatically is what made the archiving step look optional"},
+		{"false for 146 days",
+			"the correction has to say how long the claim stood, or it reads as a wording change"},
+	} {
+		if !strings.Contains(flat, strings.Join(strings.Fields(want.frag), " ")) {
+			t.Errorf("mayor.md: missing %q — %s (mg-c2e1)", want.frag, want.why)
+		}
+	}
+
+	// The retracted claim, by its own words — and this assertion had to be
+	// written twice, because the first version failed on the fix rather than on
+	// the defect. The correction QUOTES the old sentence in order to retract it
+	// (mg-724c: a retraction that does not name what it retracts leaves the
+	// reader unable to recognise the belief they are carrying), so a bare
+	// substring check on the claim scores the retraction as a relapse.
+	//
+	// Two assertions instead of one. The first forbids the ASSERTED form — the
+	// full sentence, lead-in included, which the retraction does not reproduce.
+	// The second requires the retraction marker, so the quoted fragment cannot
+	// exist except as a quote: delete "said the opposite" and the fragment is
+	// standing on its own again, and this fails.
+	if strings.Contains(flat, "Once a ticket's code is merged, the refinery archives the work item automatically") {
+		t.Error("mayor.md: the claim that the refinery archives automatically is asserted again — the " +
+			"refinery's auto-archive call was removed on 2026-03-26 by mg-1f67 and client.ArchiveMGDoneItems " +
+			"has had zero callers since; believing it leaves every completed item sitting in done/ (mg-c2e1)")
+	}
+	if strings.Contains(flat, "the refinery archives the work item automatically") &&
+		!strings.Contains(flat, "This section said the opposite") {
+		t.Error("mayor.md: the old auto-archive sentence appears without the retraction that frames it — " +
+			"an unmarked quote of a withdrawn claim reads as the claim (mg-724c, mg-c2e1)")
+	}
+}
+
+// mayorBashCommands returns the non-comment lines of every ```bash fence in
+// mayor.md — the commands the coordinator is instructed to RUN, with the `#`
+// lines that merely discuss commands stripped out.
+//
+// Both exclusions are load-bearing, exactly as in roadmapInputCommands above:
+// mayor.md's prose must quote `mg archive --days=0` to forbid it, and an
+// in-fence comment may name a form in order to warn about it. A check that
+// could not tell those from a prescription would either fail on the fix or
+// pass on the defect.
+//
+// It fails the test rather than returning empty when it finds no fences: an
+// absence assertion handed an empty string reports the prompt clean having
+// examined nothing.
+func mayorBashCommands(t *testing.T, body string) string {
+	t.Helper()
+
+	fences := regexp.MustCompile("(?s)```bash\n(.*?)\n[ \t]*```").FindAllStringSubmatch(body, -1)
+	if len(fences) == 0 {
+		t.Fatal("mayor.md: no ```bash fences found — the command-line assertions examined nothing (mg-c2e1)")
+	}
+	var cmds []string
+	for _, m := range fences {
+		for _, line := range strings.Split(m[1], "\n") {
+			if trimmed := strings.TrimSpace(line); trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+				cmds = append(cmds, line)
+			}
+		}
+	}
+	out := strings.Join(cmds, "\n")
+	// Sanity: mayor.md's fences are full of mg/pogo invocations. If neither
+	// appears, the extraction is broken rather than the prompt being clean.
+	if !strings.Contains(out, "mg ") || !strings.Contains(out, "pogo ") {
+		t.Fatalf("mayor.md: extracted fence lines contain no mg/pogo commands — extraction is broken:\n%s", out)
+	}
+	return out
+}
