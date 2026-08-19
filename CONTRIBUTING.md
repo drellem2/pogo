@@ -192,8 +192,27 @@ other three variables were pinned alongside it, or that the value does not
 resolve back onto the developer's tree. All three of `mg-6092`, `mg-e8e7` and
 `mg-5336` were hand-rolled fixes that left the next instance available.
 
-Two rules that fall out of it:
+Three rules that fall out of it:
 
+- **The module download path is CLOSED under the sandbox (`mg-117e`).**
+  `Main`/`Isolate` pin `GOMODCACHE` at the cache the real environment already
+  holds and set `GOPROXY=off` with it — the Go half of what
+  `pogo_sandbox_isolate` does in shell (`mg-a9d8`), and for the same reason:
+  moving `HOME` empties the module cache, so a test that shells out to `go`
+  re-downloaded the graph on every run (37 requests per gate run, all from
+  `internal/agent`, now 0). Two consequences for a test author:
+  - **A `go` invocation from a sandboxed test cannot fetch.** If it needs a
+    module that is in neither the extracted tree nor `cache/download`, it fails
+    with `module lookup disabled by GOPROXY=off`. One `go mod download` under the
+    real `$HOME` fixes it; the whole-tree `go test ./...` at `test.sh` step 2 is
+    one.
+  - **Overriding `HOME` inside a test no longer gives you a cold cache**, because
+    `GOMODCACHE` is exported explicitly and survives the override. A test that
+    wants one must say `GOMODCACHE=<empty dir>` too — and should assert it got
+    one, since the failure mode is a control that quietly stops controlling.
+  The pin **fails open**: no `go`, or no cache on the box, and behaviour is what
+  it was. `Sandbox.ModulePinned()` says which happened, so a suite that cares can
+  assert it rather than assume it.
 - **`POGO_HOME` is always set under the sandbox.** `config.PogoHome()` reads it
   *first* and only falls back to `$HOME/.pogo`, so a test that repoints `HOME`
   alone no longer moves the state root with it. If a test needs a synthetic home

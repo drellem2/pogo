@@ -51,9 +51,24 @@
 //     SYMLINKS and refused if it lands on, above, or below the real home or
 //     the real ~/.pogo. The symlinked root is the only shape in which this
 //     goes wrong quietly: every string reads as a private path right up until
-//     something follows the link.
+//     something follows the link. This applies to the four PATH variables only;
+//     the module cache in 4 is the developer's real one ON PURPOSE, and what
+//     makes that safe is not a path check but the closed download path beside
+//     it — there is nothing to write.
 //
-//  4. A SETUP FAILURE CANNOT BE READ AS A REGRESSION. Every check above ends
+//  4. THE MODULE DOWNLOAD PATH IS CLOSED, AND THE CACHE IS THE REAL ONE.
+//     GOMODCACHE is pinned at the cache the real environment already holds and
+//     GOPROXY is pinned to `off`. Both halves, or neither: the cache alone lets
+//     a fetch inside the sandbox WRITE into the developer's, and `off` alone
+//     turns every sandboxed build into an immediate hard failure. Without the
+//     pair, moving $HOME empties the module cache and every `go` a test shells
+//     out to re-downloads the graph — 37 module requests per gate run, measured,
+//     all of them from internal/agent (mg-117e). Unlike 1-3 this one FAILS OPEN:
+//     a box with no cache to share gets the behaviour it had before, because
+//     there is nothing better available. Sandbox.ModulePinned says which
+//     happened, so a suite can assert it rather than assume it.
+//
+//  5. A SETUP FAILURE CANNOT BE READ AS A REGRESSION. Every check above ends
 //     the run through a SETUP FAILURE banner naming this package — t.Fatal for
 //     Isolate, and for Main a banner on stderr plus EXIT 99, distinct from the
 //     assertion tally's 1, before a single test runs. mg-3412 is what the
@@ -77,6 +92,7 @@ package testsandbox
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -91,7 +107,7 @@ import (
 // the thirteen lines after it will be read as the diagnosis.
 const FailPrefix = "TEST ISOLATION SETUP FAILURE (internal/testsandbox)"
 
-// noClaim is the second half of guarantee 4: a setup failure has to say, in
+// noClaim is the second half of guarantee 5: a setup failure has to say, in
 // words, that it is not a verdict on the tree.
 const noClaim = "The isolation could not be established, so this run makes NO claim about the " +
 	"code under test. It is a SETUP failure, not a regression."
@@ -155,6 +171,139 @@ func captureLive(home, pogoHome string) liveTree {
 		}
 	}
 	return l
+}
+
+// ---------------------------------------------------------------------------
+// the module cache pin (mg-117e)
+// ---------------------------------------------------------------------------
+//
+// THE SECOND CONSEQUENCE OF MOVING $HOME, and the one the four variables above
+// do not touch. Go resolves GOMODCACHE off $HOME ($HOME/go/pkg/mod), so the
+// instant Main pins HOME under a throwaway root the module cache every `go`
+// invocation in that process sees is EMPTY. A test that shells out to `go list`
+// or `go build` then re-downloads what the tree imports, from the ambient
+// GOPROXY, on every run.
+//
+// It is not hypothetical and it is not small. Measured on the gate's own
+// package-test chain (test.sh:64) against a local counting proxy: 37 module
+// requests per gate run, ALL of them from internal/agent, whose TestMain is a
+// caller of Main and whose TestAgentPackageDoesNotImportRefinery shells out to
+// `go list` (mg-48d4, re-derived here at the request level as 2 module zips —
+// `github.com/creack/pty` and `nhooyr.io/websocket` — and ~2.0s of wall clock
+// per invocation).
+//
+// scripts/pogo-sandbox already closes exactly this in shell (mg-a9d8). This is
+// the same pin, in the Go half of the same harness, for the same reason and
+// with the same two halves — and it has to be BOTH halves:
+//
+//	GOMODCACHE at the real cache alone -> a fetch inside the sandbox WRITES into
+//	                                      the developer's cache.
+//	GOPROXY=off alone                  -> every sandboxed build hard-fails on
+//	                                      the first external import.
+//
+// Together there is no download path, therefore nothing to write, and the
+// modules are simply read from where they already are.
+//
+// WHAT THIS DOES AND DOES NOT FIX, stated because the obvious reading is wrong
+// and was measured wrong once already. It removes the traffic and the ~2s. It
+// does NOT change what happens on a resolver blip for the `go list` case:
+// measured in the test binary's own environment, `go list -f '{{.Imports}}'`
+// answers the identical 44 imports and exits 0 with the proxy live, with the
+// proxy dead, and with GOPROXY=off, because .Imports is read from main-module
+// source and failed downloads are only logged to stderr (mg-48d4's control,
+// confirmed here). The reason to close the path is the traffic, the time and
+// the exposure of every FUTURE shell-out, not a failure that is happening today.
+//
+// ONE FIGURE IS WITHDRAWN BY NAME. A ~49s toolchain download (`go: downloading
+// go1.25.0`) is what an unpinned fake HOME costs from an interactive SHELL,
+// where PATH holds the 1.24.0 homebrew `go` and the toolchain switch go.mod
+// demands must be fetched. It is NOT what a test pays: `go test` prepends the
+// resolved toolchain's own bin directory to PATH, so exec.Command("go", ...)
+// inside a test binary already runs go1.25.0 and never switches. Measured, and
+// recorded here so the number does not travel as if it were the in-test cost.
+//
+// GOCACHE is deliberately NOT pinned, for the same reason the shell half does
+// not pin it: it is written by every compile, and it costs CPU rather than
+// network, which is not what this is about.
+
+// realModCache is the module cache the developer's environment resolves, read
+// in init for exactly the reason realTree is: after Main moves HOME there is
+// nothing left to ask, because the answer would be derived from a cache that is
+// now empty.
+var realModCache string
+
+func init() { realModCache = captureModCache() }
+
+// captureModCache asks the real environment where its module cache is.
+//
+// The environment variable is preferred and answered without a subprocess,
+// because it is what `go env` would report anyway — GOMODCACHE from the
+// environment outranks the `go env -w` config file and the GOPATH default.
+//
+// GOPROXY=off ON THE CAPTURE ITSELF, mirroring scripts/pogo-sandbox and for the
+// same non-decorative reason: `go env` obeys the toolchain rule everything else
+// does, so a capture that ran under a HOME which is ALREADY cold would trigger
+// the very toolchain download this exists to remove. Refused-network is the
+// honest question here — "which cache does this environment ALREADY have?" — and
+// a cold ambient HOME answering "none" leaves the pin skipped and behaviour
+// exactly as it was.
+func captureModCache() string {
+	if v := strings.TrimSpace(os.Getenv("GOMODCACHE")); v != "" {
+		return v
+	}
+	// No `go` at all is not an error. Not every caller of this harness runs one,
+	// and a sandbox with no toolchain cannot download modules either.
+	if _, err := exec.LookPath("go"); err != nil {
+		return ""
+	}
+	cmd := exec.Command("go", "env", "GOMODCACHE")
+	cmd.Env = append(os.Environ(), "GOPROXY=off")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// modulePinProxy is the value GOPROXY is pinned to. It is a constant rather
+// than a parameter because the pin is only safe as a pair: pointing GOMODCACHE
+// at the developer's cache with any download path open is the hazard, not the
+// fix.
+const modulePinProxy = "off"
+
+// planModulePin decides what a sandbox rooted at root should pin, given the
+// cache the real environment resolved. It is a pure function of those two
+// strings plus the filesystem, so every refusal below is testable without a
+// module cache, a network, or a `go` on PATH.
+//
+// It FAILS OPEN — an empty return means "pin nothing, behave exactly as this
+// package did before" — and that is deliberate, and it is the one place this is
+// quieter than the four-variable isolation above. An unpinned HOME is a test
+// reading the developer's live state, which is a correctness defect and must
+// refuse. An unpinned module cache is the download that happens today, and on a
+// box with no cache to share there is nothing better available than what we
+// already do.
+func planModulePin(cache, root string) (modCache, proxy string) {
+	if cache == "" {
+		return "", "" // no `go`, or it could not answer
+	}
+	if !filepath.IsAbs(cache) {
+		return "", "" // a relative cache is not a cache we can hand to a subprocess
+	}
+	fi, err := os.Stat(cache)
+	if err != nil || !fi.IsDir() {
+		return "", "" // nothing there to read; downloading is all that is left
+	}
+	// A cache INSIDE the sandbox root is not the developer's — it is this run's
+	// own, teardown removes it, and pinning to it would be the empty cache with
+	// extra steps and a closed download path, which is strictly worse than doing
+	// nothing. Unreachable through the capture above (it reads the real
+	// environment before the move) but reachable through a caller's own
+	// GOMODCACHE.
+	if under(resolve(cache), resolve(root)) {
+		return "", ""
+	}
+	return cache, modulePinProxy
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +383,15 @@ type Sandbox struct {
 	XDGConfigHome string // $XDG_CONFIG_HOME
 	PogoHome      string // $POGO_HOME
 	MGRoot        string // $MG_ROOT
+
+	// GoModCache is the module cache this sandbox pinned $GOMODCACHE at — the
+	// developer's REAL one, deliberately outside the sandbox root, because the
+	// point is to read modules that already exist rather than download them
+	// again. Empty when there was nothing to pin (see planModulePin, which fails
+	// open), and GoProxy is set exactly when this is: the pair is the pin, and
+	// either half alone is a defect rather than a partial fix.
+	GoModCache string // $GOMODCACHE, or "" when unpinned
+	GoProxy    string // $GOPROXY ("off"), or "" when unpinned
 }
 
 // Contains reports whether path resolves inside the sandbox — the assertion a
@@ -258,6 +416,26 @@ func (s *Sandbox) vars() [][2]string {
 		{"MG_ROOT", s.MGRoot},
 	}
 }
+
+// goVars returns the module pin, or nothing when the sandbox could not pin one.
+// It is separate from vars() because the two are verified by OPPOSITE rules:
+// every path in vars() must resolve INSIDE the sandbox root, and the module
+// cache must resolve outside it — a cache under the root is the empty cache the
+// pin exists to stop using.
+func (s *Sandbox) goVars() [][2]string {
+	if s.GoModCache == "" {
+		return nil
+	}
+	return [][2]string{
+		{"GOMODCACHE", s.GoModCache},
+		{"GOPROXY", s.GoProxy},
+	}
+}
+
+// ModulePinned reports whether this sandbox closed the module download path. A
+// suite that wants to ASSERT the pin (rather than benefit from it quietly) reads
+// this — see internal/agent, the package where the exposure was measured.
+func (s *Sandbox) ModulePinned() bool { return s != nil && s.GoModCache != "" }
 
 // plan lays a sandbox out under root without touching anything.
 func plan(root string) *Sandbox {
@@ -320,6 +498,12 @@ func prepare(root string, l liveTree) (*Sandbox, error) {
 			"one is, so this directory predates this run and its contents are somebody "+
 			"else's state", sb.PogoHome)
 	}
+
+	// LAST, because it is the only decision here that is allowed to come out
+	// "do nothing": the four variables above must be pinned or the sandbox is
+	// refused, and the module cache is pinned when there is one to pin.
+	sb.GoModCache, sb.GoProxy = planModulePin(realModCache, root)
+
 	return sb, nil
 }
 
@@ -354,6 +538,33 @@ func verify(sb *Sandbox, l liveTree) error {
 				"sandbox root %s — it was not created by this run and nothing here owns "+
 				"its contents", name, got, r, root)
 		}
+	}
+	return verifyModulePin(sb)
+}
+
+// verifyModulePin reads the module pin back out of the process environment, for
+// the same reason verify reads the four variables back: "I called Setenv" and
+// "this process cannot download" are different claims, and only the second is
+// what the run then depends on.
+//
+// An unpinned sandbox verifies vacuously. That is what failing open means, and
+// it is why internal/agent — the package where the download was measured —
+// asserts ModulePinned separately instead of relying on this.
+func verifyModulePin(sb *Sandbox) error {
+	for _, kv := range sb.goVars() {
+		name, want := kv[0], kv[1]
+		got := os.Getenv(name)
+		if got == want {
+			continue
+		}
+		return fmt.Errorf("$%s is %q, but the sandbox pinned it to %q — the module pin "+
+			"did not take or something overrode it after it was established.\n"+
+			"Both halves are load-bearing and neither is safe alone: with $GOMODCACHE at "+
+			"the developer's cache (%s) and a download path OPEN, a fetch inside this run "+
+			"WRITES into that cache; with the path closed and the cache unpinned, every "+
+			"`go` invocation here re-downloads the module graph into a throwaway $HOME — "+
+			"37 module requests per gate run, measured, all of them from internal/agent "+
+			"(mg-117e, mg-48d4)", name, got, want, sb.GoModCache)
 	}
 	return nil
 }
@@ -393,7 +604,7 @@ func Isolate(tb testing.TB) *Sandbox {
 		tb.Fatalf("\n%s\n%v\n%s", FailPrefix, err, noClaim)
 		return nil
 	}
-	for _, kv := range sb.vars() {
+	for _, kv := range append(sb.vars(), sb.goVars()...) {
 		tb.Setenv(kv[0], kv[1])
 	}
 	if err := verify(sb, realTree); err != nil {
@@ -438,7 +649,7 @@ func Main(label string) (*Sandbox, func()) {
 	if err != nil {
 		mainFail(err)
 	}
-	for _, kv := range sb.vars() {
+	for _, kv := range append(sb.vars(), sb.goVars()...) {
 		if err := os.Setenv(kv[0], kv[1]); err != nil {
 			mainFail(fmt.Errorf("could not set $%s: %w", kv[0], err))
 		}
@@ -461,6 +672,14 @@ func Main(label string) (*Sandbox, func()) {
 		// in $TMPDIR/pogo-test-tmp on 2026-08-13, each one already selected for
 		// removal by both this line and testtmp's sweep, and unremovable by
 		// either (mg-60eb).
+		//
+		// The module pin (mg-117e) removes the CAUSE of those read-only files —
+		// with GOMODCACHE pointed at the real cache and no download path there is
+		// nothing to extract into this root — so testtmp.RemoveAll should now
+		// succeed where os.RemoveAll would have. It stays, and must: a sandbox
+		// that could not pin fails OPEN and is exactly the tree that grew them,
+		// and $HOME/go/pkg/sumdb and $HOME/Library/Caches/go-build are still
+		// written here regardless (measured, both removable).
 		testtmp.RemoveAll(sb.Root)
 	}
 }
