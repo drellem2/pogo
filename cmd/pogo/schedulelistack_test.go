@@ -21,7 +21,7 @@ func TestAckCell_StatesTheGap_NotJustTheRatio(t *testing.T) {
 		ID: "mail-check-pm-pogo", Agent: "pm-pogo", Cron: "*/10 * * * *",
 		FiresDelivered: 302, FiresCompleted: 103, EverAcked: true,
 	}
-	got := renderAckCell(e)
+	got := renderAckCell(e, unackedTurnEvidence{})
 
 	if !strings.Contains(got, "103/302") {
 		t.Errorf("the raw counters must stay — they are what a reader compares across rows: %q", got)
@@ -39,7 +39,7 @@ func TestAckCell_UntrackedIsStillADash_NotZeroOfN(t *testing.T) {
 	// evidence of failure. A schedule that has never acked rendering "0/7" would
 	// be the same could-not-look/looked-and-saw-nothing collapse one column over.
 	e := scheduler.Entry{ID: "mail-check-new", Agent: "fresh", FiresDelivered: 7}
-	if got := renderAckCell(e); got != "—" {
+	if got := renderAckCell(e, unackedTurnEvidence{}); got != "—" {
 		t.Errorf("an untracked schedule must read —, got %q", got)
 	}
 }
@@ -50,7 +50,7 @@ func TestAckCell_GapIsOmittedWhenNoCycleClosed(t *testing.T) {
 	// 0.0 would render as "1 ack per 0.0 fires", which is not a small gap but an
 	// absent measurement — exactly the confusion this ticket is about.
 	e := scheduler.Entry{ID: "mail-check-mayor", Agent: "mayor", FiresDelivered: 3, EverAcked: true}
-	got := renderAckCell(e)
+	got := renderAckCell(e, unackedTurnEvidence{})
 	if strings.Contains(got, "per 0.0") || strings.Contains(got, "1 ack per") {
 		t.Errorf("an unmeasured gap must be omitted, not printed as zero: %q", got)
 	}
@@ -66,7 +66,7 @@ func TestAckCell_StreakKeepsItsWarningAndComesLast(t *testing.T) {
 		ID: "mail-check-mayor", Agent: "mayor", FiresDelivered: 37, FiresCompleted: 29,
 		EverAcked: true, UnackedStreak: 27,
 	}
-	got := renderAckCell(e)
+	got := renderAckCell(e, unackedTurnEvidence{})
 	if !strings.Contains(got, "⚠ 27 unacked") {
 		t.Fatalf("the streak marker was lost: %q", got)
 	}
@@ -80,7 +80,7 @@ func TestAckCell_BelowStallThreshold_NoWarning(t *testing.T) {
 		ID: "mail-check-pa", Agent: "pa", FiresDelivered: 10, FiresCompleted: 9,
 		EverAcked: true, UnackedStreak: 1,
 	}
-	if got := renderAckCell(e); strings.Contains(got, "unacked") {
+	if got := renderAckCell(e, unackedTurnEvidence{}); strings.Contains(got, "unacked") {
 		t.Errorf("a streak of 1 is a turn in progress, not a stall: %q", got)
 	}
 }
