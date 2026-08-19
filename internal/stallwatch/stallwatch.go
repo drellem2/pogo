@@ -171,18 +171,25 @@ type Options struct {
 	// watcher behaves exactly as it did before that fix — it reports a worked
 	// item as unclaimed, because status is then the only evidence it has.
 	Workers Workers
+	// Preserved, when set, lets every available/ check ask whether an item's
+	// work is already written and uncommitted in a retained worktree (mg-836c).
+	// Left nil the watcher behaves exactly as it did before that fix — it
+	// advertises such an item as ready, because status is then the only
+	// evidence it has.
+	Preserved Preserved
 }
 
 // Watcher samples macguffin state and nudges the watched agent on stall.
 type Watcher struct {
-	cfg      config.StallWatchConfig
-	workRoot string
-	mailRoot string
-	nudge    Nudger
-	emit     Emitter
-	fastPoll func()
-	capacity Capacity
-	workers  Workers
+	cfg       config.StallWatchConfig
+	workRoot  string
+	mailRoot  string
+	nudge     Nudger
+	emit      Emitter
+	fastPoll  func()
+	capacity  Capacity
+	workers   Workers
+	preserved Preserved
 
 	mu sync.Mutex
 	// lastNudge records when each cooldown key last fired and how many times it
@@ -279,6 +286,7 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		fastPoll:  opts.FastPoll,
 		capacity:  opts.Capacity,
 		workers:   opts.Workers,
+		preserved: opts.Preserved,
 		lastNudge: make(map[string]fireRecord),
 	}
 }
@@ -312,12 +320,25 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	// in-flight to one of them and absent to another within the same sample.
 	flight := w.probeInFlight()
 
+	// Which of these items already has its work written and uncommitted in a
+	// retained worktree (mg-836c). Probed ONCE beside the in-flight snapshot and
+	// shared by the same checks, for the same reason: an item must not read as
+	// held by one check and free to another within one sample.
+	held := w.probePreserved(items)
+
+	// Preserved-worktree hold (mg-836c). Reads the SAME listing over the
+	// population the two dispatch checks below now skip, and says the opposite
+	// thing about it: do NOT dispatch, and do NOT clear it by deleting the tree.
+	// It runs whether or not the dispatch checks fire, because an item whose only
+	// copy of its work is unreachable to the fleet is a defect at any age.
+	w.checkPreservedWorktrees(now, items, flight, held)
+
 	// Priority-aware fast wake (gh drellem2/pogo #61). A ready, watched,
 	// high-priority available item bypasses the 10-min UnclaimedItemAgeThreshold
 	// and is delivered promptly via the same wait-idle nudge, so urgent work no
 	// longer waits out the idle-coordinator polling gap. This scans the same
 	// listing, so it is nearly free.
-	w.checkPriorityWake(now, items, flight)
+	w.checkPriorityWake(now, items, flight, held)
 
 	// Worked-but-unclaimed (mg-1a8a). Reads the SAME listing over the population
 	// the two dispatch checks skip because a live worker holds the item, and says
@@ -359,6 +380,13 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 		// (mg-1a8a). It is not dropped from the fleet's attention — the
 		// worked-but-unclaimed check above reports it, with the opposite remedy.
 		if _, worked := flight.worker(it.ID); worked {
+			continue
+		}
+		// Nor is an item whose work is already written and uncommitted in a
+		// retained worktree (mg-836c). Same shape as the exclusion above and the
+		// same disposal: checkPreservedWorktrees picks it up with the opposite
+		// remedy rather than dropping it.
+		if _, stuck := held.trees(it.ID); stuck {
 			continue
 		}
 		if w.cfg.PriorityWakeEnabled && w.isFastPriority(it.Priority) {
@@ -405,6 +433,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	advisory, advisedIDs := w.blockIntentAdvisory(due)
 	msg += advisory
 	msg += flight.uncertaintyNote()
+	msg += held.uncertaintyNote()
 	msg += sel.repeatNotice()
 
 	details := map[string]any{
@@ -445,7 +474,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 //     cooldown later, then one at twice that, out to RepeatBackoffCap — not one
 //     per heartbeat tick, and not one per cooldown forever. This is the
 //     category mg-1693 was measured on; see selectDue.
-func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, flight WorkInFlight) {
+func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, flight WorkInFlight, held PreservedWork) {
 	if !w.cfg.PriorityWakeEnabled {
 		return
 	}
@@ -461,6 +490,15 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, fl
 		// whose claim failed open drew the fastest, loudest push toward a second
 		// polecat on work already in progress.
 		if _, worked := flight.worker(it.ID); worked {
+			continue
+		}
+		// And this is the surface the preserved-tree hold mattered on too
+		// (mg-836c): mg-516e was flagged high-priority unclaimed while sixteen
+		// uncommitted files — including a whole new command and its tests — sat
+		// in its retained worktree. "Claim or dispatch now" is the most
+		// imperative wording this component emits, and it was pointing at work
+		// that already existed.
+		if _, stuck := held.trees(it.ID); stuck {
 			continue
 		}
 		if !w.isFastPriority(it.Priority) {
@@ -508,6 +546,7 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, fl
 	advisory, advisedIDs := w.blockIntentAdvisory(due)
 	msg += advisory
 	msg += flight.uncertaintyNote()
+	msg += held.uncertaintyNote()
 	msg += sel.repeatNotice()
 
 	details := map[string]any{

@@ -274,9 +274,10 @@ directions:
 | **Assignee** | May this item be executed automatically at all? | **409** — permanent; retrying unchanged is refused forever | enforces `human` / `parked` / `blocked:<agent>` |
 | **Pairing** | Has the obligation this item's repo puts on it been discharged? | **409** — permanent until the pair is filed | inert; one deployment's config |
 | **Stranded work** | Does this item already have pushed work a worker would ignore? | **409** — permanent until the branch is merged or abandoned | enforces, scanning |
+| **Preserved worktree** | Is this item's work already written and *uncommitted* in a retained worktree? | **409** — permanent until the tree is committed, rescued or ruled spent | enforces, scanning |
 | **Host load** | Can this **host** take another worker right now? | **503** — a *later*; the same request succeeds once the host clears | enforces, measuring |
 
-The first three are about the item. The fourth is about the machine, and nothing
+The first four are about the item. The fifth is about the machine, and nothing
 before it measured that.
 
 **Why the third exists.** Stopping a wedged polecat releases its claim and
@@ -305,7 +306,48 @@ precondition for stranded work, not evidence against it, because the re-dispatch
 commit-subject id, or the item's id-suffix in the branch name), so the refusal is
 overridable with `--stranded-override="<why>"`, recorded as an event.
 
-**Why the fourth exists.** The concurrency rule is "a reasonable limit is 3-5
+**Why the fourth exists.** It is the third one's mid-flight twin, and the gap
+between them was the *normal* state of every worker. The stranded-work gate is
+defined over **commits**, and a polecat commits at the END of its life — so a
+crash, a stop or an outage leaves behind exactly the state neither gate covered:
+uncommitted files in a worktree, zero commits ahead of the target, invisible to
+`git cherry`, to `pogo check-stranded` and to both stranded-push reporters, by
+construction.
+
+Everything *except* a gate already existed for this state (mg-836c). pogod
+detects the dirty tree on exit, **preserves** it rather than reaping it, emits
+`worktree_preserved`, mails the coordinator a per-tree notice naming the tree,
+the files and the prohibition, and `pogo gc --list-preserved` reports the whole
+retained population. None of it reached dispatch: the item stayed `available`,
+stall-watch and priority-wake advertised it as ready, and `spawn-polecat` did not
+refuse. After the 2026-08-14→19 outage five open items were in that state; the
+one dispatch attempted against them was stopped only by accident, because `git
+worktree add` failed on a branch still checked out — an error naming a different
+reason, whose obvious remedy (remove the stale worktree, re-dispatch) destroys
+the only copy of the files.
+
+The notice had said all of this correctly six hours earlier. It fires **once**,
+says so in its own text, and went to **one** addressee, who was itself among the
+agents down in the outage it was reporting on. *A one-shot notice to a single
+addressee is exactly as reliable as that addressee.* This gate is the same
+knowledge held as a standing property of the item, which is the difference
+between a notice and a guard.
+
+It **fails open** on a polecats directory it cannot reach and **closed** on a
+tree it found and could not read — gc already refuses to reclaim such a tree, and
+a gate that dispatched over one would be less careful than the reaper it covers
+for. Its remedy is deliberately *not* `refinery submit`: nothing is committed, so
+there is nothing to submit, and the disposition is a decision (commit the tree
+and land it, rescue what is worth keeping, or rule the work spent). Overridable
+with `--preserved-override="<why>"`, recorded as an event — and that is the one
+override whose consequence is not recoverable, since the tree is reaped once its
+item concludes.
+
+The same probe feeds stall-watch, so the surfaces that *advertise* an item stop
+advertising it: `internal/stallwatch`'s preserved-worktree check reports it with
+the opposite remedy instead of dropping it silently.
+
+**Why the fifth exists.** The concurrency rule is "a reasonable limit is 3-5
 concurrent workers", and a count of slots cannot see what is in them. Measured
 (mg-1b8c): identical gate work took **11.5s** on a host with capacity and
 **78.5s** on a full one, enough to push a gate through a fixed timeout and
@@ -327,8 +369,8 @@ history is wrong in exactly the expensive cases; and a filer-set marker depends
 on somebody remembering, where an observation of the host does not. The gate
 makes the weaker claim the evidence supports: what the fleet holds *now*.
 
-**It fails open**, like the stranded-work gate and unlike the two item gates —
-an unreadable or unattributable
+**It fails open**, like the stranded-work and preserved-worktree gates and unlike
+the assignee and pairing gates — an unreadable or unattributable
 sample proceeds. Refusing work on missing information stalls the queue for a
 reason nobody downstream can check or clear.
 

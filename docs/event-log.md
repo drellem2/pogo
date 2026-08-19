@@ -401,6 +401,36 @@ bump.
 {"schema_version":1,"timestamp":"2026-08-05T09:58:11.000000000Z","event_type":"dispatch_stranded_work_overridden","agent":"cat-a9a19","work_item_id":"mg-9a19","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"a9a19","reason":"branch is a stale duplicate; the real work merged as 9072f34","refusal":"work item mg-9a19 already has PUSHED, UNMERGED work: ..."}}
 ```
 
+#### `dispatch_preserved_worktree_overridden`
+
+A dispatch went ahead over the **preserved-worktree** gate's refusal, with a
+stated reason (`pogo agent spawn-polecat --preserved-override="<why>"`). The
+gate refuses when an item's work is already written and UNCOMMITTED in a
+retained worktree — see `worktree_preserved` below for the state, and mg-836c for
+why detection alone was not enough. Attribution is a name match between the tree's
+directory and the item, so it can be wrong; the override exists so a wrong
+refusal is not a wedge whose only exit is deleting the tree.
+
+**This is the override whose consequence is not recoverable, and that is why the
+event matters more than its two siblings.** A stranded branch survives a wrong
+call — it is on origin. A preserved tree is reaped by the next `gc` sweep once its
+item concludes, so this event is the only durable record that somebody chose to
+proceed over the last copy of that work, and the only thing that gives a
+re-derivation discovered later a named cause instead of looking like a mystery.
+Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **Optional envelope:** `repo`
+- **`details` fields:**
+  - `agent_type` (string, required): always `"polecat"` in v1
+  - `agent_name` (string, required): the name of the polecat that was dispatched anyway
+  - `reason` (string, required): the operator's stated why — specifically, what they found when they READ the tree
+  - `refusal` (string, required): the bypassed refusal verbatim, which names the tree, its branch and its modified/untracked split
+
+```json
+{"schema_version":1,"timestamp":"2026-08-19T07:31:04.000000000Z","event_type":"dispatch_preserved_worktree_overridden","agent":"cat-q516e","work_item_id":"mg-516e","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"q516e","reason":"read all 16 files; every one is regenerated suite output","refusal":"work item mg-516e already has UNCOMMITTED work in a RETAINED WORKTREE: /Users/daniel/.pogo/polecats/p516e holds 16 uncommitted path(s) — 14 modified, 2 untracked ..."}}
+```
+
 #### `work_item_completion_notice`
 
 pogod decided what to tell the agent that FILED a work item, at the moment the
@@ -807,7 +837,7 @@ pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up thresho
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
 - **`details` fields:**
-  - `category` (string, required): `"unclaimed_items"`, `"unread_mail"`, `"priority_wake"`, `"blocked_reminder"`, or `"indefinite_hold"`
+  - `category` (string, required): `"unclaimed_items"`, `"unread_mail"`, `"priority_wake"`, `"worked_unclaimed"`, `"preserved_worktree"`, `"blocked_reminder"`, or `"indefinite_hold"`
   - `watched_agent` (string, required): the agent that was nudged
   - `nudge_delivery` (string, optional): the channel that carried the nudge — `"pty"` (written to the agent's live terminal), `"mail"` (agent not running, so straight to durable mail), or `"mail_fallback"` (agent running but the PTY nudge failed, so durable mail carried it instead). Absent only when delivery failed outright.
   - `nudge_fallback_reason` (string, optional): present with `"mail_fallback"`; why the PTY channel was not used. **Not an error** — the nudge was delivered.
@@ -828,6 +858,8 @@ pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up thresho
   - For `unclaimed_items`: `item_count` (int), `item_ids` ([]string), `age_threshold` (string), `oldest_age_seconds` (float)
   - For `unread_mail`: `unread_count` (int), `max_count` (int), `oldest_age_seconds` (float), `age_threshold` (string), `over_count` (bool), `over_age` (bool)
   - For `priority_wake`: `item_count` (int), `item_ids` ([]string), `wake_delay` (string), `wake_cooldown` (string), `fast_priority` (string), `oldest_age_sec` (float)
+  - For `worked_unclaimed` (mg-1a8a): `item_count` (int), `item_ids` ([]string), `workers` ([]object — `item_id`, `polecat`, `evidence` (`"registry"` or the weaker `"witness"`), `pid` when known), `oldest_age_seconds` (float)
+  - For `preserved_worktree` (mg-836c): `item_count` (int), `item_ids` ([]string), `worktrees` ([]object — `item_id`, `worktree`, `branch`, `modified_paths` (int), `untracked_paths` (int), `unread` (bool: the tree was found but `git status` could not read it, so the two counts are not a claim about its contents)), `oldest_age_seconds` (float). The **modified/untracked split** is carried rather than a total because the halves are different facts: a modified tracked file still has its committed version in the object store, while an untracked path is on no branch, in no stash and on no remote — that tree is its only copy on the machine.
   - For `indefinite_hold` (mg-f398): `item_count` (int), `item_ids` ([]string), `hold_gates` (map gate value → count, e.g. `{"parked":4,"human":1}`), `age_threshold` (string), `cooldown` (string), `oldest_age_seconds` (float, absent when every held item is unaged), `unaged_ids` ([]string, optional — items whose file could not be stat'd, so their hold is real but its age is unknown)
   - For both work-item categories (mg-1693, all optional — absent means "nothing to report"): `repeat_counts` (map item id → notice number, present only for items on their 2nd or later notice), `backoff_suppressed_ids` ([]string) and `backoff_suppressed_count` (int) for candidates that were detected but held back by their own backoff, and `next_backoff` (string), the longest gap now applied to any item in this fire.
 
@@ -1497,9 +1529,13 @@ no apparent reason.
 An exited agent's worktree was RETAINED rather than reaped, and **the work item it belongs to now has
 work that no branch and no push can see** (mg-32e3).
 
-**This is the one form of stranded work every other guard is blind to, by construction.** The
+**Every guard defined over COMMITS is blind to this, by construction.** The
 spawn-time stranded-work refusal, `git cherry`, `strandedwork.Inspect`, `pogo check-stranded` and both
-`work_item_stranded_push` reporters are all defined over PUSHED commits. `~/.pogo/polecats/qbe37` was
+`work_item_stranded_push` reporters are all defined over PUSHED commits, and a polecat commits at the
+END of its life — so this is not an edge case, it is the normal mid-flight state of every worker and
+exactly what a crash, a stop or an outage leaves behind. Since mg-836c one guard is NOT blind to it:
+the spawn-time **preserved-worktree** gate reads the trees directly (see
+`dispatch_preserved_worktree_overridden` above). `~/.pogo/polecats/qbe37` was
 preserved on 2026-08-10 with 16 uncommitted paths, including a 1450-line package that existed in no
 other location on the machine; `pogo gc` would eventually have reclaimed the tree.
 
@@ -1514,8 +1550,13 @@ three days of preservations had to be reconstructed by grepping `PRESERVED workt
 item have work nobody pushed?" wants both: `preserved` is a positive finding and `undetermined` is a
 tree that could not be ruled out.
 
-**It reports; it blocks nothing.** No dispatch is refused and no tree is reclaimed on the strength of
-it. Additive — no `schema_version` bump.
+**It reports; it blocks nothing — and for eight days that was the whole defect.** No tree is reclaimed
+on the strength of it, and no dispatch was refused on it either. The mail beside it fires ONCE, says so,
+and goes to ONE addressee; on 2026-08-19 that addressee was among the agents down in the outage the
+notice was reporting on, and the item it named stayed `available` with priority-wake advertising it as
+ready. Dispatch is now gated on the trees themselves rather than on this event or its mail (mg-836c) —
+which is the difference between a notice and a guard, and leaves this event doing what it is good at:
+being the durable record. Additive — no `schema_version` bump.
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (the exited agent whose
   tree it is — the opposite attribution from `worktree_notice_undelivered` above, and for the same

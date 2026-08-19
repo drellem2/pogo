@@ -2135,6 +2135,12 @@ Flags:
 			// where the priority wake urges a coordinator to dispatch work a
 			// polecat is already doing.
 			Workers: newStallWorkers(agentRegistry),
+			// Let every available/ check ask whether an item's work is already
+			// written and uncommitted in a retained worktree before advertising
+			// it as ready (mg-836c). Without it the priority wake urges a
+			// coordinator to dispatch at an item whose only copy of its work is
+			// in a tree the new polecat will never see.
+			Preserved: newStallPreserved(),
 		})
 		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s fallback_cap=%d priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s indefinite_hold=%t hold_age=%s hold_cooldown=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,
