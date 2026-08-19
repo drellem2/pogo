@@ -309,3 +309,67 @@ func Follow(path string, pollInterval time.Duration, stop <-chan struct{}, lineS
 		}
 	}
 }
+
+// LogFilesCovering returns the log files for path that can contain records at
+// or after floor, oldest first, so a caller reads them in time order.
+//
+// Rotation only ever discards the OLDEST chunk (see rotate), so the retained
+// files hold a contiguous suffix of history: walking them newest-first and
+// stopping at the first file that BEGINS at or before floor is exact, not a
+// heuristic — every older file ends before that file begins.
+//
+// It exists because scanning every retained chunk unconditionally is expensive
+// enough to change a caller's design. The live log alone runs to ~100MB on this
+// box and a full parse costs ~0.8s, so six chunks is ~5s in a health check that
+// usually wants the last day or two. A caller that reads only the live log to
+// avoid that cost is the failure this replaces: a rotation inside the window
+// then hides records, and the reader reports their absence as a measurement
+// (mg-9d55).
+//
+// A zero floor means "no lower bound" and returns every retained file.
+func LogFilesCovering(path string, floor time.Time) []string {
+	all := LogFiles(path)
+	if len(all) <= 1 || floor.IsZero() {
+		return all
+	}
+	for i := len(all) - 1; i >= 0; i-- {
+		first, ok := FirstEventTime(all[i])
+		// A file whose first record we cannot read is INCLUDED along with
+		// everything older, rather than trusted to be out of range. Guessing
+		// "too new to matter" from an unreadable line would silently shrink
+		// coverage, which is the direction that turns a hole into a reading.
+		if ok && !first.After(floor) {
+			return all[i:]
+		}
+	}
+	return all
+}
+
+// FirstEventTime reads the timestamp of the first well-formed record in path.
+// The log is append-ordered, so this is the earliest record the file holds and
+// therefore the file's own coverage floor.
+func FirstEventTime(path string) (time.Time, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		ev, err := ParseLine([]byte(line))
+		if err != nil {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, ev.Timestamp)
+		if err != nil {
+			continue
+		}
+		return at, true
+	}
+	return time.Time{}, false
+}
