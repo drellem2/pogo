@@ -415,6 +415,60 @@ reason nobody downstream can check or clear.
 `pogo host load` reports the same numbers from the same gate, so a
 coordinator's plan and pogod's enforcement cannot disagree.
 
+### The `declares-remainder` warning is injected, not composed
+
+One thing at the dispatch point is **not** a gate and must not become one. An
+item tagged `declares-remainder` says its own output is a recommendation, so
+`mg done` refuses it until a successor is named — and the worker is stopped
+within seconds of its branch merging, which means a close it did not prepare for
+lands on nobody: the item returns to `available/` where the priority wake and the
+stall watch advertise finished work as unclaimed, clearable only by the
+coordinator.
+
+The control for that was a line in the coordinator's operating instructions —
+*when you dispatch such an item, say so in the body you pass*, the body being the
+snapshot the worker reads and the only channel that reaches it in time. That
+line is in the right file, addressed to the right actor, and it failed three
+times: mg-6e4f and mg-4020 on 2026-08-13, then mg-9d4e, **the ticket about this
+failure**, dispatched under a repeated stall-watch notice about that same item.
+A control that degrades under load is a poor control for a coordinator whose load
+is the thing being managed, and there were 21 tagged items open when it was
+filed.
+
+So `spawn-polecat` reads the tag itself and **prepends** a fixed block to the
+rendered prompt naming the refusal and both ways out. **What it tells the worker
+is not "pass `--successor`", and that distinction is the whole of mg-27c0**: on
+the merge path the worker submits and is stopped, pogod performs the close, and
+pogod finds the successor only by asking the store which item names the closing
+item as its `predecessor`. `mg new` does **not** write that edge (measured
+2026-08-19: a freshly filed item's `predecessor` field is `[]`), so a block that
+said merely "file the successor" would reproduce the state that cost 5 of 5
+declared items on 2026-08-13 — every one had a successor filed and none of them
+closed. The block therefore names **both** commands, `mg new` and `mg edit <new
+id> --add-tags=predecessor:<this id>`, offers `mg done <id> --successor=<id>` as
+the one-step form for a worker that does reach its own close, and gives the
+second way out: if nothing is genuinely owed, retract the declaration with
+`mg edit <id> --rm-tags=declares-remainder` and say why. Two properties are
+load-bearing (mg-a367):
+
+- **Injected by the daemon, not composed by the dispatcher.** Nothing about it
+  depends on anyone remembering. It keys on the tag, read from the store.
+- **Additive.** It goes above the template's own output and touches nothing
+  else; a dispatcher's brief frequently carries load-bearing rescue
+  instructions, so replacing or reordering a word of it would be a worse bug
+  than the one being fixed. That is also why it is not a `{{if}}` block in the
+  worker templates: a template is an on-disk, user-editable file, and making the
+  warning conditional on one carrying it would rebuild the defect one layer
+  down.
+
+**It refuses nothing.** The tag means "this work has a known remainder", not
+"this is unsafe to start". It also does not suppress itself for an item that
+already carries a `successor:` tag: such a tag does satisfy `mg done`, but only
+while the id it names still resolves, and this process cannot tell a rotted link
+from a live one — `internal/workitem` does not read the archive. A redundant
+paragraph costs a worker seconds; a missing one costs the coordinator an item
+stuck in `available/`.
+
 ### Inter-Agent Communication
 
 Two channels:
