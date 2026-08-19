@@ -1,7 +1,10 @@
 package firstturn
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -317,5 +320,271 @@ func TestReadEvidence_AgentsOutsideThePopulationGetNoEvidence(t *testing.T) {
 	ev2, _ := ReadEvidence(staggeredFixture(t), stale, now, 10*time.Minute)
 	if _, ok := ev2["mayor"]; ok {
 		t.Errorf("evidence carries mayor (%+v) despite its spawn predating the lookback", ev2["mayor"])
+	}
+}
+
+// The mg-9d55 fixture: one rotation, mid-lifetime, on real traffic.
+//
+// testdata/rotation-2026-08-14.jsonl and its `.1` are ONE verbatim slice of this
+// box's ~/.pogo/events.log — every crew spawn record and every scheduler fire
+// addressed to `mayor` or `pm-pogo` between 02:00 and 04:00 on 2026-08-14 — cut
+// in two at 03:00:23.149507Z and written out as a rotated pair. The cut is not
+// invented either: it is one of the 5,434 instants in this box's recorded
+// history at which a rotation would have made this arm report an agent that was
+// completing turns as having completed none. (Swept over ~/.pogo/events.log and
+// events.log.1, 72,478 crew fire records from 2026-04-25 to 2026-08-19, by
+// checking for every event instant in every crew incarnation's life whether a
+// rotation there leaves the agent with no completion and >= MinDeliveries
+// deliveries in the surviving log.)
+//
+// What the two agents actually did after 03:00:23Z:
+//
+//	mayor    delivered 03:00:23Z and 03:15:33Z, completed 03:17:33Z
+//	pm-pogo  delivered 03:02:03Z and 03:12:23Z, completed 03:23:38Z
+//
+// Both had completed repeatedly since their 02:01:31Z spawn — mayor six times,
+// pm-pogo five — and every one of those completions is in the ROTATED half.
+const (
+	rotationSpawn    = "2026-08-14T02:01:31.679312Z"
+	rotationPmSpawn  = "2026-08-14T02:01:34.385242Z"
+	rotationBoundary = "2026-08-14T03:00:23.149507Z"
+	// The sample instant: after two fires have been delivered to each agent
+	// post-rotation and before either has completed one, which is the window in
+	// which the truncated read is a finding.
+	rotationNotice     = "2026-08-14T03:16:00Z"
+	rotationMayorFirst = "2026-08-14T02:15:32.094338Z"
+	rotationPmFirst    = "2026-08-14T02:04:07.313024Z"
+)
+
+func rotationFixture(t *testing.T) string {
+	t.Helper()
+	return filepath.Join("testdata", "rotation-2026-08-14.jsonl")
+}
+
+// wholeLogFromRotationFixture writes the two fixture halves back into a single
+// unrotated log, which is the control: the same records, the same reader, no
+// rotation. Concatenating them is also the assertion that the pair IS the whole
+// slice — nothing was dropped when it was cut.
+func wholeLogFromRotationFixture(t *testing.T) string {
+	t.Helper()
+	live := rotationFixture(t)
+	out := filepath.Join(t.TempDir(), "events.log")
+	var buf []byte
+	for _, p := range []string{live + ".1", live} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		buf = append(buf, b...)
+	}
+	if err := os.WriteFile(out, buf, 0o644); err != nil {
+		t.Fatalf("write control log: %v", err)
+	}
+	return out
+}
+
+func rotationCrew() []Agent {
+	return []Agent{
+		{Name: "mayor", Identity: "crew-mayor", StartedAt: at(rotationSpawn)},
+		{Name: "pm-pogo", Identity: "crew-pm-pogo", StartedAt: at(rotationPmSpawn)},
+	}
+}
+
+// TestReplay_ARotationInsideAnAgentsLifetimeHidesItsCompletions is mg-9d55,
+// replayed end to end through the real reader against the real traffic.
+//
+// The rotated read must agree with the unrotated one record for record. It is
+// asserted as an equality against the control rather than as a verdict, because
+// a verdict can come out right for the wrong reason: the wrong reason here is
+// that the reader saw a window shorter than the agent's life and reported the
+// shortfall as the agent's silence.
+func TestReplay_ARotationInsideAnAgentsLifetimeHidesItsCompletions(t *testing.T) {
+	now := at(rotationNotice)
+	agents := rotationCrew()
+
+	control, cerr := ReadEvidence(wholeLogFromRotationFixture(t), agents, now, DefaultLookback)
+	if cerr != "" {
+		t.Fatalf("ReadEvidence(control): %s", cerr)
+	}
+	rotated, rerr := ReadEvidence(rotationFixture(t), agents, now, DefaultLookback)
+	if rerr != "" {
+		t.Fatalf("ReadEvidence(rotated): %s", rerr)
+	}
+
+	// The control is the ground truth, and it has to hold the completions this
+	// test is about — otherwise the fixture has stopped demonstrating anything.
+	if want := at(rotationMayorFirst); !control["mayor"].FirstCompletion.Equal(want) {
+		t.Fatalf("control mayor FirstCompletion = %s, want %s — the fixture no longer holds the pre-rotation completions",
+			control["mayor"].FirstCompletion.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+	if want := at(rotationPmFirst); !control["pm-pogo"].FirstCompletion.Equal(want) {
+		t.Fatalf("control pm-pogo FirstCompletion = %s, want %s", control["pm-pogo"].FirstCompletion.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+
+	for _, name := range []string{"mayor", "pm-pogo"} {
+		if got, want := rotated[name], control[name]; got != want {
+			t.Errorf("%s: rotated read = %+v, unrotated read = %+v — a rotation inside the agent's lifetime changed the measurement, which is mg-9d55",
+				name, got, want)
+		}
+	}
+
+	rep := Detect(Attach(agents, rotated, now, len(agents), DefaultLookback, rerr), DefaultParams())
+	if len(rep.Findings) != 0 {
+		t.Fatalf("findings = %v at %s, want none: mayor completed 6 fires since its spawn and pm-pogo 5, all of them in the rotated half",
+			Names(rep.Findings), now.Format(time.RFC3339))
+	}
+	if rep.State != StateCalm {
+		t.Fatalf("state = %s, want calm (blind reason %q)", rep.State, rep.BlindReason)
+	}
+	if len(rep.Judged) != 2 {
+		t.Errorf("judged = %v, want both agents judged and cleared", rep.Judged)
+	}
+	if len(rep.Truncated) != 0 {
+		t.Errorf("truncated = %v, want none: the retained pair spans both spawns", rep.Truncated)
+	}
+}
+
+// TestReplay_TheLiveLogAloneIsWhatFired pins the defect itself rather than only
+// its absence: read the SAME records with the rotated half withheld — what
+// ReadEvidence did until mg-9d55 — and both agents come back having completed
+// nothing, at a moment when both had completed repeatedly.
+//
+// Without this, a change that narrowed the read back to one path fails no test
+// here; the fix above would still be present and would still be bypassed.
+func TestReplay_TheLiveLogAloneIsWhatFired(t *testing.T) {
+	now := at(rotationNotice)
+	agents := rotationCrew()
+
+	// The old read: the live log only, with the rotated chunk out of reach.
+	live := filepath.Join(t.TempDir(), "events.log")
+	b, err := os.ReadFile(rotationFixture(t))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if err := os.WriteFile(live, b, 0o644); err != nil {
+		t.Fatalf("write live-only log: %v", err)
+	}
+
+	ev, readErr := ReadEvidence(live, agents, now, DefaultLookback)
+	if readErr != "" {
+		t.Fatalf("ReadEvidence: %s", readErr)
+	}
+	for _, name := range []string{"mayor", "pm-pogo"} {
+		if !ev[name].FirstCompletion.IsZero() {
+			t.Fatalf("%s FirstCompletion = %s from the live half alone; the fixture no longer demonstrates the truncation it exists for",
+				name, ev[name].FirstCompletion.Format(time.RFC3339Nano))
+		}
+		if ev[name].Delivered < DefaultMinDeliveries {
+			t.Fatalf("%s Delivered = %d in the live half, below MinDeliveries — the fixture cannot reach a finding and so cannot show the false positive",
+				name, ev[name].Delivered)
+		}
+	}
+
+	rep := Detect(Attach(agents, ev, now, len(agents), DefaultLookback, ""), DefaultParams())
+	if rep.State != StateDark || len(rep.Findings) != 2 {
+		t.Fatalf("state = %s findings = %v, want dark on both — this is the false positive being pinned, not a passing case",
+			rep.State, Names(rep.Findings))
+	}
+	// And it does not stop at two per-agent notices. Every judged agent is a
+	// finding, so the report crosses into its FLEET branch, which escalates
+	// outside the fleet on its first sample: a rotation alone would have mailed
+	// "no crew member has completed a turn" about a crew completing turns every
+	// few minutes.
+	if !rep.Fleet {
+		t.Errorf("Fleet = false; both judged agents are findings, and the fleet branch is what changes the routing")
+	}
+}
+
+// TestReadEvidence_EvidenceThatCannotReachTheSpawnIsNotJudged is the check on
+// the remedy rather than on the defect. Reading the rotated files makes the
+// window longer; it does not make it unbounded. When rotation has DISCARDED
+// records and the survivors still begin after an agent's spawn, the counts are
+// floors over a shorter window than the agent's life — the same shape as the
+// bug — and the agent must be declined rather than judged.
+func TestReadEvidence_EvidenceThatCannotReachTheSpawnIsNotJudged(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "events.log")
+	spawn := at("2026-08-14T02:01:31.679312Z")
+	now := spawn.Add(3 * time.Hour)
+
+	// A live log whose records all postdate the spawn, plus a full set of
+	// retained rotated slots — the state that means rotation has dropped the
+	// oldest chunk (events.LogSpilled).
+	if err := os.WriteFile(live, deliveries("mayor", spawn.Add(2*time.Hour), 3), 0o644); err != nil {
+		t.Fatalf("write live log: %v", err)
+	}
+	for i := 1; i <= 5; i++ {
+		p := fmt.Sprintf("%s.%d", live, i)
+		if err := os.WriteFile(p, deliveries("mayor", spawn.Add(time.Duration(2-i)*time.Minute+2*time.Hour), 1), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+
+	agents := []Agent{{Name: "mayor", Identity: "crew-mayor", StartedAt: spawn}}
+	ev, readErr := ReadEvidence(live, agents, now, DefaultLookback)
+	if readErr != "" {
+		t.Fatalf("ReadEvidence: %s", readErr)
+	}
+	if !ev["mayor"].Truncated {
+		t.Fatalf("mayor evidence not marked truncated; the surviving log begins after its spawn, so its counts are a floor and cannot answer \"since it spawned\"")
+	}
+
+	rep := Detect(Attach(agents, ev, now, len(agents), DefaultLookback, ""), DefaultParams())
+	if len(rep.Findings) != 0 {
+		t.Errorf("findings = %v — a window shorter than the agent's life was turned into a finding, which is the defect this fix exists to remove, reappearing in the fix",
+			Names(rep.Findings))
+	}
+	if !inRoster("mayor", rep.Truncated) {
+		t.Errorf("truncated = %v, want mayor named: a short reading must be reported as unjudgeable, not swallowed", rep.Truncated)
+	}
+	if inRoster("mayor", rep.Judged) {
+		t.Errorf("judged = %v — an agent whose evidence does not reach its spawn was counted as judged", rep.Judged)
+	}
+}
+
+// deliveries renders n scheduler_fire_delivered records addressed to `to`, one
+// per minute from start, as a JSONL chunk.
+func deliveries(to string, start time.Time, n int) []byte {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		ts := start.Add(time.Duration(i) * time.Minute).UTC().Format(time.RFC3339Nano)
+		fmt.Fprintf(&b, `{"schema_version":1,"timestamp":%q,"event_type":"scheduler_fire_delivered","agent":"pogod","details":{"to":%q}}`+"\n", ts, to)
+	}
+	return []byte(b.String())
+}
+
+// TestReadEvidence_AnUnreadableRotatedChunkIsBlindNotEmpty. The live log's
+// absence has been blindness since mg-3cbb; a rotated chunk is now equally
+// load-bearing evidence, and a hole in it is equally a failed measurement. A
+// chunk that exists and cannot be read must not come back as a short count that
+// looks like a reading — that is the same absence-as-evidence error the whole
+// package is built against, and widening the read is what created a second
+// place for it to happen.
+func TestReadEvidence_AnUnreadableRotatedChunkIsBlindNotEmpty(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "events.log")
+	spawn := at("2026-08-14T02:01:31.679312Z")
+	now := spawn.Add(2 * time.Hour)
+	if err := os.WriteFile(live, deliveries("mayor", spawn.Add(time.Hour), 3), 0o644); err != nil {
+		t.Fatalf("write live log: %v", err)
+	}
+	rotated := live + ".1"
+	if err := os.WriteFile(rotated, deliveries("mayor", spawn, 3), 0o000); err != nil {
+		t.Fatalf("write rotated chunk: %v", err)
+	}
+	if _, err := os.ReadFile(rotated); err == nil {
+		t.Skip("this user can read a 0000-mode file (root?), so the chunk is not actually unreadable")
+	}
+
+	agents := []Agent{{Name: "mayor", Identity: "crew-mayor", StartedAt: spawn}}
+	ev, readErr := ReadEvidence(live, agents, now, DefaultLookback)
+	if readErr == "" {
+		t.Fatalf("unreadable rotated chunk read as a clean measurement (evidence %+v); a hole in the window is not an empty window", ev)
+	}
+	if ev != nil {
+		t.Errorf("evidence = %v, want nil alongside the error", ev)
+	}
+	if rep := Detect(Attach(agents, ev, now, len(agents), DefaultLookback, readErr), DefaultParams()); rep.State != StateBlind {
+		t.Errorf("state = %s, want blind", rep.State)
 	}
 }

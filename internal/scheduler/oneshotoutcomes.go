@@ -41,9 +41,7 @@ package scheduler
 // evidence, not a wiring detail smuggled in by a consumer.
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -292,55 +290,12 @@ func inWindow(at, since, until time.Time) bool {
 // scanFilesCovering returns the events-log files that can contain records at or
 // after floor, newest-last, so a caller reads them in time order.
 //
-// Rotation only ever discards the OLDEST chunk, so the retained files hold a
-// contiguous suffix of history: walking them newest-first and stopping at the
-// first file that BEGINS before floor is exact, not a heuristic — every older
-// file ends before that file begins. The live log alone is ~86MB on this box and
-// a full parse of it costs ~0.8s, so scanning all six retained chunks
-// unconditionally would put ~5s into a health check that mostly wants a week.
+// The walk itself lives in internal/events (LogFilesCovering) rather than here:
+// the first caller to need it was this one, the second was the first-turn floor,
+// and a second copy of it was how that floor came to read only the live log
+// (mg-9d55). This wrapper stays so the call sites below read as before.
 func scanFilesCovering(logPath string, floor time.Time) []string {
-	all := events.LogFiles(logPath)
-	if len(all) <= 1 || floor.IsZero() {
-		return all
-	}
-	for i := len(all) - 1; i >= 0; i-- {
-		first, ok := firstEventTime(all[i])
-		// A file we cannot read the first record of is INCLUDED along with
-		// everything older, rather than trusted to be out of range. Guessing
-		// "too new to matter" from an unreadable line would silently shrink
-		// coverage.
-		if ok && !first.After(floor) {
-			return all[i:]
-		}
-	}
-	return all
-}
-
-// firstEventTime reads the timestamp of the first well-formed record in path.
-func firstEventTime(path string) (time.Time, bool) {
-	f, err := os.Open(path)
-	if err != nil {
-		return time.Time{}, false
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		ev, err := events.ParseLine([]byte(line))
-		if err != nil {
-			continue
-		}
-		at, err := time.Parse(time.RFC3339Nano, ev.Timestamp)
-		if err != nil {
-			continue
-		}
-		return at, true
-	}
-	return time.Time{}, false
+	return events.LogFilesCovering(logPath, floor)
 }
 
 // oneShotMessageDigestLimit bounds the message digest carried on a one-shot's

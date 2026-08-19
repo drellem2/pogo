@@ -2522,6 +2522,15 @@ measurement whose data has moved is justified by nothing.
   holds thousands of completions; every one belonged to the incarnation that died
   the previous evening. A detector matching "has acked at some point" reads green
   through the whole outage.
+- **The evidence spans the rotated logs, not just the live one.** pogod rotates
+  `events.log` at 100MB and keeps five chunks; a rotation inside an agent's
+  lifetime used to move its completions out from under this reader, which then
+  reported their absence as a measurement — the same false positive as mg-21ad
+  by a second route, reachable at 5,434 instants of this box's recorded history
+  (mg-9d55). The read now walks the retained chunks newest-first and stops at the
+  first one that begins before the lookback floor. When even those do not reach
+  an agent's spawn, the agent is reported as `truncated` and judged neither way:
+  a count over a shorter window than the agent's life is a floor, not an answer.
 - **An agent nothing was asked of is not blamed.** A finding needs at least 2
   fires actually *delivered* since spawn. Fewer, and the agent is reported as
   `never_addressed` — that is deaf-watch's finding and a different remedy.

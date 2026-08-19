@@ -250,6 +250,7 @@ func (w *Watcher) sample(now time.Time) {
 				"beyond_lookback": rep.BeyondLookback,
 				"never_addressed": rep.NeverAddressed,
 				"misanchored":     rep.Misanchored,
+				"truncated":       rep.Truncated,
 				"grace":           w.params.Grace.String(),
 			},
 		})
@@ -348,6 +349,7 @@ func (w *Watcher) announce(rep Report, now time.Time) {
 		"beyond_lookback":  rep.BeyondLookback,
 		"never_addressed":  rep.NeverAddressed,
 		"misanchored":      rep.Misanchored,
+		"truncated":        rep.Truncated,
 		"grace":            w.params.Grace.String(),
 		"notified":         strings.Join(recipients, ","),
 		"escalated":        escalated,
@@ -509,6 +511,12 @@ func mailBody(rep Report, now, openedAt time.Time, p Params, notifyTo, escalateT
 		fmt.Fprintf(&b, "\n%d agent(s) carried evidence from BEFORE their own spawn and were not\n", len(rep.Misanchored))
 		fmt.Fprintf(&b, "judged either way: %s. That reading is impossible rather than\n", strings.Join(rep.Misanchored, ", "))
 		fmt.Fprintf(&b, "negative, and this arm refuses to turn it into a finding (mg-21ad).\n")
+	}
+	if len(rep.Truncated) > 0 {
+		fmt.Fprintf(&b, "\n%d agent(s) spawned BEFORE the oldest record the events log still holds\n", len(rep.Truncated))
+		fmt.Fprintf(&b, "and were not judged either way: %s. Their evidence would be a\n", strings.Join(rep.Truncated, ", "))
+		fmt.Fprintf(&b, "count over a shorter window than their life, which is a floor and not an\n")
+		fmt.Fprintf(&b, "answer to \"since it spawned\" (mg-9d55).\n")
 	}
 	fmt.Fprintf(&b, "\n")
 	fmt.Fprintf(&b, "This is REPORT-ONLY. pogod did not restart, nudge, or respawn anything.\n")

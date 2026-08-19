@@ -200,6 +200,12 @@ type Agent struct {
 	// StartedAt. The gate that keeps this arm from blaming an agent nothing was
 	// ever asked of.
 	Delivered int
+	// EvidenceTruncated says the evidence above was measured over a window
+	// SHORTER than this agent's life, because the log no longer reaches back to
+	// its spawn. Both numbers are then floors rather than counts, and neither
+	// answers "since it spawned" — so the agent is not judged either way. See
+	// Report.Truncated.
+	EvidenceTruncated bool
 }
 
 // Completed reports whether this incarnation has ever finished a turn.
@@ -296,6 +302,16 @@ type Report struct {
 	// This arm is the only instrument that can report a coordinator which never
 	// came up, so a false positive here is noise in the sole channel.
 	Misanchored []string
+	// Truncated names agents whose evidence does not reach back to their own
+	// spawn, because the events log rotated past it (mg-9d55). The reading is
+	// SHORT rather than negative — "no completion in the part of the log that
+	// survives" is not "no completion since it spawned" — and a short reading
+	// must degrade to "cannot judge", never to a finding, for the same reason
+	// Misanchored does: this arm is the only instrument that can report a
+	// coordinator which never came up, so its false positives are noise in the
+	// sole channel. Under ReadEvidence this is reachable only when all six
+	// retained log chunks together do not span the agent's life.
+	Truncated []string
 	// Scanned is the caller's pre-filter population size.
 	Scanned int
 }
@@ -345,6 +361,13 @@ func Detect(snap Snapshot, p Params) Report {
 			rep.TooFresh = append(rep.TooFresh, a.Name)
 			continue
 		}
+		if a.EvidenceTruncated {
+			// The log no longer reaches this agent's spawn, so its counts are
+			// floors over a shorter window. Judging on them would report the
+			// reader's own horizon as the agent's silence.
+			rep.Truncated = append(rep.Truncated, a.Name)
+			continue
+		}
 		if !a.FirstCompletion.IsZero() && a.FirstCompletion.Before(a.StartedAt) {
 			// Evidence from before this agent existed. It belongs to another
 			// incarnation, or to a window that was never this agent's, and
@@ -372,6 +395,7 @@ func Detect(snap Snapshot, p Params) Report {
 	sort.Strings(rep.BeyondLookback)
 	sort.Strings(rep.NeverAddressed)
 	sort.Strings(rep.Misanchored)
+	sort.Strings(rep.Truncated)
 	sort.SliceStable(rep.Findings, func(i, j int) bool {
 		if rep.Findings[i].DarkFor != rep.Findings[j].DarkFor {
 			return rep.Findings[i].DarkFor > rep.Findings[j].DarkFor
