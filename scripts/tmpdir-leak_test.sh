@@ -122,6 +122,33 @@ run_slice() {
     )
 }
 
+# setup_failed WHAT LOG — report a run_slice that did not pass, and say what it
+# actually was before saying what this file could not measure.
+#
+# The order is the point (mg-a9d8). On 2026-08-14 this file printed
+# "SETUP: the fixture-creating suite did not pass on the third run" over a log
+# whose content was `lookup proxy.golang.org: no such host` — the sandbox left
+# GOMODCACHE empty, so a run of this file had to fetch what it imports (measured:
+# 2 zips, 2 .mod files, 752 KB, once), and a DNS blip mid-fetch landed as
+# `[setup failed]` in internal/agent, which in the same gate run passed in 358s.
+# Read top-down that is a $TMPDIR problem in a package that had none. It cost a
+# held worker slot, a withdrawn hypothesis and a mis-scoped ticket.
+#
+# And it was never going to name any other package: the SLICE above imports no
+# external module at all, so every byte of that fetch is the ./internal/agent
+# invocation. GOMODCACHE is pinned now and the fetch is gone; this stays because
+# the translation is what a person reads first, and the next module failure will
+# have some other cause.
+setup_failed() {
+    local what="$1" log="$2"
+    fail "SETUP: the fixture-creating suite did not pass $what"
+    if pogo_sandbox_go_module_failure "$log" >&2; then
+        return 0
+    fi
+    [ -r "$log" ] && sed -n '1,40p' "$log" >&2
+    return 0
+}
+
 echo "=== \$TMPDIR leak guard (mg-de3c) ==="
 echo "    testtmp root: $ROOT_NAME"
 
@@ -163,8 +190,7 @@ echo "Test 3: a COLD \$TMPDIR gains exactly one entry, and it is the testtmp roo
 cold="$WORK/cold"
 mkdir -p "$cold"
 if ! run_slice "$cold" "$WORK/cold.log"; then
-    fail "SETUP: the fixture-creating suite did not pass, so this file measured nothing"
-    sed -n '1,40p' "$WORK/cold.log" >&2
+    setup_failed "on the cold run, so this file measured nothing" "$WORK/cold.log"
 else
     n=$(count_entries "$cold")
     if [ "$n" -eq 1 ] && [ "$(list_entries "$cold")" = "$ROOT_NAME" ]; then
@@ -181,8 +207,7 @@ echo ""
 echo "Test 4: a WARM \$TMPDIR is UNCHANGED by a run that creates fixtures"
 before=$(count_entries "$cold")
 if ! run_slice "$cold" "$WORK/warm.log"; then
-    fail "SETUP: the fixture-creating suite did not pass on the warm run"
-    sed -n '1,40p' "$WORK/warm.log" >&2
+    setup_failed "on the warm run" "$WORK/warm.log"
 else
     after=$(count_entries "$cold")
     if [ "$after" -eq "$before" ]; then
@@ -201,7 +226,7 @@ echo ""
 echo "Test 5: repeated runs do not grow the testtmp root"
 inner=$(count_entries "$cold/$ROOT_NAME")
 if ! run_slice "$cold" "$WORK/sweep.log"; then
-    fail "SETUP: the fixture-creating suite did not pass on the third run"
+    setup_failed "on the third run" "$WORK/sweep.log"
 else
     grown=$(count_entries "$cold/$ROOT_NAME")
     # Not "== inner": the last process to touch the root leaves its own entry

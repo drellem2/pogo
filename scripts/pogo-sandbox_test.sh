@@ -363,6 +363,14 @@ grep -q "SETUP FAILURE" "$E2E_OUT" \
 #
 # GOPROXY=off throughout: it turns "downloads 70 MB" into "says it would have"
 # in milliseconds. Without it this control would BE the 36-minute stall.
+#
+# GOMODCACHE is put BACK to the HOME-derived path on the unpinned half, and that
+# line is load-bearing (mg-a9d8). isolate now pins the module cache at the real
+# one as well, and the toolchain lives IN that cache — so an "unpinned" half that
+# inherited the pin would resolve go1.25.0 offline, print no download line, and
+# this control would go quietly vacuous while still passing. It did, for one run,
+# during mg-a9d8: the remedy for one download silently disabled the proof that
+# the other one happens.
 run_child '
 pogo_sandbox_create t7
 trap pogo_sandbox_down EXIT
@@ -374,7 +382,7 @@ echo "TOOLCHAIN=${GOTOOLCHAIN:-<unset>}"
 echo "---PINNED---"
 GOPROXY=off go env GOVERSION 2>&1
 echo "---UNPINNED---"
-env GOPROXY=off GOTOOLCHAIN=auto PATH="$PRE_PATH" go env GOVERSION 2>&1
+env GOPROXY=off GOTOOLCHAIN=auto GOMODCACHE="$HOME/go/pkg/mod" PATH="$PRE_PATH" go env GOVERSION 2>&1
 echo "---END---"
 '
 [ "$CHILD_RC" -eq 0 ] \
@@ -437,6 +445,214 @@ TC_ZIPS=$(find "$COLD_AMBIENT/go/pkg/mod" -name 'v0.0.1-go*.zip*' 2>/dev/null | 
 [ "${TC_ZIPS:-0}" -eq 0 ] \
     && pass "...and it transferred nothing: zero toolchain .zip/.zip.tmp under that HOME (the .lock is taken either way — the zip is the 70 MB)" \
     || fail "the harness started a toolchain download into the ambient HOME ($COLD_AMBIENT): $TC_ZIPS zip artifact(s) — the capture is the disease again, one layer earlier"
+
+# ===========================================================================
+# 8. THE MODULE PIN — a private HOME must not cost the module graph either.
+# ===========================================================================
+# mg-cdf1 closed the TOOLCHAIN half of the download the HOME move causes. The
+# MODULE half stayed open for five days: the same empty cache means the next build
+# must fetch, from proxy.golang.org, every module the packages under test import.
+# Measured on 2026-08-19 against a file:// proxy: one run of
+# scripts/tmpdir-leak_test.sh fetches 2 zips and 2 .mod files, 752 KB, ONCE — the
+# six `go test` invocations share one sandbox HOME, so only the second fetches.
+# (That withdraws the ticket's unmeasured "six times per run".) Every byte of it
+# is ./internal/agent: the five-package slice imports no external module at all,
+# which is why this failure mode can only ever name that one package. On
+# 2026-08-14T03:46Z the resolver blinked mid-fetch and it landed as
+#
+#     internal/agent/terminal.go:9:2: nhooyr.io/websocket@v1.8.17: ...
+#       dial tcp: lookup proxy.golang.org: no such host
+#     FAIL  github.com/drellem2/pogo/internal/agent [setup failed]
+#
+# in a package that PASSED in the same gate run, was classed DEFECT, and was not
+# retried (mg-a9d8). Both directions in one child again, and for the same reason
+# §7 needs both: the sandbox HOME is cold by construction, so the unpinned half
+# is the live defect rather than a simulation of it.
+#
+# GOPROXY=off on the unpinned half turns "downloads the module graph" into "says
+# it would have" — which is the same trick §7 uses, and the reason this control
+# costs seconds rather than minutes of somebody else's bandwidth.
+run_child '
+pogo_sandbox_create t8
+trap pogo_sandbox_down EXIT
+pogo_sandbox_isolate
+cd "'"$REPO_ROOT"'" || exit 1
+echo "PINNED=${POGO_SANDBOX_MODCACHE_PINNED:-<none>}"
+echo "REALMC=${POGO_SANDBOX_REAL_GOMODCACHE:-<none>}"
+echo "MODCACHE=$(go env GOMODCACHE)"
+echo "PROXY=$(go env GOPROXY)"
+echo "HOMEMC=$HOME/go/pkg/mod"
+echo "---BUILD---"
+go build -o /dev/null ./internal/agent 2>&1
+echo "BUILDRC=$?"
+# Read BEFORE the unpinned half below, which points GOMODCACHE at this very
+# directory and so creates cache/ in it on its way to failing.
+echo "SANDBOX_MC_ENTRIES=$(find "$HOME/go/pkg/mod" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d " ")"
+echo "---UNPINNED---"
+env GOMODCACHE="$HOME/go/pkg/mod" GOPROXY=off go build -o /dev/null ./internal/agent 2>&1
+echo "---END---"
+'
+[ "$CHILD_RC" -eq 0 ] \
+    && pass "a sandbox that pins its module cache still isolates cleanly (rc 0) — the pin is proven inside isolate, so a pin that failed to take would have ended the run here" \
+    || fail "the module-pin child exited $CHILD_RC: $(head -20 "$CHILD_OUT" | tr '\n' '|')"
+
+MC_REAL="$(grep '^REALMC=' "$CHILD_OUT" | head -1 | cut -d= -f2-)"
+MC_SEEN="$(grep '^MODCACHE=' "$CHILD_OUT" | head -1 | cut -d= -f2-)"
+MC_HOME="$(grep '^HOMEMC=' "$CHILD_OUT" | head -1 | cut -d= -f2-)"
+MC_BUILD="$(sed -n '/^---BUILD---$/,/^---UNPINNED---$/p' "$CHILD_OUT")"
+MC_UNPINNED="$(sed -n '/^---UNPINNED---$/,/^---END---$/p' "$CHILD_OUT")"
+
+if [ -n "$MC_REAL" ] && [ "$MC_REAL" != "<none>" ] && [ "$MC_SEEN" = "$MC_REAL" ]; then
+    pass "under the private HOME, \`go env GOMODCACHE\` resolves the REAL cache ($MC_SEEN) and not the HOME-derived one ($MC_HOME) — the module graph is already there, so there is nothing to fetch"
+else
+    fail "the module cache was not pinned: go env said '$MC_SEEN', the real environment says '${MC_REAL:-<none>}' (HOME-derived would be $MC_HOME)"
+fi
+
+grep -q '^PROXY=off$' "$CHILD_OUT" \
+    && pass "...and GOPROXY=off with it, which is what makes the pin SAFE rather than merely fast: with no download path there is no write into the developer's cache, which is the hazard the pin was refused over until it was measured (mg-a9d8)" \
+    || fail "isolate pinned GOMODCACHE without closing the download path: $(grep '^PROXY=' "$CHILD_OUT" | head -1) — a fetch inside this run would WRITE into the developer's cache"
+
+# The claim that matters operationally, and the one the 2026-08-14 failure is the
+# absence of: a full build of the package that failed that night, under the
+# sandbox HOME, with the network refused.
+if grep -q '^BUILDRC=0$' "$CHILD_OUT" && ! printf '%s' "$MC_BUILD" | grep -qi 'downloading\|proxy.golang.org'; then
+    pass "with the pin, a COLD sandbox HOME builds ./internal/agent — the package the 2026-08-14 gate failure named — with no download and no network at all"
+else
+    fail "with the pin, ./internal/agent did not build offline under the sandbox HOME: $(printf '%s' "$MC_BUILD" | tr '\n' '|' | cut -c1-400)"
+fi
+
+# The positive control on the control. Same cold HOME, same build, cache left
+# where the HOME move puts it.
+printf '%s' "$MC_UNPINNED" | grep -qE 'module lookup disabled|downloading' \
+    && pass "PROVED RED: the same cold HOME with the cache left HOME-derived tries to fetch the module graph — this control is exercising the live defect, not asserting a tautology" \
+    || fail "the unpinned half did NOT try to fetch a module, so the pinned half proves nothing: $(printf '%s' "$MC_UNPINNED" | tr '\n' '|' | cut -c1-400)"
+
+# Nothing was written into the sandbox's own cache either — which is the
+# directory teardown deletes, and where the six-per-run download used to land.
+MC_SANDBOX_ENTRIES="$(grep '^SANDBOX_MC_ENTRIES=' "$CHILD_OUT" | head -1 | cut -d= -f2-)"
+[ "${MC_SANDBOX_ENTRIES:-x}" = "0" ] \
+    && pass "...and the sandbox's own HOME-derived cache stayed EMPTY across the build: nothing was fetched into a directory this run removes" \
+    || fail "the sandbox HOME-derived module cache holds ${MC_SANDBOX_ENTRIES:-<unread>} entries after a pinned build — something is still downloading into a throwaway root"
+
+# A cold ambient HOME declines the module pin for the same reason it declines the
+# toolchain one: the capture asks what this environment ALREADY has, and "none"
+# is an answer. Reusing §7's decoy HOME, which has no toolchain either.
+run_child '
+pogo_sandbox_create t8b
+trap pogo_sandbox_down EXIT
+pogo_sandbox_isolate
+echo "PINNED=${POGO_SANDBOX_MODCACHE_PINNED:-<none>}"
+echo "PROXY=${GOPROXY:-<unset>}"
+' HOME="$COLD_AMBIENT" POGO_HOME="$COLD_AMBIENT/.pogo"
+
+[ "$CHILD_RC" -eq 0 ] && grep -q '^PINNED=<none>$' "$CHILD_OUT" && grep -q '^PROXY=<unset>$' "$CHILD_OUT" \
+    && pass "an ambient HOME with no cache of its own yields NO module pin and leaves GOPROXY alone — failing OPEN, because an unpinned cache is the behaviour we already had and a wrongly-closed proxy would be a new hard failure" \
+    || fail "a cold ambient HOME did not decline the module pin: rc=$CHILD_RC, $(grep -E '^(PINNED|PROXY)=' "$CHILD_OUT" | tr '\n' '|')"
+
+# THE PROOF ITSELF, exercised. Everything above shows the pin TAKING; a pin that
+# is only ever seen working is a pin whose failure path has never run, and the
+# failure path is the whole reason the pin is written this way — mg-cdf1's
+# toolchain pin is proven under the private HOME precisely because an unproven
+# pin fails an hour downstream wearing the branch's name.
+#
+# Driven by putting a `go` on PATH that ignores its environment, which is exactly
+# what a pin that did not take looks like from the inside, and calling the pin
+# directly so the shim is not shadowed by the GOROOT the toolchain pin prepends.
+# Both halves get their own child, because either alone is a live hazard: the
+# cache without the proxy closed writes into the developer's, and the proxy
+# closed without the cache turns every sandboxed build into a hard failure.
+run_child '
+pogo_sandbox_create t8c
+trap pogo_sandbox_down EXIT
+mkdir -p "$POGO_SANDBOX_DIR/decoybin" "'"$WORK"'/fakerealcache"
+cat > "$POGO_SANDBOX_DIR/decoybin/go" <<"SHIM"
+#!/usr/bin/env bash
+echo /some/other/cache
+echo off
+SHIM
+chmod +x "$POGO_SANDBOX_DIR/decoybin/go"
+PATH="$POGO_SANDBOX_DIR/decoybin:$PATH"
+POGO_SANDBOX_REAL_GOMODCACHE="'"$WORK"'/fakerealcache"
+pogo_sandbox__pin_modcache
+echo "REACHED THE LINE AFTER THE PIN"
+'
+assert_setup_failure "a module-cache pin that did not take"
+grep -q 'module-cache pin did not take' "$CHILD_OUT" && ! grep -q 'REACHED THE LINE AFTER THE PIN' "$CHILD_OUT" \
+    && pass "...and the refusal is the MODULE PIN's, and it ENDS the run — the proof is load-bearing, not decoration, so a sandbox cannot proceed into a build that would reach the network" \
+    || fail "a module-cache pin that did not take was not refused by the pin: $(head -6 "$CHILD_OUT" | tr '\n' '|')"
+
+run_child '
+pogo_sandbox_create t8d
+trap pogo_sandbox_down EXIT
+mkdir -p "$POGO_SANDBOX_DIR/decoybin" "'"$WORK"'/fakerealcache2"
+cat > "$POGO_SANDBOX_DIR/decoybin/go" <<"SHIM"
+#!/usr/bin/env bash
+echo "'"$WORK"'/fakerealcache2"
+echo https://proxy.golang.org,direct
+SHIM
+chmod +x "$POGO_SANDBOX_DIR/decoybin/go"
+PATH="$POGO_SANDBOX_DIR/decoybin:$PATH"
+POGO_SANDBOX_REAL_GOMODCACHE="'"$WORK"'/fakerealcache2"
+pogo_sandbox__pin_modcache
+echo "REACHED THE LINE AFTER THE PIN"
+'
+assert_setup_failure "a pinned cache whose download path is still open"
+grep -q "not 'off'" "$CHILD_OUT" && ! grep -q 'REACHED THE LINE AFTER THE PIN' "$CHILD_OUT" \
+    && pass "...and the refusal names the OPEN DOWNLOAD PATH specifically — the cache pinned and the proxy live is the one combination that writes into the developer's cache, and it is refused rather than run" \
+    || fail "a pinned cache with a live proxy was not refused: $(head -6 "$CHILD_OUT" | tr '\n' '|')"
+
+# ===========================================================================
+# 9. THE TRANSLATION — a module failure must not be reported as somebody else's.
+# ===========================================================================
+# The half of mg-a9d8 that is worth having even if the pin is someday removed.
+# The 2026-08-14 log really did contain the proxy line; what a person read at the
+# top of the report was "SETUP: the fixture-creating suite did not pass on the
+# third run", so the first place three agents looked was internal/agent and
+# $TMPDIR. Both directions, because a classifier that fires on everything is the
+# same defect with the arrow reversed — it would relabel a genuine assertion
+# failure as weather and send the next reader away from a real bug.
+MODLOG="$WORK/modfail.log"
+cat > "$MODLOG" <<'MODEOF'
+ok  	github.com/drellem2/pogo/internal/events	0.395s
+internal/agent/terminal.go:9:2: nhooyr.io/websocket@v1.8.17: Get "https://proxy.golang.org/nhooyr.io/websocket/@v/v1.8.17.zip": dial tcp: lookup proxy.golang.org: no such host
+FAIL	github.com/drellem2/pogo/internal/agent [setup failed]
+MODEOF
+MOD_OUT="$WORK/modfail.out"
+( source "$REPO_ROOT/scripts/pogo-sandbox"; pogo_sandbox_go_module_failure "$MODLOG" ) > "$MOD_OUT" 2>&1
+MOD_RC=$?
+if [ "$MOD_RC" -eq 0 ] && grep -q 'NOT A DEFECT IN THE PACKAGE NAMED ABOVE' "$MOD_OUT" && grep -qi 'NETWORK failure' "$MOD_OUT"; then
+    pass "the 2026-08-14 log verbatim is reported as a NETWORK failure fetching modules, not as a failure of internal/agent — which passed in 358s in the same gate run"
+else
+    fail "the 2026-08-14 log was not translated (rc=$MOD_RC): $(head -4 "$MOD_OUT" | tr '\n' '|')"
+fi
+
+CFGLOG="$WORK/cfgfail.log"
+cat > "$CFGLOG" <<'CFGEOF'
+go: downloading nhooyr.io/websocket v1.8.17
+internal/agent/terminal.go:9:2: module lookup disabled by GOPROXY=off
+FAIL	github.com/drellem2/pogo/internal/agent [setup failed]
+CFGEOF
+( source "$REPO_ROOT/scripts/pogo-sandbox"; pogo_sandbox_go_module_failure "$CFGLOG" ) > "$MOD_OUT" 2>&1
+MOD_RC=$?
+if [ "$MOD_RC" -eq 0 ] && grep -q 'MODULE CACHE MISS' "$MOD_OUT" && grep -q 'go mod download' "$MOD_OUT"; then
+    pass "the pin's OWN failure mode — a module the pinned cache does not hold — is reported as a cache miss with the one command that fixes it, and explicitly as something re-running will not change"
+else
+    fail "the GOPROXY=off cache-miss log was not translated (rc=$MOD_RC): $(head -4 "$MOD_OUT" | tr '\n' '|')"
+fi
+
+REALLOG="$WORK/realfail.log"
+cat > "$REALLOG" <<'REALEOF'
+--- FAIL: TestWitnessStoreRoot (0.01s)
+    witness_test.go:44: got "/tmp/x", want "/tmp/y"
+FAIL	github.com/drellem2/pogo/internal/agent	0.312s
+REALEOF
+( source "$REPO_ROOT/scripts/pogo-sandbox"; pogo_sandbox_go_module_failure "$REALLOG" ) > "$MOD_OUT" 2>&1
+MOD_RC=$?
+if [ "$MOD_RC" -ne 0 ] && [ ! -s "$MOD_OUT" ]; then
+    pass "PROVED THE OTHER WAY: a genuine assertion failure is NOT translated (rc=$MOD_RC, no output) — the caller falls through to printing the log, and a real bug is not relabelled as weather"
+else
+    fail "an ordinary assertion failure was reported as a module failure (rc=$MOD_RC): $(head -4 "$MOD_OUT" | tr '\n' '|')"
+fi
 
 echo ""
 [ -s "$RESULTS" ] || { echo "ledger unreadable/empty — verdict cannot be trusted"; exit 1; }

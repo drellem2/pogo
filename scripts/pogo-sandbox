@@ -63,6 +63,18 @@
 #      downstream of one setup failure; that single property would have
 #      prevented the misdiagnosis outright.
 #
+#   5. A PRIVATE HOME THAT DOES NOT COST THE NETWORK, and that is CHECKED for
+#      the same reason the rest is. Go resolves both of its caches off $HOME, so
+#      the move that makes the home private also empties them: the toolchain pin
+#      (mg-cdf1) stopped a ~70 MB toolchain fetch that cost three consecutive
+#      60-minute gate timeouts, and the module pin beside it (mg-a9d8) stops the
+#      module fetch that made the $TMPDIR guard reach the network on every run —
+#      and be reported, when the resolver blinked, as `[setup failed]` in a
+#      package that passed in the same gate run. Both read the real environment
+#      before the move and then PROVE the pin took under the private HOME, with
+#      the network refused so an unproven pin fails in milliseconds rather than
+#      reproducing the bug it exists to remove.
+#
 # WHAT IT DELIBERATELY DOES NOT DO
 # --------------------------------
 # It does not retry, and it must never learn to: a control that reruns itself on
@@ -102,6 +114,14 @@ POGO_SANDBOX_REAL_POGO_HOME="${POGO_HOME:-$POGO_SANDBOX_REAL_HOME/.pogo}"
 # only this, is the trade that keeps the sandbox private (mg-cdf1).
 POGO_SANDBOX_REAL_GOROOT=""
 POGO_SANDBOX_REAL_GOVERSION=""
+
+# The module cache the real environment resolves, read at the same instant and
+# from the same `go env` call as the toolchain above — one invocation, so the
+# three facts cannot disagree with each other. POGO_SANDBOX_MODCACHE_PINNED is
+# the answer to "did the pin take?", which a suite reporting a module failure
+# has to be able to state rather than guess (mg-a9d8).
+POGO_SANDBOX_REAL_GOMODCACHE=""
+POGO_SANDBOX_MODCACHE_PINNED=""
 
 # Set by the lifecycle functions. Globals rather than stdout for the same reason
 # sandbox-daemon.sh uses globals: these functions can END THE RUN, and
@@ -173,12 +193,17 @@ pogo_sandbox__reject_live_path() {
 
 # pogo_sandbox_create [LABEL] — make a private root and mint this run's name
 # token. Sets $POGO_SANDBOX_DIR and $POGO_SANDBOX_TOKEN. Changes NO environment
-# variable: callers that must build binaries under the real HOME (Go resolves
-# GOMODCACHE off $HOME, and building after the override re-downloads the whole
-# MODULE cache into the sandbox — minutes of network, and a cache that is
-# read-only by design and so defeats the teardown) do that between create and
-# isolate. The other half of that download, the TOOLCHAIN, no longer happens at
-# all: isolate pins it. See the toolchain-pin note in section 2 (mg-cdf1).
+# variable, so a caller that wants to build under the real HOME can still do it
+# between create and isolate.
+#
+# THAT WINDOW IS NO LONGER LOAD-BEARING FOR GO, which is worth saying because
+# this header used to prescribe it and one suite's download was the standing
+# proof that a prescription is not a mechanism: scripts/tmpdir-leak_test.sh calls
+# create and isolate back to back, and paid a module fetch on every run for it.
+# Both halves of that fetch are now closed by isolate itself — the
+# TOOLCHAIN by the pin in section 2 (mg-cdf1), the MODULE GRAPH by the pin beside
+# it (mg-a9d8). Neither is a reason to move a build out of the window if it is
+# there for its own reasons.
 pogo_sandbox_create() {
     local label="${1:-sbx}" root
 
@@ -259,18 +284,80 @@ pogo_sandbox_is_private() {
 # WHAT IT DOES NOT WEAKEN, which is the half that has to be stated: a fix that
 # bought speed with reach would be worse than the bug it cures. HOME,
 # XDG_CONFIG_HOME, POGO_HOME and MG_ROOT are untouched and still every one of the
-# resolve-checks below runs against them; the sandbox keeps its own empty
-# GOMODCACHE and writes nothing outside the root; and nothing here touches the
-# port, the daemon, or which base_url the driver resolves — the suite's "driver
-# resolves base_url to the sandbox daemon, not the live fleet" assertion is
-# unaffected because it is decided by POGO_HOME and $PORT, neither of which moves.
-# The ONLY thing shared with the real home is the resolved toolchain's own bin
-# directory, EXECUTED and never written. Pointing GOMODCACHE at the real one
-# would also cure the download and was rejected for exactly this reason: the
-# sandbox WRITES to its module cache, and that write would land in the
-# developer's.
+# resolve-checks below runs against them; and nothing here touches the port, the
+# daemon, or which base_url the driver resolves — the suite's "driver resolves
+# base_url to the sandbox daemon, not the live fleet" assertion is unaffected
+# because it is decided by POGO_HOME and $PORT, neither of which moves.
 
-# pogo_sandbox__capture_toolchain — read, while $HOME is still the developer's,
+# THE MODULE PIN (mg-a9d8), which is the OTHER half of the same download and was
+# left open when the toolchain half was closed. The paragraph above used to end
+# by rejecting it; that rejection is withdrawn here, and the measurement that
+# withdraws it is recorded because the rejection was reasonable.
+#
+# WHAT GOES WRONG WITHOUT IT. The same sentence as above — Go resolves GOMODCACHE
+# off $HOME, so the instant isolate moves HOME that cache is EMPTY — has a second
+# consequence the toolchain pin does not touch: the next build must fetch, from
+# proxy.golang.org, every module the packages under test import.
+#
+# HOW MUCH, MEASURED (2026-08-19, against a file:// proxy served from a clone of
+# the real cache, so the count is exact and nothing left the box). One run of
+# scripts/tmpdir-leak_test.sh: **2 module zips and 2 .mod files, 752 KB, fetched
+# ONCE.** Not six times — the file makes six `go test` invocations but they share
+# one sandbox HOME and therefore one cache, so only the second fetches and the
+# other five read what it left. This WITHDRAWS the "six times per run" figure the
+# ticket carried (mg-b463, never measured); the mechanism is real and the multiple
+# is not.
+#
+# WHICH PACKAGE, AND WHY IT IS ALWAYS THE SAME ONE. The five-package slice fetches
+# NOTHING — it imports no external module at all. Every byte is `./internal/agent`,
+# which is the only package in this suite with external imports. So the
+# misattribution below is not bad luck about which package happened to name the
+# unreachable module: this failure mode can only ever name internal/agent.
+#
+# When the resolver blinked, on 2026-08-14T03:46Z, the row failed as
+#
+#     internal/agent/terminal.go:9:2: nhooyr.io/websocket@v1.8.17: ...
+#       dial tcp: lookup proxy.golang.org: no such host
+#     FAIL  github.com/drellem2/pogo/internal/agent [setup failed]
+#
+# — a network outage wearing the name of a package that, in the same gate run,
+# passed. No assertion failed. It was classed DEFECT, which commits to
+# "re-running establishes the same fact", and for weather that is false.
+#
+# WHY THE ORIGINAL REJECTION DOES NOT APPLY TO THE PAIR. The objection was
+# specific and correct: the sandbox WRITES to its module cache, and pointed at the
+# real one that write lands in the developer's. GOPROXY=off removes the write
+# PATH — there is no download, so there is nothing to write. Measured 2026-08-19
+# rather than reasoned: an APFS clone of this box's 1.2 GB / 48,124-entry module
+# cache, pinned into a sandbox with GOPROXY=off, then a cold-GOCACHE compile and
+# run of the tmpdir-leak slice plus ./internal/agent. Every entry's mode, size,
+# mtime and ctime was stat'd before and after: ZERO changed, ZERO added.
+#
+# THE ONE WRITE THAT SURVIVES GOPROXY=off, measured in the same session and named
+# here rather than left for the next reader to discover: a module whose ZIP is in
+# cache/download but whose tree is NOT extracted is extracted on demand, offline,
+# writing that module's own go.sum-verified contents (76 entries for
+# nhooyr.io/websocket in the probe). It cannot fetch and it cannot write anything
+# the developer's next build would not write itself, but it is a write outside the
+# sandbox root, so it is stated. It does not arise in the steady state the gate
+# runs in: test.sh's whole-tree `go test ./...` (real HOME) runs at step 2, before
+# any sandboxed suite, and leaves every module this build needs extracted.
+#
+# THE COST THE PIN ADDS, also stated: a module that is in NEITHER the extracted
+# tree nor cache/download now fails INSIDE the sandbox with `module lookup
+# disabled by GOPROXY=off` instead of being downloaded. That is deterministic and
+# offline rather than weather, but it still lands as `[setup failed]` in whichever
+# package imports it — so pogo_sandbox_go_module_failure below exists to let a
+# suite say what it actually is. The cure is one `go mod download` under the real
+# HOME, and on the gate path the step-2 whole-tree run already is one.
+#
+# WHAT IS SHARED WITH THE REAL HOME, in full, after both pins: the resolved
+# toolchain's bin directory, EXECUTED and never written; and the module cache,
+# READ and — with the download path off — not written. GOCACHE is deliberately
+# NOT pinned: it is written by every compile, and it costs CPU rather than
+# network, which is not what this is about.
+
+# pogo_sandbox__capture_go_env — read, while $HOME is still the developer's,
 # which toolchain the real environment resolves. After the move there is nothing
 # left to ask: the answer is derived from a cache that is now empty.
 #
@@ -281,7 +368,7 @@ pogo_sandbox_is_private() {
 # runs children under decoy HOMEs on purpose. Refused-network is the honest
 # question here: "which toolchain does this environment ALREADY have?" A cold
 # ambient HOME answers "none", the pin is skipped, and behaviour is what it was.
-pogo_sandbox__capture_toolchain() {
+pogo_sandbox__capture_go_env() {
     local out
 
     POGO_SANDBOX_REAL_GOROOT=""
@@ -291,10 +378,11 @@ pogo_sandbox__capture_toolchain() {
     # and a sandbox with no toolchain cannot download one either.
     command -v go >/dev/null 2>&1 || return 0
 
-    # One invocation, so the pair cannot disagree with itself.
-    out="$(GOPROXY=off go env GOROOT GOVERSION 2>/dev/null)" || return 0
+    # One invocation, so the three cannot disagree with each other.
+    out="$(GOPROXY=off go env GOROOT GOVERSION GOMODCACHE 2>/dev/null)" || return 0
     POGO_SANDBOX_REAL_GOROOT="$(printf '%s\n' "$out" | sed -n 1p)"
     POGO_SANDBOX_REAL_GOVERSION="$(printf '%s\n' "$out" | sed -n 2p)"
+    POGO_SANDBOX_REAL_GOMODCACHE="$(printf '%s\n' "$out" | sed -n 3p)"
 }
 
 # pogo_sandbox__pin_toolchain — apply the pin under the now-private HOME and
@@ -322,6 +410,124 @@ pogo_sandbox__pin_toolchain() {
     fi
 }
 
+# pogo_sandbox__pin_modcache — point GOMODCACHE at the cache the real
+# environment already holds and CLOSE the download path, then prove both took.
+# Runs after the toolchain pin, because the proof shells out to `go` and an
+# unpinned toolchain would answer that question by downloading one.
+#
+# Separate from the toolchain pin rather than folded into it, because they fail
+# separately: a box can resolve a toolchain and hold no module cache, and the
+# right answer in that case is the behaviour we already had, not a refusal.
+#
+# Failing OPEN on an absent cache is deliberate and is the one place this
+# function is quieter than pogo_sandbox__pin_toolchain. An unpinned toolchain is
+# a 36-minute stall; an unpinned module cache is the download this exists to
+# remove, which is exactly what happens today and on every box with no cache to
+# share there is nothing better available. POGO_SANDBOX_MODCACHE_PINNED records
+# which of the two happened so a suite can say so instead of inferring it.
+pogo_sandbox__pin_modcache() {
+    local out pinned proxy
+
+    POGO_SANDBOX_MODCACHE_PINNED=""
+
+    # No `go`, or a capture that declined (a cold ambient HOME answers "none"),
+    # leaves the sandbox exactly as it was before this pin existed.
+    [ -n "${POGO_SANDBOX_REAL_GOMODCACHE:-}" ] || return 0
+    [ -d "$POGO_SANDBOX_REAL_GOMODCACHE" ] || return 0
+
+    # A cache INSIDE the sandbox root is not the developer's — it is this run's
+    # own, teardown removes it, and pinning to it would be the empty cache with
+    # extra steps. It cannot happen through the capture (that reads the real
+    # environment before the move) but it can through a caller's own GOMODCACHE.
+    if pogo_sandbox__under "$(pogo_sandbox__realpath "$POGO_SANDBOX_REAL_GOMODCACHE")" \
+            "$(pogo_sandbox__realpath "$POGO_SANDBOX_DIR")"; then
+        return 0
+    fi
+
+    export GOMODCACHE="$POGO_SANDBOX_REAL_GOMODCACHE"
+    # The half that makes the pin safe rather than merely fast: no download path,
+    # therefore no write into the developer's cache. See the module-pin note in
+    # section 2 for the measurement, and for the one write that survives it.
+    export GOPROXY=off
+
+    # PROVEN, for the same reason the toolchain pin is proven: an unproven pin
+    # fails as a network dependency an hour downstream, wearing the branch's name.
+    # Both halves are read back, because either alone is the bug: the cache
+    # without the proxy off writes to the developer's, and the proxy off without
+    # the cache turns every sandboxed build into an immediate hard failure.
+    # One invocation for both, so the pair cannot disagree with itself — the same
+    # rule the capture above follows.
+    out="$(go env GOMODCACHE GOPROXY 2>&1)"
+    pinned="$(printf '%s\n' "$out" | sed -n 1p)"
+    proxy="$(printf '%s\n' "$out" | sed -n 2p)"
+
+    if [ "$pinned" != "$POGO_SANDBOX_REAL_GOMODCACHE" ]; then
+        pogo_sandbox_fail "the sandbox module-cache pin did not take: under the private HOME \`go env GOMODCACHE\` said '$pinned', the real environment says '$POGO_SANDBOX_REAL_GOMODCACHE'. Unpinned, every build in this sandbox must fetch what it imports from proxy.golang.org — 752 KB on every run of the \$TMPDIR guard, measured — and a resolver that blinks mid-fetch is reported as \`[setup failed]\` in whichever package imports the module it could not reach (mg-a9d8)"
+    fi
+    if [ "$proxy" != "off" ]; then
+        pogo_sandbox_fail "the sandbox pinned GOMODCACHE to the developer's cache ($POGO_SANDBOX_REAL_GOMODCACHE) but \`go env GOPROXY\` says '$proxy', not 'off' — with a download path open a fetch inside this run would WRITE into that cache, which is the hazard the pin was refused over until GOPROXY=off removed it (mg-a9d8)"
+    fi
+
+    POGO_SANDBOX_MODCACHE_PINNED=1
+    return 0
+}
+
+# pogo_sandbox_go_module_failure LOGFILE — if LOGFILE holds a Go MODULE
+# RESOLUTION failure, print what it actually was and return 0. Otherwise print
+# nothing and return 1.
+#
+# This exists because of what the failure looks like when it is NOT translated.
+# The 2026-08-14 instance surfaced as
+#
+#   Test 5: repeated runs do not grow the testtmp root
+#     FAIL: SETUP: the fixture-creating suite did not pass on the third run
+#
+# over a log whose real content was `lookup proxy.golang.org: no such host` and
+# `FAIL github.com/drellem2/pogo/internal/agent [setup failed]`. Read at the top,
+# that is a $TMPDIR or concurrency problem in internal/agent — a package that in
+# the same gate run passed in 358s. It cost the mayor a held worker slot
+# (2026-08-14 03:57Z), pm-pogo a withdrawn hypothesis, and p82a6 an initial
+# mis-scoping. The refinery learned to classify the network case for itself
+# (mg-67c9); this is the same repair one layer down, where the suite's own words
+# are what a person reads first.
+#
+# It reports the CONFIGURATION case too, which mg-67c9 deliberately does not
+# treat as network: with the module pin above, `module lookup disabled by
+# GOPROXY=off` means the pinned cache does not hold something this tree imports,
+# and the fix is a `go mod download` under the real HOME — not a re-run, and
+# nothing to do with the package the compiler named.
+pogo_sandbox_go_module_failure() {
+    local log="$1" cache="${POGO_SANDBOX_REAL_GOMODCACHE:-<unpinned>}"
+
+    [ -n "$log" ] && [ -r "$log" ] || return 1
+
+    if grep -qE 'module lookup disabled by GOPROXY=off' "$log" 2>/dev/null; then
+        printf 'NOT A DEFECT IN THE PACKAGE NAMED ABOVE: this is a MODULE CACHE MISS.\n'
+        printf '  The sandbox pins GOMODCACHE at %s and sets GOPROXY=off, so a module\n' "$cache"
+        printf '  that cache does not hold cannot be fetched and the compiler reports it as\n'
+        printf '  [setup failed] in whichever package imports it. Re-running changes nothing.\n'
+        printf '  Fix: run `go mod download` (or any build) under your REAL HOME, then re-run.\n'
+        grep -E 'module lookup disabled|^go: downloading|\[setup failed\]' "$log" 2>/dev/null \
+            | head -8 | sed 's/^/    /'
+        return 0
+    fi
+
+    if grep -qiE 'proxy\.golang\.org|sum\.golang\.org|^go: downloading' "$log" 2>/dev/null &&
+        grep -qiE 'no such host|dial tcp|i/o timeout|tls handshake timeout|connection reset|connection refused|server misbehaving' "$log" 2>/dev/null; then
+        printf 'NOT A DEFECT IN THE PACKAGE NAMED ABOVE: this is a NETWORK failure fetching modules.\n'
+        printf '  The Go toolchain could not reach the module proxy. The package the compiler\n'
+        printf '  named is the one that imports the unreachable module, not the one at fault —\n'
+        printf '  re-running is a coin flip against the weather, not a repeated measurement.\n'
+        printf '  This sandbox pins GOMODCACHE (%s) precisely so this cannot\n' "$cache"
+        printf '  happen; seeing it means the pin did not take or the cache is missing a module.\n'
+        grep -iE 'proxy\.golang\.org|no such host|dial tcp|i/o timeout|\[setup failed\]' "$log" 2>/dev/null \
+            | head -8 | sed 's/^/    /'
+        return 0
+    fi
+
+    return 1
+}
+
 # pogo_sandbox_isolate — pin HOME / XDG_CONFIG_HOME / POGO_HOME under the root,
 # then PROVE none of them can reach the developer's state. Ends the run if any
 # check fails.
@@ -341,7 +547,7 @@ pogo_sandbox_isolate() {
     root="$(pogo_sandbox__realpath "$POGO_SANDBOX_DIR")"
 
     # Before the move, for the same reason real_home is read before the move.
-    pogo_sandbox__capture_toolchain
+    pogo_sandbox__capture_go_env
 
     export HOME="$POGO_SANDBOX_DIR/home"
     export XDG_CONFIG_HOME="$POGO_SANDBOX_DIR/xdg"
@@ -383,9 +589,12 @@ pogo_sandbox_isolate() {
     fi
 
     # Last, and deliberately after the checks above rather than among them: the
-    # pin is about what the sandbox COSTS, not about what it can reach, and it
-    # must not be able to satisfy or mask a privacy check.
+    # pins are about what the sandbox COSTS, not about what it can reach, and
+    # they must not be able to satisfy or mask a privacy check. In this order
+    # because the module pin's proof shells out to `go`, and an unpinned
+    # toolchain answers a `go env` by downloading one.
     pogo_sandbox__pin_toolchain
+    pogo_sandbox__pin_modcache
 
     POGO_SANDBOX_ISOLATED=1
     return 0
@@ -598,7 +807,8 @@ pogo-sandbox — packaged test isolation for pogo (mg-78a5)
 
   source scripts/pogo-sandbox
       The shell API: pogo_sandbox_create / _isolate / _daemon / _name / _curl /
-      _down. See the header of this file.
+      _down, plus pogo_sandbox_go_module_failure for translating a Go module
+      fetch failure into what it actually is. See the header of this file.
 USAGE
 }
 

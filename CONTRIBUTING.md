@@ -94,7 +94,7 @@ So do not hand-roll the overrides. Source the packaged harness:
 source "$REPO_ROOT/scripts/pogo-sandbox"
 pogo_sandbox_create mytest        # a private root; no env change yet
 trap pogo_sandbox_down EXIT
-# ...build anything that needs the real HOME (Go resolves GOMODCACHE off it)...
+# ...build anything that needs the real HOME for its own reasons...
 pogo_sandbox_isolate              # HOME/XDG_CONFIG_HOME/POGO_HOME/MG_ROOT pinned AND checked
 pogo_sandbox_daemon "$POGO_SANDBOX_DIR/pogod" /scheduler/schedules
 pogo_sandbox_curl "register the mail-check" -- \
@@ -125,6 +125,15 @@ What it guarantees, and *checks* rather than assumes:
 - **A setup failure that cannot be read as a regression.** Any of the above ends
   the run with a `SETUP FAILURE` banner and **exit 99**, distinct from the
   assertion tally's 1, before a single assertion runs.
+- **A private home that does not cost the network.** Go resolves both of its
+  caches off `$HOME`, so the move that makes the home private also empties them.
+  `isolate` pins the toolchain (`mg-cdf1`) and the module cache (`mg-a9d8`) at
+  the ones the real environment already resolves, sets `GOPROXY=off` with the
+  latter so there is no write path back into the developer's cache, and PROVES
+  both took under the private `HOME` before returning. Unpinned, this cost three
+  consecutive 60-minute gate timeouts on one merge, and — five days later, on the
+  module half — a DNS blip reported as `[setup failed]` in a package that passed
+  in the same gate run.
 
 Never weaken an assertion to make it fit the harness. If conversion appears to
 need that, the assertion is telling you something — stop and ask.
@@ -133,11 +142,15 @@ Three things that only show up when a suite is converted (`mg-b4a5`):
 
 - **"Build before `isolate`" does not cover a build in a CHILD.** The rule exists
   because Go resolves `GOMODCACHE`/`GOCACHE`/`GOPATH` off `$HOME`, so a build
-  after the override re-downloads the whole module cache into the sandbox. A
-  control that *spawns* something which builds cannot obey it by ordering. Read
+  after the override used to re-download the whole module cache into the sandbox.
+  A control that *spawns* something which builds cannot obey it by ordering. Read
   the three paths under the real `HOME` and export them before `pogo_sandbox_isolate`
   instead. They are build caches, not pogo state: none of the four pinned
-  variables is reachable through them.
+  variables is reachable through them. `GOMODCACHE` is now pinned by `isolate`
+  itself (`mg-a9d8`), so this reduces to `GOCACHE`/`GOPATH` — and pinning
+  `GOMODCACHE` by hand is still correct, since `isolate` sets it to the same
+  value. `GOCACHE` is deliberately NOT pinned by the harness: it is written by
+  every compile, and it costs CPU rather than network.
 - **Do not let `POGO_SANDBOX_ROOT` reach a child that makes its own sandbox.**
   `pogo_sandbox_create` honours it, so an exported one puts parent and child in
   one directory — where the child's `isolate` finds a non-empty `POGO_HOME` and
