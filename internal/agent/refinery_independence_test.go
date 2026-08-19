@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -57,16 +58,23 @@ func TestWorkitemPackageDoesNotImportRefinery(t *testing.T) {
 // making on their behalf: that they answer a STRUCTURAL question and therefore
 // cannot be turned red by the network.
 //
-// They can reach the network, and on this fleet they do. TestMain pins HOME
+// They COULD reach the network, and until mg-117e they did. TestMain pins HOME
 // under a throwaway root (internal/testsandbox), Go resolves GOMODCACHE off
-// $HOME, so the `go list` above runs against an EMPTY module cache and tries to
+// $HOME, so the `go list` above ran against an EMPTY module cache and tried to
 // download every external module in the graph. Measured on the gate's own
 // package-test chain (test.sh:64, `tmpdir-leak-guard.sh` -> `go-test-budget.sh
 // ./...`) against a local counting proxy: 37 module requests per gate run, ALL
-// of them from this package, at the ambient GOPROXY — which on that path is
+// of them from this package, at the ambient GOPROXY — which on that path was
 // still the default `proxy.golang.org,direct`. mg-a9d8's pin closes the
 // download path inside `scripts/pogo-sandbox`, which this path does not go
-// through.
+// through; mg-117e closes it in internal/testsandbox, which this path DOES go
+// through, and TestTheImportQueryDoesNotReachTheDownloadPath below is that
+// closure's assertion.
+//
+// This test survives the fix and is not made redundant by it, because the two
+// answer different questions: that one says the path is closed, this one says
+// the ANSWER does not depend on whether it is — which is what keeps the two
+// structural assertions above from being decided by a resolver.
 //
 // What saves it is narrower than "the cache is warm", and it is the thing worth
 // pinning: `.Imports` is read from the main module's own source files, so the
@@ -103,11 +111,16 @@ func TestTheImportQueryDoesNotDependOnTheDownloadPath(t *testing.T) {
 		t.Fatalf("go list with the ambient download path: %v", err)
 	}
 
-	// A HOME of this test's own, not TestMain's: the two tests above have
-	// already run `go list` under the package sandbox with the download path
-	// OPEN, which downloads for real and leaves the sandbox cache warm. Reusing
-	// it would make this control pass by never reaching the path it claims to
-	// close, and it would pass in whichever order the file is read.
+	// A HOME *and an empty GOMODCACHE* of this test's own, not TestMain's.
+	//
+	// The HOME half is original: reusing the package sandbox's would make this
+	// control pass by never reaching the path it claims to close. The GOMODCACHE
+	// half is mg-117e's, and without it this test QUIETLY STOPPED CONTROLLING
+	// ANYTHING the moment the pin landed — the sandbox now exports GOMODCACHE
+	// explicitly, so it survives a HOME override and the "closed" run would read
+	// the same warm real cache as the ambient one. The cold cache is the
+	// condition this test's whole claim is about, and it has to be stated now
+	// that it is no longer a side effect of moving HOME.
 	//
 	// testtmp.Dir + testtmp.RemoveAll rather than t.TempDir(), and this test is
 	// exactly the case that rule was written for (mg-60eb): a fake $HOME that a
@@ -122,7 +135,12 @@ func TestTheImportQueryDoesNotDependOnTheDownloadPath(t *testing.T) {
 	}
 	t.Cleanup(func() { testtmp.RemoveAll(home) })
 
-	closed, closedErr, err := list("HOME="+home, "GOPROXY=off")
+	cold := filepath.Join(home, "cold-modcache")
+	if err := os.MkdirAll(cold, 0o755); err != nil {
+		t.Fatalf("staging an empty module cache for the closed-path run: %v", err)
+	}
+
+	closed, closedErr, err := list("HOME="+home, "GOMODCACHE="+cold, "GOPROXY=off")
 	if err != nil {
 		t.Fatalf("go list with the download path CLOSED failed: %v\n"+
 			"That is the regression this test exists for: these structural import "+
@@ -140,12 +158,59 @@ func TestTheImportQueryDoesNotDependOnTheDownloadPath(t *testing.T) {
 			"assertions above would pass without asserting anything")
 	}
 
-	// Not an assertion: whether a fetch is even attempted is a property of the
-	// sandbox HOME, and removing that exposure would be an improvement this
-	// control must not report as a failure. Logged so the state is visible to
-	// whoever reads a run of this file.
-	if strings.Contains(closedErr, "go: downloading") {
-		t.Logf("this package's `go list` reaches the module download path under the "+
-			"sandbox HOME — the answer is unaffected, but the traffic is real:\n%s", closedErr)
+	// The closed run must actually have WANTED a module, or "the answer does not
+	// depend on the download path" is a claim about a run that never consulted
+	// it. `go: downloading` is logged even under GOPROXY=off — Go decides it
+	// needs the module before it discovers it cannot have it — so this is an
+	// assertion about the control's own validity and it costs no network.
+	if !strings.Contains(closedErr, "go: downloading") {
+		t.Errorf("the closed-path run reached no module at all, so the comparison above "+
+			"proves nothing about the download path.\nIt is probably reading a warm "+
+			"cache: $GOMODCACHE was set to %s for that run.\nstderr:\n%s", cold, closedErr)
+	}
+}
+
+// TestTheImportQueryDoesNotReachTheDownloadPath is mg-117e's assertion, in the
+// package where the exposure was measured.
+//
+// The two structural tests above shell out to `go list`. Under TestMain's
+// throwaway HOME that used to mean an empty GOMODCACHE and a real fetch from
+// proxy.golang.org on every gate run — 37 module requests, all from here
+// (mg-48d4). internal/testsandbox now pins GOMODCACHE at the developer's real
+// cache with GOPROXY=off, and this is where that stops being a property of
+// another package's implementation and becomes something this package checks.
+//
+// It asserts the pin at the PACKAGE level rather than deferring to
+// testsandbox.Verify, because the pin FAILS OPEN by design: a box with no cache
+// to share gets the old behaviour, and Verify passes vacuously there. This
+// package is the one that measurably downloads, so it is the one that should
+// say so out loud rather than inherit a silence.
+func TestTheImportQueryDoesNotReachTheDownloadPath(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go binary not available")
+	}
+	if !sandbox.ModulePinned() {
+		t.Skipf("the package sandbox pinned no module cache — the pin fails open by "+
+			"design and there is no cache on this box to share (sandbox root %s)",
+			sandbox.Root)
+	}
+
+	cmd := exec.Command("go", "list", "-f", "{{ join .Imports \"\\n\" }}",
+		"github.com/drellem2/pogo/internal/agent")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("go list under the package sandbox: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "go: downloading") {
+		t.Errorf("this package's `go list` reached the module download path.\n"+
+			"That is mg-117e verbatim: TestMain moves $HOME, Go resolves GOMODCACHE off "+
+			"$HOME, and the cache is empty — 37 real requests to proxy.golang.org per "+
+			"gate run, every one of them from this package.\n"+
+			"$GOMODCACHE=%s $GOPROXY=%s\nstderr:\n%s",
+			os.Getenv("GOMODCACHE"), os.Getenv("GOPROXY"), stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) == "" {
+		t.Error("go list returned no imports, so the check above observed nothing")
 	}
 }

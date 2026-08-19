@@ -299,7 +299,7 @@ func TestUnpinnedPogoHomeStillGuardsTheFallbackRoute(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // the wiring. The checks above prove the rules; these two prove that failing a
-// rule ends the run the way guarantee 4 says it does, in the real harness.
+// rule ends the run the way guarantee 5 says it does, in the real harness.
 // ---------------------------------------------------------------------------
 
 const helperEnv = "POGO_TESTSANDBOX_HELPER"
