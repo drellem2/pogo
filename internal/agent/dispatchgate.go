@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/workitem"
@@ -72,6 +73,29 @@ type Gating struct {
 	// out of the middle of a body is the body-wide search workitem's parser
 	// deliberately refuses — a body that DISCUSSES a stage would gate on it.
 	CarrierUnreadable bool
+
+	// Depends are the item's `depends:` parents that are still OUTSTANDING,
+	// each rendered as "<id> (<status>)" so the refusal names what to chase
+	// rather than merely that something is in the way (mg-e7ff).
+	//
+	// This was the only one of the three "deliberately not ready" conditions
+	// with no check at the spawn point. The other two are properties the item
+	// asserts about itself; this one is a property of OTHER items, which is why
+	// it was the one that got left out — and it is also why it can go wrong in
+	// a way the others cannot. mg keeps a gated dependent in pending/ so it is
+	// never dispatchable, but status is a placement, and a placement can be
+	// wrong: releasing a claim returned an item to available/ without reading
+	// its depends, and status `available` is precisely what this gate's callers
+	// key on.
+	Depends []string
+
+	// Status is the lifecycle directory the gated item was read from. It is set
+	// only alongside Depends, and only because the depends refusal makes a claim
+	// about it: "it declares an unmet dependency AND it is in available/" is a
+	// store inconsistency worth naming, while the same item in claimed/ is
+	// merely an item somebody is working. Reading the directory rather than
+	// asserting it keeps the refusal from stating something it did not check.
+	Status string
 }
 
 // MGDispatchGate is the production DispatchGate: it reads the work item out of
@@ -164,6 +188,30 @@ func (m MGDispatchGate) DispatchGated(workItemID string) (Gating, bool) {
 			"gate cannot be read may be at `stage: gated`", workItemID)
 		return Gating{CarrierUnreadable: true}, true
 	}
+	// The dependency gate (mg-e7ff). Checked LAST of the four, because the three
+	// above are things the item says about ITSELF and this one is a fact about
+	// other items: when both apply, the message that names the item's own field
+	// is the one whose remedy is in the reader's hands.
+	//
+	// This is DEFENCE IN DEPTH and is deliberately redundant with mg. mg's own
+	// placement rule keeps a dependent with an unmet parent in pending/, where
+	// nothing dispatches from — but that rule is expressed as a DIRECTORY, and a
+	// directory is a placement that some path can get wrong. One did: releasing
+	// a claim moved the item to available/ without consulting its depends, so an
+	// item with a deliberately unmet dependency became dispatchable, was
+	// advertised by stall-watch and priority-wake as "high-priority, unclaimed",
+	// and nothing refused it. The `depends:` field was truthful the whole time.
+	// This gate reads the field, so a wrong placement no longer decides the
+	// question on its own.
+	//
+	// It fails OPEN in the two directions that matter, both by construction
+	// rather than by a check: a parent that resolves nowhere is treated as
+	// satisfied, because pogo's store reader cannot see the archive and
+	// completed work is archived within minutes; and an unreadable store answers
+	// "not gated" like every branch above it.
+	if unmet := m.unmetDepends(root, item); len(unmet) > 0 {
+		return Gating{Depends: unmet, Status: item.Status}, true
+	}
 	// Not gated — the spawn proceeds. But if the item DECLARES a block in the
 	// only channel that existed before the `blocked:<agent>` shape (mg-6fb0), say
 	// so on the way past. This is the harm moment: a polecat is about to be put
@@ -182,6 +230,56 @@ func (m MGDispatchGate) DispatchGated(workItemID string) (Gating, bool) {
 			workItemID, tag, item.Assignee, suggest)
 	}
 	return Gating{}, false
+}
+
+// unmetDepends returns the item's dependencies that are still outstanding, each
+// as "<id> (<status>)".
+//
+// "Outstanding" is resolved POSITIVELY: a parent is unmet only when it is found
+// sitting in available/, claimed/ or pending/. Every other answer — done/, the
+// archive, a typo, a store that cannot be read — yields nothing, and the spawn
+// proceeds.
+//
+// That asymmetry is not laziness, it is the only correct reading of what this
+// process can see. `internal/workitem` does not scan the archive, and mg
+// archives completed work within minutes of `mg done`; a gate that treated
+// "absent" as "unfinished" would refuse nearly every dispatch whose item has any
+// dependency at all, which is how a gate gets disarmed rather than fixed. mg is
+// the authority on satisfaction (done/ AND archive both count); this is the
+// subset of that authority pogo can verify without one.
+//
+// A parse error on ONE parent is skipped rather than failing the whole gate, for
+// the same reason: one unreadable file must not refuse a dispatch whose other
+// dependencies are fine.
+func (m MGDispatchGate) unmetDepends(root string, item workitem.WorkItem) []string {
+	deps := item.DependsList()
+	if len(deps) == 0 {
+		return nil
+	}
+	var unmet []string
+	for _, dep := range deps {
+		parent, found, err := workitem.FindLiveFrom(filepath.Join(root, "work"), dep)
+		if err != nil {
+			log.Printf("dispatch gate: could not resolve dependency %s of work item %s: %v — "+
+				"treating it as satisfied and NOT refusing the dispatch", dep, item.ID, err)
+			continue
+		}
+		if !found {
+			continue // done, archived, or nonexistent — see the doc above
+		}
+		unmet = append(unmet, fmt.Sprintf("%s (%s)", dep, parent.Status))
+	}
+	return unmet
+}
+
+// haveOrHas agrees the refusal's verb with the number of outstanding parents.
+// A refusal that reads "mg-12aa (claimed) have not finished" is the kind of
+// sentence a reader stops trusting the rest of.
+func haveOrHas(n int) string {
+	if n == 1 {
+		return "it has"
+	}
+	return "they have"
 }
 
 // gates returns the effective gate vocabulary, for messages.
@@ -251,6 +349,34 @@ func (r *Registry) dispatchGateRefusal(workItemID string) string {
 			"--body=...`, preserving the rest of the body); the refusal clears as soon as the block "+
 			"leads the body",
 			workItemID, workItemID)
+	}
+	// The dependency gate (mg-e7ff). Its way out is neither a reassignment nor a
+	// decision: the item is waiting on OTHER WORK, and the remedy is to finish
+	// that work or to drop the edge. So the message names each outstanding
+	// parent and what it is doing — "chase mg-12aa, it is claimed" and "mg-12aa
+	// is sitting in available/ unstarted" call for different next moves, and the
+	// bare id cannot tell them apart.
+	//
+	// It also says out loud that the item's DIRECTORY disagrees with its field,
+	// because that is the actionable half: an item reachable by this gate is in
+	// available/ (nothing dispatches from pending/), and mg's own rule says it
+	// should not be. Whoever reads this refusal is the first person in a
+	// position to notice the store is inconsistent.
+	if len(g.Depends) > 0 {
+		msg := fmt.Sprintf("work item %s declares `depends: %s` and %s not finished, so it is "+
+			"deliberately not ready. Finish or drop the dependency (`mg edit %s --rm-depends=...`); "+
+			"`mg schedule` releases the item by itself once every parent is done",
+			workItemID, strings.Join(g.Depends, ", "), haveOrHas(len(g.Depends)), workItemID)
+		if g.Status == "available" {
+			// The half a reader can act on beyond this one dispatch. mg parks a
+			// gated dependent in pending/, so an item that is BOTH gated and in
+			// available/ means some path placed it wrongly — and whoever is
+			// reading this refusal is the first person in a position to notice.
+			msg += ". It is also sitting in available/, which mg's own placement rule says it " +
+				"should not be while a parent is outstanding: the store is inconsistent, and " +
+				"`mg schedule` reports every item in that state"
+		}
+		return msg
 	}
 	assignee := g.Assignee
 	// The `blocked:<agent>` shape gets its own sentence (mg-6fb0). It gates for a
