@@ -316,6 +316,9 @@ func emitMergeFailed(mr *MergeRequest, attempt int, stage string, err error, ter
 	if fail.NotRetriedReason != "" {
 		details["not_retried_reason"] = fail.NotRetriedReason
 	}
+	if fail.RetriedReason != "" {
+		details["retried_reason"] = fail.RetriedReason
+	}
 	if fail.BackoffSeconds > 0 {
 		details["backoff_seconds"] = fail.BackoffSeconds
 	}

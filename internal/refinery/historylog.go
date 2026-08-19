@@ -191,6 +191,7 @@ func HistoryFromLog(livePath string, since time.Time) (*HistoryWindow, error) {
 					Class:            FailureClass(stringDetail(ev.Details, "class")),
 					Signal:           stringDetail(ev.Details, "signal"),
 					NotRetriedReason: stringDetail(ev.Details, "not_retried_reason"),
+					RetriedReason:    stringDetail(ev.Details, "retried_reason"),
 				}
 				if n, ok := ev.Details["attempt"].(float64); ok {
 					af.Attempt = int(n)

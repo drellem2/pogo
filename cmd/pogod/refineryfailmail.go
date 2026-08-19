@@ -101,9 +101,9 @@ func refineryAttemptDetail(mr *refinery.MergeRequest) string {
 		}
 		switch {
 		case a.Retried && a.BackoffSeconds > 0:
-			fmt.Fprintf(&b, "    retried: yes, after %.0fs of backoff\n", a.BackoffSeconds)
+			fmt.Fprintf(&b, "    retried: yes, after %.0fs of backoff%s\n", a.BackoffSeconds, retriedWhy(a))
 		case a.Retried:
-			b.WriteString("    retried: yes, immediately\n")
+			fmt.Fprintf(&b, "    retried: yes, immediately%s\n", retriedWhy(a))
 		default:
 			fmt.Fprintf(&b, "    retried: NO — %s\n", blankAs(a.NotRetriedReason, "no reason recorded"))
 		}
@@ -115,6 +115,18 @@ func refineryAttemptDetail(mr *refinery.MergeRequest) string {
 		}
 	}
 	return b.String()
+}
+
+// retriedWhy renders the reason a retry FOLLOWED, when one was recorded
+// (mg-15bb). The mail already carried a full sentence for every retry that did
+// NOT happen and a bare backoff figure for every one that did, so a reader could
+// see that the refinery gave up and why, but not what it had been trying to
+// establish while it did not.
+func retriedWhy(a refinery.AttemptFailure) string {
+	if strings.TrimSpace(a.RetriedReason) == "" {
+		return ""
+	}
+	return " — " + a.RetriedReason
 }
 
 func blankAs(s, fallback string) string {

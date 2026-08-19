@@ -3,6 +3,7 @@ package refinery
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -101,6 +102,33 @@ const (
 	// See gatehostresource.go for the incident, the signal table and the
 	// measured reasons the neighbouring conditions are not in it.
 	ClassHost FailureClass = "host"
+	// ClassSetup marks a gate whose OWN SETUP did not stand up: the gate
+	// printed a setup-failure banner, so the environment its checks needed was
+	// never established and the gate never returned a verdict on the tree
+	// (mg-15bb).
+	//
+	// It is not ClassDefect, and that is the whole ticket. On 2026-08-19 a
+	// merge was recorded `class=defect` with the caption "establishes a fact
+	// about the branch" and the error text "test setup failed, NOT THE BRANCH"
+	// in the adjacent field. The author agent is told a fix to its branch is
+	// warranted; the correct action is the opposite, and the label is the most
+	// authoritative-looking field in the record.
+	//
+	// It is not ClassHost either. Host says "free the resource FIRST, then
+	// resubmit unchanged" and does not retry, because a full disk is not
+	// restored by waiting. A broken test envelope may be a leftover directory
+	// or a stale lock that the next run does not meet — so this one IS retried,
+	// on a small budget, precisely to establish which it was.
+	//
+	// It is not ClassIndeterminate. A gate killed mid-run leaves the question
+	// open in BOTH directions; a bannered setup failure answers half of it
+	// outright — the gate says, in its own words, that what failed was its
+	// setup. Folding it into indeterminate would discard a statement the
+	// producing side went to the trouble of emitting.
+	//
+	// See gatesetup.go for the incident, the deployment gap it turned out to
+	// sit behind, and what the retry budget is and is not sized against.
+	ClassSetup FailureClass = "setup"
 	// ClassIndeterminate marks a gate that was KILLED before it returned a
 	// verdict — it timed out (mg-e565), or a signal from outside the refinery
 	// stopped it (mg-0502). It sits deliberately between the two classes above
@@ -142,7 +170,7 @@ const (
 // It lives beside the constants so a class added without a triage note fails a
 // test rather than reaching a coordinator as a bare status.
 var allFailureClasses = []FailureClass{
-	ClassInfrastructure, ClassContention, ClassDefect, ClassHost, ClassIndeterminate, ClassUnclassified,
+	ClassInfrastructure, ClassContention, ClassDefect, ClassHost, ClassSetup, ClassIndeterminate, ClassUnclassified,
 }
 
 // TriageNote returns the one-line instruction a coordinator needs on seeing
@@ -171,6 +199,21 @@ func (c FailureClass) TriageNote() string {
 			"The package and test names in the error are NOT findings. Free the resource, then resubmit UNCHANGED. " +
 			"Do NOT dispatch a fix, and do NOT resubmit before the resource is freed — every gate on this host fails " +
 			"the same way until it is."
+	case ClassSetup:
+		// This note must not borrow DEFECT's commitment, and it must not borrow
+		// INFRASTRUCTURE's either: "establishes nothing about the branch,
+		// resubmit" invites a straight resubmit, and the refinery has ALREADY
+		// resubmitted this one up to its budget by the time a human reads the
+		// note. Saying what was already tried is the part that stops a reader
+		// re-running it by hand and learning nothing.
+		return "SETUP — the gate's OWN SETUP failed: it printed a setup-failure banner, so it never established " +
+			"the environment its checks needed and never returned a verdict on this tree. It did not condemn this " +
+			"branch and it did not clear it. The package, test and assertion names in the output are NOT findings. " +
+			"THE BANNER DOES NOT SAY WHOSE SETUP FAILED — a branch can break its own test setup, and so can the box " +
+			"— so this class names neither, on purpose. This class IS retried automatically on a small budget; if " +
+			"you are reading this, those retries are spent and the envelope is broken STANDING rather than once, " +
+			"which narrows it without settling it. Read the banner and establish which; do NOT dispatch a fix on " +
+			"this alone, and do NOT resubmit unchanged expecting a different answer."
 	case ClassIndeterminate:
 		// The note must not name a timeout as THE cause: a gate killed by an
 		// outside signal lands here too, and a note that says "at its timeout"
@@ -206,6 +249,12 @@ func (c FailureClass) TriageNote() string {
 // for a Go toolchain download. ClassHost is excluded for the reason mg-b41f was
 // filed: a full boot volume fails every gate on the box, so counting it would
 // accumulate a verdict about whoever was queued while the disk was full.
+// ClassSetup is excluded on exactly ClassIndeterminate's reasoning, and NOT on
+// a claim that the box was at fault. A branch CAN break its own test setup
+// (mg-67c9 refused a whole class over that), so a bannered setup failure does
+// not establish who broke it — and the streak's escalation advises stopping a
+// polecat or reassigning its work item, which is a claim about a person. A class
+// that declines to say whose fault it is must not feed one that does.
 func countsAgainstAuthor(c FailureClass) bool {
 	return c == "" || c == ClassDefect
 }
@@ -242,9 +291,14 @@ type AttemptFailure struct {
 	// not, NotRetriedReason says why — requirement 3 of mg-e5c2: the absence of
 	// a retry must be legible rather than looking like a policy that does not
 	// exist.
-	Retried          bool    `json:"retried"`
-	NotRetriedReason string  `json:"not_retried_reason,omitempty"`
-	BackoffSeconds   float64 `json:"backoff_seconds,omitempty"`
+	Retried          bool   `json:"retried"`
+	NotRetriedReason string `json:"not_retried_reason,omitempty"`
+	// RetriedReason is the mirror of NotRetriedReason and says why a retry
+	// FOLLOWED — requirement 2 of mg-15bb. A retry that does not say what it is
+	// hoping to establish is indistinguishable, in the record, from a loop that
+	// re-runs things because it always has.
+	RetriedReason  string  `json:"retried_reason,omitempty"`
+	BackoffSeconds float64 `json:"backoff_seconds,omitempty"`
 }
 
 // Line renders one attempt as a single log/mail line. The transport and the
@@ -262,6 +316,9 @@ func (a AttemptFailure) Line() string {
 			fmt.Fprintf(b, "  retried after %s", a.Backoff().Round(time.Millisecond))
 		} else {
 			b.WriteString("  retried immediately")
+		}
+		if a.RetriedReason != "" {
+			fmt.Fprintf(b, " — %s", a.RetriedReason)
 		}
 	} else {
 		fmt.Fprintf(b, "  NOT RETRIED — %s", a.NotRetriedReason)
@@ -293,6 +350,17 @@ type disposition struct {
 	// re-running would give the same answer. It becomes "not retryable: ..." in
 	// the record.
 	Reason string
+	// RetryReason is the mirror of Reason and is filled when Retryable is TRUE:
+	// one sentence saying why re-running could plausibly differ. It becomes the
+	// attempt's RetriedReason.
+	//
+	// Requirement 2 of mg-15bb, and it is not decoration. Before it, a retried
+	// attempt recorded only `retried: yes, after 30s of backoff` — the fact of
+	// the retry with no statement of what it was hoping to establish — while an
+	// un-retried one carried a full sentence. The asymmetry meant the class
+	// whose whole point is "re-run this to find out which it was" could not say
+	// so anywhere a reader looks.
+	RetryReason string
 	// GateRerun says that a retry of this failure costs A WHOLE GATE RUN rather
 	// than a git command, so the retry loop must spend the gate-network budget
 	// and not the fetch-stage network budget. It is a property of what the retry
@@ -422,7 +490,7 @@ func outputReportsConflict(gitOutput string) bool {
 // gate's own output is preserved verbatim for the reader who needs to make that
 // call.
 //
-// TWO CARVE-OUTS CROSS THAT LINE, ONE PARTLY AND ONE FULLY, and both are
+// THREE CARVE-OUTS CROSS THAT LINE, ONE PARTLY AND TWO FULLY, and all three are
 // deliberate.
 //
 // ClassHost does not cross it at all: the boundary is about RETRY, and a
@@ -443,6 +511,15 @@ func outputReportsConflict(gitOutput string) bool {
 // module-fetch marker must be on the SAME LINE — plus a retry budget sized for
 // a whole gate run rather than a git command. See gatenetwork.go for the
 // specimens, the corpus counts, and what the marker table does not cover.
+//
+// gateSetupError ALSO crosses it — classified ClassSetup and retried (mg-15bb).
+// It is the loosest match of the three (one phrase, anywhere on a line), so its
+// guards have to carry the most: the phrase is a banner this repo emits
+// deliberately rather than a wording borrowed from a tool, the reading refuses
+// any line opening with a harness verdict prefix (which is exactly how the
+// 2026-08-19 specimen fooled the summariser), and the budget is the smallest of
+// the four — 3 attempts, chosen to answer one question rather than to outlast
+// anything. See gatesetup.go.
 var verdictStages = map[string]string{
 	"build":             "the build gate ran on this tree and returned a verdict",
 	"test":              "the test gate ran on this tree and returned a verdict",
@@ -551,6 +628,42 @@ func classifyFailure(stage string, raw string, err error) disposition {
 			Retryable: true,
 			GateRerun: true,
 			Signal:    fmt.Sprintf("gate-network %q with %q on the same line", netErr.Signal, netErr.Marker),
+		}
+	}
+
+	// A gate whose OWN SETUP failed is judged before the stage table, for the
+	// same reason the three conditions above are: the gate reached the stage,
+	// but what it reported was its own envelope and not the branch (mg-15bb).
+	//
+	// LAST of the four carve-outs on purpose, and each place in that order was
+	// chosen rather than fallen into:
+	//
+	//   - after the two kills, because a kill outranks the text — a gate that
+	//     was killed says nothing about whether the branch caused the hang, and
+	//     this arm retries;
+	//   - after host-resource, because a full disk can BE the reason a sandbox
+	//     failed to stand up, "the host ran out of disk" names something that
+	//     "setup failed" does not, and Host's instruction (free it first) is the
+	//     one that works;
+	//   - after gate-network, for the same reason in the same direction: a
+	//     module fetch that could not resolve is a narrower statement than a
+	//     banner, and it is matched on a conjunction rather than one phrase.
+	//
+	// Every one of those preferences hands the case to a MORE specific answer,
+	// and two of them hand it to a class that does not retry. That is the safe
+	// direction for a text-matched carve-out that spends gate runs.
+	var setupErr *gateSetupError
+	if errors.As(err, &setupErr) {
+		return disposition{
+			Class:     ClassSetup,
+			Retryable: true,
+			GateRerun: true,
+			Signal:    "gate-setup banner " + strconv.Quote(truncate(setupErr.Banner, 120)),
+			RetryReason: "the gate printed a setup-failure banner, so it never established the environment its " +
+				"checks needed and never returned a verdict on this tree — re-running establishes whether that " +
+				"envelope was broken ONCE or is broken STANDING, which is a DIFFERENT fact and the only one worth " +
+				"having here. This is not a fix being retried into existence: the branch is unchanged and nobody " +
+				"has been asked to touch it",
 		}
 	}
 
