@@ -85,6 +85,7 @@
 package progresswatch
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -310,7 +311,10 @@ type Reading struct {
 	Thresholds Thresholds `json:"thresholds"`
 
 	// Stalled is the conjunction. It is never true while anything in Blind is
-	// set.
+	// set — which is exactly why it must not be read on its own: `stalled:false`
+	// is what a healthy fleet produces AND what a run that measured nothing
+	// produces. Switch on Verdict, which states which of the two it was
+	// (mg-e75b).
 	Stalled bool `json:"stalled"`
 
 	// LiveWorkers is the whole live population; Judged excludes the ones under
@@ -355,6 +359,78 @@ type Reading struct {
 	// forces Stalled false, and is a finding of its own kind: a detector that
 	// cannot see is not a fleet that is fine.
 	Blind []string `json:"blind,omitempty"`
+}
+
+// Verdict is the state a reading resolves to — the tri-state clean / stalled /
+// blind, plus a sentinel for a Reading that was never evaluated at all. It is
+// the field a machine consumer should switch on, and it exists because
+// `stalled` alone cannot be switched on: `stalled:false` is emitted for a CLEAN reading and for a BLIND
+// one alike, and the only thing separating them in the JSON used to be the
+// PRESENCE of `blind` — an omitempty array, so the distinguishing evidence was
+// absent in precisely the case that looked healthy (mg-e75b).
+//
+// That is the same shape as the render defect mg-516e fixed one layer up, where
+// the blind paragraph opened with the clean paragraph's own headline. This
+// detector was built because every signal read green while the fleet did
+// nothing; shipping a green nobody can tell from a blind reading reproduces the
+// outage inside the instrument.
+//
+// No one of the four values is a substring of another, asserted by a test,
+// because mg-516e's failure was a grep matching where an equality test would not
+// have — and a consumer piping --json through grep is the likeliest reader of
+// this field.
+type Verdict string
+
+const (
+	// VerdictClean is a reading that was TAKEN and found nothing. It is an
+	// assertion, never an inference from an absence.
+	VerdictClean Verdict = "clean"
+	// VerdictStalled is the conjunction holding: alive, silent, idle, landing
+	// nothing.
+	VerdictStalled Verdict = "stalled"
+	// VerdictBlind is a run that could not measure a member of the conjunction.
+	// It is not a clean fleet — it is a fleet nobody measured.
+	VerdictBlind Verdict = "blind"
+	// VerdictUnknown is a Reading that was never evaluated at all: the zero
+	// value, which callers get back alongside an error. It is spelled out
+	// because the alternative is that a default-constructed Reading answers
+	// "clean", and a zero value that reads as healthy is the defect this whole
+	// field exists to remove.
+	VerdictUnknown Verdict = "unknown"
+)
+
+// Verdict derives the state from the reading rather than storing it.
+//
+// Deriving is deliberate. A stored copy of a state that is also encoded in
+// Stalled and Blind is a second source of truth that can drift from the first,
+// and a verdict field that disagreed with the booleans would be a worse false
+// green than the one it replaced. Derivation also makes the field correct for a
+// Reading decoded from an OLDER pogod that never emitted it: the value is
+// recomputed from fields that daemon did send.
+func (r Reading) Verdict() Verdict {
+	switch {
+	case r.Now.IsZero():
+		return VerdictUnknown
+	case len(r.Blind) > 0:
+		return VerdictBlind
+	case r.Stalled:
+		return VerdictStalled
+	default:
+		return VerdictClean
+	}
+}
+
+// MarshalJSON emits the derived verdict alongside the measurements, WITHOUT
+// omitempty: a consumer must be able to check one field and get an answer in
+// every case, including the healthy one. Anything omitempty is evidence that
+// vanishes exactly when the reading looks fine.
+func (r Reading) MarshalJSON() ([]byte, error) {
+	// The alias sheds Reading's methods, so this does not recurse.
+	type alias Reading
+	return json.Marshal(struct {
+		Verdict Verdict `json:"verdict"`
+		alias
+	}{Verdict: r.Verdict(), alias: alias(r)})
 }
 
 // Evaluate applies the thresholds to a snapshot. It is a pure function: the
@@ -525,11 +601,15 @@ func round(d time.Duration) string {
 // the measurement cannot.
 func (r Reading) String() string {
 	var b strings.Builder
-	if r.Stalled {
+	// Switching on the same derived tri-state the JSON carries, so this lead
+	// phrase and the `verdict` field cannot say different things about one
+	// reading (mg-e75b).
+	switch r.Verdict() {
+	case VerdictStalled:
 		b.WriteString("FLEET IS ALIVE AND LANDING NOTHING — ")
-	} else if len(r.Blind) > 0 {
+	case VerdictBlind, VerdictUnknown:
 		b.WriteString("NOT MEASURED — ")
-	} else {
+	default:
 		b.WriteString("no finding — ")
 	}
 	b.WriteString(r.Measurements())

@@ -2439,6 +2439,21 @@ rescued the fleet is what a coordinator chasing a hunch needs), and exits 0 / 1 
 3 on clean / finding / measured-nothing. A daemon with the detector disarmed
 answers **503**, never `200` with an empty reading.
 
+**Machine consumers switch on `verdict`, never on `stalled` (mg-e75b).**
+`stalled` is the conjunction, and it is `false` for a clean reading *and* for a
+blind one — a run that measured nothing has no conjunction to report. Until
+mg-e75b the only thing separating the two in the JSON was the presence of the
+`blind` array, which is `omitempty`: the distinguishing evidence was **absent in
+exactly the case that looked healthy**. `verdict` is emitted on every reading,
+never omitted, and is one of `clean` / `stalled` / `blind` / `unknown`, mapping
+one-to-one onto exit 0 / 1 / 3 / 3. It is *derived* from `stalled` and `blind`
+rather than stored beside them, so it cannot drift from them and it is still
+correct for a reading decoded from a pogod that predates the field. `unknown` is
+the zero `Reading` — it exists so that a value nobody evaluated cannot answer
+`clean`, which is the same false-green one level down. The human render is
+unchanged and still prints **no verdict token** (mg-c058); the two modes switch
+on one value, so they cannot disagree about which state a run was in.
+
 progress-watch is disjoint from its nearest neighbours:
 
 | | population | question |

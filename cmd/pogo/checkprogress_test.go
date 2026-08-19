@@ -164,3 +164,56 @@ func TestTheThreeRendersAreGreppableApart(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderAgreesWithTheJSONVerdict. The two output modes are two renderings
+// of one reading, and the whole value of the --json tri-state (mg-e75b) is that
+// a script and a human reading the same run reach the same conclusion. They now
+// switch on the same derived value; this pins that they cannot drift apart, by
+// checking each state's headline against the verdict the JSON would carry.
+func TestRenderAgreesWithTheJSONVerdict(t *testing.T) {
+	now := time.Date(2026, 8, 14, 5, 18, 0, 0, time.UTC)
+
+	clean := theIncident(now)
+	clean.WorkerCores = 6.2
+
+	blind := theIncident(now)
+	blind.CoresKnown = false
+	blind.CoresError = "ps resolution cannot resolve a 1s window"
+
+	cases := []struct {
+		name     string
+		snap     progresswatch.Snapshot
+		verdict  progresswatch.Verdict
+		headline string
+	}{
+		{"finding", theIncident(now), progresswatch.VerdictStalled, "FLEET IS ALIVE AND LANDING NOTHING"},
+		{"clean", clean, progresswatch.VerdictClean, "No finding"},
+		{"blind", blind, progresswatch.VerdictBlind, "NOT MEASURED"},
+	}
+	for _, c := range cases {
+		r := progressReading(t, c.snap)
+		if got := r.Verdict(); got != c.verdict {
+			t.Errorf("%s: verdict=%q, want %q", c.name, got, c.verdict)
+		}
+		if out := renderProgressReading(r); !strings.Contains(out, c.headline) {
+			t.Errorf("%s: verdict %q but the render does not say %q:\n%s",
+				c.name, c.verdict, c.headline, out)
+		}
+	}
+}
+
+// TestUnevaluatedReadingDoesNotRenderAsClean. The render's clean paragraph is
+// its `default` branch, which is the branch a value nobody measured falls into
+// unless something stops it. Nothing in the CLI produces a zero Reading today —
+// the client returns an error instead — so this is a guard on the shape rather
+// than on a reachable path, and it is the same guard the JSON gets from
+// VerdictUnknown.
+func TestUnevaluatedReadingDoesNotRenderAsClean(t *testing.T) {
+	out := renderProgressReading(progresswatch.Reading{})
+	if strings.Contains(out, "No finding") {
+		t.Fatalf("a reading that was never taken rendered as a clean one:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT MEASURED") {
+		t.Errorf("an unevaluated reading must say so:\n%s", out)
+	}
+}
