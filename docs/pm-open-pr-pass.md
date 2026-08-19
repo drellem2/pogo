@@ -109,11 +109,19 @@ equivalent patch is already upstream, `+` if not.
 **A `+` means `git cherry` could not establish that this commit landed — not
 that it did not land.** The two readings differ exactly where a reader acts:
 *did not land* invites filing a carrier, *could not establish* invites the one
-check that settles it. A branch that the refinery rebased and merged reports all
-`-`, because rebasing preserves patch-ids even though it rewrites every SHA —
-but content that landed under a *different* patch reads `+`, and there are three
-measured, ordinary ways for that to happen. See [§What `git cherry` does not
-cover](#what-git-cherry-does-not-cover) before acting on a `+`.
+check that settles it.
+
+A branch the refinery rebased and merged reports all `-` **only when `main` has
+not moved inside the hunk's three-line context window**. Rebasing preserves the
+patch-id of a hunk whose surrounding text is unchanged, even though it rewrites
+every SHA — but the rebase re-records the patch against the *new* base, so a
+neighbouring edit within that window changes the context lines and with them the
+patch-id, and the PR's own head then reads `+`. **This is the refinery's own
+merge path, measured, not an exotic case**; the unqualified version of this
+sentence stood here until 2026-08-19 and read as reassurance it could not
+support. See [§What `git cherry` does not
+cover](#what-git-cherry-does-not-cover) before acting on a `+` — there are three
+measured, ordinary ways for landed content to read `+`.
 
 The `-` direction is the stronger one and it is still **not** absolute: a patch
 that landed and was later reverted reads `-` LANDED with the content gone from
@@ -324,7 +332,10 @@ its own hole, and it is the same one as the constraint bullet below: a reverted
 patch's subject is still in the log. For a branch you are relying on as ground
 truth, read the content on `main`, not the subjects.
 
-Measured in `drellem2/pogo` on 2026-08-10, old predicate vs. new:
+Measured in `drellem2/pogo` on 2026-08-10, old predicate vs. new. The `NEW`
+column is quoted in that run's own vocabulary, where a `+` was still written
+"not landed"; read it as "landing not established" throughout, per the
+[predicate section](#the-landed-ness-predicate) above.
 
 ```
 REF                    OLD          NEW          EXPECTED
@@ -365,8 +376,16 @@ something else about these branches"; a before/after on one branch does.
 
 The *Landed?* column is question 1's answer, so it is only as good as the
 predicate behind it — and its `no` means **landing was not established**, not
-*this did not land*. The three bottom rows are written to be safe under that
-weaker reading: none of them closes or merges anything.
+*this did not land*.
+
+Rows 2 and 3 are safe under that weaker reading: neither closes nor merges
+anything, so a `+` that should have been a `-` costs at most a leave-open or a
+redundant carrier. **Row 4 is not** — it closes a PR, outward-facing, and it is
+reachable from a `+` alone, because row 3 offers "establish that it is
+superseded" as one of its two remedies. So supersession is not established by
+the predicate: before closing under row 4, confirm on `main` that the *other*
+change is really there, the same content check the third constraint below
+prescribes. `+` on the PR you are closing tells you nothing either way.
 
 If the top row never fires across a whole sweep, suspect the predicate before
 concluding the fleet has no rebase-dangles — that is exactly what the ancestry
