@@ -113,15 +113,7 @@ func AttributableTo(f strandedwork.Finding, workItemID string) bool {
 	if strings.EqualFold(f.WorkItemID, workItemID) {
 		return true
 	}
-	suffix := workItemID
-	if _, after, ok := strings.Cut(workItemID, "-"); ok {
-		suffix = after
-	}
-	if len(suffix) < 3 {
-		return false
-	}
-	name := strings.TrimPrefix(f.Branch, strandedwork.BranchPrefix)
-	return strings.Contains(strings.ToLower(name), strings.ToLower(suffix))
+	return strandedwork.BranchMatchesItem(f.Branch, workItemID)
 }
 
 // SetStrandedWorkGate installs the gate consulted before a polecat is

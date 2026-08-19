@@ -78,7 +78,16 @@ func resolvePostMergeWork(reg polecatReaper, mr *refinery.MergeRequest, declares
 	if mr == nil || mr.Author == "" {
 		return postMergeVerdict{}
 	}
-	if a := reg.GetByWorkItemOrName(mr.Author); a == nil || a.Type != agent.TypePolecat {
+	// The probe runs for a live polecat's merge AND for an authorless one, and
+	// the second half is mg-be37. The completion path below no longer requires a
+	// running polecat, so a guard that skipped the probe whenever the registry had
+	// nobody would let exactly the merges this ticket added — a coordinator
+	// resubmitting a dead polecat's branch — close an item that declares its own
+	// remainder. What is still skipped is an author that names no work item at
+	// all: a crew agent's name is not an id, and `mg show mayor` is a wasted call
+	// whose failure would be read as a declaration.
+	if a := reg.GetByWorkItemOrName(mr.Author); (a == nil || a.Type != agent.TypePolecat) &&
+		!client.LooksLikeWorkItemID(mr.Author) {
 		return postMergeVerdict{}
 	}
 	// The refinery performed a declared post-merge step and it FAILED
@@ -145,7 +154,34 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	// id (mr.Author == a.WorkItemID, e.g. "mg-d087"), so a plain Get(mr.Author)
 	// misses and the polecat lingers post-merge (gh #48).
 	a := reg.GetByWorkItemOrName(mr.Author)
-	if a == nil || a.Type != agent.TypePolecat {
+	polecat := a != nil && a.Type == agent.TypePolecat
+
+	// NO LIVE POLECAT IS NOT A REASON TO LEAVE THE ITEM OPEN (mg-be37). Until
+	// this line the function returned here, so completion was conditional on a
+	// polecat being registered at merge time — and it is exactly the merges with
+	// no polecat that need it most:
+	//
+	//	a coordinator submits a dead polecat's stranded branch by hand
+	//	-> the merge lands, 1116 insertions go onto main,
+	//	-> nothing closes the item, and it sits in available/
+	//	-> priority-wake advertises it as unclaimed and high priority
+	//	-> the recommended action re-derives work that is already merged.
+	//
+	// That happened four times on 2026-08-09 (mg-51f4, mg-00b3, mg-6c90,
+	// mg-56ac). It is worse than the unmerged case it grew out of: while the
+	// branch is unmerged the spawn-time stranded-work guard refuses the dispatch,
+	// but the moment it merges the guard correctly stops refusing and the item is
+	// still open. The window opens at merge and never closes. priority-wake told
+	// the mayor to "claim or dispatch now: mg-6c90" four minutes after b9e1d1b.
+	//
+	// Nothing about closing an item needs a live worker — the author is on the
+	// merge request. What it does need is an author that NAMES one: crew agents
+	// and humans author merge requests too, and `mg done mayor` is not a
+	// completion, it is an error the log would fill up with. So the shape test
+	// stands in for the registry lookup, and only for the completion half — the
+	// stop below still requires a real polecat, because there is nothing else to
+	// stop.
+	if !polecat && !client.LooksLikeWorkItemID(mr.Author) {
 		return
 	}
 
@@ -189,6 +225,16 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 			reason = "submitted --defer-done (gh #81)"
 		default:
 			reason = postMerge.Reason
+		}
+		// The backstop reaps a RUNNING polecat that never ends its lifecycle, so
+		// it can only be armed when there is one. An authorless deferred merge has
+		// nothing to reap; it is logged and left to the sweep
+		// (`pogo check-stranded`), which is the reader for exactly this residue.
+		if !polecat {
+			log.Printf("refinery: merged MR %s authored by %s %s — item deliberately NOT closed, and no polecat "+
+				"is running to finish it; `pogo check-stranded` will report the item while it stays open (mg-be37)",
+				mr.ID, mr.Author, reason)
+			return
 		}
 		log.Printf("refinery: merged polecat %s %s — skipping auto-done/auto-stop; polecat owns its lifecycle", a.Name, reason)
 		if backstop != nil {
@@ -262,6 +308,17 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		// call replaces a result the worker already wrote. Any other error is a
 		// real failure and reads as one.
 		log.Printf("refinery: mg done %s on merged polecat's behalf did not apply — if this is 'already done' the polecat wrote its own result first and that result stands: %v", mr.Author, err)
+	}
+
+	// There is nothing to stop. The close was the whole point of this call
+	// (mg-be37) — say so at the same volume as the polecat path, because this
+	// line is the only record that the merged-but-open window was shut, and its
+	// absence over a night is how the four instances of 2026-08-09 went unnoticed.
+	if !polecat {
+		log.Printf("refinery: closed work item %s at merge with NO polecat running (branch=%s, merged=%s) — "+
+			"a hand-submitted branch used to leave its item in available/, where priority-wake advertises "+
+			"work that is already on the target (mg-be37)", mr.Author, mr.Branch, mr.MergedSHA)
+		return
 	}
 
 	// Stop keys on the registry name, which is the bare id — not mr.Author.

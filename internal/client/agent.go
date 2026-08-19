@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/drellem2/pogo/internal/agent"
@@ -454,6 +455,35 @@ func CompleteMGWorkItem(id, resultJSON string) error {
 		return fmt.Errorf("mg done failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// workItemIDRe is the SHAPE of a macguffin work-item id: an `mg-` or `gh-`
+// prefix and at least three id characters. It is deliberately a shape test and
+// not a store lookup — see LooksLikeWorkItemID.
+var workItemIDRe = regexp.MustCompile(`^(?i:(?:mg|gh)-[a-z0-9]{3,})(?:@[0-9]{4}-[0-9]{2})?$`)
+
+// LooksLikeWorkItemID reports whether s is shaped like a work-item id.
+//
+// It exists because a merge request's `--author` is a free string, and TWO
+// different kinds of thing arrive in it: a work-item id (`mg-56ac`) from a
+// polecat or a coordinator submitting on an item's behalf, and an AGENT NAME
+// (`mayor`, `pm-pogo`) from a crew agent submitting its own work. pogod's merge
+// path closes the first and must not touch the second — `mg done mayor` is not a
+// completion, it is an error that would be logged on every crew merge forever.
+//
+// IT IS A SHAPE TEST, NOT AN EXISTENCE TEST, and that is the safe direction.
+// Asking the store would mean an `mg show` on the merge path whose FAILURE — a
+// slow store, an ambiguous short id, mg missing from PATH — is indistinguishable
+// from "not a work item", so a transient error would silently skip the close and
+// re-open exactly the window this guards (mg-be37). A shape test cannot fail
+// that way: a wrong yes costs one logged `mg done` error, a wrong no costs an
+// item left open, and only the shape test makes the second impossible for every
+// id the fleet actually issues.
+//
+// The optional `@YYYY-MM` suffix is mg's partition qualifier, which the store
+// requires when two archived items share a short id.
+func LooksLikeWorkItemID(s string) bool {
+	return workItemIDRe.MatchString(strings.TrimSpace(s))
 }
 
 // MGWorkItemDone reports whether a work item has reached a terminal state

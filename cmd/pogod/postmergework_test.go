@@ -168,6 +168,13 @@ func TestResolvePostMergeWork_UnreadableItemDeclines(t *testing.T) {
 // reap path ignores anyway. A crew agent's name is not a work-item id, so
 // probing it would fail and — under the rule above — mislabel an ordinary crew
 // merge as having post-merge work.
+//
+// SCOPE NARROWED BY mg-be37. This used to include `mg-nobody`: an author shaped
+// like a work-item id with no agent registered for it. That merge is no longer
+// ignored by the reap path — closing it is the whole point of mg-be37, because a
+// hand-submitted branch has no polecat by construction — so the probe must reach
+// it, and the case moved to the test below. What stays here is the case the
+// reason above was actually written for: an author that is not an id at all.
 func TestResolvePostMergeWork_SkipsNonPolecatMerges(t *testing.T) {
 	reg := &fakeReaper{agents: map[string]*agent.Agent{
 		"mayor": {Name: "mayor", Type: agent.TypeCrew},
@@ -178,7 +185,6 @@ func TestResolvePostMergeWork_SkipsNonPolecatMerges(t *testing.T) {
 	for _, mr := range []*refinery.MergeRequest{
 		{ID: "mr-1", Branch: "b", Author: "mayor", TargetRef: "main"},
 		{ID: "mr-2", Branch: "b", Author: "", TargetRef: "main"},
-		{ID: "mr-3", Branch: "b", Author: "mg-nobody", TargetRef: "main"},
 	} {
 		if v := resolvePostMergeWork(reg, mr, store.probe); v.Declared {
 			t.Errorf("author %q: expected no verdict for a merge the reap path ignores, got %q", mr.Author, v.Reason)
@@ -186,6 +192,41 @@ func TestResolvePostMergeWork_SkipsNonPolecatMerges(t *testing.T) {
 	}
 	if len(store.probed) != 0 {
 		t.Errorf("expected no work-item probe for non-polecat merges, probed %v", store.probed)
+	}
+}
+
+// TestResolvePostMergeWork_ProbesWorkItemAuthorWithNoAgent is the case mg-be37
+// moved out of the test above, and it is the one that keeps the two halves of
+// that ticket from fighting.
+//
+// The reap path now closes an item whose branch merged whatever submitted it. If
+// the probe still skipped an author with no registered agent, that close would
+// bypass the post-merge-work declaration entirely — so a hand-submitted release
+// branch would be marked complete before its tag was pushed, which is mg-d86e
+// reintroduced through the door mg-be37 opened.
+//
+// The direction here matters as much as the fact of the probe: an item that
+// cannot be READ declines completion. mg-be37 is about closing items that should
+// be closed, and it must not become a reason to close one nobody can vouch for.
+func TestResolvePostMergeWork_ProbesWorkItemAuthorWithNoAgent(t *testing.T) {
+	reg := &fakeReaper{agents: map[string]*agent.Agent{}}
+
+	declaring := &declaringStore{declared: map[string]bool{"mg-ca3c": true}}
+	v := resolvePostMergeWork(reg, &refinery.MergeRequest{ID: "mr-1", Branch: "b", Author: "mg-ca3c", TargetRef: "main"}, declaring.probe)
+	if !v.Declared {
+		t.Errorf("an item tagged post-merge-work was cleared for completion because no polecat "+
+			"was registered for it; that is mg-d86e through mg-be37's door (probed=%v)", declaring.probed)
+	}
+
+	unreadable := &declaringStore{err: errors.New("no such work item")}
+	if v := resolvePostMergeWork(reg, &refinery.MergeRequest{ID: "mr-2", Branch: "b", Author: "mg-nobody", TargetRef: "main"}, unreadable.probe); !v.Declared {
+		t.Error("an UNREADABLE work item was cleared for completion; an item nobody can read is " +
+			"not evidence that merging finished it")
+	}
+
+	quiet := &declaringStore{}
+	if v := resolvePostMergeWork(reg, &refinery.MergeRequest{ID: "mr-3", Branch: "b", Author: "mg-6c90", TargetRef: "main"}, quiet.probe); v.Declared {
+		t.Errorf("an ordinary item was withheld from completion: %q", v.Reason)
 	}
 }
 

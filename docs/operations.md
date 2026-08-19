@@ -1009,6 +1009,111 @@ lands has to reach a group the agent does not lead. This detector is the safety
 net for the population that already exists and for runners that escape teardown
 later.
 
+## Does an open item already have its work on a branch? (`pogo check-stranded`)
+
+An item reads `available` on the board. Its work is finished, pushed, and sitting
+on a polecat branch. The polecat that did it is dead, so nothing is going to mail
+anybody — and priority-wake advertises the item, so **the recommended next action
+is the one that re-derives the work**. mg-9a19 lost 1026 lines exactly that way.
+
+A spawn-time guard already refuses that dispatch, and it works. But it fires **at
+dispatch**, so an item nobody dispatches at is never checked. On 2026-08-09 four
+branches were stranded across three repos: one caught by the guard, one by a
+person reconciling something unrelated, **two by the accident of somebody looking
+next door**. This is the periodic half.
+
+```
+$ pogo check-stranded
+stranded and landed-not-closed work — open items joined to their branches
+  114 open work item(s) scanned across 1 repo(s)
+    /Users/daniel/dev/pogo — 73 item(s), 683 polecat branch(es), refs refreshed from origin
+  1 exclusion(s): branches of running polecats and branches already queued
+
+3 FINDING(S) — 0 stranded, 3 landed-but-not-closed, 0 conflict suspect, 0 UNJUDGED:
+
+  landed_not_closed available  mg-65d2
+    Build the REPRESENTATIVE relay: move the two readers, not the twenty-one writers
+    branch polecat-p65d2 (pushed) vs refs/remotes/origin/main
+    1 commit(s) already in the target under a rewritten sha; 0 unmerged.
+    The work is ON the target and the item is still asking for it.
+    -> mg done mg-65d2 --result='{"branch": "polecat-p65d2", …}'
+```
+
+Exit 0 clean, 1 at least one finding, 2 usage, 3 this run measured nothing.
+
+### Four row kinds, and their remedies are not interchangeable
+
+| kind | what it is | remedy |
+|---|---|---|
+| `stranded` | the branch has commits the target does not | `pogo refinery submit`; do **not** dispatch |
+| `landed_not_closed` | the branch is fully merged, the item still asks for it | `mg done` |
+| `conflict_suspect` | the two instruments below disagree | read it yourself; **neither** command |
+| `unjudged` | the branch could not be read | re-run; this is not a clean row |
+
+`landed_not_closed` is the worse one and it has an **upstream fix**, so it should
+stay near-empty: pogod used to close an author's item at merge only when a polecat
+had claimed it, so a coordinator submitting a stranded branch by hand left the
+item open with its work on main. It now closes the item whenever the MR's author
+is shaped like a work-item id, with no registry lookup — a hand-submitted branch
+has no polecat by construction. The sweep still reports the row, because that fix
+cannot see an item stranded before it shipped or one whose close was refused.
+
+### The instrument, and the blind spot it actually has
+
+**`git rev-list --count main..<branch>` does not work.** The refinery re-commits
+what it merges, so a successfully merged branch is "ahead of main" forever; 65
+false positives came out of it before anyone noticed, and a reader on another
+ticket briefly believed landed work was stranded from the other side.
+
+**`git cherry` compares patch ids** and gets that right. Its residual blind spot
+is *not* conflict resolution — the refinery **aborts** on a rebase conflict
+(mg-eac0) and never merges through one. It is **context drift**: the refinery
+rebases into its own copy and does not force-push the branch, so origin keeps the
+commit as written while the target gets it as replayed. A patch id covers the
+diff's context lines, so **a neighbouring change is enough**. Of 57 branches
+`git cherry` called unmerged on 2026-08-10, at least five are on main under
+another sha. The exact control:
+
+```
+77e012c  origin/polecat-79dc   patch-id 959d2fa2…
+1e1292f  main                  patch-id 5a479b4d…
+identical --stat; every added and removed line byte-identical
+```
+
+So a **content-level second opinion** runs on every stranded candidate: what
+fraction of the substantive lines the unmerged commits ADD does the target
+already hold? At ≥95% (and ≥20 countable lines) the row becomes
+`conflict_suspect`, which recommends **neither** remedy. Deliberately
+conservative — branches at 0.88, 0.91 and 0.94 are also on main and are also not
+demoted, because under-demoting costs a line of report while over-demoting costs
+a branch.
+
+### A failed read is a row, not a clean answer
+
+The natural predicate is `git cherry <target> <branch> | grep -q '^+'`, and it
+**answers clean whenever git fails** — a failed git prints nothing, and "no
+output" is how that predicate spells landed. On a sweep, one network blip then
+converts a stranded branch into an all-clear over work sitting unmerged: this
+detector's own defect, rebuilt inside its remedy. Anything unreadable is
+`unjudged`, ranked immediately behind `stranded`, and exits 1.
+
+### Two exclusions, both counted (`--all` names them)
+
+**A running polecat's branch.** It has unmerged commits on a claimed item because
+that is what work in progress *is*; `polecat-qfa70` was mid-flight during the
+manual sweep and looked identical to a strand. **A branch already in the refinery
+queue** — the remedy for a stranded branch is to submit it. An unreachable agent
+registry is an instrument failure (exit 3), not a clean run: without it every live
+worker in the fleet reads as a strand, and a detector that fires on healthy input
+teaches its readers to skip the line the real stranding surfaces on.
+
+### It is item-driven, and that is why it is readable
+
+A branch-first sweep of this repo finds 57 rows, 48 of them on archived items and
+2 on no item at all. Walking the ~115 open items instead produced three. Ranking
+is on **item status**, `available` first, because that is the status priority-wake
+advertises — not on branch count.
+
 ## GitHub branch protection on main (rulesets)
 
 Since 2026-07-05 (mg-f7a3), `main` in **drellem2/pogo** (ruleset `main-require-pr`, id 18534732) and **drellem2/macguffin** (id 18534735) is protected by a GitHub ruleset per the gh-issue workflow design (`docs/design/gh-issue-workflow-design.md` §3):
