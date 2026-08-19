@@ -2350,6 +2350,108 @@ the top of this section.
 
 Source of truth: `internal/absentwatch/`, `internal/agent/roster.go`.
 
+## Is the fleet getting anything done? (progress-watch)
+
+**Every other instrument on this box answers "is it dead?" or "is it
+erroring?".** A worker blocked on a slow or unreachable model API is neither: it
+is ALIVE, NOT FAILING, and producing nothing. On 2026-08-14 the fleet sat in
+exactly that state for ~30 minutes —
+
+```
+pogo agent list        ->  all 7 polecats PTY-active within 4 minutes
+worktree file mtimes   ->  NONE had written a file in 15 minutes
+pogo host load         ->  fleet holding 0.10 of 10 cores
+                       and no merge landed in ~30 minutes
+```
+
+— and **no alarm fired, nor could one have**. It was found because a coordinator
+ran three checks by hand and noticed a routine liveness check came back
+*confusing* rather than red (mg-516e, mg-c058).
+
+progress-watch measures the **conjunction** and reports the numbers. Its
+population is the live **workers**; its question is the FLEET's output.
+Report-only.
+
+- **Four measurements, all at one instant.**
+
+  | | source | why this one |
+  |---|---|---|
+  | awake | per-worker PTY last-write, from pogod's registry | the signature is workers demonstrably *not* wedged |
+  | writing | newest file mtime anywhere in the worker's worktree | the walk stats the whole tree; a stat of the root is blind to a file three levels down |
+  | computing | each worker's **process subtree** | a parent reads 0.0% while its children burn cores (mg-eb47), and a worker running the gate is silent on PTY *and* worktree by construction (mg-27c0) |
+  | landing | the refinery's merges and submissions, plus closed work items | a submission is a worker having finished; a closed item is work landing even when it produces no merge |
+
+- **Any one alone is ordinary** — an agent thinking, a read-only task, a quiet
+  minute, a long gate. The conjunction is not, and it has one ordinary
+  explanation: everyone is waiting on the same remote.
+- **Seven at once is the signal; one is a Tuesday.** The same zero-writes shape
+  was measured *benign* on a young polecat still reading its ticket. So a worker
+  under `min_worker_age` is not judged at all, and fewer than `min_workers`
+  blocked is not a finding.
+- **A merge in flight excuses the fleet** — it runs in pogod's subtree where no
+  worker measurement can see it — but only while it is younger than the
+  completion window. A gate that has held the slot longer than the fleet has
+  been silent is part of what is being reported, not an alibi for it.
+- **"Could not measure" is a third answer, never a quiet green.** An unreadable
+  worktree is not an unwritten one, and an unresolvable CPU sample reports zeros
+  that mean *this host cannot tell*. Any such gap suppresses the finding, emits
+  `fleet_progress_error`, and — if it persists past `blind_for` — **mails about
+  the detector itself**. An instrument whose failure is visible only in
+  `events.log` is the shape of the bug, not of the fix.
+- **The reported value is the measurement, not a state token** (mg-c058).
+  "nothing landed in 31m, 7 workers PTY-active, worker subtrees at 0.10 of 10
+  cores" is actionable; `STALLED` invites the present-tense over-reading that
+  once paged a sleeping human over 2 errors in a trailing 30 minutes.
+- **Routing and episodes.** Findings go to `notify_to` (`mayor`); a standing one
+  also copies `human` after `escalate_after`, and crossing that threshold
+  escapes the renotify floor rather than waiting it out. The all-clear reaches
+  everyone who was alarmed and carries a generic
+  `incident_episode_cleared{kind:"fleet_progress"}` (mg-55b2).
+- **It restarts nothing.** A fleet waiting on a remote is not fixed by killing
+  the agents that are waiting.
+
+```toml
+[progress_watch]
+enabled = true             # default true
+interval = "5m"            # sample cadence (default 5m). Each sample costs one
+                           # process-table pair plus a walk per live worktree.
+hold_down = "10m"          # the conjunction must hold CONTINUOUSLY this long
+                           # before anybody is mailed (default 10m — two samples,
+                           # because the CPU member is instantaneous; negative
+                           # disables — tests only)
+renotify_after = "2h"      # an open, unchanged episode re-mails after this
+notify_to = "mayor"        # mailbox findings go to (default mayor)
+escalate_after = "2h"      # a standing finding also copies `human` after this
+                           # (default 2h; negative disables age-based escalation)
+```
+
+The four thresholds themselves are **not** config: they are
+`internal/progresswatch`'s exported defaults, each set against the 05:17Z
+measurements and documented with the number it had to catch —
+`DefaultPTYActiveWithin` 10m, `DefaultQuietWritesFor` 10m, `DefaultIdleCores`
+0.5, `DefaultNoProgressFor` 30m, `DefaultMinWorkers` 3, `DefaultMinWorkerAge`
+15m.
+
+`pogo check-progress` is the pull surface, reading `GET /health/progress` on
+pogod. It samples fresh rather than serving the runner's last verdict, prints
+all four measurements on a **clean** reading as well as a finding (which of them
+rescued the fleet is what a coordinator chasing a hunch needs), and exits 0 / 1 /
+3 on clean / finding / measured-nothing. A daemon with the detector disarmed
+answers **503**, never `200` with an empty reading.
+
+progress-watch is disjoint from its nearest neighbours:
+
+| | population | question |
+|---|---|---|
+| synthwatch | agents with transcripts | are its turns ERRORING? (a blocked worker errors nothing — it waits) |
+| turn-watch | present crew agents | has it completed a turn in 3h? (the FLEET DOWN floor, deliberately coarse) |
+| progress-watch | live workers | is the FLEET landing anything in the last 30m? |
+
+A 30-minute stall of seven workers sits entirely inside turn-watch's blind spot,
+and mg-c058 could be fixed completely without making it visible.
+
+Source of truth: `internal/progresswatch/`, `cmd/pogod/progresswatch.go`.
+
 ## The first-completed-turn floor (first-turn)
 
 **A spawn is not a success.** `autostart: started pm-pogo (pid=41773)` plus a

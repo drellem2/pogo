@@ -48,6 +48,7 @@ import (
 	"github.com/drellem2/pogo/internal/heartbeat"
 	"github.com/drellem2/pogo/internal/pathenv"
 	"github.com/drellem2/pogo/internal/platform/sleep"
+	"github.com/drellem2/pogo/internal/progresswatch"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/reaper"
@@ -83,6 +84,19 @@ var agentRegistry *agent.Registry
 // method is nil-receiver-safe, so a decision point reached before main arms it —
 // or in a test that does not care — is a no-op rather than a panic.
 var conditions *conditionAnnunciator
+
+// fleetProgress is the armed fleet-productivity detector (mg-516e), held at
+// package scope for ONE reason: the on-demand surface must answer with the same
+// judgement the standing runner acts on. `pogo check-progress` reads this
+// through GET /health/progress, so a coordinator who asks by hand and the
+// watcher that mails at 03:00 cannot disagree — which matters because the
+// incident this detector exists for was found by a human taking three readings
+// by hand and noticing they did not fit together.
+//
+// nil when the detector is disabled by config or the registry did not load; the
+// handler answers 503 and says which, because a surface that returns an empty
+// reading for "not armed" is the failure this whole package is about.
+var fleetProgress *progresswatch.Watcher
 
 var mergeQueue *refinery.Refinery
 var sched *scheduler.Scheduler
@@ -693,6 +707,38 @@ func healthFull(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// healthProgress answers GET /health/progress with one fresh fleet-productivity
+// reading: the four measurements of mg-516e and what they add up to.
+//
+// It SAMPLES rather than serving the runner's last verdict. A cached reading
+// would be minutes old at exactly the moment somebody is asking because they
+// suspect something, and the cost is bounded (one process-table pair plus a
+// walk per live worktree). Reading the runner's state instead would also make
+// the answer depend on the runner's hold-down, which is a paging concern and
+// not the asker's.
+func healthProgress(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	if fleetProgress == nil {
+		// NOT an empty reading. "The detector is not armed" and "the fleet is
+		// fine" must never be the same response body — that equivalence is the
+		// defect this endpoint exists to remove.
+		http.Error(w, "fleet-progress detector is not armed on this daemon "+
+			"(disabled by config, or the agent registry did not load)",
+			http.StatusServiceUnavailable)
+		return
+	}
+	reading, err := fleetProgress.Sample(time.Now())
+	if err != nil {
+		http.Error(w, "fleet-progress sample failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(reading)
+}
+
 func homePage(w http.ResponseWriter, r *http.Request) {
 	// Only match the exact root path. In Go 1.22+ ServeMux, the "/{$}"
 	// pattern restricts this to "/", but if registered as "/" (catch-all),
@@ -877,6 +923,7 @@ func registerHandlers() {
 	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/health/full", healthFull)
+	http.HandleFunc("/health/progress", healthProgress)
 	http.HandleFunc("/version", versionHandler)
 	http.HandleFunc("/status", status)
 	http.HandleFunc("/workitems", workitem.HandleWorkItems)
@@ -2741,6 +2788,59 @@ Flags:
 	// Armed on the registry AND the scheduler log: without the first there is no
 	// population, without the second no evidence. Both absences report as BLIND
 	// rather than as a clean fleet. REPORT-ONLY.
+	// Build the FLEET-PRODUCTIVITY detector (mg-516e). Every other standing
+	// instrument on this box answers "is it dead?" or "is it erroring?", so a
+	// fleet that is ALIVE, NOT FAILING and getting nothing done has no cell to
+	// land in. On 2026-08-14 seven polecats sat blocked on an unreachable model
+	// API for ~30 minutes — PTY-active within 4 minutes, no file written in 15,
+	// 0.10 of 10 cores held, no merge landing — and nothing fired, nor could
+	// have. It was found because a human noticed a routine liveness check came
+	// back CONFUSING rather than red, and chose to chase the confusion.
+	//
+	// Its population is the live WORKERS and its question is the FLEET's
+	// output, which is what separates it from every neighbour: synthwatch counts
+	// turns that ERRORED (a blocked worker errors nothing, it waits), turnwatch
+	// is the 3-hour floor under FLEET DOWN, and deafwatch/absentwatch judge one
+	// agent's reachability and presence. REPORT-ONLY: it mails, and there is no
+	// seam through which it could restart the workers it names — a fleet waiting
+	// on a remote is not fixed by killing the agents that are waiting.
+	var progressWatcher *progresswatch.Watcher
+	if cfg.ProgressWatch.Enabled && agentRegistry != nil {
+		progressWatcher = progresswatch.New(progresswatch.Options{
+			Enabled: true,
+			Source: fleetProgressSource(agentRegistry,
+				func() *refinery.Refinery { return mergeQueue }, startTime),
+			Mail:          client.SendMGMail,
+			Interval:      cfg.ProgressWatch.Interval,
+			HoldDown:      cfg.ProgressWatch.HoldDown,
+			RenotifyAfter: cfg.ProgressWatch.RenotifyAfter,
+			NotifyTo:      cfg.ProgressWatch.NotifyTo,
+			EscalateAfter: cfg.ProgressWatch.EscalateAfter,
+			EscalateTo:    escalationBox,
+		})
+		fleetProgress = progressWatcher
+		log.Printf("pogod: progress-watch enabled (interval=%s hold_down=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s, report-only)",
+			cfg.ProgressWatch.Interval, cfg.ProgressWatch.HoldDown, cfg.ProgressWatch.RenotifyAfter,
+			cfg.ProgressWatch.NotifyTo, cfg.ProgressWatch.EscalateAfter, escalationBox)
+	} else if cfg.ProgressWatch.Enabled {
+		const reason = "the agent registry did not load, so there is no worker population to measure"
+		log.Printf("pogod: progress-watch NOT armed — %s", reason)
+		// And on the EVENT SPINE, not only on stderr. A runner that was never
+		// armed emits nothing, finds nothing, and is indistinguishable from one
+		// running over a productive fleet — which is this detector's own
+		// subject matter turned one level up, and pogod logs to inherited
+		// stderr, where four months of lines went unrecorded.
+		events.Emit(context.Background(), events.Event{
+			EventType: progresswatch.EventError,
+			Agent:     "pogod",
+			Details: map[string]any{
+				"error": reason,
+				"phase": "arm",
+				"why":   "progress-watch could not be armed at startup; a fleet that stops producing will not be reported until pogod is restarted with an agent registry",
+			},
+		})
+	}
+
 	var firstTurnWatcher *firstturn.Watcher
 	if cfg.FirstTurn.Enabled && agentRegistry != nil && sched != nil {
 		schedulerLog := scheduler.EventLogPath(schedPath)
@@ -3056,6 +3156,19 @@ Flags:
 		// down for 2d21h with every instrument green.
 		if absentWatcher != nil {
 			go absentWatcher.Check(now)
+		}
+		// The fleet-productivity detector rides the same tick and throttles
+		// itself to a coarse interval. In a goroutine for a stronger reason
+		// than the others: its sample BLOCKS for a hostload window and walks
+		// every live worktree, so on a busy fleet it is seconds. Report-only.
+		//
+		// It sits BESIDE the turn watchers on purpose. Those ask whether an
+		// AGENT is completing turns; this asks whether the FLEET is landing
+		// work, and the two come apart in both directions — a fleet can
+		// complete turns all night and merge nothing, and a fleet blocked on a
+		// remote completes no turns while erroring nothing.
+		if progressWatcher != nil {
+			go progressWatcher.Check(now)
 		}
 		// The first-completed-turn floor rides the same tick and throttles
 		// itself to a coarse interval. In a goroutine because it scans the

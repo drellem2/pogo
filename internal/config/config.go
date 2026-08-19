@@ -480,6 +480,27 @@ const (
 	// itself, and here the reason is stronger: the recipient is not merely
 	// unwakeable, it is not running, so the mail has no reader at all.
 	DefaultAbsentWatchEscalateAfter = 48 * time.Hour
+	// DefaultProgressWatchInterval is how often pogod asks whether the fleet is
+	// producing anything. Each sample costs one process-table pair plus a walk
+	// per live worktree, so it is not free; five minutes matches the other
+	// heartbeat detectors and leaves the hold-down, not the cadence, deciding
+	// how fast a finding arrives.
+	DefaultProgressWatchInterval = 5 * time.Minute
+	// DefaultProgressWatchHoldDown is how long the conjunction must hold,
+	// unbroken, before anybody is mailed. Two samples at the default interval:
+	// the CPU member is an instantaneous reading and a whole fleet can be
+	// between things for one of them.
+	DefaultProgressWatchHoldDown = 10 * time.Minute
+	// DefaultProgressWatchRenotify is how long an OPEN, unchanged episode stays
+	// quiet. mg-70f3 counted 49 pages and 44 all-clears in one log for one
+	// fault; two hours is what keeps this detector out of that shape.
+	DefaultProgressWatchRenotify = 2 * time.Hour
+	// DefaultProgressWatchNotifyTo is the mayor: deciding what to do about a
+	// fleet that is waiting on a remote is coordination work.
+	DefaultProgressWatchNotifyTo = "mayor"
+	// DefaultProgressWatchEscalateAfter is how long the fleet may land nothing
+	// before the notice ALSO reaches the human box.
+	DefaultProgressWatchEscalateAfter = 2 * time.Hour
 
 	// DefaultFirstTurnInterval is how often pogod's first-completed-turn floor
 	// samples the crew (mg-3cbb). Well under the grace, so a finding is
@@ -766,9 +787,13 @@ type Config struct {
 	// detector whose population is the CONFIGURED set rather than the registry;
 	// see AbsentWatchConfig.
 	AbsentWatch AbsentWatchConfig
-	FirstTurn   FirstTurnConfig
-	WedgeWatch  WedgeWatchConfig
-	DoneReap    DoneReapConfig
+	// ProgressWatch is the fleet-productivity detector (mg-516e): the only
+	// standing instrument that asks whether the fleet is GETTING ANYTHING DONE
+	// rather than whether it is dead or erroring. See ProgressWatchConfig.
+	ProgressWatch ProgressWatchConfig
+	FirstTurn     FirstTurnConfig
+	WedgeWatch    WedgeWatchConfig
+	DoneReap      DoneReapConfig
 	// OrchestrationResume holds the deadline on a stopped fleet. See
 	// OrchestrationResumeConfig and cmd/pogod/orchresume.go.
 	OrchestrationResume OrchestrationResumeConfig
@@ -1310,6 +1335,47 @@ type DeafWatchConfig struct {
 	EscalateAfter time.Duration
 }
 
+// ProgressWatchConfig configures pogod's FLEET-PRODUCTIVITY detector (mg-516e):
+// the heartbeat-driven runner that reports a fleet which is ALIVE, NOT FAILING,
+// and getting nothing done.
+//
+// It exists because every other signal answers "is it dead?" or "is it
+// erroring?". On 2026-08-14 seven polecats sat PTY-active and blocked on an
+// unreachable API for ~30 minutes with no file written, 0.10 of 10 cores held
+// and no merge landing — and no alarm fired, because the state is neither of
+// the two the instruments have cells for. It was found by a human noticing that
+// a routine liveness check came back CONFUSING rather than red.
+//
+// The detector's mechanics live in internal/progresswatch and its thresholds
+// are that package's Defaults; this config carries only the runner's cadences
+// and routing, matching how the other heartbeat detectors are configured.
+//
+// REPORT-ONLY: it mails NotifyTo and restarts nothing. A fleet waiting on a
+// remote is not fixed by killing the agents that are waiting.
+type ProgressWatchConfig struct {
+	// Enabled turns the runner on. Defaults to true. It is inert on a daemon
+	// with no agent registry, and every unmeasurable member of the conjunction
+	// reports as an error rather than as a finding, so leaving it on is safe.
+	Enabled bool
+	// Interval is the gap between samples. Zero falls back to
+	// DefaultProgressWatchInterval.
+	Interval time.Duration
+	// HoldDown is how long the conjunction must hold before it is mailed. Zero
+	// falls back to DefaultProgressWatchHoldDown; a NEGATIVE value disables the
+	// wait, which only a test should do.
+	HoldDown time.Duration
+	// RenotifyAfter is how long an open episode stays quiet. Zero falls back to
+	// DefaultProgressWatchRenotify.
+	RenotifyAfter time.Duration
+	// NotifyTo is the mailbox findings go to. Empty falls back to
+	// DefaultProgressWatchNotifyTo (`mayor`).
+	NotifyTo string
+	// EscalateAfter is how long the condition may hold before the notice also
+	// goes to `human`. Zero falls back to DefaultProgressWatchEscalateAfter; a
+	// NEGATIVE value disables age-based escalation.
+	EscalateAfter time.Duration
+}
+
 // AbsentWatchConfig configures pogod's ABSENT-AGENT announcer (mg-7d20): the
 // heartbeat-driven runner that compares the CONFIGURED crew/mayor set against
 // the registry and mails when a member has been missing for longer than its
@@ -1725,6 +1791,7 @@ type parsedConfig struct {
 	ackWatchEnabledSet       bool
 	deafWatchEnabledSet      bool
 	absentWatchEnabledSet    bool
+	progressWatchEnabledSet  bool
 	firstTurnEnabledSet      bool
 	wedgeWatchEnabledSet     bool
 	doneReapEnabledSet       bool
@@ -1862,6 +1929,14 @@ func Load() *Config {
 			RenotifyAfter: DefaultAbsentWatchRenotify,
 			NotifyTo:      DefaultAbsentWatchNotifyTo,
 			EscalateAfter: DefaultAbsentWatchEscalateAfter,
+		},
+		ProgressWatch: ProgressWatchConfig{
+			Enabled:       true,
+			Interval:      DefaultProgressWatchInterval,
+			HoldDown:      DefaultProgressWatchHoldDown,
+			RenotifyAfter: DefaultProgressWatchRenotify,
+			NotifyTo:      DefaultProgressWatchNotifyTo,
+			EscalateAfter: DefaultProgressWatchEscalateAfter,
 		},
 		FirstTurn: FirstTurnConfig{
 			Enabled:  true,
@@ -2098,6 +2173,28 @@ func Load() *Config {
 		// age-based escalation off.
 		if fileCfg.AbsentWatch.EscalateAfter != 0 {
 			cfg.AbsentWatch.EscalateAfter = fileCfg.AbsentWatch.EscalateAfter
+		}
+		if fileCfg.progressWatchEnabledSet {
+			cfg.ProgressWatch.Enabled = fileCfg.ProgressWatch.Enabled
+		}
+		if fileCfg.ProgressWatch.Interval > 0 {
+			cfg.ProgressWatch.Interval = fileCfg.ProgressWatch.Interval
+		}
+		// Non-zero, not >0: a negative hold-down is the documented way to turn
+		// the wait off, so it must survive the merge like any other override.
+		if fileCfg.ProgressWatch.HoldDown != 0 {
+			cfg.ProgressWatch.HoldDown = fileCfg.ProgressWatch.HoldDown
+		}
+		if fileCfg.ProgressWatch.RenotifyAfter > 0 {
+			cfg.ProgressWatch.RenotifyAfter = fileCfg.ProgressWatch.RenotifyAfter
+		}
+		if fileCfg.ProgressWatch.NotifyTo != "" {
+			cfg.ProgressWatch.NotifyTo = fileCfg.ProgressWatch.NotifyTo
+		}
+		// Non-zero, not >0: a negative value is the documented way to turn
+		// age-based escalation off.
+		if fileCfg.ProgressWatch.EscalateAfter != 0 {
+			cfg.ProgressWatch.EscalateAfter = fileCfg.ProgressWatch.EscalateAfter
 		}
 		if fileCfg.firstTurnEnabledSet {
 			cfg.FirstTurn.Enabled = fileCfg.FirstTurn.Enabled
@@ -2996,6 +3093,30 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "escalate_after":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.AbsentWatch.EscalateAfter = d
+				}
+			}
+		case "progress_watch":
+			switch key {
+			case "enabled":
+				cfg.ProgressWatch.Enabled = val == "true"
+				cfg.progressWatchEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.ProgressWatch.Interval = d
+				}
+			case "hold_down":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.ProgressWatch.HoldDown = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.ProgressWatch.RenotifyAfter = d
+				}
+			case "notify_to":
+				cfg.ProgressWatch.NotifyTo = unquotedVal
+			case "escalate_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.ProgressWatch.EscalateAfter = d
 				}
 			}
 		case "first_turn":
