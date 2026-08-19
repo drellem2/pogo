@@ -86,8 +86,20 @@
 // of the whole watcher lineage one level up — a detector that reads green
 // because it cannot see is worse than no detector, because it is trusted.
 // Detect also reports the population it DECLINED to judge (too fresh, beyond
-// the lookback, never addressed), so a quiet sample is legible as a decision
-// rather than as an absence.
+// the lookback, never addressed, mis-anchored), so a quiet sample is legible as
+// a decision rather than as an absence.
+//
+// The converse has its own rung, and it was paid for: an IMPOSSIBLE reading is
+// not a finding either. mg-21ad mailed "mayor has completed nothing since it
+// spawned 51m0s ago" about a mayor that had answered 4 scheduled fires and
+// written 10 lines to ~/.pogo/agents/turnlog/mayor.log in that same 51 minutes
+// — both re-derived here — because its evidence was measured from an older
+// crew-mate's spawn. Report.Misanchored is where that shape goes now. This arm is
+// the only instrument that can report a coordinator which never came up — every
+// other fleet-wide check on this box routes through that coordinator — so a
+// false positive here is not noise in a redundant channel, it is noise in the
+// sole channel, and its cost is that the next reader discounts the one notice
+// nobody else can send.
 package firstturn
 
 import (
@@ -269,12 +281,21 @@ type Report struct {
 	DarkFor time.Duration
 	// Judged names the agents this sample actually judged.
 	Judged []string
-	// TooFresh, BeyondLookback and NeverAddressed name the populations the
-	// sample declined to judge, and why. A report that states its own
-	// denominator cannot be misread as coverage it did not have.
+	// TooFresh, BeyondLookback, NeverAddressed and Misanchored name the
+	// populations the sample declined to judge, and why. A report that states
+	// its own denominator cannot be misread as coverage it did not have.
 	TooFresh       []string
 	BeyondLookback []string
 	NeverAddressed []string
+	// Misanchored names agents whose only observed completion PREDATES their
+	// spawn. Under ReadEvidence that is unreachable — it anchors every agent at
+	// its own StartedAt — so this is the guard against the caller that gets it
+	// wrong anyway, which is what mg-21ad was: a population-wide window handed
+	// to a per-agent join. The reading is impossible rather than negative, and
+	// an impossible reading must degrade to "cannot judge", never to a finding.
+	// This arm is the only instrument that can report a coordinator which never
+	// came up, so a false positive here is noise in the sole channel.
+	Misanchored []string
 	// Scanned is the caller's pre-filter population size.
 	Scanned int
 }
@@ -324,6 +345,13 @@ func Detect(snap Snapshot, p Params) Report {
 			rep.TooFresh = append(rep.TooFresh, a.Name)
 			continue
 		}
+		if !a.FirstCompletion.IsZero() && a.FirstCompletion.Before(a.StartedAt) {
+			// Evidence from before this agent existed. It belongs to another
+			// incarnation, or to a window that was never this agent's, and
+			// either way it cannot answer "has THIS one completed a turn".
+			rep.Misanchored = append(rep.Misanchored, a.Name)
+			continue
+		}
 		if a.Completed() {
 			rep.Judged = append(rep.Judged, a.Name)
 			continue
@@ -343,6 +371,7 @@ func Detect(snap Snapshot, p Params) Report {
 	sort.Strings(rep.TooFresh)
 	sort.Strings(rep.BeyondLookback)
 	sort.Strings(rep.NeverAddressed)
+	sort.Strings(rep.Misanchored)
 	sort.SliceStable(rep.Findings, func(i, j int) bool {
 		if rep.Findings[i].DarkFor != rep.Findings[j].DarkFor {
 			return rep.Findings[i].DarkFor > rep.Findings[j].DarkFor

@@ -1252,7 +1252,7 @@ Distinct from `ack_watch_fired` with `blackout: true`, which is the *other* side
   - `episode_age` (string, required): how long this episode has been open
   - `judged` (array of string, required): the agents actually judged this sample
   - `scanned` (int, required): agents in the registry before filtering
-  - `too_fresh` / `beyond_lookback` / `never_addressed` (arrays of string, required): the populations declined and why. `never_addressed` is an agent fewer than 2 fires reached — that is `deaf_watch`'s finding and a different remedy, and blaming this agent for it would point the operator at the wrong component. A report that states its own denominator cannot be misread as coverage it did not have (mg-7a20)
+  - `too_fresh` / `beyond_lookback` / `never_addressed` / `misanchored` (arrays of string, required): the populations declined and why. `never_addressed` is an agent fewer than 2 fires reached — that is `deaf_watch`'s finding and a different remedy, and blaming this agent for it would point the operator at the wrong component. `misanchored` is an agent whose only observed completion **predates its own spawn**: an impossible reading rather than a negative one, since the evidence reader anchors every agent at its own `StartedAt`, so it means the window came from somewhere else and the agent is judged neither dark nor clear (mg-21ad — a mayor with 31 completed turns was mailed about twice as having "completed nothing since it spawned", because its evidence was measured from a crew-mate's spawn 8h17m earlier). A report that states its own denominator cannot be misread as coverage it did not have (mg-7a20)
   - `grace` (string, required): the threshold in force
   - `notified` (string, required): comma-separated recipients
   - `escalated` (bool, required): true when the escalation box was copied
@@ -1269,7 +1269,7 @@ One sample of the floor with nothing to report — every judged agent has comple
 
 It exists for the reason this whole ticket exists: a silent correct outcome and a control that is not running are the same observation. The synthetic-failure-turn detector ran ~204 checks across 17h of total fleet silence and emitted nothing at all, and that quiet was read as the fleet's health.
 
-- **`details` fields:** `judged`, `scanned`, `too_fresh`, `beyond_lookback`, `never_addressed`, `grace` — as on `first_turn_watch_dark`; plus `suppressed` (bool, optional), `reason` (string, optional) and `would_have_reported` (array of string, optional) on the settle-window path
+- **`details` fields:** `judged`, `scanned`, `too_fresh`, `beyond_lookback`, `never_addressed`, `misanchored`, `grace` — as on `first_turn_watch_dark`; plus `suppressed` (bool, optional), `reason` (string, optional) and `would_have_reported` (array of string, optional) on the settle-window path
 
 #### `first_turn_watch_blind`
 
