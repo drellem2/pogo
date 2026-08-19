@@ -91,6 +91,18 @@
 // what happened on 2026-08-19 when a coordinator read 2 findings over 121 items
 // as the population of at-risk work and acted on it.
 //
+// AND THE STRANDED REMEDY WAS UNCONDITIONAL WITH RESPECT TO WHETHER THE BRANCH
+// WAS EVER BUILT (mg-aed4). Branches carrying RESCUE commits — five named in the
+// ticket, six on the full sweep of 2026-08-19 — work
+// recovered from dead polecats' worktrees and committed with `--no-verify` on
+// purpose, because a rescue of possibly-partial work must not be gated on whether
+// that work compiles — were rendered identically to a branch genuinely ready to
+// submit, each under a paste-ready `pogo refinery submit`, while each of those
+// items' own body said in bold not to submit it. The report's closing caveat was
+// already there and was not the missing piece: it applies to every row equally, so
+// a reader who trusts it still cannot tell WHICH rows it is about. See
+// KindRescueUnbuilt.
+//
 // REPORTS ONLY. It never submits and never closes. Submitting is cheap by hand
 // once you know; a wrong auto-submit lands unreviewed work, and a wrong auto-done
 // discards a branch.
@@ -142,6 +154,56 @@ const (
 	// KindStranded is an open item whose branch carries commits the target does
 	// not have. Resubmit the branch; do not dispatch.
 	KindStranded Kind = "stranded"
+
+	// KindRescueUnbuilt is a stranded row whose unmerged work is a RESCUE commit:
+	// work recovered out of a dead polecat's preserved worktree and committed
+	// with the pre-commit hook bypassed. It is KindStranded in every respect
+	// except the one that matters — WHAT TO DO — and it exists because that
+	// difference could not be seen (mg-aed4).
+	//
+	// THE TOOL AND THE TICKETS CONTRADICTED, AND THE TOOL IS THE RUNNABLE ONE. On
+	// 2026-08-19 this sweep printed, for five branches,
+	//
+	//	-> pogo refinery submit polecat-p516e --repo=... --author=mg-516e   # do NOT dispatch at mg-516e
+	//
+	// while each of those five items' own body said, in bold, "Do not `pogo
+	// refinery submit` this branch. It has never been built." Both artifacts were
+	// correct about what they knew: the tickets knew the commits came from the
+	// mg-51bf rescue and bypassed the hook DELIBERATELY, because a rescue of
+	// possibly-partial work must not be gated on whether that work compiles; this
+	// sweep knew only that commits existed on a branch and not on the target,
+	// which is true. A prose caveat in a ticket does not reach the reader of a
+	// paste-ready command.
+	//
+	// THE FAILURE MODE IS THE GATE PASSING, NOT THE GATE FAILING. A wasted submit
+	// costs a gate run and a `failed` row somebody later has to interpret. A
+	// PASSING gate merges half-implemented, never-reviewed rescue code to the
+	// target on the authority of a command a detector printed — and a rescue
+	// branch is precisely the population where "the gate passed" is the weakest
+	// evidence available, because the commit deliberately bypassed the hook that
+	// would have had an opinion.
+	//
+	// THE REPORT'S GENERAL CAVEAT WAS NOT THE MISSING PIECE. It already ended
+	// with "This command submitted nothing and closed nothing... both are
+	// destructive in the wrong direction, so they stay with a reader", and it
+	// still does. What it lacked was any PER-BRANCH signal: the five unbuildable
+	// rescue branches rendered identically to a branch genuinely ready to submit,
+	// so a reader who trusted the caveat had nothing telling them WHICH rows it
+	// applied to. That is what a separate Kind buys — a distinct label, a
+	// distinct count in the findings header, and a distinct remedy.
+	//
+	// IT IS NOT mg-441f AND IT IS NOT mg-ba32. mg-441f is the remedy not
+	// consulting REFINERY HISTORY, so it prints submit for a branch the refinery
+	// ALREADY REFUSED — a different cause. The mayor measured that it is not what
+	// is happening here: none of the five branches has ever been submitted at all,
+	// against a positive control on the history query. That figure is theirs and is
+	// not re-derived here. mg-ba32 is the SPAWN-time guard having no rescue cell —
+	// a different instrument. This is the third claim: the remedy was unconditional
+	// with respect to whether the branch was ever BUILT.
+	//
+	// THE REMEDY IS DELIBERATELY NOT A PASTE-READY SUBMIT, and withholding that
+	// one string is the repair. See Row.Remedy.
+	KindRescueUnbuilt Kind = "rescue_unbuilt"
 
 	// KindLandedNotClosed is an open item whose branch is fully merged. The work
 	// is done and on the target; the item is what is out of date. Close it.
@@ -281,18 +343,26 @@ const (
 // that has already been judged harmless.
 func (k Kind) Rank() int {
 	switch k {
-	case KindStranded:
+	case KindRescueUnbuilt:
+		// AHEAD OF STRANDED, on the same precedence argument DispositionPreRegistration
+		// makes: when both descriptions fit, the row whose ordinary remedy is
+		// destructive has to be the one the reader reaches first. A rescue row read
+		// as an ordinary stranded row gets a submit it must not have; an ordinary
+		// stranded row can never be read as a rescue one, because the marker is on
+		// the commit.
 		return 0
-	case KindUnjudged:
+	case KindStranded:
 		return 1
-	case KindRepoUnreadable:
+	case KindUnjudged:
 		return 2
-	case KindConflictSuspect:
+	case KindRepoUnreadable:
 		return 3
-	case KindOrphanBranch:
+	case KindConflictSuspect:
 		return 4
-	default:
+	case KindOrphanBranch:
 		return 5
+	default:
+		return 6
 	}
 }
 
@@ -350,6 +420,22 @@ type Row struct {
 	// branch carries one. A re-dispatch must branch FROM it and never amend it.
 	PreRegistration *strandedwork.Commit `json:"pre_registration,omitempty"`
 
+	// Rescue is the oldest unmerged RESCUE commit, when the branch carries one:
+	// the evidence that this work was committed with the pre-commit hook bypassed
+	// and has never been built. See KindRescueUnbuilt.
+	//
+	// IT OUTLIVES THE KIND, and only the stranded cell becomes KindRescueUnbuilt.
+	// A conflict_suspect row keeps its own Kind because its own remedy is already
+	// the right one — and it carries something the rescue row cannot, that the
+	// target may ALREADY hold this work. But "this branch is unreviewed rescue
+	// work" is worth saying on any row it is true of, so the field is set
+	// regardless and the renderer prints it either way.
+	//
+	// A landed_not_closed row can never carry it: this is populated from UNMERGED
+	// commits and that row has none, which is the same rule that keeps the label
+	// from becoming permanent once a rescue branch actually merges.
+	Rescue *strandedwork.Commit `json:"rescue,omitempty"`
+
 	// Subjects are the unmerged commit subjects, so a reader can recognise the
 	// work without a git round-trip.
 	Subjects []string `json:"subjects,omitempty"`
@@ -399,6 +485,36 @@ func (r Row) StatusLabel() string {
 // dispatch refusal prints.
 func (r Row) Remedy() string {
 	switch r.Kind {
+	case KindRescueUnbuilt:
+		// NO SUBMIT LINE, AND THAT OMISSION IS THE WHOLE REPAIR (mg-aed4). Every
+		// other instrument in this package's blast radius learned from mg-bfe0 that
+		// a prose caveat beside a runnable command loses to the command, and the fix
+		// there was to CHAIN the missing prerequisite with `&&` so it could not be
+		// skipped. That fix is unavailable here: the prerequisite is "somebody
+		// builds and reads this", the build command is repo-specific, and there is
+		// no string that makes a human review runnable. So the prerequisite is made
+		// unskippable the only other way — the paste-ready submit is not printed at
+		// all, for the one population where pasting it merges never-reviewed work.
+		//
+		// It is not withheld as a secret. The row above it names the branch, the
+		// repo and the target, and the submit command is the ordinary stranded one
+		// which this report prints on every other stranded row. What a reader cannot
+		// do is paste it from HERE without having read the branch first, and a
+		// reader who has read the branch does not need it printed.
+		//
+		// AND THE WITHHOLDING IS COMPLETE, INCLUDING IN THE EXPLANATION. The first
+		// draft of this line said "NO `refinery submit` line is printed for this row
+		// on purpose", which put the command's own name on the row it was being kept
+		// off — this ticket's defect committed by its own repair, in miniature. The
+		// text names no submittable command at all.
+		sha := ""
+		if r.Rescue != nil {
+			sha = " " + short(r.Rescue.SHA)
+		}
+		return fmt.Sprintf("git -C %s log -p %s..%s   # READ IT, THEN BUILD IT. Rescue commit%s "+
+			"bypassed the pre-commit hook and has NEVER been built; NO submit command is printed "+
+			"for this row on purpose — if the gate passed it would merge unreviewed work to %s",
+			r.Item.Repo, r.Target, orDefault(r.Ref, r.Branch), sha, r.Target)
 	case KindStranded:
 		return fmt.Sprintf("%s   # do NOT dispatch at %s",
 			strandedwork.SubmitRemedy(r.Item.Repo, r.Branch, r.Item.ID, r.Pushed), r.Item.ID)
@@ -994,6 +1110,7 @@ func classify(repo, branch string, it Item, target string) (*Row, string, error)
 		Item: it, Branch: branch, Ref: f.Ref, Pushed: f.Pushed, Target: f.Target,
 		Unmerged: len(f.Unmerged), Equivalent: f.Equivalent,
 		PreRegistration: f.PreRegistration,
+		Rescue:          f.Rescue,
 	}
 	for _, c := range f.Unmerged {
 		row.Subjects = append(row.Subjects, c.Subject)
@@ -1018,6 +1135,17 @@ func classify(repo, branch string, it Item, target string) (*Row, string, error)
 	row.Kind = KindStranded
 	if row.Presence.SuggestsLanded() {
 		row.Kind = KindConflictSuspect
+	}
+	// THE RESCUE KIND DISPLACES ONLY KindStranded, and the narrowness is the
+	// point (mg-aed4). KindStranded is the one whose remedy is a paste-ready
+	// `refinery submit`, so it is the one cell where an unbuilt branch is handed
+	// a destructive command. conflict_suspect already recommends NEITHER remedy
+	// and says so; overwriting it here would trade a correct "the two instruments
+	// disagree, go and look" for a narrower statement, and would lose the fact
+	// that the target may ALREADY hold this work. Row.Rescue stays set either
+	// way, so the renderer says "unreviewed rescue work" on both.
+	if row.Kind == KindStranded && row.Rescue != nil {
+		row.Kind = KindRescueUnbuilt
 	}
 	return &row, "", nil
 }

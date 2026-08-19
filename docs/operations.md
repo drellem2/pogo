@@ -1373,14 +1373,50 @@ stranded and landed-not-closed work — open items joined to their branches
 
 Exit 0 clean, 1 at least one finding, 2 usage, 3 this run measured nothing.
 
-### Four row kinds, and their remedies are not interchangeable
+### The row kinds, and their remedies are not interchangeable
 
 | kind | what it is | remedy |
 |---|---|---|
+| `rescue_unbuilt` | stranded, **and** the unmerged work is a `RESCUE` commit: recovered from a dead polecat's worktree with the pre-commit hook bypassed | read it, then build it. **No submit command is printed for these rows** |
 | `stranded` | the branch has commits the target does not | `pogo refinery submit`; do **not** dispatch |
 | `landed_not_closed` | the branch is fully merged, the item still asks for it | `mg done` |
 | `conflict_suspect` | the two instruments below disagree | read it yourself; **neither** command |
 | `unjudged` | the branch could not be read | re-run; this is not a clean row |
+| `repo_unreadable` | the item's repo could not be listed, so no branch was looked for | fix the item's repo field; not a clean row |
+| `orphan_branch` | a polecat worktree on this host whose branch holds commits **no remote ref has**, named by no open item | `git push origin <branch>` — there is no owner to ask and nothing to submit under |
+
+#### `rescue_unbuilt` — why one row type is denied a runnable remedy
+
+A rescue commits a dead polecat's possibly-partial work with `--no-verify`
+**deliberately**: gating a rescue on whether the work compiles is how the
+half-implementation — exactly the case the pre-commit hook refuses — stays
+uncommitted and unbacked-up. The bypass is right and the consequence is that the
+branch has never been built and nobody has reviewed it.
+
+On 2026-08-19 the sweep printed a paste-ready `pogo refinery submit` for five such
+branches while each of those items' own body said, in bold, not to submit it. The
+tool and the tickets contradicted, and the tool is the runnable one. **The failure
+mode is the gate PASSING**, not failing: a failed gate costs a run and a `failed`
+row somebody must interpret; a passing one merges half-implemented, never-reviewed
+code to main on the authority of a command a detector printed — and a rescue
+branch is precisely the population where "the gate passed" is the weakest evidence
+available, because the commit bypassed the hook that would have had an opinion.
+
+The report's closing caveat (*"both remedies are destructive in the wrong
+direction, so they stay with a reader"*) was already there and was not the missing
+piece: it applies to every row equally, so a reader who trusted it still could not
+tell which rows it was about. These rows now have their own label, their own count
+on the findings line, and a remedy that reads the branch instead of submitting it.
+The submit line is withheld, not warned about, because a prose caveat beside a
+runnable command loses to the command.
+
+Detection is the commit-subject prefix `RESCUE(` / `RESCUE:` on an **unmerged**
+commit — a rescue commit that already landed was built by whatever gate merged it,
+so the label is not permanent. Measured population on 2026-08-19: 32 such commits
+across the three repositories, from two rescue events (`mg-51bf`, 5; `mg-11fa`,
+27) that disagree about what goes inside the parentheses — a work item in the
+first, an agent name in the second — which is why the predicate is the prefix and
+nothing else.
 
 `landed_not_closed` is the worse one and it has an **upstream fix**, so it should
 stay near-empty: pogod used to close an author's item at merge only when a polecat

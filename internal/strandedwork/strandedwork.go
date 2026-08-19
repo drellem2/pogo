@@ -154,6 +154,116 @@ func (c Commit) IsPreRegistration() bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.Subject)), PreRegistrationPrefix)
 }
 
+// RescuePrefix is how a RESCUE commit announces itself, at the start of its
+// subject: `RESCUE(mg-516e): <what> recovered from preserved worktree p516e —
+// UNREVIEWED, not this committer's work (mg-51bf)`.
+//
+// WHAT A RESCUE COMMIT IS, AND WHY IT IS NOT ORDINARY WORK. When a polecat dies
+// holding uncommitted work, the recovery commits that work out of the preserved
+// worktree — deliberately with `--no-verify`, because a rescue of
+// POSSIBLY-PARTIAL work must not be gated on whether that work compiles. Gating
+// it is how the half-implementation, which is exactly the case the pre-commit
+// hook refuses, stays uncommitted and unbacked-up. So the bypass is correct and
+// the branch is still, by construction, work that HAS NEVER BEEN BUILT and that
+// nobody has reviewed.
+//
+// THIS CONSTANT IS THE FIRST PLACE THE CONVENTION IS WRITTEN DOWN IN CODE, and
+// that is worth stating rather than hiding: `grep -rn RESCUE` over this
+// repository's Go, shell and markdown finds no emitter. Every one of these
+// subjects was typed by an agent following a rescue ticket.
+//
+// THE POPULATION IS MEASURED AND IT IS NOT THE FIVE THE TICKET NAMED. Counting
+// `git log --all --grep='^RESCUE'` across the three repositories this fleet works
+// on 2026-08-19: 32 commits, from TWO rescue events, in TWO spellings of what
+// goes in the parentheses.
+//
+//	mg-51bf   5 commits, pogo only    RESCUE(mg-516e): <what> recovered from preserved
+//	                                  worktree p516e — UNREVIEWED, … (mg-51bf)
+//	mg-11fa   27 commits, all three   RESCUE(p6b2d): 2 uncommitted path(s) from a
+//	                                  retained worktree (mg-11fa)
+//
+// The first form parenthesises the WORK ITEM whose work was recovered; the
+// second parenthesises the AGENT whose worktree it came out of. Only the prefix
+// is common to both, which is the reason the predicate is the prefix and nothing
+// else — a rule keyed on either payload would have silently covered one event
+// and missed the other, and the missed one is 27 of the 32.
+//
+// Two rescue events is still a small sample and this is still a convention no
+// code enforces. It should not be cited as though it were a format.
+//
+// THE ASYMMETRY RUNS THE OPPOSITE WAY FROM PreRegistrationPrefix, so the
+// matching rule is deliberately wider rather than narrower. There, a false
+// positive REFUSES a dispatch that should have proceeded, so the spelling is
+// exact. Here, a false positive tells a reader to build and read a branch before
+// submitting it — a cost of one build — while a MISS prints a paste-ready
+// `refinery submit` for unbuilt, unreviewed, possibly half-implemented work, and
+// the expensive direction is not the wasted gate run: it is the gate PASSING and
+// that work merging to the target on the authority of a command a detector
+// printed (mg-aed4). So the marker is matched case-insensitively, anchored at
+// the start of the subject, and accepts either the parenthesised form or a bare
+// colon.
+//
+// The value is the bare WORD, lowercased, with no delimiter — unlike
+// PreRegistrationPrefix, which carries its colon. The delimiter is checked
+// separately by IsRescue because the two live spellings differ in it, and a
+// constant that baked in one of them would name a rule that only half the
+// population follows.
+const RescuePrefix = "rescue"
+
+// rescueHeaderRe matches the parenthesised id in the marker itself:
+// `RESCUE(mg-1d05):`. That id names the item whose work was RECOVERED.
+var rescueHeaderRe = regexp.MustCompile(`^\s*[Rr][Ee][Ss][Cc][Uu][Ee]\(((?:mg|gh)-[A-Za-z0-9]{3,})\)`)
+
+// IsRescue reports whether c is a rescue commit: work recovered out of a dead
+// polecat's worktree and committed with the pre-commit hook bypassed.
+//
+// See RescuePrefix for the convention, its measured population, and why this
+// match is wider than the pre-registration one.
+func (c Commit) IsRescue() bool {
+	s := strings.ToLower(strings.TrimSpace(c.Subject))
+	if !strings.HasPrefix(s, RescuePrefix) {
+		return false
+	}
+	rest := s[len(RescuePrefix):]
+	return strings.HasPrefix(rest, "(") || strings.HasPrefix(rest, ":")
+}
+
+// RescuedItem returns the work item whose work this commit recovered — the id
+// inside the marker's own parentheses, `RESCUE(mg-1d05):` — or "" when the
+// subject names none.
+func (c Commit) RescuedItem() string {
+	if m := rescueHeaderRe.FindStringSubmatch(c.Subject); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// RescueTracker returns the work item the RESCUE ITSELF was tracked under: the
+// trailing `(mg-51bf)`, by the repository's ordinary commit convention.
+//
+// THE TWO IDS IN A RESCUE SUBJECT ARE DIFFERENT ITEMS AND THIS IS THE ONE WORTH
+// PRINTING. `RESCUE(mg-1d05): … (mg-51bf)` names the recovered item first and
+// the rescue last. A report joining branches to items already knows the first —
+// it is the row's own subject — and knows nothing about the second, which is
+// where a reader finds out why work was committed without a build at all. The
+// first draft of this function returned the wrong one of the two and the wrong
+// one is the redundant one, which is exactly how it survived a passing test.
+//
+// Best-effort, as WorkItemID is: "" when the subject names no trailing id.
+func (c Commit) RescueTracker() string {
+	if !c.IsRescue() {
+		return ""
+	}
+	rest := c.Subject
+	if loc := rescueHeaderRe.FindStringIndex(rest); loc != nil {
+		rest = rest[loc[1]:]
+	}
+	if m := workItemRe.FindStringSubmatch(rest); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
 // Finding is the verdict on one branch.
 type Finding struct {
 	// Repo is the git repository the branch was read from.
@@ -189,6 +299,22 @@ type Finding struct {
 	// the ref a re-dispatch must branch from. Nil unless Disposition is
 	// DispositionPreRegistration.
 	PreRegistration *Commit `json:"pre_registration,omitempty"`
+
+	// Rescue is the OLDEST unmerged RESCUE commit on the branch, when there is
+	// one. It is the evidence that this branch's work was committed with the
+	// pre-commit hook bypassed and has therefore NEVER BEEN BUILT — see
+	// RescuePrefix.
+	//
+	// IT IS A FIELD AND NOT A DISPOSITION, deliberately. A rescue branch IS
+	// stranded — its commits really are absent from the target — so the
+	// disposition every caller switches on stays DispositionResubmit and the
+	// dispatch refusal keeps refusing exactly as before. What changes is what a
+	// REMEDY may say about it, and that decision belongs to each reporting
+	// instrument rather than to a state machine every caller shares. The
+	// check-stranded sweep is the one that consumes it today (mg-aed4); the
+	// spawn-time guard's rescue cell is mg-ba32's, and it can read this field
+	// without this package changing again.
+	Rescue *Commit `json:"rescue,omitempty"`
 
 	// CarriedBy names every OTHER polecat branch whose tip contains this
 	// branch's head — i.e. every branch that already carries all of these
@@ -401,6 +527,17 @@ func Inspect(repo, branch, target string) (Finding, error) {
 			c := unmerged[i]
 			f.PreRegistration = &c
 			f.Disposition = DispositionPreRegistration
+			break
+		}
+	}
+
+	// The rescue marker, on the same population and for the same reason: only an
+	// UNMERGED rescue commit is evidence of unbuilt work sitting outside the
+	// target. One that already landed was built by whatever gate merged it.
+	for i := range unmerged {
+		if unmerged[i].IsRescue() {
+			c := unmerged[i]
+			f.Rescue = &c
 			break
 		}
 	}
