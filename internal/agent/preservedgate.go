@@ -230,8 +230,9 @@ func preservedTreeSentence(t gitgc.PreservedTree) string {
 	s := fmt.Sprintf("%s holds %d uncommitted path(s) — %d modified, %d untracked",
 		t.Path, t.Total, t.Modified, t.Untracked)
 	if t.Untracked > 0 {
-		s += " (untracked paths are on no branch, in no stash and on no remote: this tree is their " +
-			"only copy on this machine)"
+		s += " (untracked paths are on no branch, in no stash and on no remote: this tree is the " +
+			"only copy of their git objects — whether it is the only copy of their CONTENT " +
+			"needs a `cmp` against the same path upstream)"
 	}
 	if t.Branch != "" {
 		s += ", on branch " + t.Branch

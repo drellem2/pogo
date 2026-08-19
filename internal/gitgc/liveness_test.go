@@ -62,7 +62,7 @@ func TestSweepKeepsLivePolecatOnForeignBranch(t *testing.T) {
 	deadWT := r.worktreeOwnedBy("beef", "polecat-beef")
 
 	tickets := TicketIndex{
-		"mg-caa65": TicketInFlight,
+		"mg-caa65": TicketAvailable,
 		"mg-dccb":  TicketArchived,
 		"mg-beef":  TicketArchived,
 	}

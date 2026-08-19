@@ -285,7 +285,7 @@ func TestSweep(t *testing.T) {
 	tickets := TicketIndex{
 		"mg-arch":         TicketArchived,
 		"mg-live":         TicketArchived,
-		"mg-flight":       TicketInFlight,
+		"mg-flight":       TicketAvailable,
 		"mg-donemerged":   TicketDone,
 		"mg-doneunmerged": TicketDone,
 		// mg-unknown intentionally absent
@@ -416,7 +416,7 @@ func TestSweepOrphanDirs(t *testing.T) {
 	tickets := TicketIndex{
 		"mg-aaaa": TicketDone,
 		"mg-bbbb": TicketArchived,
-		"mg-cccc": TicketInFlight,
+		"mg-cccc": TicketAvailable,
 		// mg-dddd intentionally absent
 		"mg-eeee": TicketDone,
 		"mg-ffff": TicketArchived,
@@ -497,7 +497,7 @@ func TestSweepOrphanDirsSkipsRegistered(t *testing.T) {
 	wt := filepath.Join(polecats, "aaaa")
 	r.git("worktree", "add", "-q", wt, "polecat-aaaa")
 
-	tickets := TicketIndex{"mg-aaaa": TicketInFlight}
+	tickets := TicketIndex{"mg-aaaa": TicketAvailable}
 	res, err := Sweep(Options{Repo: r.dir, Tickets: tickets, PolecatsDir: polecats})
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
@@ -617,7 +617,7 @@ func TestSweepDeletesArchivedBranchDurableElsewhere(t *testing.T) {
 		Tickets: TicketIndex{
 			"mg-reviewer": TicketArchived,
 			"mg-rebased":  TicketArchived,
-			"mg-builder":  TicketInFlight, // its own branch is not the subject here
+			"mg-builder":  TicketAvailable, // its own branch is not the subject here
 		},
 	})
 	if err != nil {
@@ -681,7 +681,7 @@ func TestSweepDoesNotMarkUnaskedKeepsAtRisk(t *testing.T) {
 	res, err := Sweep(Options{
 		Repo: r.dir, TargetBranch: "main",
 		LivePolecats: map[string]bool{"live": true},
-		Tickets:      TicketIndex{"mg-live": TicketArchived, "mg-flight": TicketInFlight},
+		Tickets:      TicketIndex{"mg-live": TicketArchived, "mg-flight": TicketAvailable},
 	})
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)

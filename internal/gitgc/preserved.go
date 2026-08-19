@@ -69,8 +69,16 @@ type PreservedTree struct {
 	// Total, Modified and Untracked are the dirty split, present only on the
 	// "preserved" outcome — a count is meaningful only when the tree was
 	// actually read. Untracked is the urgent half: such a path is on no
-	// branch, in no stash and on no remote, so this tree is its only copy
-	// anywhere on the machine.
+	// branch, in no stash and on no remote, so this tree is the only copy of
+	// its GIT OBJECTS.
+	//
+	// It is NOT necessarily the only copy of the CONTENT, and the two were
+	// conflated here for long enough to mislead three agents in one day
+	// (mg-11fa). Of one tree's 7 untracked paths, 3 were byte-identical to
+	// origin/main and 4 more existed upstream at greater length; committing
+	// them would have republished drafts that shipped work had overtaken.
+	// The untracked marker orders these paths by RECOVERABILITY, never by
+	// value, and a `cmp` against the upstream path is what separates them.
 	Total     int `json:"dirty_paths,omitempty"`
 	Modified  int `json:"modified_paths,omitempty"`
 	Untracked int `json:"untracked_paths,omitempty"`
@@ -589,7 +597,10 @@ func writeTree(b *strings.Builder, t PreservedTree) {
 		fmt.Fprintf(b, "    %d uncommitted: %d modified, %d UNTRACKED   `--force` reclaims it: %s\n",
 			t.Total, t.Modified, t.Untracked, t.ForceReclaims)
 		if untracked := t.UntrackedPaths(); len(untracked) > 0 {
-			fmt.Fprintf(b, "    untracked — on no branch, in no stash, on no remote; this tree is the only copy:\n")
+			fmt.Fprintf(b, "    untracked — on no branch, in no stash, on no remote, so this tree is the\n")
+			fmt.Fprintf(b, "    only copy OF THE GIT OBJECTS. That is not a claim about the CONTENT: a file\n")
+			fmt.Fprintf(b, "    of the same path may exist upstream, identical or newer. `git show\n")
+			fmt.Fprintf(b, "    origin/main:<path> | cmp - <path>` settles it per file and costs nothing:\n")
 			for _, p := range untracked {
 				fmt.Fprintf(b, "      %s\n", p)
 			}
