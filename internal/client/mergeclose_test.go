@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/config"
 )
 
 // fakeMG scripts the three mg invocations CloseMGWorkItemAtMerge makes — show,
@@ -595,5 +597,65 @@ func TestACandidateWithNoCreationStampIsStillReported(t *testing.T) {
 	}
 	if !errors.Is(err, ErrMGRemainderAmbiguousSuccessor) {
 		t.Errorf("two candidates are still two candidates: %v", err)
+	}
+}
+
+// THE PROPERTY THE MERGED-NOT-CLOSED EXCLUSION RESTS ON (mg-f17c).
+//
+// cmd/pogod/reap.go suppresses the merged-not-closed coordinator alert for a
+// close that returned ErrMGWorkItemGated, on the grounds that a gated item
+// cannot be dispatched — so the hazard the alert warns about (a worker sent at
+// work already on the target) cannot arise. That reasoning is only sound if the
+// population this error names is EXACTLY the population dispatch refuses. Two
+// lists that happen to agree today would make it an accident.
+//
+// They cannot disagree, and this pins why: the refusal above is produced by
+// config.IsDispatchGated, which is the same predicate
+// internal/agent.MGDispatchGate.DispatchGated refuses on and the same one
+// internal/stallwatch.watchedForDispatch excludes on. One function, three
+// callers. This test asserts the IFF against the predicate itself rather than
+// against a literal list, so a gate value added to the vocabulary next year is
+// covered without anyone remembering this file — and a local list grown here
+// instead fails immediately.
+//
+// The `claimed` half is not decoration. The gate is about UNOWNED work: a gated
+// item somebody holds has a worker on it and its merge is an ordinary
+// completion, so the error must NOT appear there even though the predicate
+// says gated. That asymmetry is what stops this test from passing by asserting
+// the predicate against itself.
+//
+// A relative assertion still has one vacuous reading — a predicate that answered
+// false for everything would satisfy the iff and gate nothing. That half is held
+// down on the other side, by config.TestIsDispatchGatedCoversEveryDefault, which
+// asserts the vocabulary absolutely. Neither test is sufficient alone and they
+// are named here so the pair is discoverable rather than coincidental.
+func TestTheGatedRefusalIsExactlyTheDispatchGatedPopulation(t *testing.T) {
+	// A population spanning both gating rules (the sentinel vocabulary and the
+	// `blocked:<agent>` shape), their case/whitespace variants, and the
+	// dispatchable values that must NOT be caught by either.
+	for _, assignee := range []string{
+		"parked", "human", "blocked:mayor", " Parked ", "HUMAN", "blocked: pm-pogo",
+		"", "mayor", "pm-pogo", "p479c", "blocked", "parked-later",
+	} {
+		t.Run("assignee="+assignee, func(t *testing.T) {
+			wantGated := config.IsDispatchGated(assignee, nil)
+
+			f := &fakeMG{show: item("available", assignee)}
+			f.install(t)
+			err := CloseMGWorkItemAtMerge("mg-479c", `{"branch":"b"}`)
+			if got := errors.Is(err, ErrMGWorkItemGated); got != wantGated {
+				t.Fatalf("unclaimed assignee %q: gated refusal = %t, but config.IsDispatchGated says %t — "+
+					"the merged-not-closed exclusion in cmd/pogod/reap.go suppresses its alert on the "+
+					"strength of these two agreeing (err = %v)", assignee, got, wantGated, err)
+			}
+
+			// Held work is never this refusal, whatever the assignee says.
+			g := &fakeMG{show: item("claimed", assignee)}
+			g.install(t)
+			if err := CloseMGWorkItemAtMerge("mg-479c", `{"branch":"b"}`); errors.Is(err, ErrMGWorkItemGated) {
+				t.Errorf("assignee %q is CLAIMED — a worker holds it and its merge is an ordinary "+
+					"completion, but the close was declined as gated: %v", assignee, err)
+			}
+		})
 	}
 }

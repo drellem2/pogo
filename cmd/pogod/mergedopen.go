@@ -49,6 +49,34 @@ import (
 // rather than to nothing. That ordering is the lesson mg-be37 paid for: its
 // detector was correct for three months and its only outputs were pogod's log and
 // an event nothing consumed.
+//
+// # TELLING THIS ALERT FROM THE ONE THAT ALREADY ARRIVES (mg-f17c)
+//
+// This path has NEVER FIRED. Verified 2026-08-20 against the whole retained
+// record: zero `work_item_merged_not_closed` events across ~/.pogo/events.log and
+// events.log.1, and zero mails anywhere under ~/.macguffin/mail carrying this
+// alert's subject prefix. The running pogod is 1ebf2dc (2026-08-14) and 2c6c47d
+// is not an ancestor of it, so the code is merged and not live; it cannot fire
+// until a redeploy (mg-fa05 / mg-e121).
+//
+// Meanwhile a DIFFERENT merged-not-closed mail does arrive today, and confusing
+// the two would score the redeploy as verified when nothing new had run. They are
+// separable by inspection, no timing argument needed:
+//
+//	THIS path      subject `[merged-not-closed] <id> is MERGED but still open …`
+//	               to agent.CoordinatorName(), preceded by a
+//	               `work_item_merged_not_closed` event on the spine.
+//	THE OLD path   subject `MERGED BUT NOT CLOSED: <id> — <title>`
+//	               to the item's CREATOR, from internal/filernotify (mg-f120,
+//	               mg-2b71), body opens "The work item you filed had its branch
+//	               MERGED". No event.
+//
+// So the runtime observation this alert still owes is specific: after the
+// redeploy, let one `declares-remainder` item merge with its polecat exiting
+// without a successor, and confirm a mail with the BRACKETED subject reaches the
+// coordinator's real mailbox and that `work_item_merged_not_closed` is on the
+// spine. A filer-addressed `MERGED BUT NOT CLOSED:` mail is not that observation
+// — it is the pre-existing path, and it fires either way.
 
 // mergedOpenAlert is one merged-but-unclosed work item with everything a reader
 // needs to act, assembled at the moment the fact is established.
