@@ -2,14 +2,22 @@ package gitgc
 
 import "testing"
 
+// TestStateFromStatus pins the mapping from mg's status vocabulary to
+// TicketState. Every status mg actually emits is here, and each not-concluded
+// one maps to its OWN state rather than to a shared "in-flight".
+//
+// The previous version of this test asserted "shelved": TicketUnknown, which
+// pinned a conflation rather than a behaviour: 205 of this machine's work items
+// are shelved, and every one of them made the report say the lookup had failed.
+// Shelved is a decision somebody made; unknown is the absence of an answer.
 func TestStateFromStatus(t *testing.T) {
 	cases := map[string]TicketState{
 		"done":      TicketDone,
 		"archived":  TicketArchived,
-		"available": TicketInFlight,
-		"claimed":   TicketInFlight,
-		"pending":   TicketInFlight,
-		"shelved":   TicketUnknown,
+		"available": TicketAvailable,
+		"claimed":   TicketClaimed,
+		"pending":   TicketPending,
+		"shelved":   TicketShelved,
 		"":          TicketUnknown,
 		"bogus":     TicketUnknown,
 	}
@@ -20,8 +28,53 @@ func TestStateFromStatus(t *testing.T) {
 	}
 }
 
+// TestStateStringSaysWhatMgSaid keeps the rendered word equal to the status mg
+// reported. It exists because the word it replaced — "in-flight" for every one
+// of available/claimed/pending — is a claim about the world that the status
+// never established, and a reader of `pogo gc --list-preserved` acted on it:
+// three trees labelled "in-flight" were read as protected by active work, when
+// all three items were `available`, blocked, with no process running (mg-11fa).
+func TestStateStringSaysWhatMgSaid(t *testing.T) {
+	for status, want := range map[string]string{
+		"available": "available",
+		"claimed":   "claimed",
+		"pending":   "pending",
+		"shelved":   "shelved",
+		"done":      "done",
+		"archived":  "archived",
+		"bogus":     "unknown",
+	} {
+		if got := stateFromStatus(status).String(); got != want {
+			t.Errorf("stateFromStatus(%q).String() = %q, want %q", status, got, want)
+		}
+		if got := stateFromStatus(status).String(); got == "in-flight" {
+			t.Errorf("status %q rendered as %q — the report must not assert that "+
+				"somebody is working on an item when the status says only that it "+
+				"has not concluded", status, got)
+		}
+	}
+}
+
+// TestSplittingNotConcludedStatesLeftDeletionUnchanged is the guard on the
+// refactor itself: splitting one not-concluded state into four is only safe
+// because Concluded() is the sole reduction the sweep consults. If a future
+// change makes any of them concluded, a tree holding uncommitted work becomes
+// `--force`-eligible without anyone deciding that.
+func TestSplittingNotConcludedStatesLeftDeletionUnchanged(t *testing.T) {
+	for _, status := range []string{"available", "claimed", "pending", "shelved", "", "bogus"} {
+		if stateFromStatus(status).Concluded() {
+			t.Errorf("status %q is treated as concluded; it must keep the branch", status)
+		}
+	}
+	for _, status := range []string{"done", "archived"} {
+		if !stateFromStatus(status).Concluded() {
+			t.Errorf("status %q must remain concluded", status)
+		}
+	}
+}
+
 func TestConcluded(t *testing.T) {
-	for _, s := range []TicketState{TicketUnknown, TicketInFlight} {
+	for _, s := range []TicketState{TicketUnknown, TicketAvailable} {
 		if s.Concluded() {
 			t.Errorf("%v.Concluded() = true, want false", s)
 		}
@@ -61,9 +114,9 @@ not json
 	idx := parseTicketIndex(ndjson)
 	want := TicketIndex{
 		"mg-1111": TicketArchived,
-		"mg-2222": TicketInFlight,
+		"mg-2222": TicketClaimed,
 		"mg-3333": TicketDone,
-		"mg-4444": TicketUnknown,
+		"mg-4444": TicketShelved,
 	}
 	if len(idx) != len(want) {
 		t.Fatalf("parsed %d items, want %d: %v", len(idx), len(want), idx)
@@ -79,22 +132,22 @@ not json
 // the real spread of polecat branch naming conventions found in the wild.
 func TestBranchStateResolution(t *testing.T) {
 	idx := TicketIndex{
-		"mg-30d5": TicketInFlight, // bare-id branch
-		"mg-9cdc": TicketArchived, // polecat-mg-<id> branch
-		"mg-a1d8": TicketArchived, // polecat-cat-mg-<id> branch
-		"mg-486f": TicketArchived, // polecat-pc-<id> branch
-		"mg-3963": TicketDone,     // retry-suffixed branch
-		"mg-30eb": TicketArchived, // prefixed + suffixed branch
-		"mg-06cb": TicketArchived, // glued single-letter prefix
-		"mg-283e": TicketArchived, // glued retry prefix
-		"mg-55d1": TicketArchived, // pc-<id> with trailing retry letter
+		"mg-30d5": TicketAvailable, // bare-id branch
+		"mg-9cdc": TicketArchived,  // polecat-mg-<id> branch
+		"mg-a1d8": TicketArchived,  // polecat-cat-mg-<id> branch
+		"mg-486f": TicketArchived,  // polecat-pc-<id> branch
+		"mg-3963": TicketDone,      // retry-suffixed branch
+		"mg-30eb": TicketArchived,  // prefixed + suffixed branch
+		"mg-06cb": TicketArchived,  // glued single-letter prefix
+		"mg-283e": TicketArchived,  // glued retry prefix
+		"mg-55d1": TicketArchived,  // pc-<id> with trailing retry letter
 	}
 	cases := []struct {
 		branch   string
 		wantID   string
 		wantStat TicketState
 	}{
-		{"polecat-30d5", "mg-30d5", TicketInFlight},
+		{"polecat-30d5", "mg-30d5", TicketAvailable},
 		{"polecat-mg-9cdc", "mg-9cdc", TicketArchived},
 		{"polecat-cat-mg-a1d8", "mg-a1d8", TicketArchived},
 		{"polecat-pc-486f", "mg-486f", TicketArchived},

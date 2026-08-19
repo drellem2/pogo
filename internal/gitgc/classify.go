@@ -10,6 +10,17 @@ import (
 // TicketState is the lifecycle classification of a macguffin work item,
 // reduced to what GC needs: only a concluded ticket makes its polecat
 // branch a deletion candidate.
+//
+// Every not-concluded status is a SEPARATE state even though GC treats them
+// identically, because this type is also what the operator report prints. It
+// used to collapse available/claimed/pending into one state whose String() was
+// "in-flight", and that word is a claim about the world — that somebody is
+// working on the item — which the status alone never established. A reader of
+// `pogo gc --list-preserved` took three trees labelled "in-flight" to be
+// protected by active work; all three items were `available`, blocked, with no
+// process running (mg-11fa). The reduction GC needs is Concluded(); the report
+// needs the word mg actually said, so the word is kept and the reduction is a
+// method.
 type TicketState int
 
 const (
@@ -17,9 +28,23 @@ const (
 	// ticket, or `mg` was unavailable. GC keeps unknown branches: it never
 	// deletes what it cannot positively classify.
 	TicketUnknown TicketState = iota
-	// TicketInFlight means the work item is still active
-	// (available / claimed / pending). Its branch is kept.
-	TicketInFlight
+	// TicketAvailable means the item exists, is not concluded, and NOBODY
+	// holds it. Its branch is kept. This is not "in flight": an available
+	// item is one dispatch away from being concluded, so a tree resting on
+	// it is resting on the absence of a decision, not on a decision.
+	TicketAvailable
+	// TicketClaimed means an agent holds the item. Its branch is kept. Note
+	// that a claim outlives the process that made it, so this state does not
+	// establish that anything is running either — `pogo agent list` does.
+	TicketClaimed
+	// TicketPending means the item is queued behind something. Kept.
+	TicketPending
+	// TicketShelved means the item was deliberately set aside. Kept — and
+	// reported as shelved rather than as unknown, which is what it used to
+	// render as by falling through to the default. "Shelved" is a decision
+	// somebody made; "unknown" says the lookup failed. 205 of this machine's
+	// work items are shelved, and every one of them said "unknown".
+	TicketShelved
 	// TicketDone means the work item is marked done. Its branch is
 	// deletable once merged into the target branch.
 	TicketDone
@@ -31,14 +56,26 @@ const (
 // Concluded reports whether the work item's lifecycle has ended, making
 // its branch a deletion candidate (a done ticket is still subject to the
 // merge gate; an archived ticket is not).
+//
+// This is the ONLY reduction GC's deletion decisions are allowed to make, and
+// splitting the not-concluded statuses above left it bit-for-bit unchanged:
+// everything that is not Done or Archived is kept, exactly as before.
 func (s TicketState) Concluded() bool {
 	return s == TicketDone || s == TicketArchived
 }
 
+// String renders the state as the status word mg reported, so a report that
+// prints it asserts nothing mg did not say.
 func (s TicketState) String() string {
 	switch s {
-	case TicketInFlight:
-		return "in-flight"
+	case TicketAvailable:
+		return "available"
+	case TicketClaimed:
+		return "claimed"
+	case TicketPending:
+		return "pending"
+	case TicketShelved:
+		return "shelved"
 	case TicketDone:
 		return "done"
 	case TicketArchived:
@@ -48,15 +85,23 @@ func (s TicketState) String() string {
 	}
 }
 
-// stateFromStatus maps an mg status string to a TicketState.
+// stateFromStatus maps an mg status string to a TicketState. An unrecognised
+// status stays TicketUnknown and is therefore kept: a status this function has
+// not been taught is not evidence that work concluded.
 func stateFromStatus(status string) TicketState {
 	switch status {
 	case "done":
 		return TicketDone
 	case "archived":
 		return TicketArchived
-	case "available", "claimed", "pending":
-		return TicketInFlight
+	case "available":
+		return TicketAvailable
+	case "claimed":
+		return TicketClaimed
+	case "pending":
+		return TicketPending
+	case "shelved":
+		return TicketShelved
 	default:
 		return TicketUnknown
 	}

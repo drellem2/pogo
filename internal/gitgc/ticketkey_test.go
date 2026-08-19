@@ -26,7 +26,7 @@ import (
 // verdict on the same files. Both arms must now reach the owner's answer.
 func TestSameDeadOwnerGetsTheSameVerdict(t *testing.T) {
 	// Identical in both arms: 0047 is archived and dead, a773 is in flight.
-	tickets := TicketIndex{"mg-0047": TicketArchived, "mg-a773": TicketInFlight}
+	tickets := TicketIndex{"mg-0047": TicketArchived, "mg-a773": TicketAvailable}
 
 	t.Run("registered worktree", func(t *testing.T) {
 		r := newTestRepo(t)
@@ -62,7 +62,7 @@ func TestSameDeadOwnerGetsTheSameVerdict(t *testing.T) {
 		if !remaining["polecat-a773"] {
 			t.Error("the foreign in-flight branch was deleted; removing the tree must only un-check-it-out")
 		}
-		if kb := findBranchAction(res.BranchesKept, "polecat-a773"); kb == nil || kb.State != TicketInFlight {
+		if kb := findBranchAction(res.BranchesKept, "polecat-a773"); kb == nil || kb.State != TicketAvailable {
 			t.Errorf("polecat-a773 should be kept on its OWN in-flight ticket, got %+v", kb)
 		}
 		if remaining["polecat-0047"] {
@@ -115,7 +115,7 @@ func TestSweepKeepsTreeWhoseOwnerIsInFlight(t *testing.T) {
 	res, err := Sweep(Options{
 		Repo:         r.dir,
 		TargetBranch: "main",
-		Tickets:      TicketIndex{"mg-0047": TicketInFlight, "mg-beef": TicketArchived},
+		Tickets:      TicketIndex{"mg-0047": TicketAvailable, "mg-beef": TicketArchived},
 	})
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
@@ -130,7 +130,7 @@ func TestSweepKeepsTreeWhoseOwnerIsInFlight(t *testing.T) {
 	if kept == nil {
 		t.Fatalf("no kept entry for %s; removed=%+v", wt, res.WorktreesRemoved)
 	}
-	if !strings.Contains(kept.Reason, "owner's ticket in-flight") {
+	if !strings.Contains(kept.Reason, "owner's ticket available") {
 		t.Errorf("kept reason = %q, want it keyed on the owner", kept.Reason)
 	}
 	// A kept tree pins its branch — the ref cannot be deleted while checked out.
@@ -155,7 +155,7 @@ func TestUnresolvableOwnerFallsBackToBranch(t *testing.T) {
 		wantRemoved bool
 	}{
 		{"concluded branch reaps", TicketArchived, true},
-		{"in-flight branch keeps", TicketInFlight, false},
+		{"in-flight branch keeps", TicketAvailable, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -209,7 +209,7 @@ func TestOwnerStateAndBranchStateAreOneResolver(t *testing.T) {
 	idx := TicketIndex{
 		"mg-30d5": TicketArchived,
 		"mg-9cdc": TicketDone,
-		"mg-a1d8": TicketInFlight,
+		"mg-a1d8": TicketAvailable,
 		"mg-30eb": TicketArchived,
 		"mg-06cb": TicketDone,
 	}

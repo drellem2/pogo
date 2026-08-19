@@ -4343,12 +4343,19 @@ complete. Pass --repo explicitly to narrow it to one repository.
 The listing reports facts and no verdict: whose tree it is, which branch it
 pins, its work item and that item's state, how long it has gone untouched, and
 every uncommitted path in it split into modified and UNTRACKED — the second
-being the half that exists on no branch, in no stash and on no remote. It says
-nothing about whether a tree may be reclaimed, because that needs someone to
-read the files. It also says, per repository, exactly which trees a single
+being the half that exists on no branch, in no stash and on no remote, so the
+tree is the only copy of those git OBJECTS. That is not a claim about their
+CONTENT: a path may exist upstream, identical or newer, and comparing it with
+"git show origin/main:PATH | cmp - PATH" says which, for nothing. It says nothing
+about whether a tree may be reclaimed, because that needs someone to read the
+files. It also says, per repository, exactly which trees a single
 "pogo gc --repo=... --apply --force" would take: that command is repo-scoped and
 forced, so it acts on every eligible retained tree at once and not on the one
-you inspected, and it does NOT touch a tree whose work item is still in flight.
+you inspected, and it does NOT touch a tree whose work item has not concluded.
+"Has not concluded" is the whole of that guarantee: the listing prints the
+status mg reported (available, claimed, pending, shelved) rather than calling
+them all "in flight", because an available item is one dispatch away from
+concluding and a claim outlives the process that made it.
 
 --list-preserved never changes anything, so --apply and --force do not apply
 to it.`,

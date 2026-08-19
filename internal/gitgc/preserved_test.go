@@ -190,7 +190,7 @@ func TestScanPreservedForceColumnAgreesWithTheSweep(t *testing.T) {
 	dirty(t, concluded, "wip.go", "package x\n")
 	dirty(t, inflight, "wip.go", "package y\n")
 
-	tickets := TicketIndex{"mg-a1b2": TicketArchived, "mg-c3d4": TicketInFlight}
+	tickets := TicketIndex{"mg-a1b2": TicketArchived, "mg-c3d4": TicketAvailable}
 
 	rep, err := ScanPreserved(PreservedScanOptions{PolecatsDir: polecats, Tickets: tickets})
 	if err != nil {
@@ -619,5 +619,84 @@ func TestWorktreeSourceRepoReadsThePointerNotGit(t *testing.T) {
 	damageGitPointer(t, wt)
 	if got, err := WorktreeSourceRepo(wt); err == nil {
 		t.Fatalf("a garbage pointer must not resolve to a repository, got %q", got)
+	}
+}
+
+// TestSummaryDoesNotClaimTheTreeIsTheOnlyCopyOfTheCONTENT is the second half of
+// the same discipline TestSummaryRefusesToRenderAVerdict enforces: the listing
+// may state facts and may not state conclusions.
+//
+// It used to head the untracked block with "this tree is the only copy". That
+// is true of the GIT OBJECTS and is not true of the CONTENT, and the gap is not
+// academic — of one tree's seven untracked paths, three were byte-identical to
+// origin/main and four more existed upstream at greater length. Three agents
+// working this ticket built a fleet-wide "113 files of authored work at risk"
+// framing on that sentence and each had to withdraw a figure (mg-11fa).
+//
+// So the header must scope the claim to the objects and must hand the reader
+// the check that settles the content question.
+func TestSummaryDoesNotClaimTheTreeIsTheOnlyCopyOfTheCONTENT(t *testing.T) {
+	polecats := sharedPolecats(t)
+	r := newTestRepo(t)
+	r.commit("kept.txt", "x\n")
+	r.branch("polecat-c0py")
+	wt := addWorktree(t, r, polecats, "c0py", "polecat-c0py")
+	dirty(t, wt, "brand-new.txt", "content\n")
+
+	rep, err := ScanPreserved(PreservedScanOptions{
+		PolecatsDir: polecats, Tickets: TicketIndex{"mg-c0py": TicketArchived},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := rep.Summary()
+
+	if strings.Contains(out, "this tree is the only copy:") {
+		t.Errorf("the listing states the tree is the only copy of the CONTENT, which it "+
+			"never established; it may only claim that of the git objects. Got:\n%s", out)
+	}
+	if !strings.Contains(out, "only copy OF THE GIT OBJECTS") {
+		t.Errorf("the untracked header must scope its claim to the git objects, got:\n%s", out)
+	}
+	if !strings.Contains(out, "cmp") {
+		t.Errorf("the untracked header must name the check that settles whether the CONTENT "+
+			"exists elsewhere, got:\n%s", out)
+	}
+	if !strings.Contains(out, "brand-new.txt") {
+		t.Fatalf("the untracked path itself must still be listed, got:\n%s", out)
+	}
+}
+
+// TestSummaryReportsTheStatusMgGaveNotInFlight keeps the per-tree work-item
+// line equal to what mg said.
+//
+// Rendering available/claimed/pending alike as "in-flight" asserted that
+// somebody was working on the item. Three trees in this machine's retained set
+// carried that label while their items sat `available` and blocked with no
+// process running, and the label was read as evidence that active work
+// protected them (mg-11fa). `pogo agent list` answers "is anything running";
+// this listing does not, so it must not imply an answer.
+func TestSummaryReportsTheStatusMgGaveNotInFlight(t *testing.T) {
+	polecats := sharedPolecats(t)
+	r := newTestRepo(t)
+	r.commit("kept.txt", "x\n")
+	r.branch("polecat-av01")
+	wt := addWorktree(t, r, polecats, "av01", "polecat-av01")
+	dirty(t, wt, "kept.txt", "edited\n")
+
+	rep, err := ScanPreserved(PreservedScanOptions{
+		PolecatsDir: polecats, Tickets: TicketIndex{"mg-av01": TicketAvailable},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := rep.Summary()
+
+	if strings.Contains(out, "in-flight") {
+		t.Errorf("an `available` work item was rendered as in-flight, which claims active "+
+			"work the status never established. Got:\n%s", out)
+	}
+	if !strings.Contains(out, "(available)") {
+		t.Errorf("the tree's line must carry the status mg reported, got:\n%s", out)
 	}
 }
