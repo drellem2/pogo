@@ -786,3 +786,47 @@ func git(repo string, args ...string) (string, error) {
 	}
 	return string(out), nil
 }
+
+// LocalOnlyCommits lists the commits on repo's LOCAL branch head that no remote
+// ref contains — `git rev-list refs/heads/<branch> --not --remotes`, newest
+// first. An absent local head is (nil, nil): there is no local copy to lose.
+//
+// IT IS A DIFFERENT QUESTION FROM Inspect'S, AND THAT IS THE POINT (mg-ded2).
+// Inspect asks "does the TARGET have these commits", which is the right question
+// for a branch somebody still intends to merge. This asks "does any remote have
+// this commit object at all", which is the right question for a branch nobody is
+// going to merge, because it is the only one whose answer tracks what git-gc can
+// destroy. The two populations differ by two orders of magnitude on this box:
+// `git cherry` calls 435 polecat branches unmerged in one repo, and exactly one
+// of the 46 polecat worktrees present held a commit on no remote ref
+// (polecat-pc-rev-c5d5a10, measured 2026-08-19).
+//
+// `--not --remotes` and not `--not origin/<branch>` because the loss this
+// answers about is loss of the OBJECT. A commit pushed under any other ref —
+// carried by a sibling branch, cherry-picked onto a release branch — is on a
+// server and recoverable at leisure; only a commit no remote ref reaches dies
+// with the worktree.
+func LocalOnlyCommits(repo, branch string) ([]Commit, error) {
+	head := "refs/heads/" + branch
+	ok, err := refExists(repo, head)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	out, err := git(repo, "rev-list", "--format=%H %s", "--no-commit-header", head, "--not", "--remotes")
+	if err != nil {
+		return nil, fmt.Errorf("git rev-list %s --not --remotes in %s: %w", head, repo, err)
+	}
+	var commits []Commit
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		sha, subject, _ := strings.Cut(line, " ")
+		commits = append(commits, Commit{SHA: sha, Subject: strings.TrimSpace(subject)})
+	}
+	return commits, nil
+}

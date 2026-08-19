@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -13,6 +14,7 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/strandwatch"
 )
 
@@ -63,6 +65,9 @@ TWO ROW TYPES, WITH OPPOSITE REMEDIES:
   unjudged           the branch could not be READ. -> re-run; this is not clean.
   repo_unreadable    the item's REPO could not be listed, so no branch was ever
                      looked for. -> fix the item's repo field; not a clean row.
+  orphan_branch      a polecat WORKTREE on this host whose branch holds commits no
+                     remote ref has, and NO open item names it. -> push it; there
+                     is no owner to ask and nothing to submit it under.
 
 The second row is the worse one and it needed its own repair: while a branch is
 unmerged the spawn-time guard refuses the dispatch, but the moment it merges the
@@ -130,6 +135,37 @@ were dropped from the join without appearing in any column, the closing line rea
 0. Every unchecked item is now a ` + "`repo_unreadable`" + ` row with its own id and its own
 error, so the shortfall reaches the exit code as well as the page.
 
+THE UNIT OF REPORT USED TO BE THE OPEN WORK ITEM, AND THAT EXCLUDED THE
+POPULATION MOST AT RISK (mg-ded2). Everything above is the item join, so three
+things could not appear in this report at all: a branch whose item is already
+CLOSED, a repository NO OPEN ITEM NAMES, and a ` + "`--repo`" + ` that MATCHED NOTHING.
+Measured on 2026-08-19 — ` + "`polecat-pc-rev-c5d5a10`" + ` held a commit on no remote ref
+inside a repository the sweep covered cleanly and was absent; a repository holding
+a polecat worktree appeared nowhere at all, not even as an error; and
+` + "`--repo one_third_width_three`" + `, ` + "`--repo this-repo-does-not-exist-anywhere`" + ` and a clean
+repository printed byte-identical all-clears and exited 0.
+
+Three repairs, and the cheapest has the widest catch:
+
+  the FRAME       the report now states its own boundary, unconditionally and on
+                  every run. Neither row-level fix below would have caught the
+                  missing repository — its worktree is clean — but a frame naming
+                  "repositories no open item names are outside this report" makes
+                  the omission visible without needing the tree to be dirty. An
+                  instrument that names its boundary is checkable; one that does
+                  not gets read as a census.
+  orphan_branch   a polecat WORKTREE still on this host whose branch holds commits
+                  NO REMOTE REF CONTAINS and which no open item names. Bounded by
+                  the worktree and not by the branch: ` + "`git cherry`" + ` calls 435 polecat
+                  branches unmerged in one repository here, while 1 of the 46
+                  worktrees present held a commit no remote had. "Also scan closed
+                  items" is NOT the fix — that population is unbounded and
+                  abandoned by design.
+  --repo          a value naming no repository this sweep can see now exits
+                  ` + fmt.Sprint(exitInstrumentFailure) + ` and says so. A wrong command that prints an all-clear does
+                  not merely fail to check a claim, it manufactures support for
+                  whichever claim it was quoted to support.
+
 A run that COULD NOT LOOK says so instead of exiting clean. An unreachable agent
 registry is fatal (exit ` + fmt.Sprint(exitInstrumentFailure) + `): without it every running polecat in the fleet
 looks like a strand, and a detector that fires on healthy input teaches its
@@ -154,6 +190,7 @@ run measured nothing.`,
 				Items:          openWorkItems,
 				LiveAgents:     liveAgentNames,
 				QueuedBranches: queuedRefineryBranches,
+				Worktrees:      polecatWorktrees,
 				Repos:          repos,
 				Target:         target,
 				Fetch:          !noFetch,
@@ -167,13 +204,23 @@ run measured nothing.`,
 			} else {
 				fmt.Print(strandwatch.Render(rep, all))
 			}
+			// ORDER MATTERS: blindness outranks findings. A run that resolved no
+			// repository cannot have found anything, so the two cannot both be true —
+			// but if they ever could, "this measured nothing" is the answer a caller
+			// must not be able to miss (mg-ded2).
+			if why := rep.Blind(); why != "" {
+				fmt.Fprintf(os.Stderr, "INSTRUMENT FAILURE — %s\n", why)
+				os.Exit(exitInstrumentFailure)
+			}
 			if rep.Actionable() {
 				os.Exit(cli.ExitError)
 			}
 		},
 	}
 	cmd.Flags().StringSliceVar(&repos, "repo", nil,
-		"Restrict to these repositories (default: every repo the open items name)")
+		"Restrict to these ABSOLUTE repository paths (default: every repo the open items name, "+
+			"plus every repo a polecat worktree on this host points at). A value matching none of "+
+			"those exits "+fmt.Sprint(exitInstrumentFailure)+" rather than printing an all-clear")
 	cmd.Flags().StringVar(&target, "target", "",
 		"Ref to compare branches against (default: each repo's default branch)")
 	cmd.Flags().BoolVar(&noFetch, "no-fetch", false,
@@ -259,6 +306,93 @@ func queuedRefineryBranches() (map[string]bool, error) {
 	out := make(map[string]bool, len(queue))
 	for _, mr := range queue {
 		out[strandwatch.QueueKey(mr.RepoPath, mr.Branch)] = true
+	}
+	return out, nil
+}
+
+// polecatWorktrees enumerates the polecat worktrees present on this host, from
+// disk.
+//
+// IT READS THE DIRECTORY AND NOT THE BOARD, and that is the whole point
+// (mg-ded2). Every other source of repositories in this command is downstream of
+// the open work items, so none of them can name a repository whose polecat work
+// all belongs to closed items — which is exactly how a repository holding a
+// polecat worktree came to appear NOWHERE in a report that read as a full sweep.
+//
+// The REPO is taken from git's own answer (`rev-parse --git-common-dir`) rather
+// than from the agent registry, for the reason gitgc.PolecatNameForWorktree
+// gives about the inverse case: a fact about whose tree this is must come from
+// the tree. A registry entry can be gone while the directory is still on disk —
+// that is the state this enumerator exists to find.
+//
+// A directory that is not a live worktree is SKIPPED and not an error. 19 of the
+// 58 entries under the polecats dir on 2026-08-19 were reaped shells whose git
+// registration is gone; they hold no branch and therefore no commit. Reclaiming
+// those directories is gitgc's orphan-dir scan, not this sweep's.
+func polecatWorktrees() ([]strandwatch.Worktree, error) {
+	dir, err := gitgc.DefaultPolecatsDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No polecats dir is a ZERO and not a failure: there are no worktrees.
+			// The distinction reaches the frame, which says "the question failed"
+			// only for a real error.
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", dir, err)
+	}
+	var out []strandwatch.Worktree
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		hasGit := false
+		if _, serr := os.Stat(filepath.Join(path, ".git")); serr == nil {
+			hasGit = true
+		}
+		common, cerr := exec.Command("git", "-C", path,
+			"rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+		if cerr != nil {
+			if !hasGit {
+				continue // a reaped shell: no .git, no branch, nothing to lose
+			}
+			// A DIRECTORY THAT HAS A .git AND STILL WOULD NOT ANSWER is not a
+			// reaped shell, and collapsing the two would be this ticket's own
+			// defect committed by its own repair: the population would lose a
+			// member silently and the count would go on reading as coverage.
+			// Reported with an empty Repo, which the sweep renders as unreadable
+			// rather than dropping.
+			out = append(out, strandwatch.Worktree{
+				Path:  path,
+				Error: fmt.Sprintf("has a .git but git would not answer: %v", cerr),
+			})
+			continue
+		}
+		gitDir := strings.TrimSpace(string(common))
+		if filepath.Base(gitDir) != ".git" {
+			out = append(out, strandwatch.Worktree{
+				Path: path,
+				Error: fmt.Sprintf("git-common-dir %q is not a conventional worktree layout, "+
+					"so the repository it belongs to could not be named", gitDir),
+			})
+			continue
+		}
+		wt := strandwatch.Worktree{Path: path, Repo: filepath.Dir(gitDir)}
+		br, berr := exec.Command("git", "-C", path, "symbolic-ref", "--short", "HEAD").Output()
+		if berr != nil {
+			// A DETACHED HEAD holds commits exactly as a branch does. It cannot be
+			// pushed by name and this sweep has no ref to measure, so it is stated
+			// rather than skipped — a worktree that drops out of the population
+			// without appearing anywhere is the shape being repaired.
+			wt.Error = "no branch is checked out (detached HEAD), so no ref could be measured"
+		} else {
+			wt.Branch = strings.TrimSpace(string(br))
+		}
+		out = append(out, wt)
 	}
 	return out, nil
 }
