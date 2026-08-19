@@ -3,6 +3,8 @@ package strandwatch
 import (
 	"fmt"
 	"strings"
+
+	"github.com/drellem2/pogo/internal/strandedwork"
 )
 
 // Render writes the human form.
@@ -36,7 +38,25 @@ func Render(rep Report, all bool) string {
 			fmt.Fprintf(&b, "    %s — COULD NOT LIST BRANCHES: %s\n", c.Repo, c.Error)
 			continue
 		}
-		fmt.Fprintf(&b, "    %s — %d item(s), %d polecat branch(es), %s\n", c.Repo, c.Items, c.Branches, fetched)
+		discovered := ""
+		if !c.NamedByOpenItem {
+			// The line that could not exist before mg-ded2. Without it a repository
+			// holding polecat worktrees and named by no open item produced no output
+			// of any kind, and the report was indistinguishable from a full sweep.
+			discovered = " — NO OPEN ITEM NAMES THIS REPO; it is here because a polecat " +
+				"worktree on this host points at it"
+		}
+		fmt.Fprintf(&b, "    %s — %d item(s), %d polecat branch(es), %d worktree(s), %s%s\n",
+			c.Repo, c.Items, c.Branches, c.Worktrees, fetched, discovered)
+	}
+	for _, u := range rep.ReposUnmatched {
+		// LOUD, and above the summary sentence rather than below it. The measured
+		// defect was not that the information was missing — `0 repo(s)` was
+		// printed — but that it sat one line above a summary sentence that
+		// contradicted it and lost to the reassuring one.
+		fmt.Fprintf(&b, "  --repo %q MATCHED NOTHING: %s\n", u.Repo, u.Error)
+		fmt.Fprintf(&b, "    No open work item names it, no polecat worktree on this host points at it,\n"+
+			"    and it could not be listed as a git repository. THIS RUN SAYS NOTHING ABOUT IT.\n")
 	}
 	if rep.ItemsWithoutRepo > 0 {
 		fmt.Fprintf(&b, "  %d open item(s) name no repo and were NOT checked — that is a gap, not a clean verdict\n",
@@ -59,6 +79,32 @@ func Render(rep Report, all bool) string {
 	for _, e := range rep.InspectErrors {
 		fmt.Fprintf(&b, "  COULD NOT READ: %s\n", e)
 	}
+	for _, w := range rep.WorktreesUnreadableList {
+		fmt.Fprintf(&b, "  WORKTREE NOT READ: %s — %s\n", w.Path, w.Error)
+	}
+	if len(rep.Frame) > 0 {
+		b.WriteString("\nWHAT THIS REPORT CANNOT SEE:\n")
+		for _, line := range rep.Frame {
+			for _, wrapped := range wrap(line, 84) {
+				fmt.Fprintf(&b, "  %s\n", wrapped)
+			}
+		}
+	}
+	if why := rep.Blind(); why != "" {
+		// Ahead of the verdict, because the verdict is the sentence that travels.
+		fmt.Fprintf(&b, "\nTHIS RUN MEASURED NOTHING: %s\n", why)
+	}
+
+	if len(rep.Rows) == 0 && rep.Blind() != "" {
+		// NOT an all-clear. The summary sentence is what gets skimmed, quoted and
+		// pasted into mail, so on a run that resolved nothing it must not be the
+		// sentence a reader takes away — `--repo one_third_width_three` and
+		// `--repo this-repo-does-not-exist-anywhere` printed byte-identical
+		// all-clears and exited 0 (mg-ded2, gap 3).
+		b.WriteString("\nNO VERDICT. Nothing was scanned, so \"nothing found\" would be a statement\n" +
+			"about this command's arguments and not about the fleet's work.\n")
+		return b.String()
+	}
 
 	if len(rep.Rows) == 0 {
 		// The scope of this sentence is the CHECKED items, and it says so. Every
@@ -80,13 +126,25 @@ func Render(rep Report, all bool) string {
 	}
 
 	fmt.Fprintf(&b, "\n%d FINDING(S) — %d stranded, %d landed-but-not-closed, %d conflict suspect, "+
-		"%d UNJUDGED, %d REPO UNREADABLE:\n",
+		"%d UNJUDGED, %d REPO UNREADABLE, %d ORPHAN BRANCH:\n",
 		len(rep.Rows), rep.Count(KindStranded), rep.Count(KindLandedNotClosed),
-		rep.Count(KindConflictSuspect), rep.Count(KindUnjudged), rep.Count(KindRepoUnreadable))
+		rep.Count(KindConflictSuspect), rep.Count(KindUnjudged), rep.Count(KindRepoUnreadable),
+		rep.Count(KindOrphanBranch))
 
 	for _, r := range rep.Rows {
 		b.WriteString("\n")
-		fmt.Fprintf(&b, "  %-17s %-10s %s\n", r.Kind, r.Item.Status, r.Item.ID)
+		fmt.Fprintf(&b, "  %-17s %-10s %s\n", r.Kind, r.StatusLabel(), r.Subject())
+		if r.Kind == KindOrphanBranch {
+			fmt.Fprintf(&b, "    in %s — %s\n", r.Item.Repo, strandedwork.LocalOnlyWarning)
+			fmt.Fprintf(&b, "    %d commit(s) on NO remote ref, and no OPEN work item names this branch:\n", r.Unmerged)
+			for _, s := range r.Subjects {
+				fmt.Fprintf(&b, "      %s\n", truncate(s, 92))
+			}
+			b.WriteString("    This is the row the open-item join cannot produce. There is no owner to ask\n" +
+				"    and no item to submit under, so the first move is to make the object durable.\n")
+			fmt.Fprintf(&b, "    -> %s\n", r.Remedy())
+			continue
+		}
 		fmt.Fprintf(&b, "    %s\n", truncate(r.Item.Title, 96))
 		if r.Kind == KindUnjudged {
 			fmt.Fprintf(&b, "    branch %s COULD NOT BE READ: %s\n", r.Branch, r.Error)
@@ -183,4 +241,27 @@ func short(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+// wrap breaks a frame line at word boundaries so a boundary statement stays
+// readable in a terminal. The frame is the part of this report meant to be read
+// rather than grepped, and an 800-column paragraph is not read.
+func wrap(s string, width int) []string {
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return nil
+	}
+	var (
+		lines []string
+		cur   = words[0]
+	)
+	for _, w := range words[1:] {
+		if len(cur)+1+len(w) > width {
+			lines = append(lines, cur)
+			cur = w
+			continue
+		}
+		cur += " " + w
+	}
+	return append(lines, cur)
 }
