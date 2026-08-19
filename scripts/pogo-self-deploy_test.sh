@@ -16,6 +16,28 @@ fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE"; }
 # shellcheck source=/dev/null
 source "$HERE/pogo-self-deploy"
 
+# ---------------------------------------------------------------------------
+# fn_line — where a line sits INSIDE one function (mg-9fc9)
+# ---------------------------------------------------------------------------
+# Every source-order assertion below used to grep the whole file and compare
+# absolute line numbers, which was exact while each pattern occurred once. It
+# stopped being exact the moment `bounce` shipped: cmd_bounce ends in the same
+# restart-and-verify sequence cmd_redeploy does, so `verify_orchestration || exit
+# 11` and `do_restart` each match twice, `cut -d: -f1` yields two numbers, and the
+# comparison fails with "integer expression expected" — a green property reported
+# as broken by an arithmetic error, which is the least useful way for a check to
+# go red.
+#
+# Scoping to a function is also the stronger assertion. These orderings are
+# properties of a DEPLOY PATH, and there are now two of them; asserting them once
+# against whichever copy grep happened to find first would leave the second path
+# unchecked while reading green.
+fn_body() { sed -n "/^$1() {/,/^}/p" "$HERE/pogo-self-deploy"; }
+# fn_line FUNC PATTERN — the 1-based offset of the first matching line within
+# FUNC's body, or empty. Empty is a MEANING: the caller reports "not found"
+# rather than comparing against a number nothing produced.
+fn_line() { fn_body "$1" | grep -n -- "$2" | head -1 | cut -d: -f1; }
+
 # --- json_str / json_num against a representative /agents/drain payload ---
 DRAIN='{"draining":true,"count":2,"polecats":[{"name":"cat-a","pid":11,"work_item_id":"mg-aaaa","worktree_dir":"/wt/a","source_repo":"/repo"},{"name":"cat-b","pid":12,"work_item_id":"mg-bbbb","worktree_dir":"/wt/b","source_repo":"/repo"}]}'
 [ "$(printf '%s' "$DRAIN" | json_num count)" = "2" ] \
@@ -567,15 +589,22 @@ VO_UNK="$(vo_run "$MODE_UNREACHABLE")"
 # launchctl kickstart. Order matters and is asserted: verify_running first, so
 # "no pogod at all" and "a pogod that is not serving the fleet" keep their own
 # exit codes instead of collapsing into one.
-SELF_DEPLOY_SRC="$HERE/pogo-self-deploy"
-if grep -q 'verify_running || exit 8' "$SELF_DEPLOY_SRC" \
-   && grep -q 'verify_orchestration || exit 11' "$SELF_DEPLOY_SRC" \
-   && [ "$(grep -n 'verify_running || exit 8' "$SELF_DEPLOY_SRC" | cut -d: -f1)" \
-        -lt "$(grep -n 'verify_orchestration || exit 11' "$SELF_DEPLOY_SRC" | cut -d: -f1)" ]; then
-    pass "cmd_redeploy runs verify_orchestration (exit 11) AFTER verify_running (exit 8) — both checks, in order"
-else
-    fail "cmd_redeploy does not wire verify_running -> verify_orchestration; the post-restart check is back to reading /version alone"
-fi
+# Asserted for BOTH acting paths (mg-9fc9). `bounce` restarts the fleet without
+# deploying, so "a pogod answered" vs "the fleet came back" is exactly as
+# separable there — and the check it uses in place of verify_running is
+# verify_bounced, which deliberately asks less (it has no main to compare to).
+for fn_pair in "cmd_redeploy:verify_running" "cmd_bounce:verify_bounced"; do
+    FN="${fn_pair%%:*}"; LIVENESS="${fn_pair#*:}"
+    L_LINE="$(fn_line "$FN" "$LIVENESS || verify_rc=")"
+    # The STATEMENT, not the comment two dozen lines above it that quotes the
+    # same text while explaining why the code is not written that way.
+    E8_LINE="$(fn_line "$FN" '^    \[ "\$verify_rc" -eq 0 \] || exit 8$')"
+    VO_LINE="$(fn_line "$FN" 'verify_orchestration || exit 11')"
+    { [ -n "$L_LINE" ] && [ -n "$E8_LINE" ] && [ -n "$VO_LINE" ] \
+        && [ "$L_LINE" -lt "$E8_LINE" ] && [ "$E8_LINE" -lt "$VO_LINE" ]; } \
+        && pass "$FN runs verify_orchestration (exit 11) AFTER $LIVENESS (exit 8) — both checks, in order" \
+        || fail "$FN does not wire $LIVENESS -> verify_orchestration; the post-restart check is back to reading /version alone (${L_LINE:-?}/${E8_LINE:-?}/${VO_LINE:-?})"
+done
 
 # --- drain_wait: the gate that used to fail OPEN (mg-65b2) -----------------
 # THE DEFECT, for the reader who finds this in a year. drain_wait used to end
@@ -2917,16 +2946,19 @@ grep -q 'agent.InstallPrompts' "$HERE/pogo-self-deploy" \
 # Same wiring assertion, same reason: report_supervision could be perfect while
 # nothing ever called it, and the whole point of mg-fa79 is a signal that
 # existed 19,274 times and was read zero times.
-grep -q '^    report_supervision$' "$HERE/pogo-self-deploy" \
-    && pass "cmd_redeploy actually calls report_supervision — the reading is wired, not just written" \
-    || fail "report_supervision is defined but never called from cmd_redeploy"
-
-# It must run AFTER the restart, or it reports on the pogod being replaced.
-SUP_LINE="$(grep -n '^    report_supervision$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
-RESTART_LINE="$(grep -n '^    do_restart$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
-[ -n "$SUP_LINE" ] && [ -n "$RESTART_LINE" ] && [ "$SUP_LINE" -gt "$RESTART_LINE" ] \
-    && pass "report_supervision runs after do_restart — it reads the daemon this deploy produced" \
-    || fail "report_supervision at line ${SUP_LINE:-?} does not follow do_restart at line ${RESTART_LINE:-?}"
+# Both paths: a bounce is a launchctl kickstart, so "an orphan pogod answered the
+# port" is precisely the reading that would make the whole fallback a no-op while
+# every other check went green.
+for FN in cmd_redeploy cmd_bounce; do
+    SUP_LINE="$(fn_line "$FN" '^    report_supervision$')"
+    RESTART_LINE="$(fn_line "$FN" '^    do_restart$')"
+    [ -n "$SUP_LINE" ] \
+        && pass "$FN actually calls report_supervision — the reading is wired, not just written" \
+        || fail "report_supervision is defined but never called from $FN"
+    { [ -n "$SUP_LINE" ] && [ -n "$RESTART_LINE" ] && [ "$SUP_LINE" -gt "$RESTART_LINE" ]; } \
+        && pass "$FN: report_supervision runs after do_restart — it reads the daemon this run produced" \
+        || fail "$FN: report_supervision at ${SUP_LINE:-?} does not follow do_restart at ${RESTART_LINE:-?}"
+done
 
 # A missing CLI must SKIP, never fail the deploy: the fleet is already up by
 # the time this runs, and an unknown subcommand on an older install is not a
@@ -3051,16 +3083,22 @@ OUT="$(format_spawn_report 7 7 "" "")"
 # result. `verify_running || exit 8` would have exited straight through the
 # worst case — spawns burned AND the daemon never came up — without a word,
 # which is the very silence this ticket is about.
-SPAWN_LINE="$(grep -n '^    report_spawns "\$spawns_pre"$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
-EXIT8_LINE="$(grep -n '^    \[ "\$verify_rc" -eq 0 \] || exit 8$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
-PRE_LINE="$(grep -n 'spawns_pre="\$(spawn_snapshot)"' "$HERE/pogo-self-deploy" | cut -d: -f1)"
-RESTART_LINE="$(grep -n '^    do_restart$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
-{ [ -n "$SPAWN_LINE" ] && [ -n "$EXIT8_LINE" ] && [ "$SPAWN_LINE" -lt "$EXIT8_LINE" ]; } \
-    && pass "report_spawns runs before the exit-8 path — a failed verify still records its spawn count" \
-    || fail "report_spawns (${SPAWN_LINE:-?}) does not precede exit 8 (${EXIT8_LINE:-?})"
-{ [ -n "$PRE_LINE" ] && [ -n "$RESTART_LINE" ] && [ "$PRE_LINE" -lt "$RESTART_LINE" ]; } \
-    && pass "the pre-kickstart sample is taken before do_restart — otherwise there is no delta" \
-    || fail "pre-sample (${PRE_LINE:-?}) does not precede do_restart (${RESTART_LINE:-?})"
+# Both acting paths again: a bounce burns launchd spawns exactly as a deploy does,
+# and the case the recorder exists for — spawns burned AND the daemon never came
+# back — is if anything worse there, because a bounce is what somebody reached for
+# when the fleet was already broken.
+for FN in cmd_redeploy cmd_bounce; do
+    SPAWN_LINE="$(fn_line "$FN" 'report_spawns "\$spawns_pre"')"
+    EXIT8_LINE="$(fn_line "$FN" '^    \[ "\$verify_rc" -eq 0 \] || exit 8$')"
+    PRE_LINE="$(fn_line "$FN" 'spawns_pre="\$(spawn_snapshot)"')"
+    RESTART_LINE="$(fn_line "$FN" '^    do_restart$')"
+    { [ -n "$SPAWN_LINE" ] && [ -n "$EXIT8_LINE" ] && [ "$SPAWN_LINE" -lt "$EXIT8_LINE" ]; } \
+        && pass "$FN: report_spawns runs before the exit-8 path — a failed verify still records its spawn count" \
+        || fail "$FN: report_spawns (${SPAWN_LINE:-?}) does not precede exit 8 (${EXIT8_LINE:-?})"
+    { [ -n "$PRE_LINE" ] && [ -n "$RESTART_LINE" ] && [ "$PRE_LINE" -lt "$RESTART_LINE" ]; } \
+        && pass "$FN: the pre-kickstart sample is taken before do_restart — otherwise there is no delta" \
+        || fail "$FN: pre-sample (${PRE_LINE:-?}) does not precede do_restart (${RESTART_LINE:-?})"
+done
 
 # THE REMEDY MUST NOT BE SUBJECT TO ITS OWN DEFECT. The failure being recorded
 # is the newly-installed binary being REFUSED AT LAUNCH. A recorder that has to
@@ -3253,11 +3291,224 @@ grep -q '^    report_activation$' "$HERE/pogo-self-deploy" \
 # trusted with this question is that the binary it asks is a VERIFIED build from
 # main; asked before, it would report the OUTGOING build's expectation (mg-b9e7
 # gap 3), which is how 2026-08-07's "fix" reinstalled the drift.
-ACT_LINE="$(grep -n '^    report_activation$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
-VERIFY_LINE="$(grep -n '^    verify_orchestration || exit 11$' "$HERE/pogo-self-deploy" | cut -d: -f1)"
+ACT_LINE="$(fn_line cmd_redeploy '^    report_activation$')"
+VERIFY_LINE="$(fn_line cmd_redeploy 'verify_orchestration || exit 11')"
 { [ -n "$ACT_LINE" ] && [ -n "$VERIFY_LINE" ] && [ "$ACT_LINE" -gt "$VERIFY_LINE" ]; } \
     && pass "report_activation runs after the install is verified — it asks the build this deploy produced, which is the only build whose expectation is right" \
     || fail "report_activation at line ${ACT_LINE:-?} does not follow verify_orchestration at line ${VERIFY_LINE:-?}"
+
+# And it must NOT be on the bounce path (mg-9fc9). The audit compares the
+# installed plists against the plist THE ASKED BINARY renders, and its entire
+# justification is that it runs right after a verified build from main — the one
+# moment of the day when "which build?" has a right answer. A bounce installs
+# nothing, so it has not earned that moment and must not borrow the reading; an
+# older binary answering with its own older plist is how 2026-08-07's "fix"
+# reinstalled the drift it was meant to clear.
+fn_body cmd_bounce | grep -q '^    report_activation$' \
+    && fail "cmd_bounce calls report_activation — a bounce verified no build, so the plist expectation it would report is whatever binary happened to be on disk" \
+    || pass "cmd_bounce does NOT call report_activation — the reading belongs to a run that verified a build from main"
+
+# ---------------------------------------------------------------------------
+# `bounce` — the restart that needs no remote (mg-9fc9)
+# ---------------------------------------------------------------------------
+# WHY THIS SUBCOMMAND EXISTS, for the reader who finds it in a year: the nightly
+# deploy is this box's only automatic recovery path and it needs the network. On
+# 2026-08-15..19 a network fault took that path out for five consecutive nights
+# and the fleet sat in a 118-hour blackout that any one of those nights would have
+# ended. `bounce` is the half of a deploy that needs no remote.
+#
+# What these assertions are for is the OMISSIONS. `bounce` is `redeploy` minus
+# four steps, and every one of them is a step somebody could reasonably add back:
+# each omission therefore has a test that fails if it returns, and a reason.
+
+grep -q '^        bounce)    cmd_bounce ;;$' "$HERE/pogo-self-deploy" \
+    && pass "main dispatches 'bounce' — the subcommand is reachable, not just written" \
+    || fail "cmd_bounce is defined but main does not dispatch to it"
+bash "$HERE/pogo-self-deploy" --help 2>&1 | grep -q 'pogo-self-deploy bounce' \
+    && pass "and --help advertises it (which is also what the runner's resolver greps for before trusting a candidate script)" \
+    || fail "--help does not mention the bounce subcommand"
+
+# --- ONE drain policy, not two --------------------------------------------
+# The ticket is explicit: "it must respect the existing drain logic ... do not
+# force past it". Two copies of that logic would respect it on the day they were
+# written and diverge on the first fix that landed in one of them, so the gate is
+# a function with two callers. The POST is the tell: exactly one site may make it.
+[ "$(grep -c 'dp_raw="\$(drain_post true)"' "$HERE/pogo-self-deploy")" = "1" ] \
+    && pass "there is exactly ONE POST /agents/drain site in the file — the gate is shared, not copied" \
+    || fail "more than one drain POST site: the drain policy has been duplicated"
+for FN in cmd_redeploy cmd_bounce; do
+    [ -n "$(fn_line "$FN" '^    drain_gate$')" ] \
+        && pass "$FN goes through drain_gate" || fail "$FN does not call drain_gate"
+done
+DG_LINE="$(fn_line cmd_bounce '^    drain_gate$')"
+DR_LINE="$(fn_line cmd_bounce '^    do_restart$')"
+{ [ -n "$DG_LINE" ] && [ -n "$DR_LINE" ] && [ "$DG_LINE" -lt "$DR_LINE" ]; } \
+    && pass "cmd_bounce drains BEFORE it kickstarts — a bounce kills in-flight polecats, so the refusal to orphan unpushed work applies here exactly as it does to a deploy" \
+    || fail "cmd_bounce restarts at ${DR_LINE:-?} without draining first (${DG_LINE:-?})"
+
+# --- the four omissions, each with its reason ----------------------------
+BOUNCE_BODY="$(fn_body cmd_bounce)"
+# NO BUILD: `go install` from a checkout the sync could not advance installs
+# either what is already installed (pointless) or an older revision (a silent
+# downgrade nobody asked for).
+grep -q 'do_build' <<<"$BOUNCE_BODY" \
+    && fail "cmd_bounce calls do_build — it would install whatever the un-syncable checkout happens to be at, which is a downgrade nobody asked for" \
+    || pass "cmd_bounce never builds — the binaries on disk are left exactly as they are"
+# NO do_prove: proving is a question about a CHANGE, and a bounce restarts the
+# artifact that is ALREADY RUNNING. Worse, a RED (exit 9) would refuse the
+# recovery for a reason unrelated to the outage — a remedy disabled by a condition
+# it does not depend on, which is the shape this whole ticket is about.
+grep -q 'do_prove' <<<"$BOUNCE_BODY" \
+    && fail "cmd_bounce calls do_prove — a RED would refuse the recovery over an artifact this run did not change" \
+    || pass "cmd_bounce never proves — it restarts the artifact already running, so there is no change to prove"
+# NO TREE: no repo resolution, no drift, no revision comparison. This is the
+# dependency the subcommand exists to shed; if it crept back the bounce would fail
+# on exactly the nights a fetch is impossible.
+grep -qE 'resolve_repo|compute_drift|classify_drift|main_rev' <<<"$BOUNCE_BODY" \
+    && fail "cmd_bounce reads the repo — it would then depend on the tree the fault made unreadable" \
+    || pass "cmd_bounce reads no repo, no ref and no revision — nothing the transport fault can take away"
+# NO verify_running: it asserts MAIN's revision, and a bounce has no $MAIN to
+# assert against. verify_bounced asks the question a bounce can answer.
+grep -q 'verify_running' <<<"$BOUNCE_BODY" \
+    && fail "cmd_bounce calls verify_running, which compares against a \$MAIN it never computed" \
+    || pass "cmd_bounce verifies with verify_bounced instead — a bounce cannot assert a revision it never read"
+
+# --- verify_bounced: it asks LESS, deliberately, and not nothing ----------
+BOUNCE_VERIFY_TIMEOUT=0
+running_rev() { echo "deadbeefcafe"; }
+verify_bounced >/dev/null 2>&1 \
+    && pass "verify_bounced passes when a pogod is answering /version" || fail "verify_bounced rejected a live daemon"
+OUT="$(running_rev() { echo "deadbeefcafe"; }; verify_bounced 2>&1)"
+case "$OUT" in *"NOT a claim that it is main"*) pass "and it SAYS the revision is whatever was already on disk — a bounce installed nothing, so the reading must not be read as 'the box is current'" ;; *) fail "verify_bounced does not qualify the revision it reports: $OUT" ;; esac
+running_rev() { echo "$REV_UNSTAMPED"; }
+verify_bounced >/dev/null 2>&1 \
+    && pass "an UNSTAMPED answer still counts — a daemon that talks but cannot say what it is has come back, and failing a recovery over a missing vcs stamp would be absurd" \
+    || fail "verify_bounced failed a daemon that answered without a revision"
+running_rev() { echo "$REV_UNREACHABLE"; }
+verify_bounced >/dev/null 2>&1 \
+    && fail "verify_bounced passed an UNREACHABLE daemon — the bounce killed the old one, so that is the fleet down harder than before" \
+    || pass "an unreachable daemon FAILS (exit 8): the bounce killed the old pogod and nothing replaced it"
+unset -f running_rev
+
+# --- cmd_bounce, driven end to end with every impure step stubbed --------
+# The sequence is the thing being asserted: drain, then read the schedules, then
+# kickstart, then both verifies, and never a build or a prove. Stubs record their
+# own calls, so "did not build" is measured rather than inferred from the source.
+BC_CALLS="$(mktemp)"
+# The rc is taken from the SUBSHELL's status, not from an echo inside it: the
+# --force path ends in `exit 2`, which leaves the subshell before any trailing
+# echo can run. Reading it the other way round reported an empty rc and called
+# the refusal an acceptance.
+bc_run() {  # bc_run [FORCE] -> echoes "rc=<n>|<calls, space separated>"
+    : > "$BC_CALLS"
+    local rc=0
+    (
+        FORCE="${1:-false}"
+        ASSUME_YES=true
+        assert_out_of_band() { echo oob >> "$BC_CALLS"; }
+        resolve_mg() { MG=/bin/echo; echo mg >> "$BC_CALLS"; }
+        drain_gate() { echo drain >> "$BC_CALLS"; }
+        schedules_body() { echo body >> "$BC_CALLS"; printf '%s' '{"schedules":[{"id":"mail-check-mg-1","agent":"a"}]}'; }
+        extract_mail_check_ids() { cat >/dev/null; echo "mail-check-mg-1"; }
+        spawn_snapshot() { printf '3\t'; }
+        do_restart() { echo restart >> "$BC_CALLS"; }
+        verify_bounced() { echo verify >> "$BC_CALLS"; }
+        report_spawns() { echo spawns >> "$BC_CALLS"; }
+        verify_orchestration() { echo orch >> "$BC_CALLS"; }
+        report_supervision() { echo supervision >> "$BC_CALLS"; }
+        report_prompt_refresh() { echo prompts >> "$BC_CALLS"; }
+        verify_mail_checks_restored() { echo postcheck >> "$BC_CALLS"; }
+        do_build() { echo BUILD >> "$BC_CALLS"; }
+        do_prove() { echo PROVE >> "$BC_CALLS"; }
+        cmd_bounce
+    ) > "$BC_CALLS.out" 2>&1 || rc=$?
+    printf 'rc=%s|%s' "$rc" "$(tr '\n' ' ' < "$BC_CALLS")"
+}
+RES="$(bc_run false)"
+case "$RES" in
+    "rc=0|"*) pass "cmd_bounce completes on a healthy path (rc=0)" ;;
+    *) fail "cmd_bounce did not complete: $RES" ;;
+esac
+CALLED="${RES#*|}"
+case "$CALLED" in
+    *"oob "*"drain "*"restart "*"verify "*"orch "*) pass "and in order: out-of-band guard, drain, kickstart, liveness, orchestration — [$CALLED]" ;;
+    *) fail "cmd_bounce sequence is wrong: [$CALLED]" ;;
+esac
+case "$CALLED" in
+    *BUILD*|*PROVE*) fail "cmd_bounce invoked a build or a prove: [$CALLED]" ;;
+    *) pass "and neither do_build nor do_prove was called — measured, not read off the source" ;;
+esac
+case "$CALLED" in
+    *postcheck*) pass "and the mail-check post-check still runs — it is the strongest local evidence that the restart actually helped, which is the question a recovery bounce is answering" ;;
+    *) fail "cmd_bounce skipped the mail-check post-check: [$CALLED]" ;;
+esac
+# --force is REFUSED, not ignored. The two things it overrides are both refusals
+# to destroy work whose only copy is in a polecat's worktree, and an unattended
+# 03:00 fallback is the last caller that should be able to make that call.
+RES="$(bc_run true)"
+case "$RES" in
+    "rc=2|"*) pass "cmd_bounce with --force exits 2 — refused outright rather than merely not passed, because a flag that is 'not passed' is one edit away from being passed" ;;
+    *) fail "cmd_bounce accepted --force: $RES" ;;
+esac
+case "${RES#*|}" in
+    *restart*|*drain*) fail "the --force refusal happened AFTER acting: [${RES#*|}]" ;;
+    *) pass "and it refuses before draining or restarting anything" ;;
+esac
+# The witness: the stub harness above can actually SEE a build, so "no BUILD in
+# the call list" is a measurement and not an artifact of a stub nothing calls.
+: > "$BC_CALLS"
+( do_build() { echo BUILD >> "$BC_CALLS"; }; do_build )
+grep -q BUILD "$BC_CALLS" \
+    && pass "the harness is ARMED: the same recorder catches a do_build when one actually happens" \
+    || fail "the build recorder records nothing — the 'never builds' assertions above measure nothing"
+unset -f bc_run
+rm -f "$BC_CALLS" "$BC_CALLS.out"
+
+# --- the reason record crosses the process boundary for a bounce too ------
+# The runner is a separate process and the only thing that used to cross was an
+# integer, which is the whole of mg-0155. A `bounce` that failed silently would
+# put the fallback's caller back in the position of re-deriving a story from a
+# code — and the fallback's mail is the ONE announcement on the night the network
+# is down, so it is the last place that can afford a guess.
+BR_FILE="$(mktemp)"
+( POGO_DEPLOY_REASON_FILE="$BR_FILE" bash -c '
+    source "'"$HERE/pogo-self-deploy"'"
+    ASSUME_YES=true
+    assert_out_of_band() { :; }
+    resolve_mg() { MG=/bin/echo; }
+    drain_gate() {
+        deploy_stage drain
+        err "3 polecat(s) still hold commits that exist only in their worktree after 900s (named above)"
+        err "refusing to orphan unpushed work without --force; restoring dispatch"
+        exit 7
+    }
+    cmd_bounce' >/dev/null 2>&1 )
+BR_RC=$?
+[ "$BR_RC" -eq 7 ] && pass "a bounce whose drain stalls exits 7 — the same code, from the same gate, as a redeploy's" || fail "bounce drain-stall rc=$BR_RC"
+{ grep -q '^exit=7$' "$BR_FILE" && grep -q '^stage=drain$' "$BR_FILE" && grep -q '^installed=no$' "$BR_FILE"; } \
+    && pass "and it leaves a reason record saying where it stopped and that nothing was installed" \
+    || fail "the bounce left no usable reason record: [$(cat "$BR_FILE")]"
+grep -q '^reason=3 polecat' "$BR_FILE" \
+    && pass "with the HEADLINE the refusal itself wrote — the caller carries the sentence across instead of re-deriving one from the integer" \
+    || fail "the record's reason line is not the refusal's headline: [$(grep '^reason=' "$BR_FILE")]"
+# installed= is measured rather than defaulted: nothing on a bounce path can move
+# it, because do_build is the only thing that does and a bounce never calls it.
+[ "$(grep -c '^installed=no$' "$BR_FILE")" = "1" ] \
+    && pass "installed=no on the bounce path is a measurement — do_build is the only thing that moves it, and a bounce never reaches one" \
+    || fail "installed= on the bounce path: [$(grep '^installed=' "$BR_FILE")]"
+rm -f "$BR_FILE"
+
+# --- confirm() is one policy, and both subcommands end in the same hazard --
+# The rc comes from the child's status for the same reason bc_run's does: confirm
+# ends in `exit 3`, so nothing after it in the same shell runs.
+OUT="$(bash -c 'source "'"$HERE/pogo-self-deploy"'"; ASSUME_YES=false; confirm "bounce pogod" </dev/null 2>&1')"; RC=$?
+{ [ "$RC" -eq 3 ] && grep -q 'refusing to bounce pogod non-interactively' <<<"$OUT"; } \
+    && pass "confirm names the action it is refusing (exit 3) — 'refusing to redeploy' under a bounce would be the wrong sentence in the one place an operator reads it" \
+    || fail "confirm did not refuse a non-interactive bounce with its own noun (rc=$RC): $OUT"
+OUT="$(bash -c 'source "'"$HERE/pogo-self-deploy"'"; ASSUME_YES=false; confirm </dev/null 2>&1')"; RC=$?
+{ [ "$RC" -eq 3 ] && grep -q 'refusing to redeploy pogod non-interactively' <<<"$OUT"; } \
+    && pass "and the default noun is unchanged for the caller that was there first" \
+    || fail "confirm's default refusal changed (rc=$RC): $OUT"
 
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)

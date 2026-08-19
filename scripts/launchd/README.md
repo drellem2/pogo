@@ -335,6 +335,41 @@ belongs there instead. In order:
    alone is 20 minutes. Saving it needs a **wider window**, which is deliberately
    not chosen here: there is no distribution to size one from. Set
    `POGO_DEPLOY_SYNC_VIGIL=0` to restore the pre-mg-5515 bound.
+
+   **7b. And when the transport is out for N nights running, bounce the fleet
+   anyway** (mg-9fc9). Everything above makes the deploy more patient about a
+   network it needs; none of it helps on the night the network never comes back.
+   The nightly deploy is this box's only *automatic* recovery path — it restarts
+   the fleet, and a restart is what clears a wedged agent — so an outage that
+   takes the deploy out takes recovery out with it. On 2026-08-15..19 that cost a
+   **118-hour blackout**: five nights, `ssh: Could not resolve hostname
+   github.com` on every one, and recovery only when a human typed a message.
+
+   A restart needs no remote. So after `POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER`
+   (default **2**) consecutive nights lost at the TRANSPORT step — and only once
+   the night's last fire is spent — the runner calls `pogo-self-deploy bounce`,
+   which is `redeploy` with the fetch, the build and `do_prove` removed. It
+   delivers **no code**; it ends a blackout the agents were only in because
+   nothing had restarted them.
+
+   | | |
+   |---|---|
+   | Counted | `network`, `remote`, `unclassified`, `timeout` — the classes where the sync never reached the tree. |
+   | Not counted | `dirty`, `diverged`, `checkout` **clear** the streak (they are read after a successful fetch, so the transport worked); `config` **leaves** it (it fails before any network call). A bad tree must never accumulate toward a fleet bounce. |
+   | Unit | **nights**, not fires — the count is idempotent per date, so three fires of one bad night cannot cross a threshold of two. |
+   | Record | `~/.pogo/deploy-transport-streak.stamp`, `<date> <count> <last-bounce-date>`. Unreadable reads as no streak, so a corrupt file delays a bounce and cannot invent one. |
+   | Window | its own reserve, `POGO_DEPLOY_BOUNCE_RESERVE` (300s), **not** the deploy's 1200s. The vigil probes until the *deploy's* budget hits zero, so charging the bounce the deploy's reserve would starve it on exactly the nights it exists for. |
+   | Drain | the same gate, and `--force` is **refused** by `bounce`. A polecat holding commits that exist only in its worktree stops the bounce; that is reported, not overridden. |
+   | Announcement | a mail to `$POGO_DEPLOY_ALERT_TO` and `human` out of the **local** maildir, plus a `deploy_transport_fallback` event. On the night this fires, the network is what is broken. |
+   | After a bounce | the streak resets, so a week-long outage bounces once every N nights rather than every night. A refused bounce does **not** reset it. |
+
+   Set `POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER=0` to disable the fallback entirely.
+   Two couplings survive and are documented at `pogo-deploy.sh` section 5c: the
+   state this fires in makes a drain refusal *more* likely (a wedged polecat that
+   committed without pushing is what the drain refuses to orphan), and the
+   fallback lives inside this job, so a fault that stops the job firing at all
+   takes it too — that one is `internal/staleness/nofire.go`'s question, not this
+   one's.
 8. **Drift gate.** `pogo-self-deploy check` is read-only and never acts. If its
    verdict is `clean`, log it and exit 0 **without bouncing**: a fleet-wide
    bounce costs every agent its session, and doing it for a no-op is strictly
@@ -347,7 +382,9 @@ belongs there instead. In order:
    killing live polecats and bouncing a fleet whose idleness could not be
    established, and neither is a call an unattended 03:00 job gets to make. The
    flag is not passed, not plumbed, and not settable by env; `pogo-deploy_test.sh`
-   asserts it.
+   asserts it. (`bounce`, the mg-9fc9 fallback at 7b, goes further and *refuses*
+   `--force` outright — it exists to restart a fleet safely, and a flag that is
+   merely "not passed" is one edit away from being passed.)
 10. **Outcome.** Exit 0 → wait out a grace period and re-read the mail-check
    schedules, alerting on any that existed before the bounce and did not come
    back. Non-zero → mail `$POGO_DEPLOY_ALERT_TO` **and** `human`, and stop — unless a retry is

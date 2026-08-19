@@ -109,6 +109,35 @@ it, and arming the channel earlier would mean arming it for `check`, a
 read-only subcommand that never alerts. It is also the live proof that the
 fallback path still works.
 
+## `bounce` reuses these codes, and adds no integers (mg-9fc9)
+
+`pogo-self-deploy bounce` is `redeploy` with everything that needs the network
+removed: no sync, no build, no `do_prove`. It exists because the nightly deploy is
+this box's only automatic recovery path and it needs the same network a network
+fault takes away — five consecutive nights of that, 2026-08-15..19, cost a
+118-hour blackout. See `cmd_bounce` for the full argument.
+
+It **mints no new exit code**, per rule 3 below: it stops at the same *sites* a
+redeploy does, so it reuses the codes that say where. What differs is which rows
+it can reach and what two columns mean there:
+
+| Code | Reachable from `bounce`? | What is different |
+|---|---|---|
+| 0 | yes — `bounce complete` | the fleet was restarted onto the binaries **already installed**. Installed? always `no`; Bounced? `yes`. |
+| 1 | yes — `assert_out_of_band`, unresolvable `mg` | identical to a redeploy's. |
+| 2 | yes — **and one site a redeploy does not have**: `--force` is refused outright. A bounce exists to restart a fleet *safely*; forcing past the drain would orphan commits that exist only in a worktree, and an unattended 03:00 fallback is the last caller that should make that call. |
+| 3 | yes — no tty and no `--yes` | the message names the bounce, not the redeploy (`confirm` takes the noun). |
+| 6, 12 | yes — the drain precondition | the same four refusals, from the same `drain_gate`. The "it stopped before the build" sentence is still true; there was never a build. |
+| 7 | yes — the drain stalled | **the designed answer, not a malfunction.** The runner reports it and does not bounce. |
+| 4, 9 | **no** | there is no build and no `do_prove` to fail. Both omissions are asserted by the test suite, each with its reason. |
+| 5 | yes — `launchctl kickstart` failed | Installed? `no`; Bounced? `yes`. This is the one code that can leave the box worse than it found it. |
+| 8 | yes — but the check is `verify_bounced`, not `verify_running` | it asserts that **a pogod is answering**, not that it reports `main`. A bounce installs nothing and never reads a ref, so there is no `$MAIN` to compare against; asserting one would assert a fact the run never established. |
+| 11 | yes — `verify_orchestration` | unchanged, and it is the code that closes a bounce: a daemon that came back index-only has replaced a blackout with a quieter one. |
+| 130, 143 | yes | the drain window's signal paths, unchanged. |
+
+Every row above is `installed=no`, and that is measured rather than defaulted:
+`do_build` is the only thing that moves `installed`, and `bounce` does not call it.
+
 ## Two observations the table makes visible
 
 **Every exit up to and including 9 leaves the running pogod alone.** Codes 1, 2,
