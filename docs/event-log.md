@@ -610,11 +610,63 @@ back to mail. What was suppressed is the terminal write.
     limit episode) or `"wake_silence_once"` (an earlier wake already spoke into
     this unbroken silence)
   - `reason` (string, required): the human-readable detail behind the rule
+  - `consecutive` (number, required): how many wakes the current unbroken run of
+    suppressions has declined, this one included. Reset by a DELIVERED wake, so
+    a value that keeps climbing is an agent nothing has reached since the run
+    began (mg-3a8a)
+  - `suppressed_for_seconds` (number, required): how long that run has lasted.
+    This is the number the bound is compared against — see
+    `wake_suppression_released` below
   - `fire_token` (string, optional): correlation id, as for `nudge_sent`
 
 ```json
-{"schema_version":1,"timestamp":"2026-07-29T11:15:30.000000000Z","event_type":"nudge_suppressed","agent":"pogod","details":{"to":"crew-mayor","message":"stall-watch: work piling up","rule":"limit_episode","reason":"usage-limit episode ep-1753-cat-mg-7ffa open since 2026-07-29T10:40:00Z (3 agent(s) rate-limited)"}}
+{"schema_version":1,"timestamp":"2026-07-29T11:15:30.000000000Z","event_type":"nudge_suppressed","agent":"pogod","details":{"to":"crew-mayor","message":"stall-watch: work piling up","rule":"limit_episode","reason":"usage-limit episode ep-1753-cat-mg-7ffa open since 2026-07-29T10:40:00Z (3 agent(s) rate-limited)","consecutive":2,"suppressed_for_seconds":63.0}}
 ```
+
+`consecutive` and `suppressed_for_seconds` are structured because the run length
+was the load-bearing number in mg-3a8a and reading it meant regexing an age out
+of an English sentence. To find a latched suppression:
+
+```bash
+pogo events list --since=24h --json |
+  jq -r 'select(.event_type=="nudge_suppressed") |
+         [.details.to, .details.rule, .details.consecutive, .details.suppressed_for_seconds] | @tsv' |
+  sort -k4 -nr | head
+```
+
+#### `wake_suppression_released`
+
+The wake-cycle policy's BOUND fired: a rule declined a wake, and it was
+delivered anyway because the run of consecutive suppressions had outlived
+`agent.DefaultWakeSuppressionBound` (15 minutes). Added by mg-3a8a.
+
+It exists because both suppression rules were unbounded, and rule 1's condition
+— "the agent has produced no PTY output since we woke it" — is exactly the
+condition a wake exists to break. Measured over 2026-08-14..19: 143 consecutive
+wakes to `crew-pa` declined across 106 hours, the age in `reason` climbing
+monotonically and never resetting, with the only exit an operator running `pogo
+agent stop`/`start` out of band. Over the same window `crew-mayor`'s
+suppressions all read `already woken 0s ago` — the same rule, working as
+intended, in the same daemon.
+
+The run ends only when a wake is DELIVERED, so past the bound every attempt is
+released until one lands; a release that failed on a busy PTY is re-offered
+rather than spending the period. After a delivery the debounce starts again from
+zero, which caps a permanently silent agent at one wake per bound period.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **`details` fields:** the same fields as `nudge_suppressed` (`to`, `message`,
+  `rule`, `reason`, `consecutive`, `suppressed_for_seconds`, optional
+  `fire_token`), where `rule` names the rule that was OVERRIDDEN, plus:
+  - `bound_seconds` (number, required): the ceiling that was crossed
+
+```json
+{"schema_version":1,"timestamp":"2026-08-19T16:40:00.000000000Z","event_type":"wake_suppression_released","agent":"pogod","details":{"to":"crew-pa","message":"check your mail","rule":"wake_silence_once","reason":"agent pa was already woken 106h29m49s ago and has produced no PTY output since that wake settled (2s) — released by the wake-suppression bound after 16m0s and 2 consecutive suppression(s) (bound 15m0s)","consecutive":2,"suppressed_for_seconds":960.0,"bound_seconds":900.0}}
+```
+
+A `wake_suppression_released` next to a `nudge_sent` with no answering agent
+output is the fleet's signal that an agent is silent *and* unreachable by the
+scheduler — the state that needs `pogo agent stop`/`start`, not another wake.
 
 #### `nudge_unconfirmed`
 

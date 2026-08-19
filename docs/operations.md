@@ -1042,7 +1042,10 @@ did nothing for the three that were wedged. The coordinator never goes idle, so
 the idle gate drops its nudges — *continuous PTY output makes an agent look
 busiest exactly when it is least reachable* — and `pa` answered a wake with
 silence, after which `wake_silence_once` stopped trying for 106h with the "already
-woken N ago" age climbing and never resetting (mg-3a8a). Mail is the only wake
+woken N ago" age climbing and never resetting (mg-3a8a — since fixed: the policy
+now bounds any run of suppressions at 15 minutes and releases the next wake over
+the rule's decline, recording `wake_suppression_released`; a run that keeps
+climbing past the bound without a delivery is now the thing to grep for). Mail is the only wake
 channel that survived both rules; it is how architect itself recovered. The alert
 goes to `human`, because during a fleet-wide stop there is by definition no
 in-fleet actor left to act — doctor, which would normally restart a wedged agent,

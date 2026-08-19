@@ -225,12 +225,23 @@ type Agent struct {
 	stopCause string
 
 	// lastWakeAt is when a WAKE nudge was last DELIVERED to this agent's PTY —
-	// the whole per-agent state of the wake-cycle policy (see wakepolicy.go).
+	// the per-agent state of the wake-cycle policy's rules (see wakepolicy.go).
 	// Guarded by wakeMu rather than mu on purpose: the policy is evaluated on
 	// the nudge path, which goes on to take mu to write the PTY, and the two
 	// locks must not nest.
-	wakeMu     sync.Mutex
-	lastWakeAt time.Time
+	//
+	// suppressRunSince/suppressRunCount are the state of the policy's BOUND
+	// (mg-3a8a): when the current unbroken run of suppressions began, and how
+	// many wakes it has declined. Both reset when a wake is delivered. They are
+	// deliberately separate from lastWakeAt, because a run can start without any
+	// wake ever having been delivered — rule 2 suppresses from the first attempt.
+	// wakeSuppressionBound overrides DefaultWakeSuppressionBound; zero means the
+	// default.
+	wakeMu               sync.Mutex
+	lastWakeAt           time.Time
+	suppressRunSince     time.Time
+	suppressRunCount     int
+	wakeSuppressionBound time.Duration
 
 	mu sync.Mutex
 }
