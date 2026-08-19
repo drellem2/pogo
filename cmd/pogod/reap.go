@@ -321,9 +321,41 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	if len(mr.Verdict) > 0 {
 		sidecar["verdict"] = mr.Verdict
 	}
+	// THERE IS DELIBERATELY NO `verdict_absent` KEY HERE, and mg-c456 tried to add
+	// one before measuring what it would do. Marking the absence on the item looks
+	// like the obvious durable home for it — the archive keeps a sidecar forever,
+	// events.log rotates — and it breaks the detector this fix exists to serve.
+	//
+	// The predicate mg-bf3f's d2_cause.py D2.5 uses for "did anybody write down an
+	// outcome" is ANY FIELD BEYOND branch/mr/target, transcribed in
+	// TestReapMergedPolecatMeasuredByTheDetectorsOwnPredicate. Any new key trips
+	// it, so a marker that SAYS "no verdict here" would make a verdict-free close
+	// read as answered — the remedy exhibiting the defect it remedies, which is the
+	// one failure mode a fix in this lineage has to be checked for.
+	//
+	// That proxy is ALSO already stale, which is the reason to route around it
+	// rather than widen it. Over the 578 result sidecars in
+	// ~/.macguffin/work/archive/2026-08 on 2026-08-19 it calls 452 answered while
+	// only 401 record a verdict: 51 false positives, produced by `merged_sha` and
+	// `post_merge_tag`, both of which are this writer's own bookkeeping and neither
+	// of which is an outcome. Adding a 52nd source of them in the name of fixing
+	// verdict loss is not a trade worth making. The absence is recorded as an EVENT
+	// instead — see recordCloseWithoutVerdict — where it observes the loss at the
+	// moment it happens and no existing predicate has to be renegotiated.
 	result, _ := json.Marshal(sidecar)
 	completeErr := complete(mr.Author, string(result))
 	closed := itemIsClosed(completeErr)
+	// Emitted only when THIS close applied, because only then is the
+	// verdict-free sidecar above the item's actual record (mg-c456). On the
+	// already-done path the polecat won the race and its own result stands; on
+	// the not-closed path nothing was written and the failure is already
+	// reported at volume below. The coverage limit that leaves — a worker that
+	// won the race and wrote a verdict-free result of its own — is stated in
+	// docs/event-log.md rather than papered over, because this writer does not
+	// read the store back and cannot see it.
+	if len(mr.Verdict) == 0 && completeErr == nil {
+		recordCloseWithoutVerdict(mr, a, polecat)
+	}
 	switch {
 	case completeErr == nil:
 	case closed:

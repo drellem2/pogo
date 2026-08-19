@@ -105,6 +105,15 @@ func TestReapMergedPolecat_NoVerdictStaysDetectableAsADrop(t *testing.T) {
 	}
 	// The detector's predicate, run here so the regression is pinned to the
 	// measurement and not to a key name this test happens to know.
+	//
+	// THIS LIST DID NOT GROW FOR mg-c456, and that is the finding rather than an
+	// omission. mg-c456 wanted a `verdict_absent` marker on the item and this
+	// guard is what stopped it: the sibling predicate in
+	// TestReapMergedPolecatMeasuredByTheDetectorsOwnPredicate reads ANY new key as
+	// "an outcome was written down", so a key stating the absence would have made
+	// a verdict-free close read as answered. The absence is an EVENT instead
+	// (work_item_closed_without_verdict). A future fix reaching for this whitelist
+	// should read the note above sidecar construction in reap.go first.
 	for k := range side {
 		switch k {
 		case "branch", "mr", "completed_by", "target", "merged_sha", "post_merge_tag":

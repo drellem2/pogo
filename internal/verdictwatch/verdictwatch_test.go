@@ -1157,3 +1157,72 @@ func TestReportIsStableAcrossRuns(t *testing.T) {
 		t.Errorf("two scans of an unchanged store rendered differently:\n--- first ---\n%s\n--- second ---\n%s", first, second)
 	}
 }
+
+// mg-c456. Every row in this report is a RECONSTRUCTION, and that is why 1014 LOST
+// rows could grow with nobody owning them: at the moment of loss the system's own
+// answer is success, so nothing looked. pogod now records one class of it as it
+// happens, and the LOST block names that counter.
+//
+// It also has to name TWO limits, and the first one is a correction of this block's
+// own first draft. The at-loss-time counter is NOT a better source for the accrual
+// rate — `landed` already gives one, and that column is exactly where the census
+// behind this ticket got its per-day table. Offering the event as the way to get a
+// rate would have been a false claim about this report in this report. The second
+// limit is coverage: the counter sees only the closes pogod itself performs, and
+// pointing a reader at a narrower instrument without saying it is narrower is how
+// one of these gets read as a total.
+func TestTheLostBlockNamesTheAtLossTimeCounterAndItsLimit(t *testing.T) {
+	f := newFixture(t)
+	f.emptyBox("filer-a")
+	f.item("mg-e0e0", "filer-a", "dropped with nothing recorded", "done")
+	f.sidecar("mg-e0e0", "done", "polecat-we0")
+	f.land("mg-e0e0", "2026-08-13T02:44:18Z", "done")
+
+	rep := f.scan(Options{Filer: "filer-a"})
+	if rep.Lost == 0 {
+		t.Fatalf("fixture produced no LOST row, so the block under test never renders: %+v", rep)
+	}
+	out := rep.Render(false, false)
+
+	// The command, verbatim and runnable. A pointer a reader has to reconstruct
+	// from prose is the same as no pointer.
+	const cmd = "pogo events list --since=24h --type=work_item_closed_without_verdict"
+	if !strings.Contains(out, cmd) {
+		t.Errorf("the LOST block does not name the at-loss-time counter as a runnable command:\n%s", out)
+	}
+	// AND it must hedge the empty reading. `pogo events list --type=X` returns
+	// zero rows just as cleanly on a pogod that predates the event as on a clean
+	// fleet — the running daemon was 1ebf2dc when this shipped, so on day one the
+	// empty result was guaranteed. Advertising a counter without that caveat hands
+	// the reader a constant and calls it a measurement, which is the shape of the
+	// defect this whole report sits next to.
+	if !strings.Contains(out, "ZERO ROWS FROM THAT IS NOT ZERO LOSSES") {
+		t.Errorf("the LOST block recommends a counter without hedging its empty reading:\n%s", out)
+	}
+	if !strings.Contains(out, "/version") {
+		t.Errorf("the hedge must name how to tell the two cases apart, not merely that they differ:\n%s", out)
+	}
+	// It must NOT sell the counter as the way to get an accrual rate. `landed`
+	// above already gives one — a report that understates its own column to
+	// promote another instrument is a false claim about itself.
+	if !strings.Contains(out, "`landed` above already gives a rate") {
+		t.Errorf("the LOST block must not imply this report cannot give an accrual rate:\n%s", out)
+	}
+	// And the coverage limit, on the same block. The counter sees only the closes
+	// pogod itself performs.
+	if !strings.Contains(out, "does NOT cover every LOST row") {
+		t.Errorf("the LOST block points at a narrower instrument without saying it is narrower:\n%s", out)
+	}
+
+	// A clean report must not carry either — an all-clear that recommends a
+	// counter has invented work.
+	clean := newFixture(t)
+	clean.emptyBox("filer-b")
+	cleanRep := clean.scan(Options{Filer: "filer-b"})
+	if cleanRep.Lost != 0 {
+		t.Fatalf("the clean fixture is not clean: %+v", cleanRep)
+	}
+	if strings.Contains(cleanRep.Render(false, false), cmd) {
+		t.Errorf("a report with no LOST rows must not recommend the counter:\n%s", cleanRep.Render(false, false))
+	}
+}

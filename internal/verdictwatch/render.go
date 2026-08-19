@@ -119,6 +119,48 @@ func (r Report) Render(verbose, quiet bool) string {
 				"from the verdict printed with them, and %d LOST row(s) have no recorded outcome to\n"+
 				"hand over at all.\n", r.Routing, r.Lost)
 		}
+		if r.Lost > 0 {
+			// THIS REPORT IS A RECONSTRUCTION, AND IT IS NOT THE ONLY READING ANY
+			// MORE (mg-c456). Every row above was rebuilt from the store after the
+			// fact, which is why the LOST column could grow for weeks with no
+			// owner: at the instant a verdict is lost the system's own answer is
+			// success — the merge succeeded, the item closed, and the worker's
+			// later `mg done --result` was refused only because the item was
+			// already terminal, a refusal the protocol scores as completion.
+			//
+			// pogod now records one class of that loss AS IT HAPPENS, and what that
+			// adds is NOT the accrual rate: this report's `landed` column already
+			// gives a rate, which is how the census that produced mg-c456 got its
+			// per-day table. What it adds is an observation the system makes ITSELF,
+			// without anyone running a reconstruction — and one field no
+			// reconstruction can recover, `worker_live_at_close`, because whether a
+			// worker was registered and about to be stopped is not a fact the store
+			// keeps.
+			//
+			// AND IT HEDGES ITS OWN RECOMMENDATION, because an empty
+			// `pogo events list --type=...` is the exact shape this ticket sits
+			// next to: an instrument answering cleanly about the wrong thing. Zero
+			// rows means "no such close in the window" OR "the daemon emitting it
+			// has not been restarted onto the revision that does" — and on the day
+			// this shipped it was the second, since the running pogod was 1ebf2dc.
+			// A report that advertises a counter without saying that has handed a
+			// reader a guaranteed-constant and called it a measurement.
+			b.WriteString("\nThe rows above were RECONSTRUCTED after the fact, which is why this column could\n" +
+				"grow unowned: at the moment of loss the system's own answer is success. pogod now\n" +
+				"records one class of it as it happens — the auto-done closes it performs with no\n" +
+				"author verdict on the merge request:\n\n" +
+				"  pogo events list --since=24h --type=work_item_closed_without_verdict\n\n" +
+				"ZERO ROWS FROM THAT IS NOT ZERO LOSSES. It reads zero just as cleanly on a pogod\n" +
+				"that predates the event, and a merged control is not a running one — check the\n" +
+				"revision actually serving before concluding anything from an empty result:\n" +
+				"  curl -s http://127.0.0.1:10000/version | jq -r .revision\n\n" +
+				"That is not a second way to count these rows; `landed` above already gives a rate.\n" +
+				"It is an observation the system makes itself, and it carries one thing no\n" +
+				"reconstruction can recover: whether a worker was live at the close, so a shut\n" +
+				"window is told apart from a hand-submitted branch nobody had a verdict for.\n" +
+				"It does NOT cover every LOST row — a worker that won the race and wrote a\n" +
+				"verdict-free result of its own is invisible to it, and is counted only here.\n")
+		}
 	}
 
 	if !quiet && verbose {
