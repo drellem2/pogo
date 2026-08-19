@@ -2,10 +2,14 @@ package agent
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"text/template"
@@ -276,6 +280,181 @@ func TestShippedTemplatesRequireTrappedCleanup(t *testing.T) {
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s: expected %q in template body (mg-c675)", name, want)
+			}
+		}
+	}
+}
+
+// TestShippedTemplatesRequireCoreBudget guards the core-budget clause in every
+// shipped {{.Worker}} template (mg-8128). Of the three load-bearing prompt
+// hazards this file pins, this was the only one with no corpus assertion —
+// `grep POGO_WORKER_CORES internal/agent/prompt_test.go` returned nothing —
+// and it is the one where the prose IS the mechanism. The clause says so in
+// its own text: nothing enforces the budget, because both dispatch gates count
+// WORKERS, not cores. The pkill ban and the trapped cleanup are guarded
+// hazards with narrower blast radii; this one is unenforced by construction,
+// so its continued presence in all six templates is the only guard there is.
+//
+// Two measured incidents sit behind it and recur if it is dropped:
+//   - mg-eb47 (2026-08-12): one Lean build held 9.0 of 10 cores across 11+
+//     processes while the per-repo cap read one-of-three; fourteen queued items
+//     were undispatchable for 22 minutes.
+//   - mg-6476 (2026-08-14, measured by pdd84): a pre-submit gate's numpy step
+//     self-parallelised to ~4.4 cores against a budget of 3 and drove
+//     `pogo host load` to HOLD — while every `-j` in that gate was correct.
+//
+// BOTH HALVES are pinned, and that is the point of the test rather than a
+// thoroughness flourish. The original mg-1d05 defect was not a missing bullet:
+// the bullet existed and enumerated too narrowly, covering only the commands a
+// worker TYPES. An assertion on the bullet's existence alone would pass against
+// the pre-4dd1b9d text and would not have caught it. So the shell-flag
+// enumeration and the self-parallelising-library enumeration are each anchored
+// on their own tokens, and a future narrowing of either fails here.
+//
+// The templates are EXPANDED rather than read raw, for two reasons. The clause
+// sits inside `{{if .WorkerCores}}`, so a raw read cannot tell a clause that
+// renders from one stranded behind a gate that never fires. And the direction
+// of the in-code claim — that these APIs report the HOST's cores, not the
+// worker's share — is carried by two template actions whose values must land
+// the right way round; deliberately unlike numbers (7 of 64) make that
+// checkable instead of coincidental.
+func TestShippedTemplatesRequireCoreBudget(t *testing.T) {
+	const (
+		workerCores = 7
+		hostCores   = 64
+	)
+	// The six shipped worker templates, DISCOVERED rather than listed. The
+	// defect this test exists to close is a hazard clause that is present in
+	// the corpus and unasserted for one member of it; a hardcoded list is the
+	// same defect one template later, and it fails silently — a seventh
+	// template would ship unguarded and every assertion here would still be
+	// green. So the directory is walked and the result is checked against what
+	// is expected: a template that appears or disappears fails here, and
+	// covering it becomes a decision somebody makes rather than one nobody
+	// notices.
+	const dir = "prompts/templates"
+	entries, err := fs.ReadDir(defaultPrompts, dir)
+	if err != nil {
+		t.Fatalf("read embedded %s: %v", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".md" {
+			continue
+		}
+		names = append(names, path.Join(dir, e.Name()))
+	}
+	sort.Strings(names)
+	expected := []string{
+		"prompts/templates/polecat-architect.md",
+		"prompts/templates/polecat-build-pr.md",
+		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-review.md",
+		"prompts/templates/polecat-triage.md",
+		"prompts/templates/polecat.md",
+	}
+	if !slices.Equal(names, expected) {
+		t.Fatalf("the shipped worker templates have changed:\n got %v\nwant %v\n"+
+			"Cover the new template with the core-budget assertions below and add "+
+			"it here, or remove it from both. Leaving this list stale is the exact "+
+			"failure this test was written for: a clause asserted everywhere except "+
+			"the one template that lost it.", names, expected)
+	}
+
+	wants := []struct{ what, want string }{
+		// The rule, and the two env vars that carry it. WorkerCoresEnv and
+		// HostCoresEnv are referenced through their constants so a rename of
+		// either fails here rather than leaving the prompt naming a variable
+		// nothing sets.
+		{"the rule itself", "**You have a CORE BUDGET"},
+		{"the budget variable", "`$" + WorkerCoresEnv + "`"},
+		{"the denominator variable", "`$" + HostCoresEnv + "` is the denominator"},
+		{"the worker's share and the host's size, interpolated",
+			fmt.Sprintf("is %d of this host's %d cores", workerCores, hostCores)},
+
+		// HALF ONE: the commands a worker types. Pinned per-toolchain, because
+		// the failure this half has already had was a too-narrow enumeration.
+		{"the make flag", "`make -j\"$" + WorkerCoresEnv + "\"`"},
+		{"the go test flag", "`go test -p \"$" + WorkerCoresEnv + "\"`"},
+		{"the cargo flag", "`cargo build -j`"},
+		{"the lake flag", "`lake build -j`"},
+		{"the ninja flag", "`ninja -j`"},
+		{"the pytest flag", "`pytest -n`"},
+
+		// HALF TWO: the code the worker writes and runs (4dd1b9d, mg-1d05).
+		// This is the half whose absence was the original defect — every `-j`
+		// in mg-6476's gate was correct and the budget was blown anyway.
+		{"the scope widening to code, not just commands",
+			"not only to commands you type"},
+		{"the reason a library gets it wrong", "reads the MACHINE, not your share"},
+		{"the Python core count", "`os.cpu_count()`"},
+		{"the multiprocessing pool", "`multiprocessing.Pool()`"},
+		{"the futures pool", "`ProcessPoolExecutor()`"},
+		{"the BLAS/OpenMP thread defaults", "numpy/OpenBLAS and OpenMP thread defaults"},
+		{"the Rust data-parallel library", "rayon"},
+		{"the Go core count", "`runtime.NumCPU()`/`GOMAXPROCS`"},
+		// The direction of the claim, with the two numbers the right way
+		// round: these APIs report the HOST, which is why they overshoot.
+		{"which number those APIs actually report",
+			fmt.Sprintf("all report %d here, not %d", hostCores, workerCores)},
+
+		// The pass-the-budget forms. A hazard named without a replacement gets
+		// ignored under time pressure — the same reason the pkill ban pins
+		// `kill "$PID"` and the cleanup rule pins the trap line.
+		{"the Python pass-through form",
+			"`Pool(int(os.environ[\"" + WorkerCoresEnv + "\"]))`"},
+		{"the OpenMP pass-through form",
+			"`OMP_NUM_THREADS=\"$" + WorkerCoresEnv + "\"`"},
+		{"the Go pass-through form", "`runtime.GOMAXPROCS`"},
+
+		// Why the second half exists at all: correct `-j` flags did not save
+		// mg-6476. Without this sentence the half reads as belt-and-braces.
+		{"the mg-6476 incident", "~4.4 cores against a budget of 3"},
+		{"that correct -j flags did not prevent it",
+			"while every `-j` in that gate was correct (mg-6476"},
+
+		// Non-enforcement, which is what makes this clause the mechanism and
+		// this test the guard.
+		{"that nothing enforces the budget", "**Nothing enforces this.**"},
+		{"why the dispatch gates do not catch it", "both dispatch gates count WORKERS"},
+		{"the mg-eb47 incident", "9.0 of 10 cores across 11+ processes"},
+		{"that the host is shared with the gate", "the refinery gate share this host with you"},
+		// The escape hatch. Without it the honest response to a real need to
+		// exceed the budget is to exceed it silently.
+		{"where to declare a measured overrun", "say so in your verdict's `unverified` list"},
+	}
+	for _, name := range names {
+		data, err := defaultPrompts.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", name, err)
+		}
+		_, body, err := parsePromptFrontmatterBytes(data)
+		if err != nil {
+			t.Fatalf("parse frontmatter in %s: %v", name, err)
+		}
+		tmpl, err := template.New(name).Parse(body)
+		if err != nil {
+			t.Fatalf("parse template %s: %v", name, err)
+		}
+		var buf bytes.Buffer
+		vars := withDefaults(TemplateVars{
+			Id:          "mg-0000",
+			Repo:        "/repo",
+			WorktreeDir: "/wt",
+			WorkerCores: workerCores,
+			HostCores:   hostCores,
+		})
+		if err := tmpl.Execute(&buf, vars); err != nil {
+			t.Fatalf("execute template %s: %v", name, err)
+		}
+		out := buf.String()
+		for _, w := range wants {
+			if !strings.Contains(out, w.want) {
+				t.Errorf("%s: the core-budget clause no longer states %s (want %q).\n"+
+					"Nothing enforces the core budget — the prompt IS the mechanism, "+
+					"and both dispatch gates count workers rather than cores (mg-eb47, mg-6476). "+
+					"If the wording moved on purpose, update this test deliberately; "+
+					"do not delete the assertion.", name, w.what, w.want)
 			}
 		}
 	}
