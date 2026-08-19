@@ -100,18 +100,31 @@ fi
 if ! out=$(git -C "$repo" cherry origin/main FETCH_HEAD 2>&1); then
   echo "cherry failed — $slug#$number UNJUDGED: $out"; continue
 fi
-printf '%s\n' "$out" | grep -q '^+' && echo "not landed" || echo landed
+printf '%s\n' "$out" | grep -q '^+' && echo "landing not established" || echo landed
 ```
 
 `git cherry <upstream> <head>` prints one line per commit on `<head>`: `-` if an
-equivalent patch is already upstream, `+` if not. **Any `+` means not landed.**
-A branch that the refinery rebased and merged reports all `-`, because rebasing
-preserves patch-ids even though it rewrites every SHA.
+equivalent patch is already upstream, `+` if not.
+
+**A `+` means `git cherry` could not establish that this commit landed — not
+that it did not land.** The two readings differ exactly where a reader acts:
+*did not land* invites filing a carrier, *could not establish* invites the one
+check that settles it. A branch that the refinery rebased and merged reports all
+`-`, because rebasing preserves patch-ids even though it rewrites every SHA —
+but content that landed under a *different* patch reads `+`, and there are three
+measured, ordinary ways for that to happen. See [§What `git cherry` does not
+cover](#what-git-cherry-does-not-cover) before acting on a `+`.
+
+The `-` direction is the stronger one and it is still **not** absolute: a patch
+that landed and was later reverted reads `-` LANDED with the content gone from
+`main`. Same section.
 
 **UNJUDGED is a third outcome, not a synonym for either.** Record it under
 *Gaps I'm watching* the same way a `gh` outage is recorded, and take no
-disposition on that PR this sweep. Folding it into `not landed` would file
-carriers for landed work; folding it into `landed` would close live PRs.
+disposition on that PR this sweep. `+` is the instrument answering and failing
+to establish landing; UNJUDGED is the instrument not answering. Folding UNJUDGED
+into `+` would file carriers for landed work; folding it into `landed` would
+close live PRs.
 
 **2. Does a live work item track it?** — search **all six** statuses
 (`available`, `claimed`, `pending`, `done`, `archived`, `shelved`), not just the
@@ -181,26 +194,107 @@ the same mistake — `git rev-list --count main..<branch>`, which reported 65
 
 ### What `git cherry` does not cover
 
-`git cherry` compares **patch-ids**, so it reports `not landed` for content that
-did land under a different patch. Every measurement below and above is on a
-**clean** rebase-and-merge; that is the refinery's only merge path, but it is not
-every path. Known exposure, stated rather than assumed — a doc that claims
-accuracy nobody measured is how the ancestry line survived two weeks:
+`git cherry` compares **patch-ids**. A patch-id is a hash of a commit's diff with
+line numbers normalised away — but the diff it hashes includes the **context
+lines**, not only the added and removed ones. Two commits are "equivalent" only
+if their diffs agree on the surrounding text as well. So `+` means *no commit
+upstream carries this exact patch*, which is strictly weaker than *this content
+is not on `main`*.
 
-- **Squash merges and "Rebase and merge" through the GitHub UI** rewrite N
-  commits into one new patch. `git cherry` will call the originals unlanded.
-  **Not measured** — no squash-merged PR was available to test against.
+Three ways that gap opens were measured on 2026-08-19 in throwaway repos, and
+each is pinned as a test in `internal/gitgc/cherrylanding_test.go` — against the
+shipped Go copy of this predicate, so the section cannot drift away from what
+git actually does on this machine:
+
+- **A squash merge rewrites N commits into one new patch**, so every commit on
+  the branch reads `+` while the content is byte-identical on `main`. Measured:
+  two-commit branch, `git merge --squash`, `+` on *both* commits, `git diff main
+  feat` empty. Reported by the repo owner as
+  [gh#149](https://github.com/drellem2/pogo/issues/149); this bullet said "not
+  measured" until then.
+- **It is patch-id identity, not commit count.** A *one*-commit branch whose
+  change is folded into a larger squash — its edit plus somebody else's, in one
+  commit — also reads `+`, with its own file byte-identical on `main`. So a `+`
+  on a single-commit PR is not, by itself, evidence that the predicate is
+  misbehaving.
+- **Any neighbouring edit on `main` inside the hunk's three-line context window
+  flips a landed commit to `+`**, because patch-id hashes those context lines.
+  That is ordinary concurrent development in the same file, not an exotic merge
+  mode. Measured as a matched triple: the same PR commit, the same squash merge,
+  differing only in where `main`'s other edit fell.
+
+  | where `main`'s other edit fell | `git cherry` |
+  |---|---|
+  | inside the PR hunk's 3-line context window | `+` |
+  | same file, outside the window | `-` |
+  | a different file | `-` |
+
+  In the `+` case the two patches differ in **exactly one context line**: same
+  added line, same removed line, same hunk header `@@ -5,6 +5,6 @@`. Line numbers
+  are normalised away; the context text is not.
+
+  **And this one is not confined to squash merges — it reaches the refinery's
+  own path.** This section used to say every measurement was on a clean
+  rebase-and-merge and that this is the refinery's only merge path, which read
+  as reassurance and was not. Rebasing the branch onto a `main` that moved inside
+  the window rewrites the landed patch with the *new* context, so the original
+  PR head — the ref a reviewer and this pass actually hold — reads `+`. Measured
+  the same way, `git rebase main` then `merge --ff-only`: `+` with the
+  neighbouring edit in the window, `-` with it in another file.
+
 - **A rebase resolved through a conflict** changes the patch, so the same
   applies. This one **cannot arise on the refinery path**: a conflicting rebase
   aborts and fails the MR rather than merging through it
   (`internal/refinery/merge.go:508–530`, mg-eac0). The residual exposure is
   human-side rebases only, and it is **not measured**.
 
-Both failures are in the *safe* direction — they over-report `not landed`, and
-the disposition table's response to `not landed + untracked` is "file a carrier,
-**never** merge or close on a guess". They are still failures. If a PR looks
-stranded and its subject line appears in `git log origin/main`, check the
-content by hand before filing anything.
+All four over-report — they answer `+` for content that is on `main` — and the
+disposition table's response is "file a carrier, **never** merge or close on a
+guess". That direction is safe. It is still a wrong answer, and on a repo that
+squash-merges it is the *ordinary* answer rather than an edge case:
+`gh api repos/drellem2/pogo` reports `allow_squash_merge: true` (re-checked
+2026-08-19), as the mg-ca27 triage found for the other eight watched repos it
+polled. One human button-merge is enough to produce a sweep of `+`.
+
+**The `-` direction has one measured failure, and it runs the unsafe way.** A
+patch applied to `main` and then **reverted** still reads `-` LANDED: the
+original patch *is* upstream, and `git cherry` does not net a revert against what
+it undid. Measured — `git cherry -v main feat` prints `- <sha> add the feature`
+while `feature.txt` is absent from `main` and the head is not an ancestor.
+**The subject-line check this doc used to prescribe does not catch it**, because
+the revert commit's own subject contains the original (`Revert "add the
+feature"`), so a `git log origin/main` grep matches. Ruling it out takes a look
+at the content: `git show origin/main:<path>` on a file the PR touches, or
+`git log --oneline origin/main -- <path>` read for a `Revert`.
+
+### A second artifact states this rule, and this doc cannot reach it
+
+**As of 2026-08-19 this doc is not the only place the landed-ness rule is written
+down, and the other copy still asserts what the section above just retracted.**
+The PM TOMLs that switch this pass on carry their own one-line summary of it —
+`~/.pogo/agents/pm/pogo.toml` reads:
+
+    ANY '+' line means NOT landed. Compare PATCHES, never ancestry.
+
+The second sentence is right. The first is the flat assertion measured false
+above — and it is the copy that **actually drives the sweeps**, because the TOML
+is what reaches a PM's composed prompt. A PM reads that every sweep; it reads
+this doc only when something sends it here. Note that being a `#` comment in the
+TOML does **not** make it inert: it is carried through verbatim, at line 1054 of
+`pogo agent prompt show pm-pogo` when this was written.
+
+Those TOMLs live under `~/.pogo/agents/pm/`, outside this repo and untracked in
+it, so **no change to this file can correct them** and no PR can carry the
+correction. They are a human's own configuration; editing them was deliberately
+left out of the change that wrote this section (mg-724c, from the mg-ca27
+triage). Four of the five PM configs carry the line (`pogo`, `onethird`,
+`lineara`, `dealdesk`; `riemann` does not), and two of those four are running —
+re-checked 2026-08-19.
+
+So if a PM's behaviour disagrees with this doc, read the TOML before concluding
+the PM is malfunctioning. **And once the TOMLs are corrected, delete this
+subsection** — a gap notice that outlives its gap is just the next artifact
+saying something untrue.
 
 ### The two-arm acceptance test
 
@@ -209,17 +303,26 @@ other answer* — which is the defect itself. So any change to this predicate mu
 be run against both arms, and both must be seen to move:
 
 1. **Known-merged branches must resolve `landed`.** Without this arm, the broken
-   ancestry predicate passes.
-2. **Genuinely unmerged branches must still resolve `not landed`.** Without this
-   arm, "everything is landed" passes.
+   ancestry predicate passes. **Wherever the repo allows squash merges, at least
+   one of them must be a known-merged multi-commit PR** — that is the case the
+   section above is about, and a sample of rebase-merged branches cannot reach
+   it. Read the result carefully in both directions: a `+` on a *single*-commit
+   PR is not automatically a predicate bug either, because a single commit folded
+   into a larger squash, or one whose context lines moved on `main`, is `+` by
+   construction. Without that caveat this arm has a false-alarm mode.
+2. **Genuinely unmerged branches must still resolve `+`.** Without this arm,
+   "everything is landed" passes.
 3. **A ref git cannot resolve must resolve `UNJUDGED`** — not `landed`, and not
-   `not landed`. This is the arm the shell makes easy to get wrong; see the
-   comment in the snippet above.
+   `+`. This is the arm the shell makes easy to get wrong; see the comment in
+   the snippet above.
 
 Establish arm 1's ground truth **without** the predicate under test — grep the
 branch's commit subjects against `git log origin/main`. Using `git cherry` to
 decide which branches count as known-merged, and then testing `git cherry`
-against that list, proves only that it agrees with itself.
+against that list, proves only that it agrees with itself. The subject grep has
+its own hole, and it is the same one as the constraint bullet below: a reverted
+patch's subject is still in the log. For a branch you are relying on as ground
+truth, read the content on `main`, not the subjects.
 
 Measured in `drellem2/pogo` on 2026-08-10, old predicate vs. new:
 
@@ -261,10 +364,25 @@ something else about these branches"; a before/after on one branch does.
 | no | superseded | **Superseded.** Close it with a one-line reason naming what landed instead. |
 
 The *Landed?* column is question 1's answer, so it is only as good as the
-predicate behind it. If the top row never fires across a whole sweep, suspect
-the predicate before concluding the fleet has no rebase-dangles — that is
-exactly what the ancestry test looked like for the two weeks it was prescribed
-here.
+predicate behind it — and its `no` means **landing was not established**, not
+*this did not land*. The three bottom rows are written to be safe under that
+weaker reading: none of them closes or merges anything.
+
+If the top row never fires across a whole sweep, suspect the predicate before
+concluding the fleet has no rebase-dangles — that is exactly what the ancestry
+test looked like for the two weeks it was prescribed here. That inference has a
+floor, though: **on a repo that squash-merges, the top row can only ever fire for
+a single-commit PR whose patch survived the squash intact.** Every multi-commit
+PR there is `+` by construction, so an empty top row is expected rather than
+diagnostic. Check the merge mode before reading the absence as a fault:
+
+```bash
+gh api "repos/$slug" --jq '{squash: .allow_squash_merge, rebase: .allow_rebase_merge}'
+```
+
+A `rebase: true` answer is **not** an all-clear, only a weaker floor: a rebase
+onto a `main` that moved inside the PR hunk's context window rewrites the patch
+too, and the top row misses that PR as well.
 
 Three constraints on acting:
 
@@ -276,12 +394,18 @@ Three constraints on acting:
 - **Closing a PR is outward-facing**, so it routes through the coordinator
   rather than being done by the PM directly — same rule as any other public
   reply.
-- **A `landed` reading is not enough to close on its own**, given the
-  squash-merge blind spot runs the other way: `git cherry` cannot report
-  `landed` for content that is not on `main`, so a false *close* is not the
-  exposure here — but confirm the subject line appears in `git log origin/main`
-  anyway before asking the coordinator to close. It costs one command and it is
-  the last check before an outward-facing action.
+- **A `landed` reading is not enough to close on its own — and the reason this
+  bullet gave until 2026-08-19 was wrong.** It said `git cherry` *cannot* report
+  `landed` for content that is not on `main`, so a false *close* was not the
+  exposure. It can, and the mitigation it prescribed does not cover the case: an
+  applied-then-reverted patch reads `-` LANDED with the content gone, and the
+  revert commit carries the original subject, so the `git log origin/main`
+  subject grep passes too (measured — [§What `git cherry` does not
+  cover](#what-git-cherry-does-not-cover)). Before asking the coordinator to
+  close, confirm the **content** is on `main`: `git show origin/main:<path>` for
+  a file the PR touches, or `git log --oneline origin/main -- <path>` read for a
+  `Revert`. It costs one command and it is the last check before an
+  outward-facing action.
 
 ## Enabling it
 
