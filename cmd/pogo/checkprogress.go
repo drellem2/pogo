@@ -72,7 +72,7 @@ which of them rescued the fleet is the part a coordinator chasing a hunch needs.
 A MEASUREMENT THAT COULD NOT BE TAKEN IS A THIRD ANSWER. An unreadable worktree
 is not an unwritten one, and an unresolvable CPU sample reports zeros that mean
 "this host cannot tell". Any such gap suppresses the finding and is printed
-under "could not measure" — and exits ` + fmt.Sprint(exitInstrumentFailure) + `, because that run measured nothing.
+under NOT MEASURED — and exits ` + fmt.Sprint(exitInstrumentFailure) + `, because that run measured nothing.
 
 The standing detector is the same code on pogod's heartbeat, reading the same
 source with the same thresholds, so this command cannot disagree with the mail
@@ -166,7 +166,14 @@ func renderProgressReading(r progresswatch.Reading) string {
 		for _, x := range r.Blind {
 			fmt.Fprintf(&b, "  - %s\n", x)
 		}
-		b.WriteString("\nNo finding is possible from this run. That is not a clean fleet.\n")
+		// NOT "No finding is possible" — that is the CLEAN render's own headline
+		// with a qualifier bolted on, and the qualifier is the half a skimmer
+		// drops and a grep never sees. The blind lead token is NOT MEASURED
+		// everywhere else this reading is rendered (Reading.String), and a
+		// state whose words are a prefix of the healthy state's words is the
+		// false-green this whole command exists to make impossible.
+		b.WriteString("\nNo reading is possible from this run, clean or otherwise.\n")
+		b.WriteString("That is not a clean fleet — it is a fleet nobody measured.\n")
 	case r.Stalled:
 		b.WriteString("FLEET IS ALIVE AND LANDING NOTHING.\n\n")
 		b.WriteString("All four measurements hold together, and they have one ordinary\n")
