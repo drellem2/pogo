@@ -258,6 +258,31 @@ gate_step "Testing the external redeploy revision probe" bash scripts/revision-p
 # which is the box that needs arming.
 gate_step "Testing the revision probe's launchd arming" bash scripts/install-revision-probe_test.sh
 
+# The EXTERNAL witness that the FLEET is still completing turns (mg-f867). Same
+# rule as the two steps above, one level out: a detector hosted INSIDE the
+# population it watches cannot report that population failing. deploy-verify §0
+# was built for exactly the 2026-08-14 outage, asks the right question, and never
+# ran — it is architect's own schedule and architect was one of the seven agents
+# that stopped.
+#
+# Two load-bearing cases. Section 6 is the THIRD CELL: four unmeasurable states,
+# none of which may land in FLEET-STOP or in OK, including a FUTURE mtime — the
+# one way this predicate could read green over a broken measurement. Section 8 is
+# the delivery half, and it is written the way a RACE has to be: a deliberately
+# chatty stub mg, with the FIRST assertion being that the old `pipefail + grep -q`
+# idiom really does get 141 against that fixture, so the section cannot pass by
+# certifying timing luck (mg-7ce7).
+gate_step "Testing the external fleet-liveness probe" bash scripts/fleet-liveness-probe_test.sh
+
+# The ARMING of that probe. The load-bearing cases are section 4 — the argument
+# vector read back out of the rendered plist and EXECUTED, because a plist can
+# parse, install and appear in `launchctl list` while naming a command line
+# nobody has ever run — and section 5, where a failing delivery positive control
+# REFUSES the install. 5e is this ticket's rule turned on its own remedy: the
+# installer's placeholder guard is asserted against a 200KB render that defeats
+# the `| grep -q` spelling it deliberately does not use.
+gate_step "Testing the fleet-liveness probe's launchd arming" bash scripts/install-fleet-liveness-probe_test.sh
+
 # The gate's own per-step profile (mg-eed9). The load-bearing case is Test 4,
 # and it is a positive control rather than a smoke test: the profile's `cores`
 # column is the only thing separating a step that is COMPUTING from a step that

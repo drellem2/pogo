@@ -827,3 +827,46 @@ tail -5 ~/Library/Logs/pogo/revision-probe.log     # RunAtLoad means there is al
 
 A ledger whose newest line is hours old means the witness stopped — which looks
 exactly like health if you only watch for alerts.
+
+## Fleet Liveness Agent (`com.pogo.fleetliveness`)
+
+The other job that is **not** installed by the `pogo` binary, and for a reason
+one level out from the revision probe's: *a detector hosted INSIDE the population
+it watches cannot report that population failing.* It runs
+`~/.pogo/deploy-src/scripts/fleet-liveness-probe.sh` every fifteen minutes at
+:07 :22 :37 :52, and its whole predicate is a `stat` and a subtraction — the
+NEWEST mtime across `~/.pogo/agents/turnlog/*.log` against now, alerting past 2h.
+
+It exists because on 2026-08-14 all seven crew agents stopped inside a ten-minute
+window and stayed stopped for ~118 hours, and the check built for exactly that
+outage (`deploy-verify` §0) never ran: it is one of architect's own schedules and
+architect was one of the agents that stopped. So this job may not be a `pogo
+schedule` (pogod's scheduler can only deliver to an agent, and needs a turn to
+run), may not be a crew schedule (that is the circularity verbatim), and may not
+be rendered by `internal/service` (which ships in the `pogo` binary). launchd is
+the only substrate that is independent of pogod, the fleet, the deploy and every
+agent turn.
+
+`--stale-after 2h` is on the NEWEST turnlog across ALL agents, never per-agent: an
+idle PM legitimately goes hours between turns and this box carries an `a270.log`
+untouched since 2026-08-11 by design. The all-of-them condition is what separates
+a fleet stop from ordinary idleness.
+
+It alerts by MAIL to `human`, never by nudge — measured during the outage, nudges
+recovered the merely-unreachable agents and did nothing for the wedged ones, and
+mail is the only wake channel that survived both the idle gate and wake-silence
+suppression. During a fleet-wide stop there is no in-fleet actor left to act.
+
+It also runs a **positive control on its own delivery path** on a cadence, because
+a detector that never fires never tests its notification path. See
+`docs/operations.md` for the full argument and the ledger's `mail=` states.
+
+```bash
+scripts/install-fleet-liveness-probe.sh
+launchctl print gui/$(id -u)/com.pogo.fleetliveness | head -20
+tail -5 ~/Library/Logs/pogo/fleet-liveness.log     # RunAtLoad means there is already a line
+```
+
+Same caveat as above, and it is the reason the ledger exists at all: a ledger
+whose newest line is hours old means the witness stopped, and nothing on this box
+watches this witness.

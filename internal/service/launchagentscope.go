@@ -135,6 +135,14 @@ func launchAgentExclusionReasons() map[string]string {
 		// see managedLaunchAgent's comment in launchagentaudit.go.
 		"com.pogo.revisionprobe": "deliberately outside the registry (mg-a03d): it is rendered by scripts/install-revision-probe.sh from a tracked plist, because everything in `internal/service` ships in the pogo BINARY and a Go-rendered row would make the auditor for the deploy witness arrive BY the deploy",
 
+		// Same argument as revisionprobe's, one level out: that job may not be
+		// armed BY the deploy it watches, and this one may not be armed by
+		// anything the FLEET provides. `internal/service` ships in the pogo
+		// binary, which a working deploy installs and which an agent turn is
+		// what anybody uses — so a Go-rendered row would make the auditor for
+		// the fleet-stop witness arrive by the fleet.
+		"com.pogo.fleetliveness": "deliberately outside the registry (mg-f867): it is rendered by scripts/install-fleet-liveness-probe.sh from a tracked plist, because everything in `internal/service` ships in the pogo BINARY and this witness must be armable on a box whose fleet has been dead for five days — the condition it exists to report",
+
 		"com.pogo.notify":    ownedByReminders,
 		"com.pogo.deadman":   ownedByReminders,
 		"com.pogo.watchdog":  ownedByReminders,

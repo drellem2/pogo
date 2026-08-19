@@ -958,6 +958,170 @@ the sole reporter of its own absence. `pogo check-staleness` (above) reads the
 deploy's own *record* of its runs; `pogo service status` compares running vs
 installed vs `main` and is itself deploy-installed.
 
+## The external witness that the FLEET is still completing turns (`scripts/fleet-liveness-probe.sh`)
+
+**The rule this file implements:** *a detector hosted INSIDE the population it
+watches cannot report that population failing.*
+
+It is the population-level sibling of the revision probe's rule above, and it was
+filed after an incident in which the check built for the exact failure did not
+run. On 2026-08-14 all seven crew agents completed their last turn inside a
+ten-minute window and stayed stopped for ~118 hours. `deploy-verify` §0 exists
+for precisely that, its own text asks the right question — *"would this read
+green over a fleet that is present and doing nothing?"* — and its
+completed-turn-artifact test would have caught it on the morning of 08-15. **It
+never ran, because it is `deploy-verify-architect`, one of architect's own
+schedules, and architect was one of the agents that stopped.**
+
+That is a circularity, not a coverage gap. A coverage gap is filled by adding a
+check; here the check EXISTS, is CORRECT and is armed nightly, and is disarmed by
+the event it detects. The same incident produced two more instances in
+independently-built components: ack-watch's escalation names `mayor` as a
+recipient while `mayor` is in its own `blackout_agents` set, and every fleet-wide
+scheduled check on this box routes through the coordinator.
+
+**The predicate is one `stat` and a subtraction.**
+
+```bash
+newest=$(ls -t ~/.pogo/agents/turnlog/*.log | head -1)
+age=$(( $(date +%s) - $(stat -f %m "$newest") ))       # ALERT past 2h
+```
+
+```bash
+scripts/fleet-liveness-probe.sh
+scripts/fleet-liveness-probe.sh --stale-after 2h --mail
+scripts/fleet-liveness-probe.sh --self-test-only        # the delivery control, alone
+```
+
+**NEWEST-across-all, never per-agent, and that is the whole design.** An idle PM
+legitimately goes hours between turns, and this box carries an `a270.log`
+untouched since 2026-08-11 by design — a per-agent threshold pages on both. If
+the most recent turn by ANY agent is old, every agent is down simultaneously,
+which has happened twice (2026-08-11, 22h; 2026-08-14, ~118h) and has never been
+benign.
+
+The fleet form was also chosen on a **correctness** argument, not a simplicity
+one. The per-agent form (turnlog line vs that agent's process start) was
+implemented first and its first version reported UNPROVEN for all seven agents
+including ones that were plainly fine: it read uptime from the wrong `awk` field,
+the parse yielded zero, a zero uptime puts `process_start` at *now*, so every
+turnlog line predated it. The fleet form **parses nothing** — no uptime, no pid,
+no field extraction, no dependency on any CLI's output format — so it is
+structurally incapable of that failure. And a per-agent detector's failures are
+**correlated** through the shared parser: seven agents agreeing is one chance of
+being wrong, not seven, so unanimity there is worth nothing as corroboration and
+is indistinguishable from the fleet stop it is meant to detect.
+
+Keep `pogo check-turns` as the per-agent diagnostic a human runs *after* this
+alarm fires, not as the thing that decides whether to page.
+
+**Three cells, and a failed measurement must not fail toward ALARM.**
+
+| exit | verdict | means |
+|---|---|---|
+| 0 | `OK` | some agent completed a turn inside the threshold |
+| 1 | `FLEET-STOP` | no agent did — every agent is down at once |
+| 2 | `UNMEASURABLE` | this probe could not measure the fleet, and says which row and why |
+| 3 | delivery control failed | detection is fine and the alarm cannot reach anyone |
+
+A two-valued instrument has nowhere to put "I could not measure this", so the
+failure lands in whichever cell the arithmetic happens to produce. `UNMEASURABLE`
+is per-row and is never folded into either verdict: an absent turnlog directory,
+an **empty** population (which is not a stopped one), a row that cannot be
+stat'd, and a **future** mtime — the last being the only way this predicate could
+read GREEN over a broken measurement, since a negative age is younger than every
+threshold. A dangling symlink is caught by an explicit existence check, because
+`stat -L` on darwin does *not* fail on one: it falls back to the link's own
+mtime, which would read as a completed turn that never happened.
+
+**It alerts by MAIL, never nudge, and that was measured.** During the outage,
+`--immediate` nudges recovered the three agents that were merely unreachable and
+did nothing for the three that were wedged. The coordinator never goes idle, so
+the idle gate drops its nudges — *continuous PTY output makes an agent look
+busiest exactly when it is least reachable* — and `pa` answered a wake with
+silence, after which `wake_silence_once` stopped trying for 106h with the "already
+woken N ago" age climbing and never resetting (mg-3a8a). Mail is the only wake
+channel that survived both rules; it is how architect itself recovered. The alert
+goes to `human`, because during a fleet-wide stop there is by definition no
+in-fleet actor left to act — doctor, which would normally restart a wedged agent,
+was itself inert.
+
+**It proves it can DELIVER, not merely detect.** Detection and delivery are
+separate halves and only the first is exercised by ordinary operation: a detector
+that never fires never tests its own notification path. `com.pogo.revisionprobe`
+delivered three correct alerts to `human` on 08-16 and 08-17 and then went silent
+mid-incident **with no code change**, because its capability probe is `cmd | grep
+-q` under `set -o pipefail` — grep exits on the first match, the producer takes
+SIGPIPE and exits 141, and a working binary is reported ABSENT (mg-7ce7). The
+pattern is not refuted; the idiom is. That is *more* alarming than a component
+that never worked, which gets caught the first time anyone looks.
+
+So the probe runs a positive control on its own notification path **on a
+cadence** (default 12h, `--self-test-every`), not once at install: it sends a
+real message, **reads it back out of the mailbox by new message id**, archives
+it, and separately confirms the alert recipient is addressable without sending to
+it. The installer runs the same control before arming and refuses if it fails —
+necessary and not sufficient, because one passing run of a race is a coin landing
+the right way.
+
+**The ledger records the send RESULT, not the send attempt.**
+
+```bash
+tail -5 ~/Library/Logs/pogo/fleet-liveness.log       # the LEDGER: one line per run
+tail -40 ~/Library/Logs/pogo/fleet-liveness.report.log
+launchctl print gui/$(id -u)/com.pogo.fleetliveness | head -20
+```
+
+```
+2026-08-19T09:07:02Z exit=0 OK           newest=mayor.log age=3m     threshold=2h agents=8 mail=n/a       selftest=fresh(4h)
+2026-08-19T09:22:01Z exit=1 FLEET-STOP   newest=mayor.log age=2h11m  threshold=2h agents=8 mail=delivered selftest=ok
+2026-08-19T09:37:02Z exit=1 FLEET-STOP   newest=mayor.log age=2h26m  threshold=2h agents=8 mail=throttled selftest=fresh(0m)
+2026-08-19T09:52:01Z exit=2 UNMEASURABLE newest=-         age=-      threshold=2h agents=0 mail=n/a       selftest=- -- no *.log under ...
+```
+
+`mail=` is one of `n/a` / `computed` / `throttled` / `no-mg` / `send-failed-rc-N`
+/ `attempted-unconfirmed` / `delivered`, and only the last means the message was
+found in the recipient's mailbox afterwards. An `attempted-unconfirmed` send
+deliberately does **not** start the re-notify throttle, so the next run tries
+again rather than recording a notification that reached nobody. The distinction
+is not bookkeeping: counting computed alerts as sent ones is what produced a
+claim about the revision probe that had to be withdrawn once the mail record was
+consulted.
+
+The ledger is written from an EXIT trap rather than from each terminal branch, so
+"either way" is structural instead of remembered — including the setup-failure
+path. **A witness that writes only when it is unhappy cannot be distinguished
+from a witness that is not running**, which is this whole ticket.
+
+**Arming it: `com.pogo.fleetliveness`.**
+
+```bash
+scripts/install-fleet-liveness-probe.sh              # install / re-install, then verify
+scripts/install-fleet-liveness-probe.sh --dry-run    # render and print, touch nothing
+scripts/install-fleet-liveness-probe.sh --uninstall  # bootout and remove
+```
+
+launchd, not `pogo schedule` and not a crew schedule. `pogo schedule` lives inside
+pogod and can only deliver a nudge or a mail to an *agent*, so it needs pogod
+alive and a turn to execute the instruction — both failure modes in this lineage.
+A crew schedule reproduces the circularity verbatim: that is what `deploy-verify`
+§0 was. Fires every fifteen minutes at :07 :22 :37 :52, deferred-once across
+sleep; a host that is powered **off** misses the fire outright and nothing
+replays it.
+
+**Siblings, and what this does not close.** `internal/turnwatch` reads the same
+artifact from inside pogod and is not replaced by this: it covers FLEET DOWN,
+POGOD UP at minutes of latency, and its own package header says it does not close
+POGOD WEDGED rather than exited, because a resident reader wedges with its host
+and launchd restarts on exit only. This job covers that cell. `pogo agent list`
+is **not** a substitute and was actively misleading during the outage — it showed
+`last-activity=just now` for agents whose turnlogs were five days stale.
+
+**Nothing watches this probe**, and that is stated rather than implied. Its
+ledger is its heartbeat and the self-test mail is a second one, and both still
+need a reader — the same class one level out.
+
+
 ## Is something versioning `$POGO_HOME`? (`pogo doctor --check`)
 
 `$POGO_HOME` can be a git working tree, and on this fleet's host it is: `~/.pogo`

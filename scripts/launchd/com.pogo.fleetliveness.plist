@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- THE ARMING OF scripts/fleet-liveness-probe.sh (mg-f867).
+
+         WHY THIS IS A LAUNCHD JOB AND NOT A SCHEDULE. This is the whole
+         finding, so it is written here rather than left to the script:
+
+         A detector hosted INSIDE the population it watches cannot report that
+         population failing.
+
+         `deploy-verify` §0 exists for exactly the outage of 2026-08-14, its own
+         text asks the right question, and its completed-turn-artifact test would
+         have caught the fleet stop on the morning of 08-15. It never ran,
+         because it is `deploy-verify-architect` — one of architect's own
+         schedules — and architect was one of the seven agents that stopped. That
+         is a circularity, not a coverage gap: the check EXISTS, is CORRECT, and
+         is armed on a nightly cadence, and it is disarmed by precisely the event
+         it is designed to detect.
+
+         So the three obvious homes are all forbidden:
+
+           `pogo schedule`      pogod's scheduler delivers a nudge or a mail to
+                                an AGENT; it cannot run a command. Arming this
+                                way needs pogod alive AND an agent turn to
+                                execute the instruction, and "turns that never
+                                run" is the entire subject.
+           a crew schedule      reproduces the circularity verbatim. This is what
+                                deploy-verify §0 was, and it is why five days of
+                                fleet outage went unreported.
+           inside pogod         internal/turnwatch already reads this artifact
+                                from inside pogod and is the right thing at its
+                                own latency. It does not close POGOD WEDGED
+                                rather than exited: a resident reader wedges with
+                                its host, and launchd restarts on exit only. Its
+                                own package header says so.
+
+         launchd is triggered by the OS clock. It is independent of pogod, of the
+         fleet, of the refinery, of the deploy and of any agent turn. -->
+    <key>Label</key>
+    <string>com.pogo.fleetliveness</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Update YOUR_USERNAME, or use scripts/install-fleet-liveness-probe.sh.
+
+             The program is the TRACKED script in a checkout, never a copy taken
+             at install time. A copy would freeze at the revision that was
+             current when somebody last remembered to re-install.
+
+             deploy-src rather than ~/dev/pogo, for the same reason as
+             com.pogo.revisionprobe: the latter is a working tree a human edits
+             and can be mid-rebase, on a feature branch, or dirty at any hour. -->
+        <string>/Users/YOUR_USERNAME/.pogo/deploy-src/scripts/fleet-liveness-probe.sh</string>
+        <string>--turnlog-dir</string>
+        <string>/Users/YOUR_USERNAME/.pogo/agents/turnlog</string>
+        <!-- TWO HOURS. Longer than any legitimate fleet-wide quiet period
+             observed on this box, and far shorter than the two real outages
+             (2026-08-11, 22h; 2026-08-14, ~118h).
+
+             The predicate is NEWEST-ACROSS-ALL, never per-agent, and that is
+             what makes one number safe: an idle PM legitimately goes hours
+             between turns, and this box carries an `a270.log` untouched since
+             2026-08-11 by design, so a per-agent threshold would page on both.
+             The most recent turn by ANY agent being two hours old means every
+             agent is down simultaneously. -->
+        <string>--stale-after</string>
+        <string>2h</string>
+        <!-- The stamp carries the re-notify record. Named explicitly rather
+             than left to $HOME resolution: an unattended job that silently picks
+             a different stamp path than the hand-run does has a throttle that
+             resets every time an operator checks on it. -->
+        <string>--stamp</string>
+        <string>/Users/YOUR_USERNAME/.pogo/fleet-liveness.stamp</string>
+        <!-- IT REPORTS EITHER WAY. One ledger line per run, green, red or
+             unmeasurable, so that "no alert" and "no probe" stop being the same
+             observation. The newest line's age is the only thing on this box
+             that answers "is the witness itself still firing?" — and a witness
+             that was not firing is what this ticket is about. -->
+        <string>--log</string>
+        <string>/Users/YOUR_USERNAME/Library/Logs/pogo/fleet-liveness.log</string>
+        <!-- The quiet flag trims the NARRATIVE, never the ledger and never an
+             alert. The ALERT headline is a bare echo and survives it;
+             unmeasurable findings and setup failures go to stderr and survive it
+             too. (XML comments may not contain a double hyphen, which is why
+             flags are named in prose rather than quoted literally.) -->
+        <string>--quiet</string>
+        <!-- MAIL, NEVER NUDGE, and this was measured during the outage rather
+             than assumed. Nudges recovered the three agents that were merely
+             unreachable and did nothing for the three that were wedged: mayor
+             never goes idle so the idle gate dropped its nudges, and pa answered
+             a wake with silence so wake silence suppression stopped trying for
+             106h. Mail is the only wake channel that survived both rules, and it
+             is how architect itself recovered.
+
+             It goes to `human` because during a fleet-wide stop there is by
+             definition no in-fleet actor left to act — doctor, which would
+             normally restart a wedged agent, was itself inert. -->
+        <string>--mail</string>
+    </array>
+
+    <!-- EVERY FIFTEEN MINUTES, and the two numbers are chosen together.
+
+         Unlike com.pogo.revisionprobe, the age here is NOT accumulated in a
+         stamp: it is read straight off the file's mtime, so it is true on the
+         first fire after a wake regardless of how many were missed. The sampling
+         rate therefore buys DETECTION LATENCY and nothing else — worst case
+         threshold + 15 minutes.
+
+         The cost of sampling often is notification volume, and that is paid in
+         the probe's renotify flag (default 2h, equal to the threshold, so a
+         standing stop notifies at most once per threshold window) rather than
+         here, because the sampling rate and the notification rate answer
+         different questions and one schedule field cannot serve both.
+
+         The minutes are off the hour boundary to stay clear of the deploy fires
+         and the restart windows they open.
+
+         REPLAY POLICY — DECLARED, because launchd has no field for it and an
+         inherited policy is one nobody chose. StartCalendarInterval is
+         DEFERRED-ONCE across sleep: any number of fires missed while asleep are
+         delivered as one run on wake. That is the right policy here and the
+         choice is not arbitrary — this probe's report is not a per-interval
+         sample. It compares a file mtime against wall clock, so a report
+         delivered late is still TRUE and still names the correct age. A skip
+         policy would discard the first report after a wake, which is the report
+         most likely to carry news; a count policy would replay ten identical
+         reports of one fact.
+
+         WHAT THIS POLICY CANNOT COVER, stated so nobody rediscovers it: a host
+         that is POWERED OFF misses the fire outright, and launchd defers across
+         sleep, not across shutdown. The ledger is how that silence is visible
+         after the fact. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Minute</key><integer>22</integer></dict>
+        <dict><key>Minute</key><integer>37</integer></dict>
+        <dict><key>Minute</key><integer>52</integer></dict>
+    </array>
+
+    <!-- RunAtLoad=true. A fire of this job is a stat and a subtraction: it never
+         builds, installs, restarts or writes anything but its own stamp and
+         ledger. And the first thing anyone wants after arming a witness is
+         evidence that it fires, which this provides at install time instead of
+         up to fifteen minutes later. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- One-shot per fire. KeepAlive=true would relaunch it in a loop, since it
+         exits on every run by design. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Two files, deliberately. fleet-liveness.log is the LEDGER — one line per
+         run, written from an EXIT trap, and it is the heartbeat. This one
+         catches whatever the run said out loud, which under the quiet flag is
+         alerts, unmeasurable findings and delivery-control failures only.
+         Mixing them would leave the heartbeat's newest line buried under
+         narrative. -->
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/fleet-liveness.report.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/fleet-liveness.report.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Must resolve `mg` and nothing else. It deliberately does NOT need
+             `go`, `pogo` or `pogod`: this probe must run on a box where the
+             fleet has been dead for five days, and reaching for anything an
+             agent turn or a deploy provides would arm it only under the
+             conditions it exists to report. ~/go/bin is on the path for `mg`
+             alone, and scripts/fleet-liveness-probe.sh makes every candidate
+             self-identify as macguffin before trusting it, because /usr/bin/mg
+             is the Micro-Emacs editor. -->
+        <key>PATH</key>
+        <string>/Users/YOUR_USERNAME/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
+        <!-- POGO_HOME is pinned rather than inherited. This box's shell exports
+             the LEGACY value POGO_HOME=$HOME (an old integration meaning "where
+             the dotfiles live"). The probe normalizes that the same way
+             internal/config.PogoHome does, so either value works; pinning it
+             removes the question from the job entirely. -->
+        <key>POGO_HOME</key>
+        <string>/Users/YOUR_USERNAME/.pogo</string>
+        <!-- NO GH_TOKEN HERE, EVER. ~/Library/LaunchAgents is world-readable.
+             This probe reads a local directory and writes local mail; it needs
+             no credential of any kind. -->
+    </dict>
+</dict>
+</plist>
