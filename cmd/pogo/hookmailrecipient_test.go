@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/claude"
+	"github.com/drellem2/pogo/internal/hookarm"
 )
 
 func withMailRoster(t *testing.T, rep *agent.RosterReport, err error) {
@@ -165,5 +167,108 @@ func TestSelfCheckSeparatesNoWarningFromNoHook(t *testing.T) {
 	buf.Reset()
 	if code := mailRecipientSelfCheck(&buf, dir); code == 0 {
 		t.Errorf("self-check passed with an unreadable roster:\n%s", buf.String())
+	}
+}
+
+// stampPayload is a PostToolUse payload carrying the harness's own statement of
+// the session's working directory — the field measured present in Claude Code
+// 2.1.236's real payload.
+func stampPayload(t *testing.T, cwd, command string) []byte {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"hook_event_name": "PostToolUse",
+		"cwd":             cwd,
+		"tool_name":       "Bash",
+		"tool_input":      map[string]any{"command": command},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return b
+}
+
+// TestTheHookStampsEvenWhenItHasNothingToSay is the whole point of the stamp.
+// The overwhelming majority of Bash calls have nothing to do with mail, and the
+// hook prints nothing for them — so if the stamp were written only alongside a
+// warning, an agent would read as unarmed until the first time it happened to
+// mail a stopped recipient, which is precisely the moment the warning was
+// supposed to already be in force (mg-503d).
+func TestTheHookStampsEvenWhenItHasNothingToSay(t *testing.T) {
+	dir := t.TempDir()
+	recordMailRecipientFire(stampPayload(t, dir, "go test ./..."))
+
+	fired, err := hookarm.LastFire(dir)
+	if err != nil {
+		t.Fatalf("LastFire: %v", err)
+	}
+	if fired.IsZero() {
+		t.Fatalf("a silent invocation left no stamp; every such agent would read as unarmed")
+	}
+}
+
+// TestTheStampFollowsTheHarnesssOwnCwd: the stamp has to land where pogod
+// looks, which is the agent's registered working directory. The harness states
+// that directory in the payload, and preferring it over the hook process's own
+// cwd is what keeps the two from disagreeing if a future harness ever runs
+// hooks from somewhere else.
+func TestTheStampFollowsTheHarnesssOwnCwd(t *testing.T) {
+	session := t.TempDir()
+	elsewhere := t.TempDir()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	recordMailRecipientFire(stampPayload(t, session, "echo hi"))
+
+	if fired, _ := hookarm.LastFire(session); fired.IsZero() {
+		t.Errorf("nothing stamped in the harness's cwd %s", session)
+	}
+	if fired, _ := hookarm.LastFire(elsewhere); !fired.IsZero() {
+		t.Errorf("stamped in the process's own cwd %s instead", elsewhere)
+	}
+}
+
+// TestAMalformedPayloadStampsNothingAndDoesNotPanic. This runs after every Bash
+// call every agent makes; the failure mode that matters is not a missing stamp,
+// it is a hook that can disturb the tool call it followed.
+func TestAMalformedPayloadStampsNothingAndDoesNotPanic(t *testing.T) {
+	recordMailRecipientFire([]byte("{not json"))
+	recordMailRecipientFire(nil)
+}
+
+// TestSelfCheckReportsTheStampWithoutFailingOnIt. --self-check is itself run
+// through Bash, so the hook fires AFTER it: a session's first self-check sees no
+// stamp even when everything is correct. Reporting that as a failure would put
+// a false alarm in the one instrument this fix's credibility rests on.
+func TestSelfCheckReportsTheStampWithoutFailingOnIt(t *testing.T) {
+	withMailRoster(t, absentDoctor(), nil)
+	dir := t.TempDir()
+	if err := claude.InstallMailRecipientHook(dir, "/bin/pogo hook mail-recipient"); err != nil {
+		t.Fatalf("InstallMailRecipientHook: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if code := mailRecipientSelfCheck(&buf, dir); code != 0 {
+		t.Fatalf("self-check failed only because no stamp exists yet:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "hook observed running: not yet") {
+		t.Errorf("self-check did not report the missing stamp:\n%s", buf.String())
+	}
+
+	if err := hookarm.RecordFire(dir); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	if code := mailRecipientSelfCheck(&buf, dir); code != 0 {
+		t.Fatalf("self-check failed with a stamp present:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "hook observed running: yes") {
+		t.Errorf("self-check did not report the stamp:\n%s", buf.String())
 	}
 }

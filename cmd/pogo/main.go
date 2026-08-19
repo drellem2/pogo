@@ -2056,7 +2056,21 @@ registry entry, so it is not one of the rows above — an absent member cannot
 appear in a set it has left. Those agents are named in a footer under the
 listing, and 'pogo agent roster' is the full view. --json is unchanged: it
 emits the registry array exactly as before, because eight callers consume it
-and assume every element has a process behind it (mg-7d20).`,
+and assume every element has a process behind it (mg-7d20).
+
+Each running row carries mail-warn=<state>, and a summary under the listing
+says how many running agents are ARMED with the mg-d924 dead-recipient mail
+warning. That warning is a harness hook installed at SPAWN, so it protects an
+agent only from that agent's next start: when it merged, every agent then
+running kept the old silent behaviour, and the only way to find out was to run
+'pogo hook mail-recipient --self-check' inside each one by hand (mg-503d).
+
+  armed    registered AND observed firing inside this process's lifetime
+  pending  registered, but never seen firing here
+  off      not registered — sends to a stopped agent are silent
+  unknown  the check could not run; mail_warn_detail says why
+  ?        this pogod does not report the state; the answer is unavailable,
+           which is not the same as clear`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			agents, err := client.ListAgents()
@@ -2085,9 +2099,10 @@ and assume every element has a process behind it (mg-7d20).`,
 					if a.WorkItemID != "" {
 						workItem = "  work-item=" + a.WorkItemID
 					}
-					fmt.Printf("%-20s  pid=%-6d  type=%-8s  status=%-10s  uptime=%s%s%s\n",
-						a.Name, a.PID, a.Type, a.Status, a.Uptime, activity, workItem)
+					fmt.Printf("%-20s  pid=%-6d  type=%-8s  status=%-10s  uptime=%s%s%s%s\n",
+						a.Name, a.PID, a.Type, a.Status, a.Uptime, mailWarnCell(a), activity, workItem)
 				}
+				printMailWarnSummary(os.Stdout, agents)
 				printAbsentFooter()
 			}
 		},
@@ -3007,6 +3022,17 @@ itself: "is the warning armed for me right now?" It reports whether the hook is
 registered in the current directory's harness settings and whether pogod's
 roster can be read. Both matter, because a hook that never installed and a
 fleet where everyone is running produce the same thing on screen — nothing.
+
+--self-check answers for ONE agent, and only when someone remembers to run it.
+The fleet answer is in 'pogo agent list': every running row carries
+mail-warn=<state> and the summary under the listing counts how many running
+agents are armed. Prefer it — the day mg-d924 merged the true reading was "0 of
+9", and nothing said so (mg-503d).
+
+Every invocation, including the silent ones, touches .claude/pogo-mailhook.stamp
+in the session's working directory. That stamp is what makes "armed" an
+OBSERVATION of this process running the hook rather than an inference from a
+settings file the process may never have read.
 
 It is a WARNING, never a refusal — mail queued for an on-demand agent that will
 be started later is legitimate. This command always exits 0 and never writes to

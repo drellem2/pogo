@@ -18,6 +18,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/hookarm"
 	"github.com/drellem2/pogo/internal/synthfail"
 )
 
@@ -54,6 +55,23 @@ type AgentInfo struct {
 	// ParkedAt (RFC 3339) is set only on status=parked entries, which are
 	// synthesized from on-disk park flags rather than live registry state.
 	ParkedAt string `json:"parked_at,omitempty"`
+	// MailWarn says whether the mg-d924 dead-recipient mail warning is actually
+	// in force for THIS PROCESS: "armed", "pending", "off", or "unknown". See
+	// internal/hookarm for what separates them.
+	//
+	// It is here, on the per-agent record every fleet view already reads,
+	// because the question the fix could not answer was a fleet question. The
+	// hook is installed at spawn, so an agent running when it merged keeps the
+	// old behaviour until it restarts; `--self-check` answered for one agent,
+	// once, for whoever remembered to run it, and nothing polled. Empty means
+	// this pogod predates the field — which is NOT the same as "off", and the
+	// CLI is required to render the difference (mg-503d).
+	MailWarn string `json:"mail_warn,omitempty"`
+	// MailWarnDetail is the one-line reason behind MailWarn: which file was
+	// read, when the hook was last seen running, or why the check could not
+	// run. A state with no reason gets argued with; a state carrying its own
+	// evidence gets acted on.
+	MailWarnDetail string `json:"mail_warn_detail,omitempty"`
 }
 
 // SpawnAPIRequest is the JSON body for POST /agents.
@@ -525,7 +543,30 @@ func ExportInfo(a *Agent) AgentInfo {
 	return agentInfo(a)
 }
 
+// agentInfo renders an agent, then annotates it with facts that live on disk
+// rather than in the registry.
+//
+// The split is not cosmetic: the annotation reads two files in the agent's
+// working directory, and doing that while holding the agent's mutex would put
+// filesystem latency on a lock every status poll in the fleet contends for.
 func agentInfo(a *Agent) AgentInfo {
+	info, dir := agentInfoLocked(a)
+	// Only a running process can be armed. An exited or restarting entry has no
+	// session to be armed IN, and a parked one has no entry here at all — a
+	// state reported for those would be a claim about a process that is not
+	// there.
+	if info.Status == StatusRunning {
+		state, why := hookarm.Resolve(dir, info.StartTime)
+		info.MailWarn = string(state)
+		info.MailWarnDetail = why
+	}
+	return info
+}
+
+// agentInfoLocked builds the registry half of the record and returns the
+// agent's working directory alongside it, so the caller can read the on-disk
+// half without the lock.
+func agentInfoLocked(a *Agent) (AgentInfo, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	info := AgentInfo{
@@ -554,7 +595,7 @@ func agentInfo(a *Agent) AgentInfo {
 			info.LastActivity = formatLastActivity(t)
 		}
 	}
-	return info
+	return info, a.Dir
 }
 
 // agentUptime returns the human-readable uptime for an agent.
