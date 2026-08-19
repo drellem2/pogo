@@ -331,9 +331,14 @@ func TestCherry_RevertedPatchStillReadsLanded(t *testing.T) {
 // without the other, and the failure this whole change repairs was exactly a doc
 // that had drifted from what the command does.
 func TestCherryLandingCasesAreDocumented(t *testing.T) {
+	// Fatal rather than Skip, which is where the event-log.md guards elsewhere
+	// in the tree land. Those catalog an enum against a doc that is not going
+	// anywhere; this one exists to catch drift, and a rename or a deletion is
+	// the maximal drift. A guard that goes green on it has the failure mode it
+	// was written to detect.
 	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "pm-open-pr-pass.md"))
 	if err != nil {
-		t.Skipf("pm-open-pr-pass.md not readable from here: %v", err)
+		t.Fatalf("pm-open-pr-pass.md is unreadable — this guard's subject is gone: %v", err)
 	}
 	text := string(doc)
 	for _, want := range []string{
@@ -350,6 +355,14 @@ func TestCherryLandingCasesAreDocumented(t *testing.T) {
 		// unique to that subsection: the doc has named ~/.pogo/agents/pm/
 		// since it shipped, so the path alone would pass vacuously.
 		"no change to this file can correct them",
+		// The qualification on the refinery's own path, in the paragraph a
+		// reader acts on rather than only in the exposure section below it.
+		// TestCherry_ContextWindowBitesTheRebaseMergePathToo is the
+		// measurement; this is the sentence it licenses.
+		"only when `main` has\nnot moved inside the hunk's three-line context window",
+		// Row 4 of the disposition table closes a PR and is reachable from a
+		// `+`, so the table's safety claim has to name it.
+		"**Row 4 is not**",
 		// The test file itself, so a reader can re-run the measurement.
 		"internal/gitgc/cherrylanding_test.go",
 	} {
@@ -362,6 +375,13 @@ func TestCherryLandingCasesAreDocumented(t *testing.T) {
 	// thing once.
 	for _, gone := range []string{
 		"**Any `+` means not landed.**",
+		// The flat reassurance about the refinery path. Measured false by
+		// TestCherry_ContextWindowBitesTheRebaseMergePathToo, and it lived in
+		// the operative paragraph while the retraction lived two sections
+		// down — exactly the "says both" shape this loop rejects.
+		"reports all\n`-`, because rebasing preserves patch-ids",
+		// The disposition table's safety claim before it accounted for row 4.
+		"none of them closes or merges anything",
 		"`git cherry` cannot report\n  `landed` for content that is not on `main`",
 		"**Not measured** — no squash-merged PR was available to test against.",
 	} {
