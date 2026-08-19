@@ -74,6 +74,19 @@ is not an unwritten one, and an unresolvable CPU sample reports zeros that mean
 "this host cannot tell". Any such gap suppresses the finding and is printed
 under NOT MEASURED — and exits ` + fmt.Sprint(exitInstrumentFailure) + `, because that run measured nothing.
 
+WITH --json, SWITCH ON "verdict", NOT ON "stalled". "stalled" is the
+conjunction and is false for a clean reading AND for a blind one, so a consumer
+that checks it alone cannot tell a healthy fleet from a run that measured
+nothing (mg-e75b). "verdict" is always present and is one of:
+
+  clean      the reading was taken and found nothing
+  stalled    the fleet is alive and landing nothing
+  blind      a member of the conjunction could not be measured
+  unknown    no reading was taken at all
+
+They correspond one-to-one with the exit codes below, and none of the four is
+a prefix of another, so grep and equality agree.
+
 The standing detector is the same code on pogod's heartbeat, reading the same
 source with the same thresholds, so this command cannot disagree with the mail
 that arrives at 03:00.
@@ -102,10 +115,13 @@ Exit status: 0 no finding, 1 the fleet is landing nothing, ` + fmt.Sprint(exitPr
 			} else {
 				fmt.Print(renderProgressReading(*reading))
 			}
-			if len(reading.Blind) > 0 {
+			// One switch for both output modes, on the same tri-state the JSON
+			// carries, so the exit code cannot disagree with the field a
+			// consumer read (mg-e75b).
+			switch reading.Verdict() {
+			case progresswatch.VerdictBlind, progresswatch.VerdictUnknown:
 				os.Exit(exitInstrumentFailure)
-			}
-			if reading.Stalled {
+			case progresswatch.VerdictStalled:
 				os.Exit(cli.ExitError)
 			}
 		},
@@ -160,11 +176,22 @@ func renderProgressReading(r progresswatch.Reading) string {
 	}
 
 	b.WriteString("\n")
-	switch {
-	case len(r.Blind) > 0:
+	// The human render deliberately prints no verdict TOKEN (mg-c058): a state
+	// word invites a present-tense over-reading the measurement cannot support.
+	// The tri-state it switches on is the same one --json names, so the two
+	// modes cannot disagree about which state this is — only about how loudly
+	// they say it.
+	switch r.Verdict() {
+	case progresswatch.VerdictBlind, progresswatch.VerdictUnknown:
 		b.WriteString("NOT MEASURED — the conjunction has a member this run could not read:\n")
 		for _, x := range r.Blind {
 			fmt.Fprintf(&b, "  - %s\n", x)
+		}
+		if len(r.Blind) == 0 {
+			// VerdictUnknown: a Reading that was never evaluated. It has no
+			// blind list to name because no measurement was attempted, and it
+			// still must not fall through to the clean paragraph.
+			b.WriteString("  - no reading was taken at all\n")
 		}
 		// NOT "No finding is possible" — that is the CLEAN render's own headline
 		// with a qualifier bolted on, and the qualifier is the half a skimmer
@@ -174,7 +201,7 @@ func renderProgressReading(r progresswatch.Reading) string {
 		// false-green this whole command exists to make impossible.
 		b.WriteString("\nNo reading is possible from this run, clean or otherwise.\n")
 		b.WriteString("That is not a clean fleet — it is a fleet nobody measured.\n")
-	case r.Stalled:
+	case progresswatch.VerdictStalled:
 		b.WriteString("FLEET IS ALIVE AND LANDING NOTHING.\n\n")
 		b.WriteString("All four measurements hold together, and they have one ordinary\n")
 		b.WriteString("explanation: every worker is waiting on the same remote. Check whether\n")

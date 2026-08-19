@@ -1,6 +1,7 @@
 package progresswatch
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -357,4 +358,186 @@ func TestFreshestWriteIsReportedNotAnAverage(t *testing.T) {
 	if r.MaxPTYIdle != 9*time.Minute {
 		t.Errorf("max_pty_idle = %s, want the stalest PTY write (9m)", r.MaxPTYIdle)
 	}
+}
+
+// --- the JSON tri-state (mg-e75b) -------------------------------------------
+
+// TestJSONSeparatesCleanFromBlind is the machine-readable twin of
+// TestTheThreeRendersAreGreppableApart, and it is here because the render was
+// fixed (mg-516e) while the JSON was left with the identical collision: a clean
+// reading and a blind one both carry `stalled:false`, and the only thing that
+// used to separate them was the PRESENCE of `blind` — an omitempty array, so
+// the distinguishing evidence was absent in exactly the case that looked
+// healthy.
+//
+// This asserts the collision still exists on `stalled` (it must: `stalled` is
+// the conjunction, and a blind run has no conjunction to report) AND that
+// `verdict` resolves it.
+func TestJSONSeparatesCleanFromBlind(t *testing.T) {
+	clean := incident()
+	clean.WorkerCores = 6.2
+
+	blind := incident()
+	blind.CoresKnown = false
+	blind.CoresError = "ps resolution cannot resolve a 1s window"
+
+	cleanJSON := mustMarshal(t, Evaluate(clean, Thresholds{}))
+	blindJSON := mustMarshal(t, Evaluate(blind, Thresholds{}))
+
+	// The premise. If this ever stops holding the test above is measuring
+	// nothing, so it is asserted rather than assumed.
+	if cleanJSON["stalled"] != false || blindJSON["stalled"] != false {
+		t.Fatalf("premise gone: stalled is no longer false for both (clean=%v blind=%v)",
+			cleanJSON["stalled"], blindJSON["stalled"])
+	}
+	if _, ok := blindJSON["blind"]; !ok {
+		t.Error("a blind reading must name what it could not measure")
+	}
+	if _, ok := cleanJSON["blind"]; ok {
+		t.Error("a clean reading must not carry a blind list")
+	}
+
+	if got := cleanJSON["verdict"]; got != string(VerdictClean) {
+		t.Errorf("clean reading emitted verdict=%v, want %q", got, VerdictClean)
+	}
+	if got := blindJSON["verdict"]; got != string(VerdictBlind) {
+		t.Errorf("blind reading emitted verdict=%v, want %q", got, VerdictBlind)
+	}
+}
+
+// TestJSONVerdictIsAlwaysPresent. The failure this whole field exists to remove
+// is evidence that goes MISSING in the healthy case, so `verdict` must never be
+// omitempty and must never be the empty string — including for the zero
+// Reading, which is what a caller holds alongside an error.
+func TestJSONVerdictIsAlwaysPresent(t *testing.T) {
+	stalledSnap := incident()
+
+	cleanSnap := incident()
+	cleanSnap.WorkerCores = 6.2
+
+	blindSnap := incident()
+	blindSnap.ProgressKnown = false
+
+	cases := []struct {
+		name string
+		r    Reading
+		want Verdict
+	}{
+		{"stalled", Evaluate(stalledSnap, Thresholds{}), VerdictStalled},
+		{"clean", Evaluate(cleanSnap, Thresholds{}), VerdictClean},
+		{"blind", Evaluate(blindSnap, Thresholds{}), VerdictBlind},
+		{"zero value", Reading{}, VerdictUnknown},
+	}
+	for _, c := range cases {
+		m := mustMarshal(t, c.r)
+		got, ok := m["verdict"]
+		if !ok {
+			t.Errorf("%s: no verdict key at all — the field is omitempty somewhere", c.name)
+			continue
+		}
+		if got == "" {
+			t.Errorf("%s: verdict is the empty string", c.name)
+		}
+		if got != string(c.want) {
+			t.Errorf("%s: verdict=%v, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestZeroReadingIsNotClean pins the half a derived field could most easily get
+// wrong. A verdict computed from Stalled and Blind would answer "clean" for a
+// Reading nobody ever evaluated, because both are zero there — a default-
+// constructed value that reads as healthy is the same defect one level down.
+func TestZeroReadingIsNotClean(t *testing.T) {
+	if v := (Reading{}).Verdict(); v == VerdictClean {
+		t.Fatal("the zero Reading answers clean; a value nobody measured must never read as healthy")
+	}
+}
+
+// TestVerdictNeverDisagreesWithTheBooleans. `verdict` is a second way of saying
+// what `stalled` and `blind` already say, and a second source of truth that can
+// drift is a worse false green than the ambiguity it replaced. Deriving rather
+// than storing is what makes this hold; this asserts it over every state.
+func TestVerdictNeverDisagreesWithTheBooleans(t *testing.T) {
+	stalledSnap := incident()
+
+	cleanSnap := incident()
+	cleanSnap.WorkerCores = 6.2
+
+	blindSnap := incident()
+	blindSnap.CoresKnown = false
+
+	// The invariant the struct comment states: Stalled is never true while
+	// Blind is set, so the three are genuinely exclusive.
+	for _, s := range []Snapshot{stalledSnap, cleanSnap, blindSnap} {
+		r := Evaluate(s, Thresholds{})
+		switch r.Verdict() {
+		case VerdictBlind:
+			if len(r.Blind) == 0 || r.Stalled {
+				t.Errorf("verdict=blind but blind=%v stalled=%v", r.Blind, r.Stalled)
+			}
+		case VerdictStalled:
+			if !r.Stalled || len(r.Blind) > 0 {
+				t.Errorf("verdict=stalled but blind=%v stalled=%v", r.Blind, r.Stalled)
+			}
+		case VerdictClean:
+			if r.Stalled || len(r.Blind) > 0 {
+				t.Errorf("verdict=clean but blind=%v stalled=%v", r.Blind, r.Stalled)
+			}
+		default:
+			t.Errorf("evaluated reading answered %q", r.Verdict())
+		}
+	}
+}
+
+// TestVerdictsAreGreppableApart. mg-516e's defect was that the blind headline
+// was a PREFIX of the clean one, so a `grep` matched where an equality test
+// would not have. The same trap is available to four short tokens, and a
+// consumer piping --json through grep is the likeliest reader of this field.
+func TestVerdictsAreGreppableApart(t *testing.T) {
+	all := []Verdict{VerdictClean, VerdictStalled, VerdictBlind, VerdictUnknown}
+	for _, a := range all {
+		if a == "" {
+			t.Error("a verdict is the empty string, which is a substring of everything")
+		}
+		for _, b := range all {
+			if a == b {
+				continue
+			}
+			if strings.Contains(string(a), string(b)) {
+				t.Errorf("verdict %q contains %q — grep cannot tell the two states apart", a, b)
+			}
+		}
+	}
+}
+
+// TestVerdictSurvivesAnOlderDaemon. The CLI decodes this struct from whatever
+// pogod is deployed, and a daemon predating this field sends no `verdict` at
+// all. Because the value is derived rather than stored, the decoded reading
+// still answers correctly instead of falling back to a silent zero.
+func TestVerdictSurvivesAnOlderDaemon(t *testing.T) {
+	// Exactly what an older pogod put on the wire for a blind reading: the
+	// booleans and the blind list, and no verdict key.
+	const oldWire = `{"now":"2026-08-14T05:18:00Z","stalled":false,` +
+		`"blind":["worker CPU unmeasurable: ps resolution cannot resolve a 1s window"]}`
+	var r Reading
+	if err := json.Unmarshal([]byte(oldWire), &r); err != nil {
+		t.Fatalf("decoding an older daemon's reading: %v", err)
+	}
+	if got := r.Verdict(); got != VerdictBlind {
+		t.Errorf("a pre-mg-e75b blind reading decoded as %q, want %q", got, VerdictBlind)
+	}
+}
+
+func mustMarshal(t *testing.T, r Reading) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshalling reading: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("re-reading the emitted JSON: %v\n%s", err, b)
+	}
+	return m
 }
