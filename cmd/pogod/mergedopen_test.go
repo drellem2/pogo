@@ -211,6 +211,16 @@ func countMergedNotClosedEvents(t *testing.T) int {
 // the exclusion lives at the CALL SITE: the function under test here would
 // happily alert on a gated error, and asserting on it directly would pass while
 // the branch that matters was deleted.
+//
+// WHAT THIS TEST DOES AND DOES NOT ESTABLISH (mg-f17c). It pins the judgement,
+// not the correctness of the judgement — that was mg-9d4e's own flag on itself,
+// and it is still true of the assertions below. The judgement was reviewed
+// separately and UPHELD; the evidence is written up at the call site in
+// reap.go, and the premise it turns on is pinned as a property in
+// client.TestTheGatedRefusalIsExactlyTheDispatchGatedPopulation — that the
+// suppressed population is exactly the one dispatch refuses, by shared
+// predicate rather than by two lists agreeing. A reviewer who wants to reverse
+// the ruling changes this test, and should read those two first.
 func TestAGatedItemRaisesNoMergedNotClosedAlert(t *testing.T) {
 	got := captureMergedOpenAlerts(t, func(string) (bool, error) { return false, nil })
 	mr := &refinery.MergeRequest{ID: "mr-1", Branch: "polecat-c479c", Author: "mg-479c", MergedSHA: "1a0240a"}

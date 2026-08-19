@@ -392,6 +392,50 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		// (mg-2b71) — and being gated is precisely what stops it being dispatched,
 		// so the hazard this alert exists to warn about cannot arise. The alert's
 		// remedy is "file the successor", which would be wrong advice there.
+		//
+		// REVIEWED AND UPHELD (mg-f17c), because the line above is a judgement and
+		// the test beside it asserted the judgement rather than any evidence for
+		// it. Three things were checked; the third is the one that decided it.
+		//
+		// 1. THE UNDISPATCHABILITY IS STRUCTURAL, NOT INCIDENTAL. This is not two
+		//    lists that happen to agree. client.ErrMGWorkItemGated is PRODUCED by
+		//    config.IsDispatchGated (internal/client/agent.go), which is the same
+		//    predicate agent.MGDispatchGate.DispatchGated refuses spawns on and the
+		//    same one stallwatch.watchedForDispatch excludes from the priority-wake
+		//    population — so a gated item is not advertised as ready either. One
+		//    function, three callers, and the spawn gate is armed OUTSIDE
+		//    stallWatchArmed so an unconfigured daemon still enforces it. Pinned as
+		//    an iff in TestTheGatedRefusalIsExactlyTheDispatchGatedPopulation, which
+		//    fails if a local vocabulary is ever grown at either end.
+		//
+		// 2. THE REMEDY WOULD BE WRONG, not merely redundant. mergedOpenAlert's body
+		//    prescribes `mg done <id> --successor=<...>` and "DO NOT WEAKEN THE
+		//    GUARD". A parked item owes no remainder and no guard refused it; a
+		//    reader handed that text goes looking for a successor that does not
+		//    exist. An alert whose remedy is wrong is worse than absent.
+		//
+		// 3. THE STATE STILL REACHES A NAMED RECIPIENT — measured, not assumed. The
+		//    notifyFiler call below runs unconditionally and carries
+		//    notClosedReason's gated wording, and its skip cannot fire here (it
+		//    requires c.Closed). Over the live window in which the gated decline has
+		//    actually been running (mg-2b71 landed 2026-08-13; measured to
+		//    2026-08-20 in ~/Library/Logs/pogo/pogod.log) there were 18 MERGED BUT
+		//    NOT CLOSED events: 13 declares-remainder and 5 gated — mg-e52c, mg-836c,
+		//    mg-6476, mg-1d05, mg-fbaf, all five `blocked:mayor`. ALL FIVE produced a
+		//    routed `MERGED BUT NOT CLOSED:` mail to the item's filer quoting the
+		//    gated reason verbatim, timestamps matching these log lines to the
+		//    second. Not one was silent. So the suppression costs a duplicate, not
+		//    the fact.
+		//
+		// THE RESIDUAL, recorded because it is real and this is not its fix: in 3 of
+		// those 5 the filer was a PM rather than the mayor, so the agent NAMED IN THE
+		// GATE (`blocked:mayor`) was not the one told. That is a gap in
+		// `blocked:<agent>` routing — the addressee should be the named blocker —
+		// and raising THIS alert would close it only by coincidence, since it routes
+		// to agent.CoordinatorName() regardless of who the block names. Fixing it
+		// here would make the routing right for `blocked:mayor` and wrong for every
+		// other `blocked:<agent>`, on top of shipping the wrong remedy text at 2.
+		// It belongs in filernotify or stallwatch.checkBlockedReminders.
 		if !errors.Is(completeErr, client.ErrMGWorkItemGated) {
 			who := ""
 			if a != nil {
