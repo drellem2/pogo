@@ -45,6 +45,52 @@ see it because it is in no commit. Cite the issue as `Refs owner/repo#N` in PR
 bodies too, and fix a flagged one with `gh pr edit <number> --body-file -` —
 amending and re-pushing does nothing to a PR body.
 
+## Tests that measure a shared resource
+
+**An assertion over a shared resource must be RELATIVE. Never require a minimum
+share of one inside a fixed window.**
+
+CPU cores, scheduler timeslices, and wall-clock throughput are shared with
+everything else running on the box. A test that requires a minimum of one —
+"at least 0.5 cores", "at least 2 frames in 400ms", "at least N samples in
+T seconds" — is asserting what the scheduler happened to grant, not what the
+code did. It is **unmeetable by construction under contention**, so there is no
+correct threshold value and widening the number only buys silence: a control
+tuned until it stops firing has stopped measuring anything.
+
+This is not hypothetical. Two such assertions cost this repo five innocent
+branches in one evening (mg-6c90), each a full gate run plus the work of
+proving the branch was clean, and the coordinator ended it reading
+`FAIL internal/refinery` as noise before checking — which is how a real
+regression merges unnoticed. Byte-identical binaries measured 4/4 PASS at load
+5 and 13/13 FAIL at load 52-106.
+
+Write one of these instead:
+
+- **Compare two arms.** Measure the thing busy and measure it idle; assert the
+  ordering. Both arms meet the same contention, so the comparison survives it.
+- **Track injected work.** Quadruple the work, require the measurement to rise
+  with it. Ratios are load-independent because schedulers allocate per runnable
+  thread: N spinners get about N times one spinner's share whatever else the
+  box is doing. This is the strongest form — it proves the number is a
+  *function of* the work, so a constant, a wrong-subtree reading, and a lost
+  descendant all fail it.
+- **Wait for the event instead of budgeting for it.** Poll to a generous
+  deadline rather than sleeping a fixed window and counting what arrived. On a
+  quiet box it costs nothing; on a loaded one it takes longer instead of going
+  red. It still fails when the event genuinely never comes, which is the defect
+  worth catching.
+
+Upper bounds — "this returned in under 2s", "one spinner did not exceed 2
+cores" — are safe to state absolutely, because contention can only push a
+measurement down.
+
+Whatever you write, **show it can still fail**: construct the broken
+instrument and watch the test go red.
+`internal/refinery/gatecpuarms_test.go` does both halves — a table of broken
+instruments against the rules, and a live gate with its subtree walk
+deliberately blinded.
+
 ## End-to-end smoke test
 
 `scripts/test-e2e.sh` exercises the full loop — `pogo init`, `pogod`, mayor
