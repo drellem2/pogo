@@ -380,10 +380,58 @@ pogo agent list
 
 Look for:
 - **Completed {{.Worker}}s**: The refinery mails you when a merge succeeds (subject starts with `MERGED:`). pogod stops the merged {{.Worker}}, marks its work item done, and reaps its mail-check schedule **automatically at merge time** (event-driven, gh #35) — you normally only need to:
-  1. Archive the work item:
+  1. Archive the work item — **by id, one at a time, and only once its {{.Worker}} is gone:**
      ```bash
-     mg archive --days=0
+     pogo agent list | grep "work-item=<id>"   # must print NOTHING — exit 1 is the pass
+     mg show <id> | grep '^Status:'            # must read: done
+     mg archive <id>
      ```
+     (`pogo agent list --json` calls that field `work_item_id`.) Both checks are the gate the mass
+     form does not have, and they are cheap: a live {{.Worker}} means the work is not finished, and
+     `mg archive` refuses anything not already `done` anyway — so the second line is there to tell you
+     *why* a refusal happened before it happens.
+
+     **Never `mg archive --days=0`.** The mass form was only ever here because the single-id form used
+     to silently no-op. That was fixed and verified live on 2026-07-21 — `mg archive mg-e0ca` and
+     `mg archive mg-b399` each took exactly their own item, with all three live `gh-issue` carriers
+     untouched before and after — so the reason for the sweep is gone and only its blast radius
+     remains. `mg archive --help` states the hazard in its own words: *"The sweep is unfiltered:
+     --days=0 archives ALL done items, including any you are keeping deliberately."*
+
+     **"Unfiltered" means the whole estate, not the items you just merged — and in practice it means
+     almost none of yours.** You archive your own items as you close them, so what is actually sitting
+     in `done/` at any moment is mostly other agents' work. Measured here on 2026-08-19 with
+     `mg archive --days=0 --dry-run`: **4 items would have been archived and not one of them was
+     yours** — two were architect's, in a repo that is not this one; one belonged to a `pm-<project>`
+     in a third repo; and one was a request Daniel had filed that same morning. (The ids were
+     `mg-13e6`, `mg-15d4`, `mg-872c` and `mg-d172`, recorded so the reading can be re-derived. The
+     agent and repo names are deliberately *not* recorded here: a shipped prompt that names one
+     fleet's roster is a separate defect with its own gate — mg-f04b — so do not "helpfully" restore
+     them.) The sweep reads every done item in the store, for every agent and every repo, and your
+     own name is nowhere in its input.
+
+     **And it cannot see a gate — structurally, not as an oversight someone might patch.** Carrier
+     state is pogod's parse, not mg's: `mg show --json` has no `workflow` key and no `stage` key at
+     all, while pogod's `GET /workitems` reports `mg-3050` as `workflow=gh-issue stage=gated` (both
+     measured 2026-08-19). `mg archive` is mg, so the gate is not merely unchecked by the sweep — it
+     is absent from the data model the sweep reads, and no amount of care at the callsite can restore
+     it. `--days=0` has eaten live `gh-issue` gate carriers twice. Two guards *do* exist and refuse a
+     done `design` with no successor and anything tagged `blocked-on-*` — they held back 3 of the 7
+     done items in that same dry-run — but neither is a gate check and neither looks at whether an
+     agent is still running.
+
+     If you want the batch view, **`mg archive --days=0 --dry-run` is safe** and prints exactly what
+     the sweep would take, guard refusals included. Read it, then archive the ones that are yours by
+     id.
+
+     **This step is coupled to `pm/pm-template.md`, in both directions.** Its "Recently shipped" query
+     reads `done` **or** `archived` precisely because this step moves completed items out of `done`
+     within minutes of the close (mg-e52c) — measured there, `--status=done` alone returned 0 shipped
+     items for every PM. If you change *when* or *whether* you archive, read that query first; if you
+     are editing that query, this step is what it depends on. The filename is literal and deliberately
+     **not** `{{.Coordinator}}.md`: the coordinator's NAME is configurable, but its prompt FILE is
+     frozen at `mayor.md` (mg-04ce), so a placeholder would point the next editor at a path that stops
+     existing the moment the name changes.
   2. **If the item's filer is not you, tell them it landed.** `mg show <id>` names the creator. pogod
      mails the filer itself on merge and self-close, so this is only for the paths where the template
      forbids the {{.Worker}} to close its own item — triage most clearly (drellem2/pogo#144, mg-1d9e).
@@ -1256,12 +1304,31 @@ You don't need to interact with the refinery directly. Just be aware that merge 
 
 ### Work item archival
 
-Once a ticket's code is merged, the refinery archives the work item automatically — no action needed from you.
+**Nothing archives a work item for you. You are the only archiver, for merged work and unmerged work
+alike.** At merge the refinery mails you and pogod closes the item to `done` — neither of them
+archives it, so every completed item waits in `done/` until you move it by id.
 
-If a work item has no code change (e.g., an investigation or evaluation task), the refinery won't archive it. In that case, archive it yourself once the work is complete:
+This section said the opposite ("the refinery archives the work item automatically — no action needed
+from you") and that was true for five days. The refinery's auto-archive call was removed on
+2026-03-26 by mg-1f67 — deliberately, so that completions stay visible to you long enough to act on —
+and this paragraph was written on 2026-03-21 and never updated, so it has been false for 146 days.
+Believing it costs you twice: items pile up in `done/` unnoticed, and then step 3's archive looks like
+harmless catch-up rather than the only thing that ever runs.
+
+The helper that call used is still in the tree — `client.ArchiveMGDoneItems()` in
+`internal/client/agent.go`, doc comment still asserting the refinery calls it after a successful
+merge, **zero callers** as of 2026-08-19 — and it wraps `mg archive --days=0`. Re-wiring it would put
+the estate-wide sweep back into code, where no session's judgement is in the path at all. If you are
+dispatching cleanup work, that is worth a ticket.
+
+So archive by id, once the item is `done` and its {{.Worker}} has exited — as part of step 3's
+cleanup for merged work, and as soon as the work is complete for anything that produced no code
+change (an investigation, an evaluation, a triage):
 ```bash
 mg archive <id>
 ```
+See step 3 for the two-line check that precedes it and for why the `--days=0` sweep is never the
+right instrument.
 
 ### Refinery logs
 
