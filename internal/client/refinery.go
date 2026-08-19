@@ -45,7 +45,18 @@ func GetRefineryQueue() ([]refinery.MergeRequest, error) {
 // The refinery prunes history destructively past its count/age caps, so this is
 // a window and not an archive. A caller that needs a wider window must read the
 // event log (refinery.HistoryFromLog); a caller that needs to know whether this
-// window is truncated must read Status.HistoryTruncated.
+// window is truncated must read Status.HistoryTruncation(), which is a TRI-STATE
+// — unknown / none / at-cap — because a daemon older than mg-e9ee reports no
+// retention at all and "not reported" must not decode as "not truncated". (This
+// sentence used to name a field `Status.HistoryTruncated`, which has never
+// existed; corrected in mg-441f, the first change to consult this window.)
+//
+// THE COUNT CAP IS NOT THE ONLY PRUNER. HistoryTruncation() classifies the
+// retained window against MaxHistoryLen only, so `none` means the COUNT cap has
+// not bitten and says nothing about the AGE cap, which prunes silently at
+// MaxHistoryAge. A caller that needs to know how far back this window actually
+// observes should read the oldest retained DoneTime — an observation — rather
+// than infer completeness from the truncation state.
 func GetRefineryHistory() ([]refinery.MergeRequest, error) {
 	r, err := http.Get(serverURL + "/refinery/history")
 	if err != nil {

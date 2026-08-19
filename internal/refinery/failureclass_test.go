@@ -329,6 +329,39 @@ func TestEveryClassCarriesATriageNote(t *testing.T) {
 	}
 }
 
+// TestOnlyDefectCommitsToRepeating guards the predicate mg-441f's check-stranded
+// remedy is suppressed on. A class added here without deciding this answers NO by
+// falling through the switch, which is the safe direction — a remedy printed
+// where it should not be costs a wasted gate run, while a remedy withheld where
+// it was correct leaves finished work stranded — but it must be a DECISION, so
+// the coverage assertion is on the whole table.
+func TestOnlyDefectCommitsToRepeating(t *testing.T) {
+	if !ClassDefect.ResubmitUnchangedRepeats() {
+		t.Error("ClassDefect does not commit to repeating, yet its own triage note says " +
+			"re-running establishes the SAME fact")
+	}
+	for _, c := range allFailureClasses {
+		if c == ClassDefect {
+			continue
+		}
+		if c.ResubmitUnchangedRepeats() {
+			t.Errorf("class %s claims an unchanged resubmit repeats; only a class that "+
+				"establishes a fact about the BRANCH may, and a caller that suppresses the "+
+				"resubmit remedy on this would withhold the correct one", c)
+		}
+	}
+	if FailureClass("").ResubmitUnchangedRepeats() {
+		t.Error("an unclassified-by-absence failure claims to repeat; the strong claim needs evidence")
+	}
+	// The distinction the doc comment turns on: HOST also tells a reader not to
+	// resubmit yet, and it is deliberately not folded in because its prerequisite
+	// is on the box and its eventual remedy IS an unchanged resubmit.
+	if !strings.Contains(ClassHost.TriageNote(), "resubmit UNCHANGED") {
+		t.Errorf("the host note no longer says the eventual remedy is an unchanged resubmit, "+
+			"which is the reason it is excluded above: %q", ClassHost.TriageNote())
+	}
+}
+
 func TestGitStepErrorKeepsRawOutputAndCommand(t *testing.T) {
 	inner := fmt.Errorf("exit status 128")
 	err := gitStepFail("fetch", "fetch: "+incidentSSH+": exit status 128", []string{"fetch", "origin"}, incidentSSH, inner)

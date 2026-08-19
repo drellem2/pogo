@@ -70,6 +70,22 @@ func Render(rep Report, all bool) string {
 		fmt.Fprintf(&b, "  refinery queue UNREADABLE (%s) — a branch already awaiting merge could not be\n"+
 			"  excluded, so a row below may be one somebody already submitted\n", rep.QueueUnreadable)
 	}
+	switch {
+	case !rep.HistoryConsulted:
+		fmt.Fprintf(&b, "  refinery merge history NOT CONSULTED — no remedy below has been checked\n"+
+			"  against whether its branch was already submitted and refused\n")
+	case rep.HistoryUnreadable != "":
+		fmt.Fprintf(&b, "  refinery merge history UNREADABLE (%s) — no remedy below\n"+
+			"  has been checked against whether its branch was already submitted and refused\n",
+			rep.HistoryUnreadable)
+	default:
+		floor := "an EMPTY window"
+		if !rep.History.Floor.IsZero() {
+			floor = "back to " + rep.History.Floor.UTC().Format("2006-01-02T15:04Z")
+		}
+		fmt.Fprintf(&b, "  refinery merge history: %d completed request(s), observing %s%s\n",
+			rep.History.Records, floor, retentionNote(rep.History.Retention))
+	}
 	fmt.Fprintf(&b, "  %d exclusion(s): branches of running polecats and branches already queued\n", len(rep.Excluded))
 	if all {
 		for _, e := range rep.Excluded {
@@ -129,11 +145,12 @@ func Render(rep Report, all bool) string {
 	// because the number a reader needs on the header line is "how many of these
 	// must NOT be submitted" — the count that used to be folded silently into
 	// `stranded` (mg-aed4).
-	fmt.Fprintf(&b, "\n%d FINDING(S) — %d RESCUE-UNBUILT, %d stranded, %d landed-but-not-closed, "+
-		"%d conflict suspect, %d UNJUDGED, %d REPO UNREADABLE, %d ORPHAN BRANCH:\n",
-		len(rep.Rows), rep.Count(KindRescueUnbuilt), rep.Count(KindStranded),
-		rep.Count(KindLandedNotClosed), rep.Count(KindConflictSuspect), rep.Count(KindUnjudged),
-		rep.Count(KindRepoUnreadable), rep.Count(KindOrphanBranch))
+	fmt.Fprintf(&b, "\n%d FINDING(S) — %d RESCUE-UNBUILT, %d ALREADY-REFUSED, %d stranded, "+
+		"%d landed-but-not-closed, %d conflict suspect, %d UNJUDGED, %d REPO UNREADABLE, "+
+		"%d ORPHAN BRANCH:\n",
+		len(rep.Rows), rep.Count(KindRescueUnbuilt), rep.Count(KindRefusedBefore),
+		rep.Count(KindStranded), rep.Count(KindLandedNotClosed), rep.Count(KindConflictSuspect),
+		rep.Count(KindUnjudged), rep.Count(KindRepoUnreadable), rep.Count(KindOrphanBranch))
 
 	for _, r := range rep.Rows {
 		b.WriteString("\n")
@@ -189,6 +206,47 @@ func Render(rep Report, all bool) string {
 			fmt.Fprintf(&b, "    PRE-REGISTRATION commit %s is unmerged — a worker branching from %s would\n"+
 				"    write its predictions AFTER seeing the results. Branch FROM it or resubmit.\n",
 				short(r.PreRegistration.SHA), r.Target)
+		}
+		if r.Prior != nil {
+			// PRINTED ON WHATEVER KIND THE ROW ENDED UP AS, for Row.Prior's reason:
+			// only the stranded cell becomes KindRefusedBefore, but a reader deciding
+			// what to do about a conflict_suspect or rescue row still needs to know
+			// the refinery has already ruled on this branch.
+			fmt.Fprintf(&b, "    ALREADY SUBMITTED — %s %s %s\n",
+				r.Prior.MR, strings.ToUpper(r.Prior.Status), r.priorWhere())
+			if r.PriorStale {
+				// The exculpatory case, and it is stated as loudly as the damning one.
+				// A reader who saw "already refused" and stopped there would leave
+				// finished, fixed work sitting on a branch.
+				fmt.Fprintf(&b, "    That record PREDATES this branch's last commit (%s), so it is about\n"+
+					"    content the branch no longer has and does NOT stand against the remedy below.\n",
+					r.TipTime.UTC().Format("2006-01-02T15:04Z"))
+			}
+			if why := r.priorWhy(); why != "" && r.Prior.Status == "failed" {
+				for _, line := range wrap(why, 84) {
+					fmt.Fprintf(&b, "      %s\n", line)
+				}
+			}
+			if r.Prior.Refuses() && !r.PriorStale {
+				b.WriteString("    An UNCHANGED resubmit re-runs the same failure — that is what the class above\n" +
+					"    commits to. What can work: rebase this branch onto the target, fix what the\n" +
+					"    refinery names, push it, and submit THAT. No submit command is printed here.\n")
+			}
+		}
+		if r.HistoryGap != "" && r.Kind == KindStranded {
+			// ON THE ONE ROW THAT PRINTS A PASTE-READY SUBMIT, and nowhere else. A
+			// rescue row already withholds its submit for a stronger reason; a
+			// landed_not_closed row is not being told to submit anything; a
+			// conflict_suspect row's remedy is already "do neither blind". Printing the
+			// caveat on all four would put it on most rows of most runs, and a caveat
+			// that appears everywhere is one readers learn to skip — which is the
+			// failure mode this package cites against itself twice already. The
+			// coverage block above states the history's condition on every run
+			// regardless, so nothing is hidden by narrowing it here.
+			b.WriteString("    REMEDY NOT CHECKED AGAINST REFINERY HISTORY:\n")
+			for _, line := range wrap(r.HistoryGap, 82) {
+				fmt.Fprintf(&b, "      %s\n", line)
+			}
 		}
 		if r.Rescue != nil {
 			// PRINTED ON WHATEVER KIND THE ROW ENDED UP AS. Only the stranded cell
@@ -248,6 +306,16 @@ func quoteRepo(repo string) string {
 		return "(none)"
 	}
 	return fmt.Sprintf("%q", repo)
+}
+
+// retentionNote renders the daemon's retention bound, or says it was not
+// obtained. An empty string here would read as "no bound", which is the reading
+// that makes a pruned window look complete.
+func retentionNote(retention string) string {
+	if retention == "" {
+		return " (retention bound NOT REPORTED by this pogod)"
+	}
+	return " (retention: " + retention + ")"
 }
 
 func truncate(s string, n int) string {

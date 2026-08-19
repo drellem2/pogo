@@ -234,6 +234,40 @@ func (c FailureClass) TriageNote() string {
 	return ""
 }
 
+// ResubmitUnchangedRepeats reports whether this class COMMITS to an unchanged
+// resubmit of the same branch getting the SAME answer.
+//
+// IT IS A NARROWER QUESTION THAN "was this retried", and the two must not be
+// confused. Retryability is the refinery's decision about ITS OWN next attempt,
+// taken inside one merge request and spent against a budget; this is what a
+// LATER READER can conclude about submitting that branch again tomorrow. A
+// retry budget that ran out leaves an infrastructure failure un-retried without
+// making a fresh submit futile, and reading `NotRetried` as futility would
+// suppress the one remedy that works.
+//
+// ONLY ClassDefect ANSWERS YES, and it does so in its own triage note: "re-running
+// establishes the SAME fact". Every other class either establishes nothing about
+// the branch (infrastructure, contention, indeterminate, setup, unclassified) or
+// establishes something about the BOX rather than the branch (host). It exists as
+// a method here, beside the classes and their notes, rather than in the caller
+// that needs it — a predicate over these constants written anywhere else is a
+// second copy of this table that nothing makes anyone update.
+//
+// ClassHost is deliberately NOT folded in, even though its note also says not to
+// resubmit yet. Its prerequisite is on the HOST and its eventual remedy is a
+// resubmit UNCHANGED, so a reader who frees the disk should be handed the submit
+// command; ClassDefect's prerequisite is on the BRANCH and no resubmit of the
+// same content can ever work. Callers that suppress a remedy on this predicate
+// would suppress the correct one for host, so the note travels with the row
+// instead — see internal/strandwatch.KindRefusedBefore.
+//
+// An EMPTY class is a failure recorded before classification existed, or one the
+// classifier never reached. It answers NO: the strong claim needs evidence, and
+// there is none.
+func (c FailureClass) ResubmitUnchangedRepeats() bool {
+	return c == ClassDefect
+}
+
 // countsAgainstAuthor answers whether a terminal failure of this class should
 // accumulate into the author's consecutive-failure streak.
 //

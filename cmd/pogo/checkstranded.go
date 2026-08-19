@@ -64,6 +64,10 @@ ROW TYPES, WITH OPPOSITE REMEDIES:
                      the pre-commit hook bypassed, so it has never been built and
                      nobody has reviewed it. -> read and build it. NO submit line
                      is printed for these rows on purpose.
+  refused_before     the same, EXCEPT the refinery has ALREADY been given this
+                     branch and refused it, with a failure its own record commits
+                     to reproducing. -> the branch has to CHANGE first. NO submit
+                     line is printed for these rows either.
   landed_not_closed  the branch is fully merged and the item is still asking for
                      the work. -> ` + "`mg done`" + `.
   conflict_suspect   the two instruments below DISAGREE. -> read it yourself.
@@ -191,6 +195,45 @@ PER-BRANCH signal, so those five rendered identically to a branch genuinely read
 to submit. They are now their own row type, their own count on the findings line,
 and their own remedy, and no paste-ready submit is printed for them.
 
+AND IT WAS UNCONDITIONAL WITH RESPECT TO WHETHER THE REFINERY HAD ALREADY REFUSED
+THE BRANCH (mg-441f). For mg-5058 this command printed
+
+    -> pogo refinery submit polecat-p5058 ...
+
+as its single recommended action, for a branch the refinery had already failed at
+stage=rebase on a content conflict, classed ` + "`defect`" + `, and explicitly declined to
+retry — the recorded reason being, verbatim, "Resubmitting unchanged re-runs the
+same conflict forever; the branch has to be rebased and the conflict resolved by
+hand before it can land". A fresh instance was measured on 2026-08-19 while fixing
+it: mg-6b2d, open, whose branch carries the identical record.
+
+The remedy is now checked against the refinery's history, and this is the THIRD
+external fact that one line has had to learn — after mg-bfe0 (a branch not on
+origin needs a push first, because submit refuses it) and mg-aed4 (a RESCUE branch
+has never been built). None of the three implies another.
+
+TWO THINGS THE CHECK IS CAREFUL ABOUT, because each would make it a new defect:
+
+  a STALE record   a branch that was refused, FIXED and pushed again is an
+                   ordinary resubmit. A refusal that predates the branch's last
+                   commit is reported and explicitly does not stand — withholding
+                   the remedy on an expired fact is the same error as computing it
+                   from no fact at all.
+  a PRUNED window  the refinery's history is a window, not an archive, so "no
+                   record" and "the record was deleted" are the same absence. A
+                   STRANDED row whose answer depends on what was pruned says so on
+                   its own line instead of falling back silently to the bare
+                   submit — the
+                   coverage lesson of mg-8baa, applied here rather than re-learned.
+                   A truncated window still answers conclusively for every branch
+                   committed to since the window opened, which is most of them.
+
+Only a failure the refinery's own class table commits to REPRODUCING suppresses
+the submit line (` + "`class=defect`" + `). An infrastructure or contention failure
+establishes nothing about the branch and a straight resubmit is the correct
+remedy, so those rows stay ` + "`stranded`" + ` and merely report that an earlier attempt
+failed.
+
 A run that COULD NOT LOOK says so instead of exiting clean. An unreachable agent
 registry is fatal (exit ` + fmt.Sprint(exitInstrumentFailure) + `): without it every running polecat in the fleet
 looks like a strand, and a detector that fires on healthy input teaches its
@@ -215,6 +258,7 @@ run measured nothing.`,
 				Items:          openWorkItems,
 				LiveAgents:     liveAgentNames,
 				QueuedBranches: queuedRefineryBranches,
+				History:        refineryMergeHistory,
 				Worktrees:      polecatWorktrees,
 				Repos:          repos,
 				Target:         target,
@@ -331,6 +375,73 @@ func queuedRefineryBranches() (map[string]bool, error) {
 	out := make(map[string]bool, len(queue))
 	for _, mr := range queue {
 		out[strandwatch.QueueKey(mr.RepoPath, mr.Branch)] = true
+	}
+	return out, nil
+}
+
+// refineryMergeHistory returns what the refinery still remembers about branches
+// that have ALREADY been through the merge queue (mg-441f).
+//
+// IT READS TWO ENDPOINTS AND THE SECOND ONE IS NOT OPTIONAL DECORATION.
+// `/refinery/history` is a WINDOW: the refinery prunes completed requests
+// destructively past a count cap and an age cap, so a branch's absence from it
+// means either "never submitted" or "the record was deleted", and those license
+// opposite remedies. The window's own floor — the completion time of the oldest
+// record it still holds — is what separates them, and `/refinery/status` supplies
+// the daemon's description of the bound so a reader can see how wide the window
+// is meant to be. A status that cannot be read costs the description and nothing
+// else; the floor comes from the records themselves and is an observation.
+//
+// ONLY THE MOST RECENT record per branch is kept. A branch that failed and was
+// later merged is not a refused branch, and a branch with four old failures and
+// one recent one is described by the recent one.
+//
+// The two JUDGEMENTS the sweep needs — the class's triage note and whether the
+// class commits to an unchanged resubmit repeating — are taken from the refinery's
+// own table here rather than reimplemented in strandwatch, so a class added there
+// reaches this report without strandwatch changing. See
+// refinery.FailureClass.ResubmitUnchangedRepeats.
+func refineryMergeHistory() (strandwatch.RefineryHistory, error) {
+	history, err := client.GetRefineryHistory()
+	if err != nil {
+		return strandwatch.RefineryHistory{}, err
+	}
+	out := strandwatch.RefineryHistory{
+		Latest:  make(map[string]strandwatch.PriorSubmission, len(history)),
+		Records: len(history),
+	}
+	for _, mr := range history {
+		if !mr.DoneTime.IsZero() && (out.Floor.IsZero() || mr.DoneTime.Before(out.Floor)) {
+			out.Floor = mr.DoneTime
+		}
+		key := strandwatch.QueueKey(mr.RepoPath, mr.Branch)
+		if prev, ok := out.Latest[key]; ok && !mr.SubmitTime.After(prev.SubmittedAt) {
+			continue
+		}
+		p := strandwatch.PriorSubmission{
+			MR:          mr.ID,
+			Status:      string(mr.Status),
+			Class:       string(mr.FailureClass),
+			Target:      mr.TargetRef,
+			Reason:      mr.NotRetriedReason,
+			Error:       mr.Error,
+			Attempts:    mr.AttemptCount,
+			SubmittedAt: mr.SubmitTime,
+			FinishedAt:  mr.DoneTime,
+			Repeats:     mr.FailureClass.ResubmitUnchangedRepeats(),
+		}
+		if mr.FailureClass != "" {
+			p.Triage = mr.FailureClass.TriageNote()
+		}
+		// The stage is on the LAST recorded attempt: that is the one that ended the
+		// request, and an earlier attempt may have failed somewhere else entirely.
+		if n := len(mr.Attempts); n > 0 {
+			p.Stage = mr.Attempts[n-1].Stage
+		}
+		out.Latest[key] = p
+	}
+	if st, serr := client.GetRefineryStatus(); serr == nil {
+		out.Retention = st.RetentionSummary()
 	}
 	return out, nil
 }
