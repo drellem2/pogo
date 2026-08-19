@@ -55,10 +55,15 @@ is dead so nothing is going to mail anybody. Meanwhile priority-wake advertises
 the item, and the action it advertises re-derives the work. mg-9a19 lost 1026
 lines that way.
 
-TWO ROW TYPES, WITH OPPOSITE REMEDIES:
+ROW TYPES, WITH OPPOSITE REMEDIES:
 
   stranded           the branch has commits the target does not.
                      -> ` + "`pogo refinery submit`" + `. Do NOT dispatch.
+  rescue_unbuilt     the same, EXCEPT the unmerged work is a RESCUE commit: work
+                     recovered from a dead polecat's worktree and committed with
+                     the pre-commit hook bypassed, so it has never been built and
+                     nobody has reviewed it. -> read and build it. NO submit line
+                     is printed for these rows on purpose.
   landed_not_closed  the branch is fully merged and the item is still asking for
                      the work. -> ` + "`mg done`" + `.
   conflict_suspect   the two instruments below DISAGREE. -> read it yourself.
@@ -69,8 +74,8 @@ TWO ROW TYPES, WITH OPPOSITE REMEDIES:
                      remote ref has, and NO open item names it. -> push it; there
                      is no owner to ask and nothing to submit it under.
 
-The second row is the worse one and it needed its own repair: while a branch is
-unmerged the spawn-time guard refuses the dispatch, but the moment it merges the
+The ` + "`landed_not_closed`" + ` row is the worse one and it needed its own repair:
+while a branch is unmerged the spawn-time guard refuses the dispatch, but the moment it merges the
 guard correctly stops refusing and the item is STILL available. pogod now closes
 an author's item at merge whatever submitted the branch, so this row should be
 empty in steady state — it is reported anyway, because that repair cannot see an
@@ -165,6 +170,26 @@ Three repairs, and the cheapest has the widest catch:
                   ` + fmt.Sprint(exitInstrumentFailure) + ` and says so. A wrong command that prints an all-clear does
                   not merely fail to check a claim, it manufactures support for
                   whichever claim it was quoted to support.
+
+THE REMEDY USED TO BE UNCONDITIONAL WITH RESPECT TO WHETHER THE BRANCH WAS EVER
+BUILT (mg-aed4). On 2026-08-19 this command printed, for five branches,
+
+    -> pogo refinery submit polecat-p516e --repo=... --author=mg-516e   # do NOT dispatch at mg-516e
+
+while each of those five items' own body said, in bold, "Do not ` + "`pogo refinery submit`" + `
+this branch. It has never been built." Both were correct about what they knew —
+the tickets knew the commits came from the mg-51bf rescue and bypassed the hook
+DELIBERATELY, because a rescue of possibly-partial work must not be gated on
+whether that work compiles; this sweep knew only that commits existed on a branch
+and not on the target. The tool is the one that is runnable, so the tool wins.
+
+The failure mode is the gate PASSING, not failing: a failed gate costs a run and a
+` + "`failed`" + ` row, a passing one merges half-implemented never-reviewed code to the
+target on the authority of a command a detector printed. The closing caveat below
+was already there and was not the missing piece — what was missing was any
+PER-BRANCH signal, so those five rendered identically to a branch genuinely ready
+to submit. They are now their own row type, their own count on the findings line,
+and their own remedy, and no paste-ready submit is printed for them.
 
 A run that COULD NOT LOOK says so instead of exiting clean. An unreachable agent
 registry is fatal (exit ` + fmt.Sprint(exitInstrumentFailure) + `): without it every running polecat in the fleet

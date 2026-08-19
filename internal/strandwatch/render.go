@@ -125,11 +125,15 @@ func Render(rep Report, all bool) string {
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, "\n%d FINDING(S) — %d stranded, %d landed-but-not-closed, %d conflict suspect, "+
-		"%d UNJUDGED, %d REPO UNREADABLE, %d ORPHAN BRANCH:\n",
-		len(rep.Rows), rep.Count(KindStranded), rep.Count(KindLandedNotClosed),
-		rep.Count(KindConflictSuspect), rep.Count(KindUnjudged), rep.Count(KindRepoUnreadable),
-		rep.Count(KindOrphanBranch))
+	// RESCUE-UNBUILT LEADS THE COUNT because it leads the rows (Kind.Rank), and
+	// because the number a reader needs on the header line is "how many of these
+	// must NOT be submitted" — the count that used to be folded silently into
+	// `stranded` (mg-aed4).
+	fmt.Fprintf(&b, "\n%d FINDING(S) — %d RESCUE-UNBUILT, %d stranded, %d landed-but-not-closed, "+
+		"%d conflict suspect, %d UNJUDGED, %d REPO UNREADABLE, %d ORPHAN BRANCH:\n",
+		len(rep.Rows), rep.Count(KindRescueUnbuilt), rep.Count(KindStranded),
+		rep.Count(KindLandedNotClosed), rep.Count(KindConflictSuspect), rep.Count(KindUnjudged),
+		rep.Count(KindRepoUnreadable), rep.Count(KindOrphanBranch))
 
 	for _, r := range rep.Rows {
 		b.WriteString("\n")
@@ -185,6 +189,24 @@ func Render(rep Report, all bool) string {
 			fmt.Fprintf(&b, "    PRE-REGISTRATION commit %s is unmerged — a worker branching from %s would\n"+
 				"    write its predictions AFTER seeing the results. Branch FROM it or resubmit.\n",
 				short(r.PreRegistration.SHA), r.Target)
+		}
+		if r.Rescue != nil {
+			// PRINTED ON WHATEVER KIND THE ROW ENDED UP AS. Only the stranded cell
+			// becomes KindRescueUnbuilt (see classify), but a conflict_suspect row
+			// carrying a rescue commit is still unreviewed work and a reader deciding
+			// what to do about it needs to know that. (landed_not_closed can never
+			// reach here: the field is populated from UNMERGED commits and that row
+			// has none.)
+			tracker := ""
+			if id := r.Rescue.RescueTracker(); id != "" {
+				tracker = fmt.Sprintf(", rescue tracked at %s", id)
+			}
+			fmt.Fprintf(&b, "    RESCUE COMMIT %s%s — committed with `--no-verify` and NEVER BUILT.\n",
+				short(r.Rescue.SHA), tracker)
+			b.WriteString("    This is possibly-partial work recovered from a dead polecat's worktree: the hook\n" +
+				"    bypass was deliberate (a rescue must not be gated on whether the work compiles) and\n" +
+				"    it means nobody has compiled this and nobody has reviewed it. A PASSING gate is the\n" +
+				"    worse outcome here, not the good one — it merges half-implemented code.\n")
 		}
 		fmt.Fprintf(&b, "    -> %s\n", r.Remedy())
 	}

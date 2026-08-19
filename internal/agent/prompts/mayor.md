@@ -990,12 +990,23 @@ cannot — whether an item is still open with its work already **merged**:
 pogo check-stranded          # every OPEN item whose work is already on a branch
 ```
 
-Two row kinds, and their remedies are **opposite** — never act on one as though
-it were the other:
+Row kinds, and their remedies are **opposite** — never act on one as though it
+were the other:
 
 - `stranded` — the branch has commits `main` does not. **`pogo refinery submit`**,
   and do *not* dispatch. A dispatch here re-derives work that already exists;
   mg-9a19 lost 1026 lines that way.
+- `rescue_unbuilt` — stranded, **and** the unmerged work is a `RESCUE` commit:
+  possibly-partial work recovered from a dead {{.Worker}}'s worktree and committed
+  with the pre-commit hook bypassed on purpose, so **it has never been built and
+  nobody has reviewed it**. The report prints **no submit command** for these rows
+  and that omission is deliberate — read the branch and build it first. The
+  failure mode here is the gate **passing**, not failing: a failed gate costs a
+  run, a passing one merges half-implemented unreviewed code to main on the
+  authority of a line a detector printed. This row exists because on 2026-08-19
+  the sweep printed a paste-ready submit for five such branches while each of
+  those items' own body said in bold not to submit it, and a coordinator nearly
+  acted on it (mg-aed4).
 - `landed_not_closed` — the branch is **merged** and the item is still asking for
   the work. **`mg done`**. This is the one that used to be invisible: on
   2026-08-09, priority-wake told you to "claim or dispatch now: mg-6c90" *four
