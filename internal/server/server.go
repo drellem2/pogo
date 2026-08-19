@@ -232,6 +232,40 @@ func (s *Server) transitionToFull() (StartReport, error) {
 		report.RefineryRestarted = true
 	}
 
+	// Clear StopAll's shutdown latch HERE: after the refinery's point of no
+	// return, and BEFORE the mode flip — so no spawn can be admitted between
+	// arming crash-respawn and the fleet becoming reachable.
+	//
+	// That ordering is the whole argument, and it holds without needing any
+	// window to be argued: while the mode is still index-only, /agents and
+	// /agents/ are behind RequireOrchestration (cmd/pogod/main.go:799-800), so
+	// nothing can spawn; the drain removed every agent, so nothing is left to
+	// crash. From the flip onward every spawn — and therefore every respawn
+	// its OnExit schedules — holds the current generation.
+	//
+	// Not earlier than this. A refinery failure above returns before anything
+	// is mutated; re-arming crash-respawn for a transition that did not happen
+	// would leave the daemon supervising a fleet it never restarted. Earlier
+	// still — the end of transitionToIndexOnly, or the top of this function —
+	// re-admits the drain's own late respawn goroutines (scheduled by the
+	// OnExit hook, firing 2s after StopAll returned synchronously) into a
+	// fleet being rebuilt.
+	//
+	// Not later. Resume bumps the generation, invalidating every respawn
+	// scheduled before it. Clearing after the sweep would leave exactly the
+	// agents that crashed during the sweep permanently unsupervised, in a
+	// fleet reporting itself restored. Clearing after the mode flip is the
+	// same failure in miniature: the flip makes /agents reachable, so a spawn
+	// admitted between the two would have its crash-respawn invalidated by
+	// the very call meant to arm it.
+	//
+	// The generation bump is what makes the drain's stale goroutines lose by
+	// construction rather than by timing — a stale goroutine holds a stale
+	// generation and loses however late it fires.
+	if agents != nil {
+		agents.Resume()
+	}
+
 	s.mu.Lock()
 	if newRef != nil {
 		s.refinery = newRef
@@ -240,28 +274,6 @@ func (s *Server) transitionToFull() (StartReport, error) {
 	s.mu.Unlock()
 
 	log.Printf("server: now in full mode")
-
-	// Clear StopAll's shutdown latch HERE: after the drain has returned and
-	// the mode is full, and before the sweep below spawns anything.
-	//
-	// Later would be wrong. Resume bumps the registry generation, invalidating
-	// every respawn scheduled before it — so clearing after the sweep would
-	// leave exactly the agents that crashed during the sweep permanently
-	// unsupervised, in a fleet that reports itself restored.
-	//
-	// Earlier would be wrong for a different reason. The drain's own late
-	// respawn goroutines (scheduled by the OnExit hook, firing 2s after
-	// StopAll returned synchronously) would be re-admitted into a fleet that
-	// is being rebuilt, racing the sweep whose only guard is a check-then-act
-	// on r.Get(name). The generation bump is what makes that impossible rather
-	// than merely unlikely — a stale goroutine holds a stale generation and
-	// loses however late it fires — but the clear still belongs after the
-	// point of no return, not before it: a refinery failure above returns
-	// early, and re-arming crash-respawn for a transition that did not happen
-	// would leave the daemon supervising a fleet it never restarted.
-	if agents != nil {
-		agents.Resume()
-	}
 
 	// Re-run the auto-start sweep. Missing this is the defect gh #108
 	// reported: mode flipped to full, refinery came back, and s.agents was
