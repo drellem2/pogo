@@ -181,6 +181,20 @@ type Provider struct {
 	// a harness that starts without a receipt is strictly better than one that
 	// does not start.
 	SubmitReceiptHook func(dir, hookCommand string) error
+
+	// MailRecipientHook installs this harness's post-tool hook for warning an
+	// agent that a mail it just sent named a recipient nobody is home to read.
+	// dir is the agent's working directory; hookCommand is the fully resolved
+	// command line the harness should run after each tool call.
+	//
+	// nil means "this harness cannot show its agent what a tool call just did",
+	// which is a supported answer and costs exactly the warning: sends keep
+	// behaving as they did before mg-d924, succeeding identically whether or
+	// not the recipient is running. Returning an error says the same thing for
+	// one spawn — pogod logs it and starts the agent anyway, because an agent
+	// that runs without the warning is strictly better than one that does not
+	// run.
+	MailRecipientHook func(dir, hookCommand string) error
 }
 
 // PromptInjectionKind enumerates the strategies for delivering a persona prompt

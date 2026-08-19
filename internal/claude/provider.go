@@ -75,6 +75,12 @@ var Provider = agent.Provider{
 	// which is the receipt a PTY write cannot produce for itself. It is what
 	// lets a nudge be confirmed instead of assumed (mg-ebee).
 	SubmitReceiptHook: InstallSubmitReceiptHook,
+
+	// Claude Code's PostToolUse hook runs after each tool call with the call's
+	// own input, which is where an `mg mail send` to an agent nobody is running
+	// can finally be named. mg cannot say it (it does not own liveness) and the
+	// send cannot say it (it succeeds identically either way) — mg-d924.
+	MailRecipientHook: InstallMailRecipientHook,
 }
 
 // SessionTranscriptGlob returns the home-relative glob matching the Claude Code
