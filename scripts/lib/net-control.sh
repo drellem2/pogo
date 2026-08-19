@@ -88,6 +88,27 @@
 #     GREEN and there is no cheap fix for it at this layer; the control measures
 #     "something answered", not "the internet works". Named rather than papered
 #     over.
+#
+#     NO LONGER HYPOTHETICAL ON THIS HOST, and the measurement is here because a
+#     reader who only had the paragraph above would still quote the green
+#     (mg-12aa). With the VPN on `utun4` holding the default route, measured
+#     2026-08-19 08:5xZ from a polecat worktree:
+#
+#         192.0.2.1:443     CONNECTED 0.09s   (RFC 5737, routed nowhere)
+#         198.51.100.1:443  CONNECTED 0.09s   (RFC 5737, routed nowhere)
+#         203.0.113.1:443   CONNECTED 0.09s   (RFC 5737, routed nowhere)
+#         240.0.0.1:443     CONNECTED 0.09s   (reserved Class E, routed NOWHERE
+#                                              on earth — nothing can answer it)
+#         100.64.1.1:443    no answer 3.0s    (outside the tunnel's route set)
+#
+#     `connect(2)` is being completed by the tunnel itself, so on this host
+#     `up` currently means "utun4 is up", not "this box reaches anything". The
+#     verdict is left as `up` rather than downgraded because the obvious remedy —
+#     a reserved-address canary on every call — costs a FULL per-probe timeout on
+#     a healthy box, where the canary correctly blackholes, and this control is
+#     meant to be callable from an alert path. Tracked separately; what ships
+#     under mg-12aa is that the SUITE now measures the condition and prints it
+#     beside its own green rather than assuming it away.
 #   * IF EVERY REFERENCE TARGET IS GENUINELY DEAD, the verdict is a false `down`.
 #     That is why the default set is three anycast resolvers run by three
 #     different operators on three different networks, addressed by literal IP

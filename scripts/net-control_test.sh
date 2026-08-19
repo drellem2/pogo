@@ -33,6 +33,17 @@
 # a blackhole fails SLOW, and a control could plausibly handle one and not the
 # other.
 #
+# Section 2b is what makes section 3 mean anything, and it is here because it
+# was missing (mg-12aa). Sections 3, 4e and 5 used to NAME three RFC 5737
+# documentation addresses and take the naming for the arranging. On this host,
+# with a VPN holding the default route, those addresses complete a TCP handshake
+# in 0.09s — so the three assertions reported a substrate that was not a
+# blackhole, in the CONTROL's voice, and took `./build.sh` red on pristine main
+# for six days. The substrate is now measured before it is used, with the
+# control's own probe, and it must be a blackhole in both senses of the word:
+# nothing answers, AND nothing answers slowly. A refusal satisfies the first and
+# not the second, and only the second is the shape section 3 exists for.
+#
 # Sections 4 onward are the other half of the bar: the control must be
 # distinguishable from a control that is merely broken. Each one drives it into
 # a state where it cannot measure and requires `unknown`, never `down`.
@@ -50,7 +61,13 @@ LIB="$HERE/lib/net-control.sh"
 # shellcheck source=/dev/null
 source "$HERE/pogo-sandbox"
 pogo_sandbox_create netcontrol
-trap pogo_sandbox_down EXIT
+# BH_SINK_PID is a background python process this suite may start (section 2b).
+# The signal list is not decoration: with a bare `trap ... EXIT` the handler does
+# not run on SIGTERM, and a SYN sink that outlives the suite holds a loopback
+# port with a permanently full accept queue.
+BH_SINK_PID=""
+netc_teardown() { [ -n "$BH_SINK_PID" ] && kill "$BH_SINK_PID" 2>/dev/null; pogo_sandbox_down; }
+trap netc_teardown EXIT INT TERM HUP
 pogo_sandbox_isolate
 
 PASS=0
@@ -149,6 +166,138 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 2b. ESTABLISHING A BLACKHOLE, RATHER THAN NAMING ONE AND HOPING
+# ---------------------------------------------------------------------------
+# Sections 3, 4e and 5 all need somewhere that SWALLOWS SYNs. Until mg-12aa they
+# named three RFC 5737 documentation addresses and assumed the naming was the
+# arranging — the same assumption section 2 already refuses to make about its
+# own isolation mechanism ("prove the isolation before trusting what it
+# produces"), left out of the section that needed it just as much.
+#
+# It is false on this host. Measured 2026-08-19 with the VPN on `utun4` holding
+# the default route: 192.0.2.1:443, 198.51.100.1:443, 203.0.113.1:443 and even
+# 240.0.0.1:443 — reserved Class E, routed nowhere on earth — all COMPLETE a TCP
+# handshake in 0.09s, from a tunnel that terminates connect(2) locally. The
+# three assertions did not detect a broken control. They reported a substrate
+# that was not a blackhole, in the control's voice, and took `./build.sh` red on
+# pristine main with it.
+#
+# So the substrate is now MEASURED before it is used, with the control's own
+# probe primitive, and it must be a blackhole in both directions of the word:
+# nothing answers, AND nothing answers SLOWLY. A refusal would satisfy "nothing
+# answered" while testing the fast shape section 2 already covers, which would
+# leave the slow shape — the mg-964e shape this section exists for — unproven
+# under a passing green.
+echo "--- 2b. establishing a blackhole to test against ---"
+
+# The probe, taken from the library rather than reimplemented: the substrate has
+# to be a blackhole to the SAME primitive the control will use, not to some
+# other tool that might disagree about it. Echoes elapsed seconds, returns 0 if
+# the endpoint ANSWERED.
+bh_probe() {
+    (
+        # shellcheck source=/dev/null
+        source "$LIB"
+        netc_resolve_nc >/dev/null 2>&1 || { echo 0; exit 0; }   # "answered" => unusable
+        netc_probe "$1" "$2" "$3"; rc=$?
+        echo "$NETC_LAST_ELAPSED"
+        exit "$rc"
+    )
+}
+
+# bh_is_blackhole HOST PORT — no answer AND the probe had to be timed out for it.
+# `>= 2` against a 3s budget rather than `== 3` because NETC_LAST_ELAPSED is a
+# whole-second $SECONDS delta and can round down by one.
+bh_is_blackhole() {
+    local el rc
+    el="$(bh_probe "$1" "$2" 3)"; rc=$?
+    [ "$rc" -ne 0 ] || return 1
+    [ "${el:-0}" -ge 2 ] || return 1
+    return 0
+}
+
+BH_KIND=""
+BH_TARGETS=""
+BH_PROXY_NOTE=""
+BH_RFC5737="192.0.2.1:443 198.51.100.1:443 203.0.113.1:443"
+
+BH_RFC_OK=0
+for t in $BH_RFC5737; do
+    bh_is_blackhole "${t%:*}" "${t##*:}" && BH_RFC_OK=$(( BH_RFC_OK + 1 ))
+done
+if [ "$BH_RFC_OK" -eq 3 ]; then
+    BH_KIND="RFC 5737 documentation addresses"
+    BH_TARGETS="$BH_RFC5737"
+    pass "the blackhole substrate is PROVEN before it is used: all three RFC 5737 addresses swallowed a SYN and had to be timed out"
+else
+    # Not a failure yet — it is a fact about the box, and the fallback below is
+    # a real blackhole rather than a way around one. But it IS the control's own
+    # documented false-green condition, observed, so it gets said out loud here
+    # and again next to the summary.
+    BH_PROXY_NOTE="  Only $BH_RFC_OK of 3 RFC 5737 documentation addresses blackholed a SYN on this box.
+  Something on this host COMPLETES TCP handshakes for destinations that are
+  routed nowhere, so section 1's UP is NOT evidence that anything beyond that
+  something is reachable — it is the transparent-proxy false green named in
+  net-control.sh's own limits section, no longer hypothetical here. Every RED
+  below was still proven, against the substrate named beside it."
+    echo "  NOTE — this box completes handshakes for destinations that are routed nowhere:"
+    printf '%s\n' "$BH_PROXY_NOTE"
+
+    # The fallback, and it is not a mock. A loopback listener whose accept queue
+    # is full makes the kernel DROP further SYNs instead of refusing them: the
+    # connect hangs until the caller's own deadline, with nothing coming back.
+    # That is the same observable the mg-964e blackhole produces, made by the
+    # real kernel on real sockets, and it has the property the off-box addresses
+    # just lost — it cannot be answered by anything in the path, because there
+    # is no path.
+    if command -v python3 >/dev/null 2>&1; then
+        BH_SINK_PORTFILE="$WORK/sink.ports"
+        python3 - "$BH_SINK_PORTFILE" 3 >/dev/null 2>&1 <<'PY' &
+import socket, sys, time
+keep, ports = [], []
+for _ in range(int(sys.argv[2])):
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # backlog 1 and never accept(). Measured on Darwin: with backlog 1 the
+    # second connect is dropped, while backlog 0 completed six in a row — so
+    # the 1 is load-bearing and not a "small number".
+    srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    keep.append(srv)
+    port = srv.getsockname()[1]
+    for _i in range(8):
+        c = socket.socket(); c.settimeout(0.5)
+        try:
+            c.connect(("127.0.0.1", port)); keep.append(c)
+        except OSError:
+            ports.append(port); break
+with open(sys.argv[1], "w") as fh:
+    fh.write(" ".join(str(p) for p in ports) if ports else "NONE")
+time.sleep(600)
+PY
+        BH_SINK_PID=$!
+        i=0
+        while [ ! -s "$BH_SINK_PORTFILE" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$(( i + 1 )); done
+        BH_SINK_PORTS="$(cat "$BH_SINK_PORTFILE" 2>/dev/null)"
+        [ "$BH_SINK_PORTS" = "NONE" ] && BH_SINK_PORTS=""
+        bh_ok=0; bh_cand=""
+        for port in $BH_SINK_PORTS; do
+            if bh_is_blackhole 127.0.0.1 "$port"; then
+                bh_ok=$(( bh_ok + 1 )); bh_cand="$bh_cand 127.0.0.1:$port"
+            fi
+        done
+        if [ "$bh_ok" -ge 3 ]; then
+            BH_KIND="loopback SYN sinks (listeners with a full accept queue)"
+            BH_TARGETS="${bh_cand# }"
+            pass "a blackhole was CONSTRUCTED and proven: 3 loopback SYN sinks each swallowed a SYN and had to be timed out, so the slow shape is testable on a box whose off-box blackholes answer"
+        fi
+    fi
+fi
+
+if [ -z "$BH_KIND" ]; then
+    fail "no blackhole could be established on this host: the RFC 5737 addresses did not swallow a SYN (they either answered or refused fast — $BH_RFC_OK of 3 blackholed), and no loopback SYN sink could be stood up either (needs python3). Sections 3, 4e and 5 cannot run, so the control's RED is UNPROVEN against dropped SYNs. Not skipped: the untested direction is the one that matters."
+fi
+
+# ---------------------------------------------------------------------------
 # 3. THE SECOND REAL RED SHAPE: A BLACKHOLE, WHICH FAILS SLOW
 # ---------------------------------------------------------------------------
 # Section 2's denial fails instantly (EPERM). This host's actual outage does
@@ -157,29 +306,45 @@ fi
 # handled the fast shape and hung on the slow one would pass section 2 and be
 # useless on the night it was built for.
 #
-# RFC 5737 reserves 192.0.2.0/24, 198.51.100.0/24 and 203.0.113.0/24 for
-# documentation; they are routed nowhere. The packets here are real.
+# The targets come from section 2b, which PROVED them rather than named them.
+# This paragraph used to assert them instead: "RFC 5737 reserves 192.0.2.0/24,
+# 198.51.100.0/24 and 203.0.113.0/24 for documentation; they are routed nowhere.
+# The packets here are real." Every clause of that is true of the internet and
+# none of it was true of this host, where a tunnel answered all three. The
+# packets are still real either way — 2b's fallback drops them in the kernel
+# rather than on a wire, which is the same observable and one a routing change
+# cannot take away.
 echo "--- 3. RED under a real SYN blackhole (the mg-964e shape) ---"
-if [ "$LIVE_UP" -eq 1 ]; then
+if [ "$LIVE_UP" -eq 1 ] && [ -n "$BH_KIND" ]; then
     BH_START=$SECONDS
-    BH_OUT="$(POGO_NET_CONTROL_TARGETS="192.0.2.1:443 198.51.100.1:443 203.0.113.1:443" \
+    BH_OUT="$(POGO_NET_CONTROL_TARGETS="$BH_TARGETS" \
               POGO_NET_CONTROL_NAME_TARGETS="" \
               POGO_NET_CONTROL_TIMEOUT=2 \
               bash "$LIB" 2>&1)"; BH_RC=$?
     BH_ELAPSED=$(( SECONDS - BH_START ))
     if [ "$BH_RC" -eq 1 ] && printf '%s' "$BH_OUT" | grep -q 'POSITIVE CONTROL: DOWN'; then
-        pass "RED under dropped SYNs, not just refused ones — three blackholed addresses, verdict DOWN in ${BH_ELAPSED}s"
+        pass "RED under dropped SYNs, not just refused ones — three blackholed addresses ($BH_KIND), verdict DOWN in ${BH_ELAPSED}s"
     else
-        fail "the control did not go red against three blackholed addresses (exit $BH_RC). Output: $BH_OUT"
+        fail "the control did not go red against three blackholed addresses via $BH_KIND (exit $BH_RC). Output: $BH_OUT"
     fi
-    # Bounded, and the bound is what makes it callable from an alert path. Three
-    # targets at a 2s per-probe budget must not approach the ~75s an unbounded
-    # SYN would cost even once.
+    # The sweep is asserted from BOTH sides, and the lower bound is the half
+    # mg-12aa added. Upper: three targets at a 2s per-probe budget must not
+    # approach the ~75s an unbounded SYN would cost even once, or no runner can
+    # call this before alerting. Lower: three DROPPED SYNs at a 2s budget cannot
+    # come back in about no time — a sweep that does was talking to a substrate
+    # that REFUSED, which is the fast shape section 2 already proves and not the
+    # slow one this section exists for. Without it a red is a red either way and
+    # the difference is invisible.
     [ "$BH_ELAPSED" -lt 30 ] \
         && pass "the blackhole sweep stayed bounded (${BH_ELAPSED}s for 3 targets at a 2s budget), so a runner can call this before alerting" \
         || fail "the blackhole sweep took ${BH_ELAPSED}s — an unbounded probe is a control nobody can afford to call"
-else
+    [ "$BH_ELAPSED" -ge 3 ] \
+        && pass "the RED came from SYNs that were DROPPED and timed out, not refused — ${BH_ELAPSED}s for 3 targets at a 2s budget, where refusals would have returned in about none" \
+        || fail "the sweep returned in ${BH_ELAPSED}s, too fast for three dropped SYNs at a 2s budget: the substrate was refusing rather than blackholing, so this RED does not establish the slow shape"
+elif [ "$LIVE_UP" -ne 1 ]; then
     fail "section 1 did not establish UP, so a DOWN here would carry no information — this box appears to be offline and section 3 cannot run"
+else
+    fail "no blackhole substrate could be established in section 2b, so the control's RED against dropped SYNs is unproven on this host"
 fi
 
 # ---------------------------------------------------------------------------
@@ -259,15 +424,21 @@ chmod +x "$WORK/nc-always-yes"
 
 # 4e. Below the floor. One dead target and a dead box are the same observation,
 # so one target may never produce a red.
-(
-    # shellcheck source=/dev/null
-    source "$LIB"
-    POGO_NET_CONTROL_TARGETS="192.0.2.1:443" POGO_NET_CONTROL_NAME_TARGETS="" POGO_NET_CONTROL_TIMEOUT=2
-    net_control; rc=$?
-    [ "$rc" -eq 2 ] && [ "$NET_CONTROL_VERDICT" = "unknown" ] \
-        && printf '%s' "$NET_CONTROL_REASON" | grep -q 'floor'
-) && pass "a single unreachable target is below the floor => unknown, because one dead target and a dead box look identical" \
-  || fail "a single unreachable target produced something other than unknown"
+# The target comes from section 2b's PROVEN set: "unreachable" has to be a
+# measured property of the address, not a property of the RFC it was reserved by.
+if [ -n "$BH_KIND" ]; then
+    (
+        # shellcheck source=/dev/null
+        source "$LIB"
+        POGO_NET_CONTROL_TARGETS="${BH_TARGETS%% *}" POGO_NET_CONTROL_NAME_TARGETS="" POGO_NET_CONTROL_TIMEOUT=2
+        net_control; rc=$?
+        [ "$rc" -eq 2 ] && [ "$NET_CONTROL_VERDICT" = "unknown" ] \
+            && printf '%s' "$NET_CONTROL_REASON" | grep -q 'floor'
+    ) && pass "a single unreachable target is below the floor => unknown, because one dead target and a dead box look identical" \
+      || fail "a single unreachable target produced something other than unknown"
+else
+    fail "no blackhole substrate (section 2b), so the floor rule could not be exercised against an actually-unreachable target"
+fi
 
 # 4f. The report must carry the self-test line even when the control failed —
 # those are precisely the runs where the reader needs to see that the verdict
@@ -290,8 +461,9 @@ chmod +x "$WORK/nc-always-yes"
 # question the IP arm cannot, and reaching a host BY NAME requires both
 # resolution and a completed handshake — strictly more than the empty arm.
 echo "--- 5. a dead reference set does not become a dead box ---"
-if [ "$LIVE_UP" -eq 1 ]; then
-    FR_OUT="$(POGO_NET_CONTROL_TARGETS="192.0.2.1:443 198.51.100.1:443" POGO_NET_CONTROL_TIMEOUT=2 bash "$LIB" 2>&1)"; FR_RC=$?
+if [ "$LIVE_UP" -eq 1 ] && [ -n "$BH_KIND" ]; then
+    FR_TARGETS="$(printf '%s' "$BH_TARGETS" | cut -d' ' -f1,2)"
+    FR_OUT="$(POGO_NET_CONTROL_TARGETS="$FR_TARGETS" POGO_NET_CONTROL_TIMEOUT=2 bash "$LIB" 2>&1)"; FR_RC=$?
     if [ "$FR_RC" -eq 0 ] && printf '%s' "$FR_OUT" | grep -q 'IP reference set is what should be checked'; then
         pass "every literal-IP target dead but a name answering => UP, and the reason points at the reference set rather than the box"
     else
@@ -303,8 +475,10 @@ if [ "$LIVE_UP" -eq 1 ]; then
     printf '%s' "$DNS_OUT" | grep -q 'dns arm:   DOWN' \
         && pass "IP-up / name-down is NAMED as name resolution, not folded into the connectivity verdict" \
         || fail "an IP-up / DNS-down box did not get its own line. Output: $DNS_OUT"
-else
+elif [ "$LIVE_UP" -ne 1 ]; then
     fail "section 1 did not establish UP, so section 5 cannot run"
+else
+    fail "no blackhole substrate (section 2b), so a DEAD reference set could not be arranged and section 5 cannot run"
 fi
 
 # ---------------------------------------------------------------------------
@@ -366,5 +540,12 @@ echo "--- 7. namespace hygiene ---"
   || fail "the library clobbered a caller's NC or probe_tcp"
 
 echo
+# Said again, beside the count, because this is the line a reader skims and the
+# green above is the one they would otherwise quote (mg-82a6).
+if [ -n "$BH_PROXY_NOTE" ]; then
+    echo "NOTE — READ BEFORE CITING SECTION 1'S GREEN:"
+    printf '%s\n' "$BH_PROXY_NOTE"
+    echo
+fi
 echo "=== net-control.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
