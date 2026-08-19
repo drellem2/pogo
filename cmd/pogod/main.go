@@ -1589,6 +1589,20 @@ Flags:
 	// reserve against a refinery nobody is using any more.
 	agentRegistry.SetRefineryActivity(refineryRepoActivity(func() *refinery.Refinery { return mergeQueue }))
 
+	// The merged-work gate (mg-9d4e), reached through the SAME thunk and for the
+	// same reason: an orchestration restart replaces *mergeQueue, and a gate
+	// closed over the old pointer would answer "nothing merged" from a refinery
+	// nobody is using — which is this gate's fail-open direction, so the drift
+	// would be silent.
+	//
+	// Wired here rather than defaulted inside internal/agent because the answer
+	// lives in the refinery's history and that package may not import it
+	// (TestAgentPackageDoesNotImportRefinery). Unconditional, so whether the
+	// fourth dispatch refusal enforces is a question about whether this daemon
+	// has a refinery at all — and a daemon with no refinery performs no merges
+	// for it to catch.
+	agentRegistry.SetMergedWorkGate(refineryMergedWork(func() *refinery.Refinery { return mergeQueue }))
+
 	// And the routing half, beside the gate it sits next to (mg-9a04): a spawn
 	// with no --template routes on the work item's `type` through the closed map
 	// in internal/agent/templateroute.go, refusing rather than defaulting when

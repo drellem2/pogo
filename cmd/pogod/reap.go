@@ -322,14 +322,35 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	}
 	result, _ := json.Marshal(sidecar)
 	completeErr := complete(mr.Author, string(result))
-	if err := completeErr; err != nil {
-		// An "already done" here means the POLECAT won the race and its own
-		// result stands — the item is closed with the worker's verdict, not
-		// ours, and that is the better outcome, not a degraded one. mg enforces
-		// it: a second `mg done` is refused, so there is no path by which this
-		// call replaces a result the worker already wrote. Any other error is a
-		// real failure and reads as one.
-		log.Printf("refinery: mg done %s on merged polecat's behalf did not apply — if this is 'already done' the polecat wrote its own result first and that result stands: %v", mr.Author, err)
+	if completeErr != nil {
+		// TWO DIFFERENT THINGS FAIL THIS CALL, and this line used to be the only
+		// output for both (mg-9d4e):
+		//
+		//   already done  -> the WORKER won the race, its own result stands, and
+		//                    that is the better outcome, not a degraded one. mg
+		//                    enforces it — a second `mg done` is refused — so
+		//                    there is no path by which this call replaces a
+		//                    result the worker already wrote.
+		//   refused       -> the item DECLINED to close, most often the
+		//                    `declares-remainder` guard holding an item whose
+		//                    successor was never filed. The merge landed, the
+		//                    item stays open, its claim is released seconds
+		//                    later, and priority-wake advertises finished work
+		//                    as ready and unclaimed.
+		//
+		// The two are indistinguishable by exit code and were indistinguishable
+		// here. reportMergedButOpen asks the store which one this is and, for
+		// the second, gives the fact an addressee — see mergedopen.go for why
+		// the daemon has to be the one that emits it.
+		//
+		// Called BEFORE the filer notification and the stop below, so the alert
+		// is on the spine before anything else can fail. It is best-effort in
+		// both directions: it neither blocks the notification nor the stop.
+		who := ""
+		if a != nil {
+			who = a.Name
+		}
+		reportMergedButOpen(mr, who, completeErr)
 	}
 
 	// TELL THE AGENT THAT COMMISSIONED THIS ITEM (mg-f120). Everything above
