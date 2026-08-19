@@ -87,3 +87,52 @@
   layer down, in the words a person reads first. Both directions are controlled:
   an ordinary assertion failure is NOT translated, so a real bug cannot be
   relabelled as weather.
+
+- **Scope correction to the entry above, measured (mg-48d4).** `fa8a4e9`'s
+  subject line ends "and a DNS blip stops being a failure in `internal/agent`".
+  Read as a statement about the merge gate — "a failure in `internal/agent`" is
+  the gate symptom from mg-b463 and the 08-14 incident — that reads as a claim
+  about the gate's **package-test row**, and the pin is not on that row's path.
+  The pin lives in `scripts/pogo-sandbox`; the package row is `test.sh:64`,
+  `tmpdir-leak-guard.sh` -> `go-test-budget.sh ./...`, and that guard exports
+  `TMPDIR` and nothing else. `scripts/pogo-sandbox` appears in `test.sh` once, at
+  line 120, as the SUBJECT of its own suite. What the entry above fixes is the
+  sandboxed suites, which is what its body says and what the 08-14 failure
+  actually was: the row that went red was `Testing the $TMPDIR leak guard`, and
+  `internal/agent` was the package NAMED IN a sandboxed suite's compile error,
+  not the gate's package row failing.
+
+  The clause is nonetheless TRUE of the package row — and for none of the
+  reasons on offer, which is the part worth having written down:
+
+  - **The row's own compile needs no network.** `HOME` is untouched by the
+    guard, so `GOMODCACHE` is the developer's real cache: all 615 packages of
+    `go list -deps -test ./...` resolve with `GOPROXY=off`, exit 0.
+  - **The row is NOT fetch-free, and the pin does not cover it.**
+    `internal/agent`'s `TestMain` pins `HOME` under a throwaway root
+    (`internal/testsandbox`, whose own comment records this), Go resolves
+    `GOMODCACHE` off `$HOME`, and
+    `TestAgentPackageDoesNotImportRefinery` shells out to `go list` — so it runs
+    against an EMPTY cache and downloads for real. Counted against a local
+    404-ing proxy on the gate chain run verbatim: **37 module requests per gate
+    run, every one of them from that single test**, at the ambient `GOPROXY`,
+    which on this path is still the default `proxy.golang.org,direct`. The
+    counter was proved with a positive control first (seeded toolchain, empty
+    module cache: 38 requests, naming this package's two external imports).
+  - **A blip there still does not fail it, for a narrow reason.** `go list`'s
+    `.Imports` is read from the main module's own source, so a failed download is
+    logged to stderr and changes neither the answer nor the exit status: the
+    identical 44 imports come back with the path open, 404-ing, or `off`. The
+    whole `test.sh:64` chain exits 0 with **zero** `FAIL` lines against a
+    resolver that cannot resolve (2 full runs, 6m34s and 6m37s).
+
+  So the honest sentence is *the query does not need the module*, not *the cache
+  was warm* and not *the sandbox pin covers it*. That is now a control rather
+  than a paragraph — `TestTheImportQueryDoesNotDependOnTheDownloadPath`, beside
+  the two tests it protects, closing the download path against a cold `HOME` of
+  its own so it cannot pass by reusing the cache the tests above it warmed.
+
+  Provenance: the invocation chain, `fa8a4e9`'s file list and the guard's missing
+  pin are pm-pogo's, filed 2026-08-19; the 615/37/38/44 counts and both dead-
+  resolver chain runs are mg-48d4's, measured the same day. pa9d8's "752 KB, once
+  per run" for the sandboxed suite is theirs and was NOT re-derived here.
