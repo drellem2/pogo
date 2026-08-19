@@ -16,7 +16,7 @@ func preservedEvent(t *testing.T, setup func(t *testing.T, repoDir, wt string)) 
 	t.Helper()
 	spine := filepath.Join(t.TempDir(), "events.log")
 	events.SetLogPathForTesting(spine)
-	t.Cleanup(func() { events.SetLogPathForTesting("") })
+	t.Cleanup(func() { events.SetLogPathForTesting(testEventLogPath) })
 
 	repo, wt := wtRepo(t)
 	setup(t, repo, wt)

@@ -537,6 +537,14 @@ type Registry struct {
 	// but could not read. See preservedgate.go.
 	preservedWorktreeGate PreservedWorktreeGate
 
+	// mergedWorkGate refuses to dispatch a polecat onto a work item whose branch
+	// has ALREADY MERGED (mg-9d4e) — the case that opens the moment
+	// strandedWorkGate's stops applying. Nil DISARMS it, and that is the one
+	// default here that is not a functional implementation: the answer lives in
+	// the refinery's history, which this package may not import, so there is
+	// nothing to fall back to. cmd/pogod installs it. See mergedgate.go.
+	mergedWorkGate MergedWorkGate
+
 	// loadGate refuses to dispatch a worker onto a host the fleet is already
 	// using most of (mg-1b8c). Nil means the default HostLoadGate, which
 	// measures — so the gate holds without any wiring. Unlike the two gates

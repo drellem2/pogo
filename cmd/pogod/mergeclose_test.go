@@ -133,7 +133,7 @@ func TestTheGatedReasonReadsAsADecision(t *testing.T) {
 func TestTheCompletionNoticeEventSaysWhetherTheItemClosed(t *testing.T) {
 	spine := filepath.Join(t.TempDir(), "events.log")
 	events.SetLogPathForTesting(spine)
-	t.Cleanup(func() { events.SetLogPathForTesting("") })
+	t.Cleanup(func() { events.SetLogPathForTesting(testEventLogPath) })
 
 	recordFilerNotice(
 		filernotify.Completion{ItemID: "mg-479c", Route: filernotify.RouteMerge, Branch: "polecat-c479c",

@@ -264,7 +264,7 @@ There is no "sling" command. Spawning a polecat with a work item is the assignme
 ### Dispatch gates
 
 `pogo agent spawn-polecat` is the one chokepoint every item passes through
-before any worker touches it, whoever filed it. Four gates sit there, above
+before any worker touches it, whoever filed it. The gates sit there, above
 every side effect, so a refused dispatch leaves no worktree, agent dir, or
 prompt file behind. They ask different questions and fail in different
 directions:
@@ -275,9 +275,10 @@ directions:
 | **Pairing** | Has the obligation this item's repo puts on it been discharged? | **409** — permanent until the pair is filed | inert; one deployment's config |
 | **Stranded work** | Does this item already have pushed work a worker would ignore? | **409** — permanent until the branch is merged or abandoned | enforces, scanning |
 | **Preserved worktree** | Is this item's work already written and *uncommitted* in a retained worktree? | **409** — permanent until the tree is committed, rescued or ruled spent | enforces, scanning |
+| **Merged work** | Has this item's work **already landed** on the target? | **409** — permanent until the item is closed | enforces when a refinery exists |
 | **Host load** | Can this **host** take another worker right now? | **503** — a *later*; the same request succeeds once the host clears | enforces, measuring |
 
-The first four are about the item. The fifth is about the machine, and nothing
+The first five are about the item. The last is about the machine, and nothing
 before it measured that.
 
 **Why the third exists.** Stopping a wedged polecat releases its claim and
@@ -347,7 +348,44 @@ The same probe feeds stall-watch, so the surfaces that *advertise* an item stop
 advertising it: `internal/stallwatch`'s preserved-worktree check reports it with
 the opposite remedy instead of dropping it silently.
 
-**Why the fifth exists.** The concurrency rule is "a reasonable limit is 3-5
+**Why the fifth exists**, given the third. They are complements, not degrees of
+the same check: the stranded-work gate covers a branch that is pushed and
+**unmerged**, and the case it stops applying to is the one that opens the moment
+that branch lands. pogod closes a work item at merge, but the close can be
+**refused, correctly** — an item tagged `declares-remainder` names work that must
+outlive it, and `mg done` turns such an item away until a successor is named. So
+the merge lands, the close is refused, the polecat is stopped, its claim is
+released, and the item is back in `available/`: genuinely unclaimed, genuinely
+open, and completely done. That happened to mg-0e8c and mg-ac0c 66 minutes apart
+on 2026-08-12, and priority-wake advertised each as "high priority, ready and
+unclaimed" within minutes of its branch merging (mg-9d4e).
+
+The guard that produces that state is **not** the bug and is not weakened here.
+Its alternative failure is strictly worse and happened the same night: mg-69f1
+was untagged, closed cleanly, and silently dropped its remainder. A completed
+item re-offered to the queue is loud and recoverable; a lost remainder is
+neither.
+
+The gate answers from the **refinery's own record** of the merge, keyed on the
+`--author` the branch was submitted under, rather than from git: a heuristic
+refusal gets overridden on reflex, and the git-side attribution routes are the
+ones `internal/strandedwork` already documents as incomplete. It excludes
+**PR-flow** merges, which land on an integration branch whose deliverable — a PR
+against the default branch — does not exist yet, so the item is legitimately
+unfinished. It fails **open** on an absent id, an absent refinery, or a merge the
+bounded in-memory history has forgotten, so a quiet answer is never proof that
+nothing merged. `--merged-override="<why>"` dispatches anyway; unlike the other
+gates' overrides this has a use that is not a false positive, since an item can
+genuinely owe work after its merge.
+
+The same moment is reported as well as refused. When the post-merge `mg done` is
+turned away for any reason other than the worker having already closed the item,
+pogod emits `work_item_merged_not_closed` and mails the coordinator. The
+detection has to live in the daemon: pogod stops the polecat about half a second
+after the merge whether or not the close applied, so the worker is not slow to
+notice, it is gone.
+
+**Why the last one exists.** The concurrency rule is "a reasonable limit is 3-5
 concurrent workers", and a count of slots cannot see what is in them. Measured
 (mg-1b8c): identical gate work took **11.5s** on a host with capacity and
 **78.5s** on a full one, enough to push a gate through a fixed timeout and

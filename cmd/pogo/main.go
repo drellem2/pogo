@@ -2758,6 +2758,7 @@ Example:
 	var spawnPolecatPairingOverride string
 	var spawnPolecatStrandedOverride string
 	var spawnPolecatPreservedOverride string
+	var spawnPolecatMergedOverride string
 	var cmdAgentSpawnPolecat = &cobra.Command{
 		Use:   "spawn-polecat <name>",
 		Short: "Spawn a polecat from a prompt template",
@@ -2821,6 +2822,7 @@ A --body-file that cannot be read is an error, never an empty body.`,
 				PairingOverride:   spawnPolecatPairingOverride,
 				StrandedOverride:  spawnPolecatStrandedOverride,
 				PreservedOverride: spawnPolecatPreservedOverride,
+				MergedOverride:    spawnPolecatMergedOverride,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -2872,11 +2874,15 @@ A --body-file that cannot be read is an error, never an empty body.`,
 	// is heuristic, so this gate can be wrong — and a gate that can be wrong with
 	// no way past it gets disarmed rather than overridden.
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatStrandedOverride, "stranded-override", "", "Dispatch over pushed-but-unmerged work already on a polecat branch for this item (mg-b468), stating WHY in the value; the reason and the refusal it bypassed are recorded as a dispatch_stranded_work_overridden event. Overrides that gate only")
-	// Also a string, and the reason to insist here is the strongest of the three:
+	// Also a string, and the reason to insist here is the strongest of the four:
 	// the tree this gate protects is the ONLY copy of the work it holds, and the
 	// reflex remedy — delete the stale worktree, re-dispatch — destroys it. The
 	// value is where the overrider records that they read the tree first.
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatPreservedOverride, "preserved-override", "", "Dispatch over UNCOMMITTED work sitting in a retained worktree for this item (mg-836c), stating WHY in the value; the reason and the refusal it bypassed are recorded as a dispatch_preserved_worktree_overridden event. Read the tree first (`pogo gc --list-preserved`) — it is the only copy. Overrides that gate only")
+	// Also a string, and here the reason is not only that the gate can be wrong:
+	// an item can genuinely owe work AFTER its merge, and the value is what tells
+	// a later reader which of the two this dispatch was.
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatMergedOverride, "merged-override", "", "Dispatch over work for this item that has ALREADY MERGED to the target (mg-9d4e), stating WHY in the value; the reason and the refusal it bypassed are recorded as a dispatch_merged_work_overridden event. Overrides that gate only")
 
 	// Nudge command — top-level for convenience
 	var nudgeImmediate bool

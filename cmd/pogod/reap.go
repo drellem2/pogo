@@ -376,6 +376,29 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		log.Printf("refinery: MERGED BUT NOT CLOSED — work item %s is STILL OPEN after branch %s merged as %s: %v. "+
 			"No completion is being reported for it; close it by hand once you know why, or leave it open if that is "+
 			"correct (mg-2b71)", mr.Author, mr.Branch, mr.MergedSHA, completeErr)
+		// GIVE THE FACT AN ADDRESSEE (mg-9d4e). The line above is a log line, and
+		// a log line is exactly what this state already had: on 2026-08-12 mg-0e8c
+		// and mg-ac0c each merged, each refused to close, and each was back in
+		// available/ being advertised by priority-wake as "high priority, ready
+		// and unclaimed" within minutes. Nobody reads pogod's log at that moment;
+		// the only reason both were caught is that a coordinator happened to
+		// remember watching the branches go through. reportMergedButOpen puts the
+		// same fact on the event spine and in the coordinator's inbox — see
+		// mergedopen.go for why the daemon has to be the one that emits it.
+		//
+		// NOT FOR A GATED ITEM, which is the one not-closed case that is not this
+		// defect. pogod could have closed it and DECLINED, because a
+		// `parked`/`human`/`blocked:` item is work somebody stopped on purpose
+		// (mg-2b71) — and being gated is precisely what stops it being dispatched,
+		// so the hazard this alert exists to warn about cannot arise. The alert's
+		// remedy is "file the successor", which would be wrong advice there.
+		if !errors.Is(completeErr, client.ErrMGWorkItemGated) {
+			who := ""
+			if a != nil {
+				who = a.Name
+			}
+			reportMergedButOpen(mr, who, completeErr)
+		}
 	}
 
 	// TELL THE AGENT THAT COMMISSIONED THIS ITEM (mg-f120). Everything above
