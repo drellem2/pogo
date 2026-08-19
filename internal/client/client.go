@@ -23,6 +23,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/health"
+	"github.com/drellem2/pogo/internal/progresswatch"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/server"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
@@ -94,6 +95,31 @@ func GetFullHealth() (*health.FullResponse, error) {
 		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var out health.FullResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetFleetProgress fetches one fresh fleet-productivity reading from pogod's
+// /health/progress (mg-516e): the four measurements that separate a fleet which
+// is working from one that is merely awake.
+//
+// A 503 means the detector is NOT ARMED on that daemon, which is a different
+// answer from a clean fleet and is returned as an error rather than as an empty
+// reading. Collapsing those two is the exact defect the detector exists to
+// remove, so it must not be re-introduced by its own client.
+func GetFleetProgress() (*progresswatch.Reading, error) {
+	resp, err := http.Get(serverURL + "/health/progress")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out progresswatch.Reading
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}

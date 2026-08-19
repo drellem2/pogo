@@ -367,6 +367,19 @@ func humanAge(d time.Duration) string {
 
 func (e *UndeterminedWorktreeError) Unwrap() error { return e.Err }
 
+// NewestWrite is newestWrite for callers outside this package, and it carries
+// the whole of that function's contract — including the SCOPE note below, which
+// binds them too: it is correct for an AGENT'S OWN worktree and has not been
+// reasoned about for a main worktree.
+//
+// It is exported for internal/progresswatch, whose second conjunct is "no file
+// written in N minutes" across the live workers. Re-implementing the walk there
+// would have produced a second answer to the same question, differing in
+// exactly the places this one is careful about — the .git skip, an unreadable
+// directory being an error rather than a smaller maximum, and a vanished entry
+// mid-walk not being either.
+func NewestWrite(worktreeDir string) (time.Time, error) { return newestWrite(worktreeDir) }
+
 // newestWrite reports the modification time of the most recently written thing
 // inside worktreeDir, and an error when the tree cannot be ENUMERATED — which
 // is a different and worse answer than "nothing has been written", and is why
