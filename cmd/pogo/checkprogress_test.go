@@ -111,3 +111,56 @@ func TestRenderStatesWhoItDeclinedToJudge(t *testing.T) {
 		t.Errorf("render did not state the excluded worker:\n%s", out)
 	}
 }
+
+// TestTheThreeRendersAreGreppableApart is the general form of the rule
+// TestBlindRenderDoesNotReadAsClean pins for one phrase, and it is here because
+// the rescued renderer broke that rule by writing the blind paragraph as the
+// CLEAN headline plus a qualifier ("No finding is possible from this run").
+// That reads as a near-miss and greps as a hit: the three states are
+// distinguished for a reader who reads the whole paragraph, and not at all for
+// one who skims the first two words or runs `grep "No finding"` over a log.
+//
+// A detector whose healthy state and whose I-COULD-NOT-TELL state share a lead
+// phrase has reintroduced, in its own output, the false-green it was built to
+// make impossible. So each state's headline must appear in that state's render
+// and in NEITHER of the other two.
+func TestTheThreeRendersAreGreppableApart(t *testing.T) {
+	now := time.Date(2026, 8, 14, 5, 18, 0, 0, time.UTC)
+
+	finding := theIncident(now)
+
+	clean := theIncident(now)
+	clean.WorkerCores = 6.2
+
+	blind := theIncident(now)
+	blind.CoresKnown = false
+	blind.CoresError = "ps resolution cannot resolve a 1s window"
+
+	states := []struct {
+		name     string
+		headline string
+		snap     progresswatch.Snapshot
+	}{
+		{"finding", "FLEET IS ALIVE AND LANDING NOTHING", finding},
+		{"clean", "No finding", clean},
+		{"blind", "NOT MEASURED", blind},
+	}
+
+	for _, self := range states {
+		out := renderProgressReading(progressReading(t, self.snap))
+		for _, other := range states {
+			got := strings.Contains(out, other.headline)
+			want := self.name == other.name
+			if got == want {
+				continue
+			}
+			if want {
+				t.Errorf("the %s render does not carry its own headline %q:\n%s",
+					self.name, other.headline, out)
+			} else {
+				t.Errorf("the %s render carries the %s headline %q — the two states are not greppable apart:\n%s",
+					self.name, other.name, other.headline, out)
+			}
+		}
+	}
+}
