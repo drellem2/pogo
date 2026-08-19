@@ -84,6 +84,21 @@
 // reaches live state by a route that is not an environment variable (an
 // absolute path in a fixture, say) is outside what this can promise.
 //
+// # HOME and POGO_HOME are pinned in ONE canonical relation
+//
+// The sandbox places POGO_HOME at exactly $HOME/.pogo (see plan). That is not
+// incidental: it is what makes ONE envelope cover code that reads either notion
+// of "where my state lives", without the test author having to know which one
+// the code under test happens to use. Inside a sandbox, $HOME/.pogo,
+// ${POGO_HOME:-$HOME/.pogo} and config.PogoHome() are the same directory;
+// outside one they are not, and only config.PogoHome() is right (mg-5082).
+//
+// The boundary is therefore the sandbox ROOT, not either variable. A test that
+// pins only HOME does not move the state root — mg-0af3's runner reads
+// POGO_HOME and bypassed a HOME-only sandbox entirely — and a test that pins
+// only POGO_HOME leaves XDG_CONFIG_HOME, MG_ROOT and Go's caches on the
+// developer. See CONTRIBUTING.md, "Where state lives".
+//
 // See testsandbox_test.go, which breaks each guarantee on purpose and reads
 // back what comes out. A harness observed only making tests pass has not been
 // observed working.

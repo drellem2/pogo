@@ -79,6 +79,117 @@ Several gate rows are darwin-specific, several stand up live daemons, and one
 drives the live fleet; closing the gap is not the goal, and `ci-coverage.sh`
 does not treat it as one. Knowing the gap is the goal.
 
+### Where state lives: `HOME`, `POGO_HOME`, and what may derive a path (`mg-5082`)
+
+This tree has two notions of "where my state lives". Five defects were filed
+independently in one evening by four agents, all of them consequences of that
+(`mg-1a23`, `mg-117e`, `mg-712e`, `mg-e121`, `mg-0af3`). Each has a correct local
+fix; none of them can answer *which variable is the boundary*, so the next suite
+that needs isolation picks whichever it thinks of first. This is that answer.
+
+**1. The isolation boundary is the sandbox root — neither variable, and never
+one of them alone.** A test isolates by calling `pogo_sandbox_isolate` or
+`testsandbox.Main`, which pin `HOME`, `XDG_CONFIG_HOME`, `POGO_HOME` and
+`MG_ROOT` *together* and read each one back. All four are load-bearing, and the
+two sections below say why each is. Isolating `HOME` alone does not move the
+state root — `mg-0af3`'s runner reads `POGO_HOME` and bypassed a `HOME` sandbox
+entirely, twice per suite run, onto the counter that fires a fleet-wide bounce.
+Isolating `POGO_HOME` alone leaves `XDG_CONFIG_HOME`, `MG_ROOT` and Go's caches
+pointing at the developer.
+
+**2. Inside the sandbox the two notions coincide, deliberately.** Both harnesses
+place `POGO_HOME` at exactly `$HOME/.pogo` — `pogo_sandbox_isolate` in
+`scripts/pogo-sandbox`, and `plan` in `internal/testsandbox/testsandbox.go`. That
+is not an implementation detail to work around; it is what lets one envelope
+cover code that reads *either* notion without the test author having to know
+which one the code under test happens to use. A test that needs them to differ
+is testing the normalisation itself and should say so.
+
+**3. Outside a sandbox, exactly one thing may derive the state root, and
+`${POGO_HOME:-$HOME/.pogo}` is not it.** That expression is not a weaker
+normalisation — it is a *different answer* on precisely the environment the
+normalisation exists for. Measured on the reporting host, 2026-08-19:
+
+| environment | `${POGO_HOME:-$HOME/.pogo}` | `resolve_pogo_home` | `config.PogoHome()` |
+|---|---|---|---|
+| `POGO_HOME` unset | `/Users/daniel/.pogo` | `/Users/daniel/.pogo` | `/Users/daniel/.pogo` |
+| **`POGO_HOME=$HOME`** (legacy) | **`/Users/daniel`** | `/Users/daniel/.pogo` | `/Users/daniel/.pogo` |
+| `POGO_HOME=$HOME/.pogo` (sandbox) | `<sbx>/home/.pogo` | `<sbx>/home/.pogo` | `<sbx>/home/.pogo` |
+
+One row in three disagrees, and that row is **live right now**: `~/.zshrc:37`
+still exports `POGO_HOME=$(dir_resolve ~)`. Of ten running processes on that host
+carrying `POGO_HOME`, nine had `/Users/daniel/.pogo` and one — an
+interactively-descended `pogo status --live` — had `/Users/daniel`. Every
+`launchd` pogo job carried the normalised value. So the split is not the daemon
+and it is not a future hazard: it is the interactive shell, today, and which
+branch of that expression a process takes depends on how it was started.
+
+`config.PogoHome()` is what keeps that harmless. The raw shell form is what makes
+it harmful, because the wrong path usually **exists and is stale** — so a grep of
+it returns a well-formed wrong answer that an `ls -l` then confirms
+(`drellem2/pogo#145`).
+
+So:
+
+- **Go** — call `config.PogoHome()`. Do not read `POGO_HOME`, and do not memoise
+  the answer: `mg-abbf` is a `sync.Once` that let call order decide where 131 log
+  lines landed. The only two direct reads left are `internal/config` itself and
+  `internal/project`'s one-time legacy migration, which needs the raw value by
+  definition.
+- **A prompt, or any shell an agent will run** — ask the CLI. `pogo events list`,
+  `pogo doctor`, `pogo agent env` resolve the path themselves, so there is no
+  path to get wrong. Enforced by the `runnableLines` check in
+  `internal/agent/prompt_test.go` (`mg-c18d`).
+- **A tracked shell script that cannot call the binary** — normalise the way
+  `config.PogoHome` does, and give it a parity test.
+  `resolve_pogo_home` in `scripts/fleet-liveness-probe.sh` is the worked example
+  and case 7 of `scripts/fleet-liveness-probe_test.sh` is its parity test.
+  Calling the CLI is *not* available here: a tracked file goes live the instant a
+  merge lands and the binaries go live only when self-deploy runs, and a script
+  that couples those two clocks is broken for the window in between — see
+  "Writing a hook: it must self-activate from source" below.
+
+**4. Caches that derive from `$HOME` are the harness's job, not each suite's.**
+Moving `HOME` also moves `GOMODCACHE`, `GOCACHE` and `GOPATH`, and a cold module
+cache repopulates over the network — 37 module requests per gate run, all from
+`internal/agent` (`mg-117e`), and three consecutive 60-minute gate timeouts on
+the toolchain half before that (`mg-cdf1`, `mg-a9d8`). Both harnesses now pin
+`GOMODCACHE` at the real cache with `GOPROXY=off` beside it. Do not re-derive
+that in a suite; if you need a *cold* cache, say `GOMODCACHE=<empty dir>`
+explicitly and assert you got one.
+
+#### Enforcement, and what is still open
+
+`TestNoShellFileReDerivesThePogoStateRoot` in `internal/config` walks the tree and
+fails on the fallback form on a runnable line, against
+`internal/config/pogohome-shell-ledger.txt`. Same ratchet rules as the adoption
+ledger: converting a file is a one-line deletion, and the list may only shrink.
+It is scoped to the fallback form on purpose — a bare `$POGO_HOME/...` after
+something in the same script *set* `POGO_HOME` is correct, and no textual check
+can tell that from a read of an inherited one.
+
+The check found one occurrence no grep in the filing tickets had: **the shell
+half of the isolation harness itself.** `scripts/pogo-sandbox` captures
+`POGO_SANDBOX_REAL_POGO_HOME` with the raw form, while its Go twin (`captureLive`
+in `internal/testsandbox`) applies the normalisation. Under the legacy value the
+shell half therefore treats the *whole home* as "the developer's live pogo
+state". That
+fails **safe** — a wider `real_pogo` refuses more, never fewer, and the adjacent
+`real_home` check already covers the same ground — so it is a legibility defect
+rather than a leak, and it is ledgered rather than fixed here. It is the first
+line the backlog (`mg-5551`) should take.
+
+Two things this section deliberately does **not** decide, because they are fixes
+and not rules: whether the ledgered occurrences are converted or deleted (that is
+their own tickets' work), and `~/.zshrc:37`, which is outside this repository.
+
+*Provenance.* The five-ticket cause-class is pm-pogo's reading, and the
+correction that withdrew its `mg-e121`-orders-`mg-0af3` claim is mayor's and
+r0af3's — nothing here sequences those two tickets against each other. The
+"twice per suite run" figure is `mg-0af3`'s filer's; the 37 module requests are
+`mg-48d4`'s polecat's, re-derived by `mg-117e`'s. The derivation table, the
+process survey and the `launchd` survey were measured for this section.
+
 ### Writing a test that touches pogo state: use `scripts/pogo-sandbox`
 
 A test must never read or write the developer's live `~/.pogo`, the live daemon,

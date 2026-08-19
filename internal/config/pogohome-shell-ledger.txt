@@ -1,0 +1,33 @@
+# Shell files that still derive a pogo state path with the ${POGO_HOME:-$HOME/...}
+# fallback form instead of normalising the way config.PogoHome does.
+#
+# Filed with the ratchet in pogohomefallback_test.go (mg-5082). Read that file
+# first; this one is only the list.
+#
+# THIS IS A RATCHET, NOT AN ALLOWLIST. It may only shrink.
+#
+#   - Converting a file MUST delete its line here. The check fails when a
+#     ledgered file no longer contains the form, so the list cannot rust into
+#     an allowlist nobody can honestly shorten.
+#   - A file that is renamed or deleted MUST have its line deleted too. Same
+#     check, same reason.
+#   - When the last line goes, delete this file and the ledger lookup with it.
+#
+# THERE IS EXACTLY ONE ACCEPTED REASON FOR A LINE HERE, and it is historical:
+# the occurrence predates the rule (2026-08-19). "This one is safe because
+# POGO_HOME is normalised on my box" is NOT an accepted reason — it is a fact
+# about one box at one moment, and ~/.zshrc still exports the legacy value, so
+# an interactively-descended process carries it today.
+#
+# IF YOU ARE HERE BECAUSE YOU WROTE A NEW SCRIPT: do not add a line. Ask the
+# CLI, or copy resolve_pogo_home from scripts/fleet-liveness-probe.sh and give
+# it a parity test. See CONTRIBUTING.md, "Where state lives".
+#
+# Paths are repo-relative. Keep them sorted.
+
+install.sh
+scripts/launchd/pogo-deploy.sh
+scripts/launchd/pogo-reclaim.sh
+scripts/pogo-deploy_test.sh
+scripts/pogo-sandbox
+scripts/pogo-sandbox_test.sh

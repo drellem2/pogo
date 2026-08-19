@@ -2544,6 +2544,16 @@ func ConfigFilePaths() []string {
 // refinery-state.json, etc. across the home directory root, so a POGO_HOME
 // equal to the user's home dir is normalized to $HOME/.pogo — the documented
 // default, and where all of that state already lives on such machines.
+//
+// THIS FUNCTION IS THE ONLY SANCTIONED DERIVATION (mg-5082). `${POGO_HOME:-$HOME/.pogo}`
+// is NOT an equivalent written in shell: it cannot apply the normalization
+// above, so on a machine carrying the legacy value it names a DIFFERENT
+// directory — one that usually exists and is stale, which is the worst shape a
+// wrong path can take. Shell that can reach the CLI should ask it (`pogo events
+// list` and friends resolve the path themselves); shell that cannot must
+// normalize the same way and assert the parity, as scripts/fleet-liveness-probe.sh
+// does. pogohomefallback_test.go is the ratchet; CONTRIBUTING.md, "Where state
+// lives", is the rule.
 func PogoHome() string {
 	if h := os.Getenv("POGO_HOME"); h != "" {
 		if home, err := os.UserHomeDir(); err == nil && home != "" &&
