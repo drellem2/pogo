@@ -29,9 +29,17 @@ When you start, read your config to confirm scope. If anything in the config con
 
 Set up your background scheduling. PMs need three persistent triggers — one mail-check loop and two daily sweep crons. Register each via **`pogo schedule`** (the daemon-side scheduler), not your harness's in-process scheduler (Claude Code's `CronCreate`). The pogod scheduler ticks off the heartbeat goroutine and stores absolute fire times on disk, so your schedules survive host sleep, NTP steps, and pogod restarts — all of which silently drop fires from an in-process scheduler like `CronCreate`. See `ARCHITECTURE.md` → "Scheduler" for the substrate.
 
-Each registration is **idempotent via `--id`** (registering the same id twice replaces the entry), so it's safe to re-run these commands on every startup.
+**Check what survived before you register anything.** Schedules live in `~/.pogo/schedules.json` and fire off pogod's heartbeat, so they normally outlive your session, a pogod restart and a host sleep — which is the whole reason this file prefers `pogo schedule` over an in-process scheduler:
 
-**Schedule IDs are suffixed with your agent name** (`-pm-<your-name>`) — same convention {{.Worker}}s use (`mail-check-<work-item-id>`). The suffix matters: pogod's registry compaction has previously purged short / generic IDs after ~1h (mg-8e5d), but agent-suffixed IDs persist. Re-registering with the same `--id` is still idempotent (id is the dedup key); the suffix only changes which key you're idempotent on.
+```bash
+pogo schedule list --agent pm-<your-name>
+```
+
+**Any of your three ids that is present with the intended cron needs nothing — do not re-register it.** Register only the ids that are missing, or whose cron is wrong. The three definitions follow.
+
+**Check per ID, not per list — this is the step that has already gone wrong once.** A non-empty listing is not the check. In mg-de08 a PM ran exactly this command after a bounce, saw its two sweeps still present, concluded "already registered, nothing owed," and skipped — and the id that had been reaped was the third one, `mail-check-pm-<name>`, which is not named `sweep-*` and so was the only one collected. The PM looked scheduled, answered nudges, and diagnosed healthy with no mail loop for two hours; a redeploy report sat unread and would have sat until the 09:00 sweep. So read the ID column and account for all three of your ids by name. Missing one is the failure mode this instruction has, and it is worse than a spurious re-registration.
+
+**Schedule IDs are suffixed with your agent name** (`-pm-<your-name>`) — same convention {{.Worker}}s use (`mail-check-<work-item-id>`). The suffix matters: pogod's registry compaction has previously purged short / generic IDs after ~1h (mg-8e5d), but agent-suffixed IDs persist. The suffix is also what makes the ids you check for stable across boots.
 
 1. **Mail-check loop** — every 10 minutes, so you stay responsive to overrides and feedback. The nudge body **also** instructs you to refresh your sweep.log heartbeat — {{.Coordinator}} watches sweep.log mtime to detect wedged sessions (see "{{.CoordinatorTitle}}'s stall-watch" below):
 
@@ -57,13 +65,15 @@ Each registration is **idempotent via `--id`** (registering the same id twice re
        --message "sweep"
    ```
 
-Confirm registration with:
+Re-run `pogo schedule list --agent pm-<your-name>` to confirm. You should see exactly three entries (`mail-check-pm-<your-name>`, `sweep-morning-pm-<your-name>`, `sweep-evening-pm-<your-name>`). Do **not** add additional schedules beyond these three — extra cadences lead to duplicate digests and inbox noise.
 
-```bash
-pogo schedule list --agent pm-<your-name>
-```
+**Why a check rather than re-running all three every startup.** This file used to say each registration is "idempotent via `--id`, so it's safe to re-run these commands on every startup." `--id` is the dedup key and you will not stack duplicates — but "does not duplicate" is not "costs nothing," and that is how it was read. Registering an existing `--id` REPLACES the entry and zeroes its lifetime completion counters; the `COMPLETED` column goes from a ratio to `—`. Measured on the running daemon 2026-08-12: `1/1` before, `—` after, one `pogo schedule` call in between. Those counters are how `internal/ackwatch` distinguishes a fire that was *worked* from one that was merely delivered, and re-registering at boot discards that for a settle window on every boot — including the boot after an outage, where the evidence is worth most.
 
-You should see exactly three entries (`mail-check-pm-<your-name>`, `sweep-morning-pm-<your-name>`, `sweep-evening-pm-<your-name>`). Do **not** add additional schedules beyond these three — extra cadences lead to duplicate digests and inbox noise.
+**And the reason this file used to demand the unconditional re-run is itself fixed.** mg-de08 made the case that re-registering blindly was load-bearing, because a pogod bounce reaped the whole fleet's `mail-check-*`. That was its option (2), described in the ticket itself as the "cheap, partial" fix that leaves the fleet's mail loop resting on prompt wording. Option (1) shipped instead, ~2h later: `cmd/pogod/gcgate.go` (7a2dc7f, "never reap a mail-check without positive evidence of death"), after which an absent registry entry means UNKNOWN rather than GONE and the reap is held until pogod's first auto-start sweep plus a settle window. Verified live 2026-08-12: that commit is an ancestor of the running daemon's revision. The bounce-reaps-the-fleet event cannot recur by that path, so the workaround should not outlive it.
+
+An outstanding fire itself now survives a re-registration: since mg-3cbb, `scheduler.Add` carries a still-redeemable token across a same-`(agent, id)` re-register. Before that fix it did not, and this template's own instruction is what destroyed it — on 2026-08-11 pm-pogo booted out of the 22h outage, re-registered all three ids as told, then worked the two sweep fires that had been waiting through it and had **both acks refused** with "no fire outstanding to acknowledge," after the work was done. Its record for that outage reads two delivered, zero acked, both actually completed. The refusal is fixed; the reason not to re-register is now the counters, and the remedy is to check instead of assuming.
+
+**After a bounce, reconcile your mail with `mg mail list pm-<your-name> --all` against your last sweep.log heartbeat — not with the unread filter.** A mail that landed between your last heartbeat and the bounce can be marked read without ever having been handled, and the unread filter can never surface it again; pm-pogo lost its 02:52 mail to exactly this on 2026-08-12. Same shape as the schedule check: what you need is what survived, and the default filter answers a different question.
 
 ### The harness's in-process scheduler is for ephemeral reminders only
 
@@ -129,7 +139,7 @@ When `fired` is much later than `due` (typically because the host slept through 
 
 The PM template's three schedules are all `once` — a single catch-up sweep is correct; do **not** run "one sweep per missed cron" (that would mail Daniel several digests in a row after a long sleep). If the gap is large enough that the digest needs a "we slept through X" note, include it in the next "Gaps I'm watching" section.
 
-Re-registering the schedules (e.g. on restart) is harmless — pogod replaces the entry with the same `--id`.
+Do **not** re-register the schedules to "recover" from a sleep — pogod already replayed what was missed, and re-registering would zero your completion counters for nothing. Check with `pogo schedule list --agent pm-<your-name>` if you want to confirm they survived; see "On Startup" for why the check is the whole procedure.
 
 ### Acking the fire when its work is done
 

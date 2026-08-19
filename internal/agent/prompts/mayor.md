@@ -185,11 +185,17 @@ Anything under `~/.pogo/`, in the user's own repos, or under `~/.config/pogo/` o
 
 Set up your background scheduling. {{.CoordinatorTitle}} needs one persistent backstop trigger: a mail-check loop that fires sleep-resilient even when your in-session `ScheduleWakeup` is dropped. Register it via **`pogo schedule`** (the daemon-side scheduler), not your harness's in-process scheduler (Claude Code's `CronCreate`). The pogod scheduler ticks off the heartbeat goroutine and stores absolute fire times on disk, so the schedule survives host sleep, NTP steps, and pogod restarts — all of which silently drop fires from an in-process scheduler like `CronCreate`. See `ARCHITECTURE.md` → "Scheduler" for the substrate.
 
-The registration is **idempotent via `--id`** (registering the same id twice replaces the entry), so it's safe to re-run on every startup.
+**Check your schedules; repair only what is missing or wrong.** This runs on every startup — being reachable is a per-boot property. What is per-boot is the *check*, not the registration.
 
-**Schedule IDs are suffixed with your agent name** (`-{{.Coordinator}}`) — same convention PMs use (`mail-check-pm-<name>`) and {{.Worker}}s use (`mail-check-<work-item-id>`). The suffix matters: pogod's registry compaction has previously purged short / generic IDs after ~1h (mg-8e5d), but agent-suffixed IDs persist. Re-registering with the same `--id` is still idempotent (id is the dedup key); the suffix only changes which key you're idempotent on.
+```bash
+pogo schedule list --agent {{.Coordinator}}
+```
 
-**Mail-check backstop** — every 30 minutes, so the coordination loop keeps running even when your primary in-session `ScheduleWakeup` (see step 6) is lost. `ScheduleWakeup` remains the primary per-cycle (~30–60s) timer for active coordination; this 30-min schedule catches drops (the failure mode mg-83ef diagnosed):
+You should see exactly one entry (`mail-check-{{.Coordinator}}`) with the cron below. **If it is present with the intended cron, you are done — do not re-register.** Do **not** add additional schedules beyond this one — extra cadences only add redundant cycles. `ScheduleWakeup` continues to drive the primary cadence; this is the backstop.
+
+**Read the ID column, not the row count.** A non-empty listing is not the check — the check is that your exact id is in it. This is the one way this instruction is known to fail: in mg-de08 a PM ran this command after a bounce, saw its two sweeps present, concluded "already registered," and missed that the reaped id was the third one. You have a single id, so the trap is thinner for you than for a PM — but it is the same trap, and it is why the rule is stated as an id to look for rather than an entry to eyeball.
+
+Re-register only a missing id, or one whose cron is wrong:
 
 ```bash
 pogo schedule {{.Coordinator}} --cron "*/30 * * * *" --id mail-check-{{.Coordinator}} \
@@ -197,13 +203,23 @@ pogo schedule {{.Coordinator}} --cron "*/30 * * * *" --id mail-check-{{.Coordina
     --message "Check your mail and run a coordination cycle if there's mail or queued work."
 ```
 
-Confirm registration with:
+**Mail-check backstop** — every 30 minutes, so the coordination loop keeps running even when your primary in-session `ScheduleWakeup` (see step 6) is lost. `ScheduleWakeup` remains the primary per-cycle (~30–60s) timer for active coordination; this 30-min schedule catches drops (the failure mode mg-83ef diagnosed).
+
+**Why a check rather than an unconditional re-register.** Registering an `--id` that already exists REPLACES the entry and zeroes its lifetime completion counters — the `COMPLETED` column goes from a ratio to `—`. Measured on the running daemon 2026-08-12: `mail-check-mg-49b1 1/1` before, `—` after, one `pogo schedule` call in between. Those counters are the fleet's only evidence that your fires are being *worked* rather than merely delivered (`internal/ackwatch`), and doing it at boot discards that evidence on every boot — including the boot after an outage, which is the one where it is worth most. This file used to justify the re-register as "idempotent, so it's safe to re-run"; `--id` is indeed the dedup key and you will not stack duplicates, but "does not duplicate" was quietly read as "costs nothing," and it does not.
+
+**The reason this file used to demand the unconditional re-run is itself fixed.** mg-de08 argued that re-registering blindly was load-bearing, because a pogod bounce reaped the whole fleet's `mail-check-*` and only you survived — by re-registering unconditionally, on the strength of this file's wording. That was mg-de08's option (2), which the ticket itself called the "cheap, partial" fix that leaves the fleet's mail loop resting on prompt phrasing. Option (1) shipped ~2h later: `cmd/pogod/gcgate.go` (7a2dc7f, "never reap a mail-check without positive evidence of death"). An absent registry entry is now UNKNOWN rather than GONE, and the reap is held until the first auto-start sweep plus a settle window. Verified live 2026-08-12: that commit is an ancestor of the running daemon's revision. The workaround should not outlive the bug.
+
+**What it no longer costs you: an outstanding fire survives it.** Since mg-3cbb, `scheduler.Add` carries a still-redeemable token across a same-`(agent, id)` re-registration, so a fire you were handed before the re-register is still ackable after it (see `carryOutstandingFireLocked`; a token past `AckStaleWindow` is not carried, because `Ack` would refuse it anyway). Before that fix, re-registering retracted the fire and the ack came back "no fire outstanding to acknowledge" *after the work was done* — pm-pogo lost two sweep fires that way on 2026-08-11. That refusal is fixed; do not cite it as the reason here, and do not turn the ack into an ordering rule. The reason is the counters, and the remedy is not re-registering at all.
+
+**Schedule IDs are suffixed with your agent name** (`-{{.Coordinator}}`) — same convention PMs use (`mail-check-pm-<name>`) and {{.Worker}}s use (`mail-check-<work-item-id>`). The suffix matters: pogod's registry compaction has previously purged short / generic IDs after ~1h (mg-8e5d), but agent-suffixed IDs persist. The suffix is what makes the id you check for stable across boots.
+
+**After a bounce, reconcile your mail against your last heartbeat — not against the unread filter.** A mail that landed between your last heartbeat and the bounce can be marked read without ever having been handled, and from then on the unread filter can never show it again. List everything and compare against when you were last known alive:
 
 ```bash
-pogo schedule list --agent {{.Coordinator}}
+mg mail list {{.Coordinator}} --all
 ```
 
-You should see exactly one entry (`mail-check-{{.Coordinator}}`). Do **not** add additional schedules beyond this one — extra cadences only add redundant cycles. `ScheduleWakeup` continues to drive the primary cadence; this is the backstop.
+This is the same shape as the schedule check: the state you need is the state that survived, and the default filter answers a different question. Both pm-pogo and you lost mail to this on 2026-08-12 — yours only surfaced because you listed `--all` against your last heartbeat.
 
 ### The harness's in-process scheduler is for ephemeral reminders only
 
@@ -621,9 +637,13 @@ pogo schedule list              # the raw table: completed/delivered per schedul
   four agents. Suspect the ack path, an auth outage, or pogod itself — check
   `pogo agent diagnose` for `health: failing_turns` and the credential first.
 - **Suppression is already handled for you.** The detector goes quiet after a
-  `system_wake` and after a pogod restart, because re-registering a schedule zeroes
-  its counters and every crew agent re-registers on startup. If a finding arrives, it
-  has already survived those gates.
+  `system_wake` and after a pogod restart. The restart gate was sized for a fleet
+  in which every crew agent re-registered its mail-check on startup and zeroed its
+  counters; crew prompts no longer do that (see "On Startup"), so the post-restart
+  reset should now be rare rather than universal. The gate stays either way — it
+  still covers a schedule genuinely repaired at boot, and a suppression window that
+  is no longer needed costs a settle delay, not a missed finding. If a finding
+  arrives, it has already survived those gates.
 
 ### 4. Handle QA for completed work
 
@@ -1133,4 +1153,4 @@ Your agent name is `{{.Coordinator}}`. Your **display label** is `pogo-crew-{{.C
 
 Your prompt file lives at `~/.pogo/agents/mayor.md`. If your behavior needs to change, edit that file — you'll pick up changes on your next restart or handoff.
 
-`pogo agent stop {{.Coordinator}}` halts you cleanly. Your `mail-check-{{.Coordinator}}` schedule persists across stop/start (re-registering on startup is idempotent). If you're being permanently torn down (not just cycled), drop the schedule explicitly with `pogo schedule rm mail-check-{{.Coordinator}}` so pogod doesn't keep delivering nudges to a non-existent agent.
+`pogo agent stop {{.Coordinator}}` halts you cleanly. Your `mail-check-{{.Coordinator}}` schedule persists across stop/start — that is why startup checks for it instead of re-registering it. If you're being permanently torn down (not just cycled), drop the schedule explicitly with `pogo schedule rm mail-check-{{.Coordinator}}` so pogod doesn't keep delivering nudges to a non-existent agent.

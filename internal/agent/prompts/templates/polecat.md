@@ -91,7 +91,17 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    dispatched onto it. Re-running it is harmless.
 {{end}}
 
-2. **Register a mail-check schedule with pogod** so the {{.Coordinator}} can reach you mid-task. {{.WorkerTitle}}s are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use your harness's in-process scheduler{{if eq .Provider "claude"}} (Claude Code's `CronCreate`){{end}} for this — it silently drops fires during sleep:
+2. **Make sure you have a mail-check schedule** so the {{.Coordinator}} can reach you mid-task. {{.WorkerTitle}}s are not on pogod's nudge cycle — without this step, you won't notice incoming mail until your work is done. Use **`pogo schedule`** (the daemon-side scheduler) so the mail-check survives host sleep / NTP steps / pogod restarts; do **not** use your harness's in-process scheduler{{if eq .Provider "claude"}} (Claude Code's `CronCreate`){{end}} for this — it silently drops fires during sleep.
+
+   **Check first — pogod already registered this schedule for you at spawn (mg-e633), so on the normal path you have nothing to do here.**
+
+   ```bash
+   pogo schedule list --agent $POGO_AGENT_NAME
+   ```
+
+   You should see exactly one entry, `mail-check-{{.Id}}`, on `*/10 * * * *`. **If it is there with that cron, you are done — skip the rest of this step.** Read the ID column rather than the row count.
+
+   Register only if the entry is missing, or its cron is wrong:
 
    ```bash
    pogo schedule $POGO_AGENT_NAME --cron "*/10 * * * *" --id mail-check-{{.Id}} \
@@ -99,7 +109,11 @@ Follow these steps exactly, in order. Skipping any step is a failure.
        --message "Check your mail with BOTH mg mail list $POGO_AGENT_NAME AND mg mail list {{.Id}}, and handle any unread messages."
    ```
 
-   Confirm with `pogo schedule list --agent $POGO_AGENT_NAME` — you should see exactly one entry. pogod already auto-registers this schedule for you at spawn (mg-e633), so this command is a safe re-confirm; the `--id` is keyed on your work item id, so re-running it replaces the same `(agent, id)` entry rather than stacking duplicates. **Read BOTH mailboxes, every time.** Both are registered for you at spawn (mg-7dc1), and which one a given message is in is a property of the SENDER — whichever name they happened to type — not anything you can determine from in here. `$POGO_AGENT_NAME` is where replies to your own mail come back (that is what `--from=$POGO_AGENT_NAME` puts on them); `{{.Id}}` is where mail from anyone who addressed your work item landed. Both are real boxes and both can hold unread mail, so reading only one is silent when it is the wrong one — one polecat lost 40 minutes to that, with both ends of its review loop healthy the whole time (mg-4f8c). A box that exists and a box that never did are now distinguishable (`No such mailbox: X` on the human output, `"exists":false` under `--json`), but BOTH still exit 0 — so a check that reads only the exit status still cannot tell them apart.
+   A non-empty listing is not the check — it is your exact id that has to be there. In mg-de08 an agent that read a row count lost its mail loop for two hours while looking scheduled and diagnosing healthy.
+
+   Registering an `--id` that already exists REPLACES the entry and zeroes its completion counters — the `COMPLETED` column goes from a ratio to `—`. It will not stack duplicates, which is what "idempotent" bought and all it bought; "does not duplicate" is not "costs nothing". Those counters are how the fleet tells a fire you actually WORKED from one that merely reached you, which is the distinction a 23h30m outage was invisible for the want of. (An outstanding fire itself survives a re-registration since mg-3cbb, so this is about the counters, not about losing a fire.)
+
+   **Read BOTH mailboxes, every time.** Both are registered for you at spawn (mg-7dc1), and which one a given message is in is a property of the SENDER — whichever name they happened to type — not anything you can determine from in here. `$POGO_AGENT_NAME` is where replies to your own mail come back (that is what `--from=$POGO_AGENT_NAME` puts on them); `{{.Id}}` is where mail from anyone who addressed your work item landed. Both are real boxes and both can hold unread mail, so reading only one is silent when it is the wrong one — one polecat lost 40 minutes to that, with both ends of its review loop healthy the whole time (mg-4f8c). A box that exists and a box that never did are now distinguishable (`No such mailbox: X` on the human output, `"exists":false` under `--json`), but BOTH still exit 0 — so a check that reads only the exit status still cannot tell them apart.
 
    Two more traps in the same area:
 
