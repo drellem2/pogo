@@ -1072,6 +1072,78 @@ Also emitted with `phase: "clear"` when the all-clear mail could not be delivere
 {"schema_version":1,"timestamp":"2026-07-29T06:30:00.000000000Z","event_type":"deaf_watch_error","agent":"pogod","details":{"error":"agent: no mail-check provider installed; diagnose has no basis to judge mail loops"}}
 ```
 
+#### `fleet_progress_stalled`
+
+pogod's fleet-productivity detector ([internal/progresswatch](../internal/progresswatch/progresswatch.go), mg-516e) found the fleet **ALIVE, NOT FAILING, and landing nothing** for longer than the hold-down, and mailed `notify_to` (`mayor` by default).
+
+It exists because every other signal on this box answers "is it dead?" or "is it erroring?". A worker blocked on a slow or unreachable model API is neither — it waits. On 2026-08-14 seven polecats sat PTY-active within 4 minutes, none having written a file in 15, the fleet holding 0.10 of 10 cores, with no merge in ~30 minutes, and nothing fired nor could have; it was found by a human noticing a routine liveness check came back *confusing* rather than red. The finding is a **conjunction** — awake AND not writing AND not computing (by process subtree) AND nothing landing — because any one of those alone is ordinary and the four together have one ordinary explanation: everyone is waiting on the same remote. **Report-only** — pogod restarts nothing on this signal. Emitted once per sample that mailed; an open, unchanged episode is re-raised only after `renotify_after`. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `measurement` (string, required): the four readings as one line. This is the field that makes the log answer "how bad" without opening the mail, and it is deliberately a MEASUREMENT rather than a state token (mg-c058: `STALLED` invites the present-tense over-reading that the numbers cannot)
+  - `blocked_workers` (int, required): workers PTY-active AND writing nothing
+  - `blocked_names` (array of string, required): their names, sorted — the argument an operator cannot construct from a count
+  - `worker_cores` (float, required) / `host_cores` (int, required): the worker SUBTREES' CPU and its denominator. Subtrees, because a parent under-reports a fan-out workload (mg-eb47) and a worker running the gate is silent on PTY and worktree by construction
+  - `since_progress` (string, required): how long since the fleet landed anything
+  - `held_for` (string, required): how long the conjunction has held, unbroken
+  - `escalated` (bool, required): true when `human` was copied as well
+  - `notified` (array of string, required): the mailboxes the notice was sent to
+
+```json
+{"schema_version":1,"timestamp":"2026-08-14T05:48:00.000000000Z","event_type":"fleet_progress_stalled","agent":"pogod","details":{"measurement":"7 of 7 judged worker(s) alive and writing nothing, stalest PTY write 4m ago, freshest file write 15m ago, worker subtrees at 0.10 of 10 cores, nothing landed in 31m (last: merge mr-0f2a (polecat-p27c0) landed)","blocked_workers":7,"blocked_names":["p0f24","p1a3c","p27c0","p516e","p8b2d","pc058","pe7f5"],"worker_cores":0.1,"host_cores":10,"since_progress":"31m0s","held_for":"11m0s","escalated":false,"notified":["mayor"]}}
+```
+
+#### `fleet_progress_pending`
+
+The conjunction holds and has not yet outlasted the hold-down: seen, not announced. The four thresholds already carry their own patience, so this window is short (10m, two samples) and exists because the CPU member is an **instantaneous** reading — a whole fleet can be between things for one sample.
+
+Emitted once per entry into the window, not per sample, so the log distinguishes "we saw it and waited" from "we never saw it". A fleet that starts producing again inside the window produces no other record at all.
+
+- **`details` fields:**
+  - `measurement` (string, required): the four readings, as above
+  - `hold_down` (string, required): the window being waited out
+  - `why` (string, required): the fixed explanation
+
+```json
+{"schema_version":1,"timestamp":"2026-08-14T05:38:00.000000000Z","event_type":"fleet_progress_pending","agent":"pogod","details":{"measurement":"7 of 7 judged worker(s) alive and writing nothing, worker subtrees at 0.10 of 10 cores, nothing landed in 21m","hold_down":"10m0s","why":"the conjunction holds; waiting out the hold-down before announcing"}}
+```
+
+#### `fleet_progress_cleared`
+
+The conjunction no longer holds. Carries what broke it, because an all-clear that does not say what changed is indistinguishable from a detector that stopped looking. The generic `incident_episode_cleared{kind:"fleet_progress"}` is emitted alongside it for the notifier's coalescing (mg-55b2).
+
+- **`details` fields:**
+  - `measurement` (string, required): the readings at the moment it cleared
+  - `window` (string, required): how long the episode ran
+  - `cleared_by` (array of string, required): the conjuncts that stopped holding, in words
+
+```json
+{"schema_version":1,"timestamp":"2026-08-14T06:12:00.000000000Z","event_type":"fleet_progress_cleared","agent":"pogod","details":{"measurement":"0 of 7 judged worker(s) alive and writing nothing, worker subtrees at 4.80 of 10 cores, nothing landed in 3m (last: branch polecat-p516e submitted by mg-516e)","window":"35m0s","cleared_by":["the fleet landed something 3m ago, inside the 30m window","worker subtrees are computing: 4.80 cores, at or above the 0.50 floor"]}}
+```
+
+#### `fleet_progress_error`
+
+The detector could not measure. Three distinct cases share the type and are separated by `phase`:
+
+- `phase: "arm"` — the runner was never armed (no agent registry at startup). A runner that was never armed emits nothing, finds nothing, and is indistinguishable from one watching a productive fleet.
+- `phase: "sample"` — the source failed; nothing was measured this tick.
+- `phase: "evaluate"` — a MEMBER of the conjunction was unmeasurable (an unreadable worktree, an unresolvable CPU sample, an unreadable completion history). No finding is possible from such a sample, and the hold-down clock is deliberately left where it was: a detector that goes blind mid-incident must not report the incident as over.
+- `phase: "mail"` / `"clear_mail"` / `"blind_mail"` — the finding, the all-clear, or the detector's own self-report was measured and could not be delivered.
+
+Persistent blindness (past `blind_for`, default 30m) is **also mailed**, because an instrument whose failure is visible only here is the shape of the bug this detector exists to fix rather than the shape of the fix.
+
+- **`details` fields:**
+  - `error` (string, optional): why, for the sample/mail/arm phases
+  - `blind` (array of string, optional): the members that could not be measured, with reasons, for `phase: "evaluate"`
+  - `measurement` (string, optional): what the sample DID manage to read
+  - `phase` (string, required): `arm` / `sample` / `evaluate` / `mail` / `clear_mail` / `blind_mail`
+  - `to` (string, optional): the mailbox that could not be reached, for the mail phases
+  - `why` (string, optional): the fixed explanation of what this blindness costs
+
+```json
+{"schema_version":1,"timestamp":"2026-08-14T05:48:00.000000000Z","event_type":"fleet_progress_error","agent":"pogod","details":{"blind":["worker CPU unmeasurable: ps resolution 1s cannot resolve a 1s window"],"measurement":"7 of 7 judged worker(s) alive and writing nothing, worker CPU not measured, nothing landed in 31m","phase":"evaluate","why":"a member of the conjunction could not be measured; no finding is possible from this sample"}}
+```
+
 #### `first_turn_watch_dark`
 
 pogod's first-completed-turn floor ([internal/firstturn](../internal/firstturn/firstturn.go), mg-3cbb) found at least one **crew** agent that it spawned and that has never completed a single scheduled fire since — past the grace, with fires demonstrably delivered to it the whole time. **A spawn is not a success**: on 2026-08-11 this daemon logged `autostart: started X (pid=N)` five times, re-registered every schedule, and passed its own post-check ninety seconds later, over a fleet that then completed zero turns for seventeen hours.
