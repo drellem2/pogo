@@ -231,6 +231,24 @@ Idempotent. It does **not** clone the build checkout — the runner does that on
 its first real run, keeping a network operation out of an install an operator
 may be running because the box is already unhealthy.
 
+**A merged change to `scripts/launchd/pogo-deploy.sh` is not live until it is
+installed.** launchd executes `~/.pogo/bin/pogo-deploy.sh` — a static copy that
+nothing refreshes, not the nightly and not a `pogo` upgrade. Twice now a runner
+fix has sat on `main` while 03:00 ran the pre-fix file (mg-bcc1 2026-07-29,
+mg-45b9 2026-08-19; the second was mg-9fc9's fleet bounce, three revisions
+behind). Nothing detects it either: `pogo doctor` compares the **plist** against
+the shipped template and says nothing about the runner's contents. Check it by
+hand, and believe the hashes rather than a command that reported success:
+
+```bash
+git hash-object scripts/launchd/pogo-deploy.sh ~/.pogo/bin/pogo-deploy.sh
+git hash-object scripts/lib/net-control.sh     ~/.pogo/bin/net-control.sh
+```
+
+Two files, because `install-deploy` ships the runner and its positive-control
+library as a pair and a divergence in how they are found is how one of them
+silently stops being shipped.
+
 ### What the runner does (and refuses to do)
 
 `pogo-deploy.sh` is a trigger, not a deployer. Every gate that matters already
