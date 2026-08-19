@@ -972,6 +972,50 @@ Do **not** read the branch count out of a manual sweep: 57 of this repo's 634
 polecat branches have unmerged patches and 48 of those belong to archived items.
 The command already ranks on item status for that reason.
 
+### Work that exists but was never committed — `pogo gc --list-preserved`
+
+Everything above is defined over **commits**, and a {{.Worker}} commits at the
+END of its life. So none of it — not the mail, not `check-stranded`, not
+`git cherry` — can see the state a crash, a stop or an outage actually leaves
+behind: **uncommitted files in a worktree, zero commits ahead of the target.**
+That is not an edge case. It is the normal mid-flight state of every worker.
+
+pogod handles that state well: it **preserves** the worktree instead of reaping
+it, emits `worktree_preserved`, and mails you a per-tree notice naming the tree,
+the files and the prohibition. Take that mail seriously, and note its one
+weakness — **it fires ONCE and is never repeated.** After the 2026-08-14→19
+outage it was sent to a mayor who was itself one of the down agents, into an
+inbox holding 905 unread, and five open items sat `available` with their only
+copy of the work on disk and nothing on the board saying so (mg-836c).
+
+The standing list is the instrument that does not depend on you having read one
+message:
+
+```bash
+pogo gc --list-preserved     # every retained tree: files, modified vs untracked,
+                             # its work item, and whether --force would take it
+```
+
+**Untracked is the urgent column.** An untracked path is on no branch, in no
+stash and on no remote — that tree is its only copy on this machine.
+
+Since mg-836c dispatch is **gated** on this, so you should not be the last line
+of defence: `pogo agent spawn-polecat` refuses an item with a retained tree and
+names it, and the stall-watch / priority-wake surfaces stop advertising it and
+report it with the opposite remedy instead. Three things follow for you:
+
+- **The remedy is not `refinery submit`.** Nothing is committed, so there is
+  nothing to submit. The disposition is a decision: commit the tree on its own
+  branch and land it, rescue what is worth keeping by hand, or rule the work
+  spent.
+- **Never clear the refusal by removing the worktree.** That is the reflex
+  remedy and it destroys the only copy. It is also what the incidental
+  checked-out-branch error invites, because that error names a different reason.
+- `--preserved-override="<why>"` exists and is the one override whose
+  consequence is **not recoverable** — the tree is reaped once its item
+  concludes. Read the tree before you use it, and say in the reason what you
+  found.
+
 ### Intake reconciliation — `pogo check-intake`
 
 A `[gh]` mail you read but did not act on is gone. `mg mail read` marks a message read immediately, so a read-but-unhandled message is invisible to every later unread check, and the issue behind it appears on no board at all — not `mg list`, not `--tag=gh-issue`, not the stall watch. drellem2/pogo#99 generated **two** delivered `[gh]` mails on 2026-07-29 and went ~10 hours with no carrier; its paired issue #100, filed 19 minutes later, was carried normally. A pair Daniel filed to be considered together got split and the untracked half went dark. It was found by a PM running an open-issue sweep by hand, early, on a hunch.

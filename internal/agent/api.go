@@ -119,6 +119,15 @@ type SpawnPolecatAPIRequest struct {
 	//
 	// It overrides the STRANDED-WORK gate alone. See strandedgate.go.
 	StrandedOverride string `json:"stranded_override,omitempty"`
+	// PreservedOverride dispatches an item whose work is already sitting
+	// uncommitted in a retained worktree, and states why. Same shape and same
+	// reasoning as the two above: not a boolean, because what a later reader
+	// needs is what the overrider knew that the gate did not — and here that is
+	// specifically whether they READ the tree before deciding it held nothing.
+	// An empty string is not an override.
+	//
+	// It overrides the PRESERVED-WORKTREE gate alone. See preservedgate.go.
+	PreservedOverride string `json:"preserved_override,omitempty"`
 }
 
 // DrainAPIRequest is the JSON body for POST /agents/drain. Toggling drain mode
@@ -1535,6 +1544,46 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		}
 	}
 
+	// Preserved-worktree gate: refuse to put a worker on an item whose work is
+	// already sitting UNCOMMITTED in a worktree gc will not reclaim (mg-836c).
+	// The stranded gate above asks the same question — does this work already
+	// exist — over COMMITS, and a polecat commits at the END of its life, so the
+	// state a crash, a stop or an outage actually leaves behind fell between the
+	// two. That state is not an edge case: it is the normal mid-flight state of
+	// every worker.
+	//
+	// It is here because everything EXCEPT a gate already existed. pogod detects
+	// the dirty tree on exit, preserves it, emits worktree_preserved, mails the
+	// coordinator a precise per-tree notice, and `pogo gc --list-preserved`
+	// stands as a list. None of that reached dispatch: the item read `available`,
+	// priority-wake advertised it as ready, and the notice — which said DO NOT
+	// DISPATCH in capitals — fires ONCE, to one addressee, who on 2026-08-19 was
+	// one of the agents down in the outage it was reporting on. A one-shot
+	// message is exactly as reliable as its recipient. This makes it a standing
+	// property of the item instead.
+	//
+	// 409 and placed with the conflict gates, for their reasons: retrying it
+	// unchanged is refused identically until the tree is dealt with, and a
+	// refused dispatch must leave no worktree, agent dir, or prompt file behind
+	// (mg-ef80). Fails OPEN on a polecats dir it cannot reach and CLOSED on a
+	// tree it found but could not read — see PreservedWorktrees for that split.
+	//
+	// Overridable, and it has to be: attribution is a name match, and a tree
+	// holding nothing but stale build output would otherwise wedge its item with
+	// no way out but deleting the very thing the gate exists to protect.
+	// --preserved-override costs a written reason, recorded as an event beside
+	// the refusal it bypassed.
+	if refusal := r.preservedWorktreeRefusal(spawnReq.Id, spawnReq.Repo); refusal != "" {
+		if override := strings.TrimSpace(spawnReq.PreservedOverride); override != "" {
+			emitPolecatPreservedOverridden(spawnReq, override, refusal)
+			log.Printf("dispatch preserved-worktree: OVERRIDDEN for %s by explicit request: %s (refusal was: %s)",
+				spawnReq.Id, override, refusal)
+		} else {
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+			return
+		}
+	}
+
 	// Per-repo cap: refuse to add a worker to a REPOSITORY that already holds
 	// its allowance (mg-3977). Seven workers went into one Go repo on
 	// 2026-08-05; the 10-core host reached a load average of 337, commands
@@ -2035,6 +2084,33 @@ func emitPolecatStrandedOverridden(spawnReq SpawnPolecatAPIRequest, reason, refu
 	}
 	events.Emit(context.Background(), events.Event{
 		EventType:  "dispatch_stranded_work_overridden",
+		Agent:      actor,
+		WorkItemID: spawnReq.Id,
+		Repo:       spawnReq.Repo,
+		Details: map[string]any{
+			"agent_type": string(TypePolecat),
+			"agent_name": spawnReq.Name,
+			"reason":     reason,
+			"refusal":    refusal,
+		},
+	})
+}
+
+// emitPolecatPreservedOverridden records a dispatch that went ahead over the
+// preserved-worktree gate, with the reason its caller gave. Mirrors the two
+// emitters above, and matters more than either: this is the one override whose
+// consequence is not recoverable. A stranded branch survives a wrong call; a
+// preserved tree is reaped by the next gc sweep once its item concludes, so the
+// event is the only durable record that somebody chose to proceed over the last
+// copy of that work — and that a re-derivation, if one shows up later, has a
+// named cause rather than looking like a mystery.
+func emitPolecatPreservedOverridden(spawnReq SpawnPolecatAPIRequest, reason, refusal string) {
+	actor := "pogod"
+	if spawnReq.Name != "" {
+		actor = "cat-" + spawnReq.Name
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType:  "dispatch_preserved_worktree_overridden",
 		Agent:      actor,
 		WorkItemID: spawnReq.Id,
 		Repo:       spawnReq.Repo,

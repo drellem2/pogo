@@ -516,6 +516,16 @@ type Registry struct {
 	// strandedgate.go.
 	strandedWorkGate StrandedWorkGate
 
+	// preservedWorktreeGate refuses to dispatch a polecat onto a work item whose
+	// work is already sitting UNCOMMITTED in a retained worktree (mg-836c). Nil
+	// means the default GitPreservedWorktreeGate, which scans — so the gate holds
+	// without any wiring. It is the mid-flight twin of strandedWorkGate above:
+	// that one is defined over commits and a polecat commits at the END, so the
+	// state a crash or an outage actually leaves behind fell between them. Fails
+	// OPEN when the polecats dir cannot be reached and CLOSED on a tree it found
+	// but could not read. See preservedgate.go.
+	preservedWorktreeGate PreservedWorktreeGate
+
 	// loadGate refuses to dispatch a worker onto a host the fleet is already
 	// using most of (mg-1b8c). Nil means the default HostLoadGate, which
 	// measures — so the gate holds without any wiring. Unlike the two gates
