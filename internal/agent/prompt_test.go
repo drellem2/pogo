@@ -6966,8 +6966,9 @@ func TestMayorArchivesByIdNotByMassSweep(t *testing.T) {
 	// standing on its own again, and this fails.
 	if strings.Contains(flat, "Once a ticket's code is merged, the refinery archives the work item automatically") {
 		t.Error("mayor.md: the claim that the refinery archives automatically is asserted again — the " +
-			"refinery's auto-archive call was removed on 2026-03-26 by mg-1f67 and client.ArchiveMGDoneItems " +
-			"has had zero callers since; believing it leaves every completed item sitting in done/ (mg-c2e1)")
+			"refinery's auto-archive call was removed on 2026-03-26 by mg-1f67 and client.ArchiveMGDoneItems, " +
+			"which had had zero callers since, was deleted by mg-eadd; believing it leaves every " +
+			"completed item sitting in done/ (mg-c2e1)")
 	}
 	if strings.Contains(flat, "the refinery archives the work item automatically") &&
 		!strings.Contains(flat, "This section said the opposite") {

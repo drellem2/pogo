@@ -1315,11 +1315,12 @@ and this paragraph was written on 2026-03-21 and never updated, so it has been f
 Believing it costs you twice: items pile up in `done/` unnoticed, and then step 3's archive looks like
 harmless catch-up rather than the only thing that ever runs.
 
-The helper that call used is still in the tree — `client.ArchiveMGDoneItems()` in
-`internal/client/agent.go`, doc comment still asserting the refinery calls it after a successful
-merge, **zero callers** as of 2026-08-19 — and it wraps `mg archive --days=0`. Re-wiring it would put
-the estate-wide sweep back into code, where no session's judgement is in the path at all. If you are
-dispatching cleanup work, that is worth a ticket.
+The helper that call used — `client.ArchiveMGDoneItems()`, which wrapped `mg archive --days=0` and
+whose doc comment still asserted the refinery called it after a successful merge — was **deleted** on
+2026-08-19 by mg-eadd, having had zero callers since the call site went. A guard test now fails the
+build if anything in production code invokes the estate-wide sweep again, because re-wiring it would
+put that sweep back into code, where no session's judgement is in the path at all. Nothing archives
+on your behalf; that is now true of the code as well as of this paragraph.
 
 So archive by id, once the item is `done` and its {{.Worker}} has exited — as part of step 3's
 cleanup for merged work, and as soon as the work is complete for anything that produced no code

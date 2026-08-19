@@ -420,20 +420,6 @@ func RegisterMGMailbox(name string) error {
 	return nil
 }
 
-// ArchiveMGDoneItems triggers macguffin to archive all done work items
-// immediately (--days=0). Called by the refinery after a successful merge
-// so the merged item moves from done/ to archive/ at its natural lifecycle
-// endpoint rather than waiting for time-based cleanup.
-func ArchiveMGDoneItems() (string, error) {
-	cmd := execCommand("mg", "archive", "--days=0")
-	cmd.Stderr = nil
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("mg archive failed: %s (%w)", string(out), err)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
 // ErrMGWorkItemNotDone reports that mg reopen refused because the item was
 // never done — it is still claimed and in progress. The refinery reopens a work
 // item after a failed merge so the author can retry, and a live polecat's item
