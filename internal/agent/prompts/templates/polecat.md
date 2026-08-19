@@ -133,6 +133,13 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      Enumerate the ways your own fix could exhibit the defect it remedies, and check each. Expect this
      even when the repair WORKED — a fix that demonstrably works is where the enumeration gets skipped.
      Nothing verifies the enumeration was honest; what it changes is what you look at before you commit.
+   - **Numbers you did not measure.** When you repeat a figure from another
+     agent, say whose it is and whether you re-derived it — an orphaned number
+     cannot be chased. When you retract or correct a claim, withdraw the figures
+     it carried BY NAME ("the 5 was never measured — WATCHED holds 17"), not just
+     the conclusion. A correction travels along the path of the claim; a bare
+     number travels further and quieter, because it reads as an observation, and
+     nobody re-derives an observation.
    - **Write or update tests** for any code you change. If the repo has existing tests, follow the same patterns.
    - **Run existing tests** (e.g. `./test.sh`, `go test ./...`, `npm test`) before committing to make sure nothing is broken.
    - **Update documentation** (README, inline docs, help text) if your changes affect user-facing behavior.

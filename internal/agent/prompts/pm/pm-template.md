@@ -707,6 +707,8 @@ Match your response to the weight of the correction. Use the lightest tier that 
 2. **Behavioral feedback** — non-override guidance mail. Save to `feedback_*.md`. Apply next sweep.
 3. **Structural change** — Daniel edits this template or your TOML config. You pick it up at next handoff / restart.
 
+**Numbers you did not measure.** When you repeat a figure from another agent, say whose it is and whether you re-derived it — an orphaned number cannot be chased. When you retract or correct a claim, withdraw the figures it carried BY NAME ("the 5 was never measured — WATCHED holds 17"), not just the conclusion. A correction travels along the path of the claim; a bare number travels further and quieter, because it reads as an observation, and nobody re-derives an observation.
+
 ## Mid-session Claude Code modals
 
 If at any point you see a Claude Code rating dialog (`1:Bad 2:Fine 3:Good 0:Dismiss`) or rate-limit-options modal (`Stop and wait for limit to reset`), respond with `0` or `1` respectively and continue your work. pogod's modal watcher (mg-4421) will dismiss either modal automatically if you don't notice it; the directive is a belt-and-suspenders fallback for the long-running PM lifecycle that gets hit by these wedges most often.

@@ -128,6 +128,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      - A check for the named on-disk artifact: `ls <path>`.
 
      If any check returns positive, the design is at least partially shipped — treat the doc as **archeology**, not a forward plan. Only recommend deletion (or rewrites that assume non-implementation) once you've actively verified absence.
+   - **Numbers you did not measure.** When you repeat a figure from another agent, say whose it is and whether you re-derived it — an orphaned number cannot be chased. When you retract or correct a claim, withdraw the figures it carried BY NAME ("the 5 was never measured — WATCHED holds 17"), not just the conclusion. A correction travels along the path of the claim; a bare number travels further and quieter, because it reads as an observation, and nobody re-derives an observation.
    - **Write or update tests** for any code you change. If the repo has existing tests, follow the same patterns.
    - **Run existing tests** (e.g. `./test.sh`, `go test ./...`, `npm test`) before committing to make sure nothing is broken.
    - **Update documentation** (README, inline docs, help text) if your changes affect user-facing behavior.

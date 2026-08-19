@@ -140,7 +140,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    - If the change modifies output formats, verify the output.
    - Check edge cases mentioned in the spec.
 
-   **Evidence discipline — five habits, one idea: a claim about your own work is worth what it cost
+   **Evidence discipline — six habits, one idea: a claim about your own work is worth what it cost
    to make.** None of them is a gate; nothing verifies that a prediction preceded a run, that a
    measurement was taken, that a near-miss was disclosed, or that a control family was sought. What
    they change is what you write down before you look.
@@ -178,6 +178,13 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      a report naming what went wrong carries information; one saying everything went to plan carries none.
      The model is mg-5800 on mg-41aa — a repair that closed its own
      weakest link by measurement instead of defending it in prose.
+   - **Numbers you did not measure.** When you repeat a figure from another
+     agent, say whose it is and whether you re-derived it — an orphaned number
+     cannot be chased. When you retract or correct a claim, withdraw the figures
+     it carried BY NAME ("the 5 was never measured — WATCHED holds 17"), not just
+     the conclusion. A correction travels along the path of the claim; a bare
+     number travels further and quieter, because it reads as an observation, and
+     nobody re-derives an observation.
    - **To credit an effect to one of two causes, MEASURE the held-constant one under the definition in play,
      IN EVERY CELL, and report the measurement.** An asserted invariant is not a control — and a single
      matching statistic is not the invariant: TL_n(β) matched 132 path pairs, not its graph (mg-2060).
