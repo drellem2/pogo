@@ -4611,6 +4611,7 @@ report; it is safe from anywhere and never acts.`,
 	cmdAgent.AddCommand(cmdAgentAttach)
 	cmdAgent.AddCommand(cmdAgentOutput)
 	cmdAgent.AddCommand(cmdAgentWitness)
+	cmdAgent.AddCommand(newAgentEnvCmd(&jsonOutput))
 	cmdAgentPrompt.AddCommand(cmdAgentPromptList)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptInit)
 	cmdAgentPrompt.AddCommand(cmdAgentPromptInstall)

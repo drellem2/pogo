@@ -122,15 +122,38 @@ so one worker whose toolchain self-parallelises can hold the box while a cap of
 // and it answers whether one worker can legitimately plan to hold most of the
 // box. That question had no answer at all before mg-eb47, which is how one Lean
 // build came to hold 9.0 of 10 cores while the per-repo cap read one-of-three.
+//
+// # Why the consumer clause left this line
+//
+// It used to read:
+//
+//	Advisory: it reaches a worker as $POGO_WORKER_CORES and prompt prose.
+//	Nothing enforces it — ...
+//
+// "and prompt prose" is the consumer, appended to the delivery clause of a
+// sentence whose emphasis is the next line's absence. Two readers took the
+// emphasis and dropped the clause. One concluded the variable did not exist and
+// prepared to request it; the other, having established that it does, concluded
+// nothing consults it and routed that as a ticket — while quoting this line
+// twice. mg-fbaf is the record, and its finding is that this is a property of
+// the line, not of the readers.
+//
+// So the clause is gone rather than reworded. Three facts that were one
+// paragraph are now three statements that do not lean on each other: it is
+// advisory and unenforced; it arrives as $POGO_WORKER_CORES; and who reads that
+// variable is answered by `pogo agent env`, which computes the consumer list
+// from the embedded prompt corpus instead of asserting it here. A reader who
+// takes only the emphatic line still leaves knowing the variable exists.
 func printWorkerBudget(w io.Writer, b agent.WorkerBudget) {
 	if !b.Known() {
 		fmt.Fprintf(w, "\nWorker budget: NOT DERIVED — %s\n", b.Basis)
 		return
 	}
 	fmt.Fprintf(w, "\nWorker budget: %d of %d cores per worker (%s).\n", b.Cores, b.HostCores, b.Basis)
-	fmt.Fprintf(w, "               Advisory: it reaches a worker as $%s and prompt prose.\n"+
-		"               Nothing enforces it — a toolchain that ignores it takes the box, and\n"+
-		"               the host gate above is still what notices.\n", agent.WorkerCoresEnv)
+	fmt.Fprintf(w, "               Advisory. Nothing enforces it — a toolchain that ignores it takes\n"+
+		"               the box, and the host gate above is still what notices.\n")
+	fmt.Fprintf(w, "               It reaches a worker as $%s.\n", agent.WorkerCoresEnv)
+	fmt.Fprintf(w, "               Which prompts read that variable: pogo agent env\n")
 }
 
 // printRepoOccupancy renders the per-repo cap's view, or nothing when --repo
