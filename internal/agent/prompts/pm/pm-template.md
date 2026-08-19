@@ -387,10 +387,17 @@ A sweep has three phases: **gather**, **decide**, **report**.
 **Baseline (every sweep, every PM):**
 
 ```bash
-# Open / recently-closed work in your product. No --status: the default listing
-# is already active items + done, which is exactly this. There is no `open`
-# status — the accepted values are available, claimed, pending, done, shelved,
-# archived — and `--status=open` is REFUSED, not ignored.
+# OPEN work in your product. No --status: the default listing is active items
+# plus done. There is no `open` status — the accepted values are available,
+# claimed, pending, done, shelved, archived — and `--status=open` is REFUSED,
+# not ignored.
+#
+# This listing is NOT a read of what recently closed, and do not use it as one:
+# it hides archived items, and completed work is archived within minutes of the
+# close (mg-e52c), so the handful of `done` rows here are the ones caught
+# mid-transition, not the week's output. Measured 2026-08-19 for tag `pogo`:
+# 2 done in this listing against 829 archived. Add --archived and filter on
+# status when the question is what COMPLETED — see "Regenerate roadmap.md".
 for repo in <repos>; do mg list --repo=$repo; done
 for tag in <tags_any>; do mg list --tag=$tag; done
 
@@ -846,21 +853,31 @@ mg spend --by tag:<your-tag> --since 7d --json
 # Now / Next / Backlog: open work for your product.
 mg list --tag=<your-tag> --json
 
-# Recently shipped. `mg list` has no time window and no `closed` status — the
-# closed status is `done`, and you bound the window yourself off `mtime`
-# (mg-21b1). See the caveat below: mtime is a proxy for the close, not the close.
-mg list --tag=<your-tag> --status=done --json \
-  | jq -c --arg cutoff "$(date -u -v-7d +%F)" 'select(.mtime[:10] >= $cutoff)'
+# Recently shipped. Completed work is `done` OR `archived`, and in practice it is
+# almost all `archived` — {{.Coordinator}} archives within minutes of the close,
+# so `done` is a state items occupy transiently (mg-e52c). `--archived` is what
+# adds them to the listing; the jq status filter is then load-bearing, because
+# `--archived` also carries the still-open items through. `mg list` has no time
+# window, so you bound the 7 days yourself off `mtime` (mg-21b1). See the caveats
+# below: for an archived item mtime is the ARCHIVE, not the close.
+mg list --tag=<your-tag> --archived --json \
+  | jq -c --arg cutoff "$(date -u -v-7d +%F)" \
+      'select((.status=="done" or .status=="archived") and .mtime[:10] >= $cutoff)'
 ```
 
 **Two of these have a shape you will get wrong from memory, and the CLI refuses the wrong shape rather than approximating it.** Run them before you write the section that consumes them.
 
 - **The per-item spend breakdown is a selector on `--by`, not a filter flag.** It is `--by tag:<your-tag>`. There is no `--tag` flag on `mg spend` at all — `mg spend --by item --tag=<x>` exits 2 with `unknown flag: --tag`. `--by tag` (all tags, no item detail) and `--by tag:<x>` (one tag, with item breakdown) are different views, and you want both: the first tells you where the product sits against its siblings, the second tells you which items inside it consumed the budget.
-- **`mg list` has no `--since`, and the closed status is `done`, not `closed`.** `--status=closed` exits 1 (`invalid status`); `--since 7d` exits 2 (`unknown flag`). There is no closed-at field to sort on either, so the 7-day window is yours to apply — `mtime` is the closest proxy. Be aware of what that proxy is: for a done item `mtime` is normally the close, but it moves if anyone edits the item afterwards, so a stale item that got a tag fix last night reads as freshly shipped. Day granularity (`[:10]`) is deliberate — it sidesteps the mixed UTC/offset timestamp formats in that field, and a roadmap bucket does not need the hours. (`date -u -v-7d` is BSD/macOS `date`; on GNU it is `date -u -d '7 days ago'`.)
+- **`mg list` has no `--since`, and the closed status is `done` OR `archived` — a shipped-work query that reads only `done` returns nothing.** `--status=closed` exits 1 (`invalid status`); `--since 7d` exits 2 (`unknown flag`). And `done` is transient **by design**: pogod closes an item, then {{.Coordinator}} archives it, so an item is `done` for the minutes between those two steps and `archived` from then on. A 7-day window over `done` alone is empty by construction, not intermittently — measured on 2026-08-19, `--status=done` returned **0** shipped items in 7d for both the `riemann` and `pogo` tags, while `done` + `archived` returned **41** and **125**. Zero is the worst possible wrong answer here, because an empty "Recently shipped" section is indistinguishable from a stalled product and needs no explanation to be believed.
+  - **This is not a tuning problem — do not ask for the archiver to be slowed.** The close and the archive are separate steps under *any* archiving cadence, so `done` would be near-empty even if archiving ran once a day. **The coupling is with `mayor.md`**, whose cleanup step is what moves completed items out of `done`; if you change this query, read that file first, and if you are editing that file, this query is what depends on it. That filename is deliberately literal and NOT `{{.Coordinator}}.md`: the coordinator's *name* is configurable, but its prompt FILE is frozen at `mayor.md` (mg-04ce), so a placeholder here would resolve to a path that does not exist the moment the name is changed.
+  - **Whenever you ask "what shipped / what completed", ask it of `done` + `archived`** — not just here. The same correction applies to any completion query you write during a sweep.
+  - **`--status` takes ONE value, so it cannot express "done or archived".** The single-invocation route is `--archived` (which *adds* archived to the default active+done listing) plus a `select(.status=="done" or .status=="archived")` in the jq — that status filter is required, because `--archived` also carries `available`/`claimed`/`pending` items whose `mtime` is recent and which have shipped nothing. Two invocations (`--status=done` and `--status=archived`) merged is equivalent and also correct; it is just twice the work.
+  - **`mtime` is a proxy for the close, and for an archived item it is the ARCHIVE time, not the close time** — the two differ by {{.Coordinator}}'s polling interval. There is no closed-at field to sort on, so the window is yours to apply. For a *done* item `mtime` is normally the close, but it moves if anyone edits the item afterwards, so a stale item that got a tag fix last night reads as freshly shipped. A minutes-apart proxy is fine for a 7-day bucket and would not be fine for anything finer — do not reuse this query to answer "what shipped in the last hour".
+  - **Sort these rows on the full `mtime`, never on the `HH:MM` part.** Day granularity (`[:10]`) is deliberate for the *cutoff* — it sidesteps the mixed UTC/offset timestamp formats in that field, and a roadmap bucket does not need the hours — but a *sort* keyed on the clock time alone silently conflates days: `05:xx` sorts below `09:xx`, so everything from this morning falls to the bottom of the list and gets cut. (`date -u -v-7d` is BSD/macOS `date`; on GNU it is `date -u -d '7 days ago'`.)
 
 If one of these refuses, **do not improvise an invocation and do not drop the section silently** — that is how the Trajectory section shipped throughput with no token totals and no tag-level bottleneck for at least one regeneration cycle (mg-d8ea), reading as an editorial choice because the prose around the hole was good. Say in the section which input you could not get.
 
-Bucket items into Now (claimed / in-flight), Next (open + ready, no blocking deps), Later (proposals you haven't filed yet), Backlog (open but no near-term plan), Recently shipped (done within 7d). Trajectory is a short macro read off `mg spend` — throughput, total tokens, the one or two tag-level bottlenecks you can name.
+Bucket items into Now (claimed / in-flight), Next (open + ready, no blocking deps), Later (proposals you haven't filed yet), Backlog (open but no near-term plan), Recently shipped (done **or archived** within 7d — archived is where nearly all of it is). Trajectory is a short macro read off `mg spend` — throughput, total tokens, the one or two tag-level bottlenecks you can name.
 
 **Render** to `<your-product-repo>/docs/roadmap.md` using this skeleton (copy-pasteable; fill in real values):
 
@@ -883,7 +900,7 @@ Bucket items into Now (claimed / in-flight), Next (open + ready, no blocking dep
 - mg-dddd — …
 
 ## Recently shipped (last 7d)
-- mg-eeee — closed 2026-04-25 — actual 187k vs budget 200k (94%)
+- mg-eeee — shipped 2026-04-25 (mtime; for an archived item that is the archive, not the close) — actual 187k vs budget 200k (94%)
 
 ## Trajectory
 - 7d throughput: 12 items closed, 2.4M tokens spent

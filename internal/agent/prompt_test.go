@@ -6010,11 +6010,14 @@ func TestPMTemplateRoadmapInputsAreAcceptedInvocations(t *testing.T) {
 		"There is no `--tag` flag on `mg spend` at all",
 		"unknown flag: --tag",
 		// The closed-work read, and both halves of what was wrong with it.
-		"mg list --tag=<your-tag> --status=done --json",
-		"has no `--since`, and the closed status is `done`, not `closed`",
+		// It reads `--archived` rather than `--status=done` since mg-e52c —
+		// see TestPMTemplateShippedQueryCoversArchived for why that is the
+		// whole population and not a refinement.
+		"mg list --tag=<your-tag> --archived --json",
+		"has no `--since`, and the closed status is `done` OR `archived`",
 		// The client-side window, with the proxy named honestly rather than
 		// presented as a closed-at timestamp.
-		"select(.mtime[:10] >= $cutoff)",
+		".mtime[:10] >= $cutoff",
 		"`mtime` is normally the close, but it moves if anyone edits the item afterwards",
 		// The instruction that closes the silent-degradation path. A PM that
 		// hits a refusal must say so in the section, not paper over it.
@@ -6060,6 +6063,102 @@ func TestPMTemplateRoadmapInputsAreAcceptedInvocations(t *testing.T) {
 	}
 	if !strings.Contains(inputs, "jq -c --arg cutoff") {
 		t.Error("pm-template.md: roadmap input block no longer windows recently-shipped client-side; `mg list` cannot do it server-side (mg-d8ea)")
+	}
+}
+
+// "Recently shipped" read `--status=done` and returned ZERO for every PM
+// (mg-e52c).
+//
+// Measured 2026-08-19, same 7-day window, same jq cutoff:
+//
+//	tag riemann:  --status=done -> 0    done+archived -> 41
+//	tag pogo:     --status=done -> 0    done+archived -> 125
+//
+// Zero, not a partial miss, and zero for every PM — which is the part that
+// makes this a construction defect rather than a flake. The lifecycle is: the
+// refinery mails the coordinator, pogod closes the item, the coordinator
+// archives it. `done` is therefore a state an item occupies for the MINUTES
+// between those two steps, so the probability that a twice-daily sweep's
+// 7-day window catches one mid-transition is negligible.
+//
+// Two consequences worth pinning, because both are reachable by someone
+// "fixing" this again from first principles:
+//
+//  1. Slowing the archiver would MASK this, not fix it. The close and the
+//     archive are separate steps under any archiving cadence, so a 7-day
+//     window over `done` alone is near-empty even if archiving ran daily.
+//     That is why the template must name the coordinator's file as the
+//     coupled one rather than treat the emptiness as a timing accident.
+//  2. `--archived` alone is not the fix either. It ADDS archived rows to the
+//     default active+done listing, so without the status filter every
+//     `available` item with a recent mtime is reported as shipped — a wrong
+//     answer in the same section, in the opposite direction.
+//
+// The failure mode is why this is pinned rather than patched once: an empty
+// "Recently shipped" renders as a well-formed section stating, in the
+// affirmative, that nothing shipped. It is indistinguishable from a stalled
+// product and needs no explanation to be believed. On the day it was caught,
+// riemann had shipped four items overnight.
+func TestPMTemplateShippedQueryCoversArchived(t *testing.T) {
+	data, err := defaultPrompts.ReadFile("prompts/pm/pm-template.md")
+	if err != nil {
+		t.Fatalf("read pm-template.md: %v", err)
+	}
+	body := string(data)
+
+	// The regression, scoped to the COMMANDS — the prose has to quote
+	// `--status=done` in order to explain why it is wrong, and a whole-document
+	// substring check would score that correction as the defect. Same
+	// discriminator, and same helper, as mg-d8ea's block above.
+	inputs := roadmapInputCommands(t, body)
+	if regexp.MustCompile(`mg list[^\n]*--status=done`).MatchString(inputs) {
+		t.Error("pm-template.md: the roadmap input block reads shipped work with `--status=done`, which returns 0 for every PM — completed items are archived within minutes (mg-e52c)")
+	}
+	if !strings.Contains(inputs, "--archived") {
+		t.Error("pm-template.md: the roadmap input block no longer passes --archived; without it the shipped listing cannot see the population it is counting (mg-e52c)")
+	}
+	// --archived without the status filter over-reports instead of
+	// under-reporting: the default listing it adds to is active items + done.
+	if !strings.Contains(inputs, `.status=="done" or .status=="archived"`) {
+		t.Error("pm-template.md: the roadmap input block passes --archived without filtering status to done-or-archived — open items with a recent mtime would be reported as shipped (mg-e52c)")
+	}
+
+	for _, want := range []struct{ frag, why string }{
+		// Acceptance criterion 2: the caveat sits next to the query, because
+		// it changes what the section MEANS. mtime on an archived item is the
+		// archive, which trails the close by the coordinator's poll interval.
+		{"for an archived item mtime is the ARCHIVE, not the close",
+			"the mtime-is-archive-time caveat must sit with the query itself"},
+		{"fine for a 7-day bucket and would not be fine for anything finer",
+			"the caveat has to bound where the proxy stops being good enough, or it reads as pedantry and gets dropped"},
+		// The coupling. Fixing either file alone leaves the dependency
+		// invisible to whoever edits the other next.
+		// The filename is literal on purpose: the coordinator's NAME is
+		// configurable and its prompt FILE is frozen at mayor.md (mg-04ce), so
+		// `{{.Coordinator}}.md` would point the next editor at a path that does
+		// not exist the moment the name changes — a pointer that misdirects
+		// silently, which is the same failure shape this whole fix is about.
+		{"The coupling is with `mayor.md`",
+			"the query must name the file whose archiving step empties `done`, so the next editor cannot re-break this unknowingly"},
+		{"NOT `{{.Coordinator}}.md`",
+			"the literal filename needs its reason attached, or a later pass placeholder-ises it and breaks the pointer"},
+		{"do not ask for the archiver to be slowed",
+			"the near-miss repair — slow the archiver — masks the defect and has to be refused explicitly"},
+		// Generalise: this is wrong for ANY completion question, not just the
+		// roadmap's.
+		{`ask it of ` + "`done` + `archived`",
+			"the correction has to generalise past this one query, or the next completion query a PM writes repeats it"},
+		// The second, smaller thing found in the same pass.
+		{"never on the `HH:MM` part",
+			"sorting shipped rows on the clock time alone conflates days and silently drops today's"},
+		// The baseline gather is the OTHER place a PM reads closed work, and
+		// its default listing hides archived entirely.
+		{"This listing is NOT a read of what recently closed",
+			"the sweep's baseline listing hides archived items, so it cannot answer what shipped"},
+	} {
+		if !strings.Contains(body, want.frag) {
+			t.Errorf("pm-template.md: missing %q — %s (mg-e52c)", want.frag, want.why)
+		}
 	}
 }
 
