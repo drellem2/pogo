@@ -20,8 +20,79 @@ trap 'rm -f "$RESULTS_FILE"; rm -rf "$WORK"' EXIT
 pass() { echo "PASS: $1"; echo "PASS: $1" >> "$RESULTS_FILE"; }
 fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE"; }
 
+# ---------------------------------------------------------------------------
+# ISOLATION: scope by POGO_HOME, because that is the variable the runner READS
+# ---------------------------------------------------------------------------
+# This file used to isolate the runner with `HOME="$WORK"` alone. That is not
+# isolation, and the two lines that show it are:
+#
+#   pogo-deploy.sh:613   STAMP="${POGO_DEPLOY_STAMP:-${POGO_HOME:-$HOME/.pogo}/deploy-attempt.stamp}"
+#   pogo-deploy.sh:2244  TRANSPORT_STREAK="${POGO_DEPLOY_TRANSPORT_STREAK:-${POGO_HOME:-$HOME/.pogo}/deploy-transport-streak.stamp}"
+#
+# $HOME is consulted ONLY when POGO_HOME is unset. Every pogod child has it set,
+# so on the box that actually runs this suite the HOME sandbox was bypassed
+# entirely and both writes landed wherever POGO_HOME pointed. Overriding HOME to
+# isolate a script that prefers POGO_HOME is isolation that silently does
+# nothing (mg-0af3).
+#
+# MEASURED, before this line existed, by wrapping transport_streak_save in a
+# scratch copy of the runner to record every target path and caller line across a
+# full 450-assertion run: TWO writes escape per suite run, both to
+# $POGO_HOME/deploy-transport-streak.stamp, from
+#
+#   pogo-deploy.sh:3759  the BUMP          <- run_e2e step  (logs "transport streak: 0 ...")
+#   pogo-deploy.sh:3811  the post-sync CLEAR <- run_e2e ok  (SILENT: it logs only when prev0>0)
+#
+# neither of which sets POGO_DEPLOY_TRANSPORT_STREAK. The clear is the one worth
+# naming: it writes without logging, so reading the e2e logs undercounts the leak
+# and would have found only the bump.
+#
+# WHY IT MATTERS MORE THAN A STRAY FILE. deploy-transport-streak.stamp is the
+# counter that fires a FLEET-WIDE BOUNCE at threshold 2. A suite run that leaves
+# it at 1 arms a real bounce on the next lost night; one that resets it to 0
+# suppresses a bounce the fleet is owed. Both directions are a test run reaching
+# into production state.
+#
+# The export covers every child — the `source` below, `--help`, and the two
+# `bash -c 'source "$RUNNER"'` harnesses. Each invocation site ALSO sets it
+# inline next to its HOME override, so the scoping is readable where the run is
+# written rather than only 3000 lines above it.
+#
+# Captured BEFORE the export, because a detector that reads the overridden value
+# would point at $WORK and be vacuous — which is this ticket's own defect wearing
+# the remedy's clothes. This is what the acceptance section at the end of the
+# file compares against.
+REAL_STATE_DIR="${POGO_HOME:-$HOME/.pogo}"
+export POGO_HOME="$WORK"
+
+# state_fingerprint DIR — the two deploy stamps as one comparable string.
+# Absence is a value, so a file that APPEARS registers as a change. Used by both
+# halves of the acceptance section: the positive control (which requires this to
+# change) and the leak check (which requires it not to).
+state_fingerprint() {
+    local d="$1" f out=""
+    for f in deploy-attempt.stamp deploy-transport-streak.stamp; do
+        if [ -e "$d/$f" ]; then
+            out="$out$f=$(cksum < "$d/$f" 2>/dev/null | tr -d ' \n')@$(stat -f %m "$d/$f" 2>/dev/null || stat -c %Y "$d/$f" 2>/dev/null);"
+        else
+            out="$out$f=absent;"
+        fi
+    done
+    printf '%s' "$out"
+}
+REAL_STATE_BEFORE="$(state_fingerprint "$REAL_STATE_DIR")"
+
 # shellcheck source=/dev/null
 source "$RUNNER"
+
+# The source above derives STAMP and TRANSPORT_STREAK from the environment as it
+# stands right now. If the export did not take, every helper called directly in
+# this file is aimed at the real box — so this is asserted here, at the moment
+# it becomes true, rather than inferred later from an absence.
+case "$STAMP" in "$WORK"/*) pass "the sourced runner's STAMP is inside \$WORK — POGO_HOME, not HOME, is what steers it" ;;
+    *) fail "sourced STAMP is [$STAMP], outside \$WORK — this file's helpers are aimed at the real box" ;; esac
+case "$TRANSPORT_STREAK" in "$WORK"/*) pass "and so is TRANSPORT_STREAK, the counter that gates a fleet-wide bounce" ;;
+    *) fail "sourced TRANSPORT_STREAK is [$TRANSPORT_STREAK], outside \$WORK" ;; esac
 
 # ---------------------------------------------------------------------------
 # parse_window / in_window — the outside-window skip
@@ -66,7 +137,7 @@ in_window 04 02 05 && pass "in_window: a zero-padded WINDOW bound parses base-10
 # there BEFORE resolving tools, sourcing a token, or touching git — an abort
 # that has already fetched is an abort that has already had side effects.
 OUT="$(POGO_DEPLOY_NOW=14 POGO_DEPLOY_SRC="$WORK/nonexistent" \
-       HOME="$WORK" bash "$RUNNER" 2>&1)"; RC=$?
+       HOME="$WORK" POGO_HOME="$WORK" bash "$RUNNER" 2>&1)"; RC=$?
 [ "$RC" -eq 0 ] && pass "outside-window run exits 0 (a deferred fire is not a failure)" || fail "outside-window exit was $RC"
 printf '%s' "$OUT" | grep -q "outside \[2,6)" \
     && pass "outside-window run says WHY it skipped (a silent no-op is indistinguishable from a dead job)" || fail "outside-window reason not logged: $OUT"
@@ -2049,7 +2120,7 @@ STAMP_F="$WORK/attempt.stamp"
 printf '2026-07-31 1 4\n' > "$STAMP_F"
 OUT="$(POGO_DEPLOY_NOW=04 POGO_DEPLOY_DATE=2026-07-31 POGO_DEPLOY_STAMP="$STAMP_F" \
        POGO_DEPLOY_LOCK_DIR="$WORK/lock-settled.d" POGO_DEPLOY_SRC="$WORK/nonexistent" \
-       HOME="$WORK" bash "$RUNNER" 2>&1)"; RC=$?
+       HOME="$WORK" POGO_HOME="$WORK" bash "$RUNNER" 2>&1)"; RC=$?
 [ "$RC" -eq 0 ] && pass "settled-night fire exits 0 (a skipped retry is not a failure)" || fail "settled-night exit was $RC"
 printf '%s' "$OUT" | grep -q "already settled" \
     && pass "settled-night fire says WHY it skipped" || fail "settled-night reason not logged: $OUT"
@@ -2066,7 +2137,7 @@ printf '2026-07-31 1 7\n' > "$STAMP_F"
 OUT="$(POGO_DEPLOY_NOW=05 POGO_DEPLOY_DATE=2026-07-31 POGO_DEPLOY_STAMP="$STAMP_F" \
        POGO_DEPLOY_MIN_DRAIN=99999 \
        POGO_DEPLOY_LOCK_DIR="$WORK/lock-floor.d" POGO_DEPLOY_SRC="$WORK/nonexistent" \
-       HOME="$WORK" bash "$RUNNER" 2>&1)"; RC=$?
+       HOME="$WORK" POGO_HOME="$WORK" bash "$RUNNER" 2>&1)"; RC=$?
 [ "$RC" -eq 0 ] && pass "under-floor fire exits 0" || fail "under-floor exit was $RC"
 printf '%s' "$OUT" | grep -q "attempt: RETRY" \
     && pass "a recorded exit 7 REOPENS the night — the retry gate lets it past" || fail "rc=7 record did not produce a retry: $OUT"
@@ -2795,7 +2866,7 @@ HOME="$E2E" GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" \
 
 run_e2e() {   # run_e2e LABEL GIT_BIN GIT_TIMEOUT RUN_DEADLINE -> log on stdout
     rm -rf "$E2E/lock" "$E2E/mail.log" "$E2E/stamp"
-    HOME="$E2E" \
+    HOME="$E2E" POGO_HOME="$E2E" \
     GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" \
     POGO_BIN="$E2E/go/bin/pogo" \
     GIT="$2" \
@@ -2875,7 +2946,7 @@ grep -q 'pogo-deploy: end (rc=' "$E2E/step.log" \
 # it is indistinguishable, to a witness reading the log, from a run that started
 # and never came back.
 mkdir -p "$E2E/lock"
-HOME="$E2E" GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" POGO_BIN="$E2E/go/bin/pogo" \
+HOME="$E2E" POGO_HOME="$E2E" GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" POGO_BIN="$E2E/go/bin/pogo" \
     GIT="$FAKEBIN/workinggit" POGO_DEPLOY_SRC="$E2E/src" POGO_DEPLOY_ZSHENV="$E2E/zshenv" \
     POGO_DEPLOY_LOCK_DIR="$E2E/lock" POGO_DEPLOY_STAMP="$E2E/stamp" \
     POGO_DEPLOY_SKIP_WINDOW=1 POGO_DEPLOY_NOW=05 POGO_DEPLOY_STALE_LOCK_MIN=99999 \
@@ -3239,7 +3310,7 @@ fb_run() {  # fb_run STREAK_LINE COUNT WINDOW NOW -> echoes FALLBACK_STATUS
     printf '%s\n' "$1" > "$FB_DIR/streak"
     POGO_DEPLOY_SRC="$FB_DIR/src" POGO_DEPLOY_BOOTSTRAP_REPO="$FB_DIR/src" \
     POGO_DEPLOY_TRANSPORT_STREAK="$FB_DIR/streak" POGO_DEPLOY_WINDOW="$3" POGO_DEPLOY_NOW="$4" \
-    HOME="$FB_DIR" FB_MAIL="$FB_MAIL" COUNT="$2" \
+    HOME="$FB_DIR" POGO_HOME="$FB_DIR" FB_MAIL="$FB_MAIL" COUNT="$2" \
     bash -c 'source "'"$RUNNER"'"
              parse_window "$POGO_DEPLOY_WINDOW"
              POGO_CLI=""; MG=""; SYNC_CLASS=network; SYNC_VIGIL_SPENT=9000
@@ -3374,6 +3445,69 @@ CLR_LINE="$(grep -n 'transport streak: CLEARED (was' "$RUNNER" | cut -d: -f1)"
 grep -q '  fallback: \$FALLBACK_STATUS' "$RUNNER" \
     && pass "and the sync-abort alert cross-references what the fallback did, so one mail is not read without the other" \
     || fail "the sync alert does not report the fallback's outcome"
+
+# ---------------------------------------------------------------------------
+# THE ACCEPTANCE: the sandbox is aimed at POGO_HOME, and the real box is untouched
+# ---------------------------------------------------------------------------
+# Two halves, and the first one is the important one. "No files appeared" is
+# exactly what a broken check reports, so the leak check below is only worth
+# reading once the same detector has been shown to CREATE the file it is looking
+# for. The positive control does that: it drives a real runner process at a
+# canary POGO_HOME with no POGO_DEPLOY_TRANSPORT_STREAK override — the shape of
+# run_e2e's `ok` arm, which is one of the invocations measured to leak — and
+# REQUIRES deploy-transport-streak.stamp to appear there.
+CANARY="$WORK/canary-pogo-home"
+CANARY_HOME="$WORK/canary-home"
+mkdir -p "$CANARY" "$CANARY_HOME/Library/Logs/pogo" "$CANARY_HOME/go/bin"
+cp "$E2E/go/bin/mg" "$E2E/go/bin/pogo" "$CANARY_HOME/go/bin/" 2>/dev/null || true
+CANARY_BEFORE="$(state_fingerprint "$CANARY")"
+
+canary_run() {   # canary_run POGO_HOME_DIR HOME_DIR — one real nightly whose sync SUCCEEDS
+    HOME="$2" POGO_HOME="$1" \
+    GOBIN="$2/go/bin" GOPATH="$2/go" GOMODCACHE="$E2E_GOMODCACHE" \
+    POGO_BIN="$2/go/bin/pogo" \
+    GIT="$FAKEBIN/workinggit" \
+    POGO_DEPLOY_SRC="$E2E/src" \
+    POGO_DEPLOY_ZSHENV="$E2E/zshenv" \
+    POGO_DEPLOY_LOCK_DIR="$WORK/canary.lock.d" \
+    POGO_DEPLOY_STAMP="$WORK/canary.stamp" \
+    POGO_DEPLOY_SKIP_WINDOW=1 POGO_DEPLOY_NOW=05 POGO_DEPLOY_FIRE_HOURS="3" \
+    POGO_DEPLOY_GIT_TIMEOUT=5 POGO_DEPLOY_RUN_DEADLINE=60 \
+    POGO_DEPLOY_SYNC_ATTEMPTS=1 POGO_DEPLOY_SYNC_VIGIL=0 \
+    POGO_DEPLOY_ALERT_TO=mayor \
+        bash "$RUNNER" > "$WORK/canary.log" 2>&1
+    rm -rf "$WORK/canary.lock.d"
+}
+
+canary_run "$CANARY" "$CANARY_HOME"
+[ -f "$CANARY/deploy-transport-streak.stamp" ] \
+    && pass "POSITIVE CONTROL: a run with POGO_HOME set and no explicit streak override DOES write \$POGO_HOME/deploy-transport-streak.stamp — the check below is looking for a file this suite is capable of producing" \
+    || fail "POSITIVE CONTROL FAILED: no streak file appeared at \$CANARY — the leak check below proves nothing until this passes (log: $(tail -3 "$WORK/canary.log" 2>/dev/null))"
+[ "$(state_fingerprint "$CANARY")" != "$CANARY_BEFORE" ] \
+    && pass "and state_fingerprint SEES that write — the same function the leak check uses goes RED on a real one" \
+    || fail "state_fingerprint did not register the canary write; it cannot detect a leak either"
+
+# THE STRUCTURAL DEFECT, asserted rather than described. The same run, same HOME,
+# and the write follows POGO_HOME — so a sandbox built out of HOME alone is a
+# sandbox the runner never consults. This is the assertion that fails if anyone
+# reverts the isolation to `HOME="$WORK"`.
+[ ! -e "$CANARY_HOME/.pogo/deploy-transport-streak.stamp" ] \
+    && pass "and NOT to \$HOME/.pogo — \${POGO_HOME:-\$HOME/.pogo} consults HOME only when POGO_HOME is unset, which is why isolating this runner by HOME alone does nothing (mg-0af3)" \
+    || fail "the write landed under HOME, not POGO_HOME — the two lines this ticket is about have changed and the isolation strategy needs rereading"
+
+# THE LEAK CHECK. REAL_STATE_DIR and REAL_STATE_BEFORE were both captured at the
+# top of this file, BEFORE `export POGO_HOME="$WORK"` — reading them now would
+# resolve to $WORK and assert nothing, which is this ticket's own defect
+# reappearing inside its fix.
+#
+# It compares content and mtime rather than mere existence: on the box that runs
+# this suite the real deploy-attempt.stamp is present and legitimately written by
+# the nightly, so "the file is there" is not evidence either way. What is
+# evidence is that neither stamp MOVED across a full suite run.
+REAL_STATE_AFTER="$(state_fingerprint "$REAL_STATE_DIR")"
+[ "$REAL_STATE_AFTER" = "$REAL_STATE_BEFORE" ] \
+    && pass "ACCEPTANCE: a full suite run leaves the real \$POGO_HOME deploy stamps byte- and mtime-identical — including deploy-transport-streak.stamp, the counter that fires a fleet-wide bounce at ${TRANSPORT_BOUNCE_AFTER:-2}" \
+    || fail "ACCEPTANCE FAILED: this suite wrote into $REAL_STATE_DIR — before [$REAL_STATE_BEFORE] after [$REAL_STATE_AFTER]. A test run has just armed or suppressed a real fleet restart."
 
 # ---------------------------------------------------------------------------
 echo
