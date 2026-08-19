@@ -1067,6 +1067,11 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// it fall back to wait-idle (see receipthook.go).
 	receiptFile := installReceiptHook(provider, req.Name, req.Dir)
 
+	// And the harness's post-tool hook, which is what lets a send to an agent
+	// nobody is running stop looking exactly like a send to a live one
+	// (mg-d924). Best-effort for the same reason the receipt is.
+	installMailRecipientHook(provider, req.Name, req.Dir)
+
 	// Inject agent identity env vars, assembled THROUGH the catalogue in
 	// workerenv.go rather than from literals here. The catalogue is what
 	// `pogo agent env` reports, so a variable cannot be injected without
@@ -1631,6 +1636,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	// a harness that no longer exists, and comparing against them would make
 	// the first nudge after a restart wait on a number that can never move.
 	receiptFile := installReceiptHook(old.provider, old.Name, old.Dir)
+	installMailRecipientHook(old.provider, old.Name, old.Dir)
 
 	// Same catalogue as the spawn path — a restart that injected a different
 	// set would be an environment nothing reports.

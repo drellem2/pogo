@@ -2986,7 +2986,40 @@ to break, or edit, the delivery it is reporting on.`,
 			}
 		},
 	}
-	cmdHook.AddCommand(cmdHookPromptSubmit)
+	var mailRecipientSelfCheckFlag bool
+	var cmdHookMailRecipient = &cobra.Command{
+		Use:   "mail-recipient",
+		Short: "Warn when a just-sent mail named an agent that is not running",
+		Long: `Read a PostToolUse hook payload on stdin and warn about dead recipients.
+
+pogod registers this as the harness's PostToolUse hook on the Bash tool. When
+the command that just ran contained an ` + "`mg mail send <name>`" + ` and <name> is a
+CONFIGURED agent that is absent or parked, this prints a PostToolUse
+additionalContext envelope naming it; otherwise it prints nothing.
+
+It exists because a send to an agent that is not running is indistinguishable
+from a send to a live one: exit 0, the word "Delivered", a message id. mg owns
+the mailbox and pogod owns liveness, so mg is not in a position to say this and
+pogo says it from the side (mg-d924).
+
+--self-check answers the question this fix must be able to answer about
+itself: "is the warning armed for me right now?" It reports whether the hook is
+registered in the current directory's harness settings and whether pogod's
+roster can be read. Both matter, because a hook that never installed and a
+fleet where everyone is running produce the same thing on screen — nothing.
+
+It is a WARNING, never a refusal — mail queued for an on-demand agent that will
+be started later is legitimate. This command always exits 0 and never writes to
+stdout except that envelope: a hook that can fail must not be able to disturb
+the tool call it is reporting on.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			mailRecipientHookMain(mailRecipientSelfCheckFlag)
+		},
+	}
+	cmdHookMailRecipient.Flags().BoolVar(&mailRecipientSelfCheckFlag, "self-check", false,
+		"Report whether the warning is armed here: is the hook registered in this directory, and can the roster be read?")
+	cmdHook.AddCommand(cmdHookPromptSubmit, cmdHookMailRecipient)
 
 	// Scheduler commands. Talks to pogod's /scheduler/* endpoints. The daemon
 	// drives fires off the heartbeat tick, so schedules persist across

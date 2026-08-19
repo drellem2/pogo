@@ -42,13 +42,20 @@ func InstallSubmitReceiptHook(dir, hookCommand string) error {
 		return errors.New("no hook command to install")
 	}
 
+	return installHook(dir, "UserPromptSubmit", "", pogoHookMarker, hookCommand)
+}
+
+// installHook is the read-merge-write shared by every hook pogo registers. It
+// is one function on purpose: the merge discipline above is the part that must
+// not diverge between hooks, because the file it edits is a human's.
+func installHook(dir, event, matcher, marker, hookCommand string) error {
 	path := filepath.Join(dir, settingsRelPath)
 	settings, err := readSettings(path)
 	if err != nil {
 		return err
 	}
 
-	if err := upsertPromptSubmitHook(settings, hookCommand); err != nil {
+	if err := upsertHook(settings, event, matcher, marker, hookCommand); err != nil {
 		return err
 	}
 
@@ -95,18 +102,25 @@ func readSettings(path string) (map[string]any, error) {
 // binary move between spawns without leaving a stale duplicate behind.
 const pogoHookMarker = "hook prompt-submit"
 
-// upsertPromptSubmitHook adds or refreshes pogo's entry in
-// settings["hooks"]["UserPromptSubmit"], preserving every other matcher group
-// and every other hook in pogo's own group.
-func upsertPromptSubmitHook(settings map[string]any, hookCommand string) error {
+// upsertHook adds or refreshes pogo's entry in settings["hooks"][event],
+// preserving every other matcher group and every other hook in pogo's own
+// group.
+//
+// matcher is the tool-name pattern the harness filters on ("" for events that
+// have no tool, such as UserPromptSubmit). marker identifies pogo's own entry
+// by the tail of its command, so a re-spawn from a moved binary UPDATES the
+// path instead of stacking a second copy — two copies of a receipt hook would
+// double-count every prompt, and two copies of the mail-recipient hook would
+// print every warning twice.
+func upsertHook(settings map[string]any, event, matcher, marker, hookCommand string) error {
 	hooks, err := childObject(settings, "hooks")
 	if err != nil {
 		return err
 	}
 
-	groups, _ := hooks["UserPromptSubmit"].([]any)
-	if hooks["UserPromptSubmit"] != nil && groups == nil {
-		return fmt.Errorf("hooks.UserPromptSubmit is not a list; refusing to rewrite it")
+	groups, _ := hooks[event].([]any)
+	if hooks[event] != nil && groups == nil {
+		return fmt.Errorf("hooks.%s is not a list; refusing to rewrite it", event)
 	}
 
 	for _, g := range groups {
@@ -121,20 +135,25 @@ func upsertPromptSubmitHook(settings map[string]any, hookCommand string) error {
 				continue
 			}
 			cmd, _ := entry["command"].(string)
-			if hasSuffix(cmd, pogoHookMarker) {
+			if hasSuffix(cmd, marker) {
 				entries[i] = newHookEntry(hookCommand)
 				group["hooks"] = entries
-				hooks["UserPromptSubmit"] = groups
+				if matcher != "" {
+					group["matcher"] = matcher
+				}
+				hooks[event] = groups
 				settings["hooks"] = hooks
 				return nil
 			}
 		}
 	}
 
-	groups = append(groups, map[string]any{
-		"hooks": []any{newHookEntry(hookCommand)},
-	})
-	hooks["UserPromptSubmit"] = groups
+	group := map[string]any{"hooks": []any{newHookEntry(hookCommand)}}
+	if matcher != "" {
+		group["matcher"] = matcher
+	}
+	groups = append(groups, group)
+	hooks[event] = groups
 	settings["hooks"] = hooks
 	return nil
 }
@@ -161,4 +180,69 @@ func childObject(settings map[string]any, key string) (map[string]any, error) {
 
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
+
+// mailRecipientMarker identifies pogo's mail-recipient hook entry. Same rule as
+// pogoHookMarker: the tail of the command, so the binary can move.
+const mailRecipientMarker = "hook mail-recipient"
+
+// mailRecipientMatcher is the tool this hook watches. `mg mail send` is a shell
+// command, so Bash is the only tool that can carry one.
+const mailRecipientMatcher = "Bash"
+
+// InstallMailRecipientHook registers hookCommand as a PostToolUse hook on the
+// Bash tool in dir's Claude Code project settings.
+//
+// PostToolUse rather than PreToolUse, deliberately. The ask (mg-d924) is a
+// WARNING, not a refusal: mail queued for an on-demand agent that will be
+// started later is legitimate, and so is queueing work for it. PreToolUse is
+// the event that can deny a tool call, and its non-denying outputs are the ones
+// a harness is most free to change; PostToolUse additionalContext is the plain
+// "put this in front of the model" channel, and by the time it runs the mail is
+// already delivered, so there is nothing left that a bug here could block.
+//
+// Same merge discipline as InstallSubmitReceiptHook: the existing file is
+// merged rather than replaced, because the agent's working directory can be a
+// real repository holding a human's own hooks and permissions.
+func InstallMailRecipientHook(dir, hookCommand string) error {
+	if dir == "" {
+		return errors.New("no working directory to install the mail-recipient hook into")
+	}
+	if hookCommand == "" {
+		return errors.New("no hook command to install")
+	}
+
+	return installHook(dir, "PostToolUse", mailRecipientMatcher, mailRecipientMarker, hookCommand)
+}
+
+// MailRecipientHookCommand reports the mail-recipient hook command registered
+// in dir's settings, and whether one is registered at all.
+//
+// It exists so that "no warning" can be told apart from "no hook". Those two
+// are the same bytes on screen — nothing — and one of them means every send
+// from this agent to a stopped recipient is as silent as it was before mg-d924.
+// A remedy for an invisible failure that fails invisibly itself is worth
+// exactly nothing, so it is made ASKABLE rather than assumed.
+func MailRecipientHookCommand(dir string) (string, bool, error) {
+	if dir == "" {
+		return "", false, errors.New("no directory to check")
+	}
+	settings, err := readSettings(filepath.Join(dir, settingsRelPath))
+	if err != nil {
+		return "", false, err
+	}
+	hooks, _ := settings["hooks"].(map[string]any)
+	groups, _ := hooks["PostToolUse"].([]any)
+	for _, g := range groups {
+		group, _ := g.(map[string]any)
+		entries, _ := group["hooks"].([]any)
+		for _, e := range entries {
+			entry, _ := e.(map[string]any)
+			cmd, _ := entry["command"].(string)
+			if hasSuffix(cmd, mailRecipientMarker) {
+				return cmd, true, nil
+			}
+		}
+	}
+	return "", false, nil
 }

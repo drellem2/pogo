@@ -77,3 +77,35 @@ func pogoBinaryPath() string {
 	}
 	return ""
 }
+
+// installMailRecipientHook asks the provider to install the dead-recipient
+// warning hook into the agent's working directory.
+//
+// It is separate from installReceiptHook, and fails independently, because the
+// two hooks buy different things: a missing receipt downgrades nudge delivery
+// to wait-idle, and a missing mail warning returns sends to the pre-mg-d924
+// behaviour. Neither is a reason to fail a spawn, and neither is a reason to
+// skip the other.
+//
+// IT IS SILENT ABOUT ITS OWN ABSENCE, and that is the one property worth
+// stating out loud. An agent whose hook did not install sends mail exactly as
+// it did before — successfully, with no warning — which is indistinguishable
+// from an agent whose every recipient was running. That is the same shape as
+// the defect this hook exists to fix, one level up. The log line below is the
+// only place the difference is recorded, so it names the consequence rather
+// than just the error.
+func installMailRecipientHook(p *Provider, name, dir string) {
+	if p == nil || p.MailRecipientHook == nil || name == "" || dir == "" {
+		return
+	}
+	bin := pogoBinaryPath()
+	if bin == "" {
+		log.Printf("agent %s: no pogo binary on PATH; skipping mail-recipient hook "+
+			"(mail to a stopped agent will report Delivered with no warning)", name)
+		return
+	}
+	if err := p.MailRecipientHook(dir, bin+" hook mail-recipient"); err != nil {
+		log.Printf("agent %s: could not install mail-recipient hook: %v "+
+			"(mail to a stopped agent will report Delivered with no warning)", name, err)
+	}
+}

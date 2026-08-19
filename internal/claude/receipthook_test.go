@@ -184,3 +184,118 @@ func TestProviderDeclaresTheReceiptHook(t *testing.T) {
 		t.Fatalf("provider hook installed %v", cmds)
 	}
 }
+
+// postToolUseGroups returns the PostToolUse matcher groups as (matcher,
+// commands) pairs.
+func postToolUseGroups(t *testing.T, settings map[string]any) map[string][]string {
+	t.Helper()
+	hooks, _ := settings["hooks"].(map[string]any)
+	groups, _ := hooks["PostToolUse"].([]any)
+	out := map[string][]string{}
+	for _, g := range groups {
+		group, _ := g.(map[string]any)
+		matcher, _ := group["matcher"].(string)
+		entries, _ := group["hooks"].([]any)
+		for _, e := range entries {
+			entry, _ := e.(map[string]any)
+			if cmd, ok := entry["command"].(string); ok {
+				out[matcher] = append(out[matcher], cmd)
+			}
+		}
+	}
+	return out
+}
+
+func TestInstallMailRecipientHookRegistersOnBash(t *testing.T) {
+	dir := t.TempDir()
+	if err := InstallMailRecipientHook(dir, "/usr/local/bin/pogo hook mail-recipient"); err != nil {
+		t.Fatalf("InstallMailRecipientHook: %v", err)
+	}
+	got := postToolUseGroups(t, readSettingsFile(t, dir))
+	cmds := got["Bash"]
+	if len(cmds) != 1 || !strings.HasSuffix(cmds[0], "hook mail-recipient") {
+		t.Fatalf("PostToolUse/Bash hooks = %v", got)
+	}
+}
+
+// TestInstallMailRecipientHookIsIdempotentAcrossAMovedBinary: an agent respawns
+// often, and a second copy of this hook would print every warning twice — which
+// is how a warning stops being read.
+func TestInstallMailRecipientHookIsIdempotentAcrossAMovedBinary(t *testing.T) {
+	dir := t.TempDir()
+	for _, bin := range []string{"/old/pogo", "/old/pogo", "/new/pogo"} {
+		if err := InstallMailRecipientHook(dir, bin+" hook mail-recipient"); err != nil {
+			t.Fatalf("InstallMailRecipientHook(%s): %v", bin, err)
+		}
+	}
+	cmds := postToolUseGroups(t, readSettingsFile(t, dir))["Bash"]
+	if len(cmds) != 1 {
+		t.Fatalf("want exactly one entry after three installs, got %v", cmds)
+	}
+	if cmds[0] != "/new/pogo hook mail-recipient" {
+		t.Fatalf("stale command survived a move: %q", cmds[0])
+	}
+}
+
+// TestBothHooksCoexist: they are installed by the same spawn into the same
+// file, and one must not eat the other.
+func TestBothHooksCoexist(t *testing.T) {
+	dir := t.TempDir()
+	if err := InstallSubmitReceiptHook(dir, "/bin/pogo hook prompt-submit"); err != nil {
+		t.Fatalf("InstallSubmitReceiptHook: %v", err)
+	}
+	if err := InstallMailRecipientHook(dir, "/bin/pogo hook mail-recipient"); err != nil {
+		t.Fatalf("InstallMailRecipientHook: %v", err)
+	}
+	settings := readSettingsFile(t, dir)
+	if got := promptSubmitCommands(t, settings); len(got) != 1 {
+		t.Errorf("UserPromptSubmit hooks = %v", got)
+	}
+	if got := postToolUseGroups(t, settings)["Bash"]; len(got) != 1 {
+		t.Errorf("PostToolUse/Bash hooks = %v", got)
+	}
+}
+
+// TestInstallMailRecipientHookPreservesAHumansOwnPostToolUseHooks: the agent's
+// working directory can be a real repository whose settings.local.json belongs
+// to a person.
+func TestInstallMailRecipientHookPreservesAHumansOwnPostToolUseHooks(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, settingsRelPath)), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	existing := `{
+	  "permissions": {"allow": ["Bash(go test:*)"]},
+	  "hooks": {"PostToolUse": [{"matcher": "Write", "hooks": [{"type": "command", "command": "prettier"}]}]}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, settingsRelPath), []byte(existing), 0o644); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	if err := InstallMailRecipientHook(dir, "/bin/pogo hook mail-recipient"); err != nil {
+		t.Fatalf("InstallMailRecipientHook: %v", err)
+	}
+	settings := readSettingsFile(t, dir)
+	groups := postToolUseGroups(t, settings)
+	if got := groups["Write"]; len(got) != 1 || got[0] != "prettier" {
+		t.Errorf("the human's Write hook was disturbed: %v", groups)
+	}
+	if got := groups["Bash"]; len(got) != 1 {
+		t.Errorf("pogo's hook not registered: %v", groups)
+	}
+	if _, ok := settings["permissions"]; !ok {
+		t.Error("permissions block was dropped")
+	}
+}
+
+// TestProviderCarriesBothHooks: the agent-side wiring tests use a fake
+// provider, so the REAL one is asserted here. A Provider literal that forgot
+// the field would pass every other test on either side.
+func TestProviderCarriesBothHooks(t *testing.T) {
+	if Provider.SubmitReceiptHook == nil {
+		t.Error("the Claude provider lost its SubmitReceiptHook")
+	}
+	if Provider.MailRecipientHook == nil {
+		t.Error("the Claude provider has no MailRecipientHook: no agent will ever be warned " +
+			"that it just mailed a stopped agent (mg-d924)")
+	}
+}
