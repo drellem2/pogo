@@ -1033,24 +1033,18 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		cmd.Dir = req.Dir
 	}
 
-	// Inject agent identity env vars
-	procName := ProcessName(req.Type, req.Name)
-	injectedEnv := []string{
-		"POGO_AGENT_NAME=" + req.Name,
-		"POGO_AGENT_TYPE=" + string(req.Type),
-		"POGO_PROCESS_NAME=" + procName,
-	}
-	if req.PromptFile != "" {
-		injectedEnv = append(injectedEnv, "POGO_AGENT_PROMPT="+req.PromptFile)
-	}
-
 	// Install the harness's prompt-submission hook and tell the hook process
 	// where to append. "" means this agent cannot prove delivery, and nudges to
 	// it fall back to wait-idle (see receipthook.go).
 	receiptFile := installReceiptHook(provider, req.Name, req.Dir)
-	if receiptFile != "" {
-		injectedEnv = append(injectedEnv, "POGO_SUBMIT_RECEIPT="+receiptFile)
-	}
+
+	// Inject agent identity env vars, assembled THROUGH the catalogue in
+	// workerenv.go rather than from literals here. The catalogue is what
+	// `pogo agent env` reports, so a variable cannot be injected without
+	// appearing in the report — which is the property mg-fbaf was filed about:
+	// an environment that exists and is believed absent.
+	procName := ProcessName(req.Type, req.Name)
+	injectedEnv := envAssignments(agentIdentityEnv(req.Name, req.Type, procName, req.PromptFile, receiptFile))
 
 	cmd.Env = append(os.Environ(), append(injectedEnv, req.Env...)...)
 
@@ -1603,24 +1597,16 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	if old.Dir != "" {
 		cmd.Dir = old.Dir
 	}
-	procName := ProcessName(old.Type, old.Name)
-	injectedEnv := []string{
-		"POGO_AGENT_NAME=" + old.Name,
-		"POGO_AGENT_TYPE=" + string(old.Type),
-		"POGO_PROCESS_NAME=" + procName,
-	}
-	if old.PromptFile != "" {
-		injectedEnv = append(injectedEnv, "POGO_AGENT_PROMPT="+old.PromptFile)
-	}
-
 	// A restart is a new process with a new prompt history, so the receipt is
 	// re-installed and reset: the counts the old process accumulated belong to
 	// a harness that no longer exists, and comparing against them would make
 	// the first nudge after a restart wait on a number that can never move.
 	receiptFile := installReceiptHook(old.provider, old.Name, old.Dir)
-	if receiptFile != "" {
-		injectedEnv = append(injectedEnv, "POGO_SUBMIT_RECEIPT="+receiptFile)
-	}
+
+	// Same catalogue as the spawn path — a restart that injected a different
+	// set would be an environment nothing reports.
+	procName := ProcessName(old.Type, old.Name)
+	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile))
 
 	cmd.Env = append(os.Environ(), injectedEnv...)
 
