@@ -666,6 +666,36 @@ Restart recovery could not carry an in-flight merge request forward (branch dele
 {"schema_version":1,"timestamp":"2026-07-02T09:14:02.000000000Z","event_type":"refinery_mr_lost","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","author":"cat-mg-0241","reason":"branch \"polecat-mg-0241\" not found on origin"}}
 ```
 
+#### `refinery_failure_notice_unaddressed`
+
+A `MERGE FAILED` notice was sent, and no live agent could be resolved to receive it — the mail went only to mailboxes with no reader. Emitted once per terminal failure whose owner is gone; a failure whose polecat is still registered emits nothing (mg-1fcc).
+
+The refinery addresses the failure notice to the submitting agent as well as to `author` (which for a polecat is its work-item id, a different Maildir from the agent's own). This event is the record of the case where neither resolves to a running process. The polecat's polling loop is the primary channel and covers everything else: an author that polls learns of the failure at failure time, so the exposure is exactly the author that was stopped or has finished polling — the mg-be37 population, whose branch is pushed and unmerged with nobody watching.
+
+A non-empty result here is a merge failure nobody was told about:
+
+```bash
+pogo events list --type refinery_failure_notice_unaddressed
+```
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `repo`, `details`
+- **Optional envelope:** `work_item_id` (the `author` string, when it names one)
+- `agent` is always `"refinery"` — the actor. The agent that was *not* reached is what this event says does not exist.
+- **`details` fields:**
+  - `merge_request_id` (string, required)
+  - `branch` (string, required)
+  - `target` (string, required)
+  - `author` (string, required): the `--author` on the merge request
+  - `class` (string, required): the failure class, per `refinery_merge_failed`
+  - `branch_owner` (string, required): the agent name embedded in the branch (`polecat-c32e3` → `c32e3`), or `""` when the branch carries no such prefix
+  - `reason` (string, required): why no live agent resolved — a stopped owner, an unprefixed branch, or a missing registry
+  - `mailboxes` (array of string, required): the recipients the notice was addressed to
+  - `delivery` (array of string, optional): one `name=outcome` entry per recipient, sorted — `delivered`, or the send error. An unregistered mailbox refuses the send (`no_such_mailbox`, exit 3 since mg-d639), and this is where that refusal is queryable rather than only logged.
+
+```json
+{"schema_version":1,"timestamp":"2026-08-10T05:01:00.000000000Z","event_type":"refinery_failure_notice_unaddressed","agent":"refinery","work_item_id":"mg-db58","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-d9sljcatjv1sgaptnaag","branch":"polecat-cdb58","target":"main","author":"mg-db58","class":"infrastructure","branch_owner":"cdb58","reason":"nothing is registered as \"cdb58\" (from branch \"polecat-cdb58\") or as author \"mg-db58\" — the owner has stopped, or never ran in this daemon; if it was stopped mid-merge its branch is pushed and unmerged (mg-be37)","mailboxes":["cdb58","mg-db58"],"delivery":["cdb58=delivered","mg-db58=delivered"]}}
+```
+
 ### Daemon watchers
 
 #### `stall_watch_fired`

@@ -2734,11 +2734,31 @@ Flags:
 					refineryAttemptSummary(mr), mr.Error, mr.GateOutput, mr.FailureCount,
 					refineryAttemptDetail(mr))
 
-				// Mail the author agent so they can fix and resubmit.
-				if mr.Author != "" {
-					if err := client.SendMGMail(mr.Author, "refinery", subject, body); err != nil {
-						log.Printf("refinery: failed to mail author %s: %v", mr.Author, err)
+				// Mail the author so they can fix and resubmit — and address the
+				// AGENT, not only the work-item id (mg-1fcc). `mr.Author` is
+				// `mg-32e3`; the running polecat's mailbox is `c32e3`. Those are
+				// different Maildirs, so every notice went to a box the author
+				// does not read as its own. See resolveRefineryFailureAddressees
+				// for why this is a redundancy repair (the polling loop is the
+				// working channel) and what narrow case it closes.
+				addressees := resolveRefineryFailureAddressees(agentRegistry, mr)
+				delivery := make(map[string]string, len(addressees.Mailboxes))
+				for _, to := range addressees.Mailboxes {
+					if err := client.SendMGMail(to, "refinery", subject, body); err != nil {
+						log.Printf("refinery: failed to mail author mailbox %s: %v", to, err)
+						delivery[to] = err.Error()
+						continue
 					}
+					delivery[to] = "delivered"
+				}
+				// A notice whose only recipients are mailboxes with no reader
+				// must not look like a successful delivery. Nothing polls when
+				// the poller has been stopped, so this event is the only trace
+				// that a branch failed with nobody watching it.
+				if !addressees.AgentResolved() {
+					log.Printf("refinery: MERGE FAILED notice for %s (branch=%s) reached no live agent: %s",
+						mr.ID, mr.Branch, addressees.Reason)
+					emitRefineryFailureNoticeUnaddressed(mr, addressees, delivery)
 				}
 
 				// Mail the coordinator so they can re-dispatch if the author exited.
