@@ -338,6 +338,13 @@ FILE the successor before it submits. That tag makes `mg done` refuse without a 
 is a snapshot the {{.Worker}} reads; telling it at dispatch is the only channel that reaches it in
 time. Cost twice on 2026-08-13 (mg-6e4f, mg-4020).
 
+**pogod now prepends that warning itself, and you still write yours.** `spawn-polecat` reads the tag
+off the item and puts a fixed block above the rendered prompt naming the refusal and both ways out
+(mg-a367) — because this instruction failed a third time on mg-9d4e, *the ticket about that failure*,
+while you were dispatching under a repeated stall-watch notice about it. Treat the injection as the
+floor, not the message: it knows the tag and nothing else, it is silent for a spawn with no `--id` or
+an item it cannot read, and only you can say **what** the remainder is for this item.
+
 **Do NOT tell it to pass `--successor` on `mg done` — that instruction asks for something it never
 does.** On the merge path the {{.Worker}} submits and exits, and *pogod* performs the close. Since
 mg-27c0 pogod resolves the successor itself: it asks the store which item names the closing item as

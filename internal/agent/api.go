@@ -1824,10 +1824,29 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// not claim.
 	budget := r.WorkerBudget()
 
+	// The `declares-remainder` warning, prepended to the rendered prompt when
+	// the item carries the tag (mg-a367). Read here, by the daemon that already
+	// reads this item at the gates above, rather than composed by whoever is
+	// dispatching — the control it replaces was a line in the coordinator's
+	// operating instructions, and it failed three times by being forgotten,
+	// most instructively on the ticket about this very failure.
+	//
+	// It refuses nothing: the tag means "this work has a known remainder", not
+	// "this is unsafe to start". And it is strictly ADDITIVE — Body is passed
+	// through untouched below, because a dispatcher's brief frequently carries
+	// load-bearing rescue instructions that must not be replaced or reordered.
+	// See remainderdeclaration.go.
+	prelude := r.declaresRemainderPrelude(spawnReq.Id)
+	if prelude != "" {
+		log.Printf("polecat %s: work item %s is tagged %q — prepending the "+
+			"successor-required warning to its prompt", spawnReq.Name, spawnReq.Id, DeclaresRemainderTag)
+	}
+
 	// Expand template to a temp file
 	vars := TemplateVars{
 		Task:          spawnReq.Task,
 		Body:          spawnReq.Body,
+		Prelude:       prelude,
 		Id:            spawnReq.Id,
 		Repo:          spawnReq.Repo,
 		Branch:        spawnReq.Branch,

@@ -207,6 +207,24 @@ type TemplateVars struct {
 	// (or surface the in-place protocol behind `{{if .NoWorktree}}`).
 	NoWorktree bool
 
+	// Prelude is text the DAEMON prepends to the RENDERED prompt, above the
+	// template's own first line. It is NOT a placeholder: no template
+	// references it, and adding it to a template would defeat it.
+	//
+	// That is the point. It carries warnings pogod derives from the work item
+	// itself — today the `declares-remainder` block (mg-a367) — whose whole
+	// reason for existing is that the previous control depended on a human
+	// remembering a step. A `{{if .Prelude}}` block would put that dependency
+	// back one layer down, in an on-disk file any operator may edit, where its
+	// absence is silent.
+	//
+	// It is prepended AFTER expansion and never itself expanded, so its text is
+	// literal — a `{{` in it is two braces, not a parse error.
+	//
+	// Empty is the ordinary case: most dispatches carry no prelude and the
+	// rendered prompt is byte-identical to what the template produced.
+	Prelude string
+
 	// RecentCommits is `git log --oneline -n` output for the source repo's
 	// checked-out branch, surfaced as FYI context so a polecat picking up
 	// the Nth ticket of a multi-ticket feature can see the prior N-1
@@ -761,7 +779,12 @@ func ExpandTemplate(templatePath string, vars TemplateVars) (string, error) {
 		return "", fmt.Errorf("execute template: %w", err)
 	}
 
-	return buf.String(), nil
+	// The daemon's prelude goes on the FRONT of the finished render, outside the
+	// template pass — never through it. See TemplateVars.Prelude: it must reach
+	// the worker whatever the template on disk says, and it must arrive
+	// literally. Nothing else about the render moves, so a dispatch with no
+	// prelude is byte-identical to one from before this existed.
+	return vars.Prelude + buf.String(), nil
 }
 
 // ExpandTemplateToFile expands a template and writes it to a temporary file

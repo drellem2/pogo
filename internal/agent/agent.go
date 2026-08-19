@@ -586,6 +586,15 @@ type Registry struct {
 	// the empty ledger; beginSpawnClaim fills it in. See spawnclaimadopt.go.
 	spawnClaimsInFlight map[string]inFlightSpawnClaim
 
+	// remainderDeclarer reads whether a dispatched work item carries the
+	// `declares-remainder` tag, so handleSpawnPolecat can PREPEND the warning
+	// that `mg done` will refuse the item without a successor (mg-a367). Nil
+	// means the default MGRemainderDeclarer — like the gate above, the warning
+	// holds without any wiring, which is the entire point: the control it
+	// replaces was a line in the coordinator's instructions and failed three
+	// times by being forgotten. It refuses nothing. See remainderdeclaration.go.
+	remainderDeclarer RemainderDeclarer
+
 	// workItemTyper reads a work item's `type` marker so handleSpawnPolecat can
 	// route it through the closed type→template map when no --template was
 	// given (mg-9a04). Nil means the default MGWorkItemTyper — like the gate
