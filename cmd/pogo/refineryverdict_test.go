@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,4 +89,52 @@ func TestReadSubmitVerdict(t *testing.T) {
 			t.Errorf("got %v, want a refusal", err)
 		}
 	})
+}
+
+// mg-c456's submit-time half. The loss is CREATED at submit and merely REALISED
+// at the close, so the notice has to exist at the one moment a fix costs one
+// flag.
+func TestVerdictFreeSubmitWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		verdict   json.RawMessage
+		author    string
+		deferDone bool
+		want      bool
+	}{
+		{name: "work-item author, no verdict", author: "mg-c456", want: true},
+		{name: "verdict carried", verdict: json.RawMessage(`{"verdict":"pass"}`), author: "mg-c456"},
+		// The one deferral this process can actually see. The other two are
+		// resolved by the daemon at merge time, which is why the text names the
+		// condition it checked rather than asserting the lane.
+		{name: "defer-done", author: "mg-c456", deferDone: true},
+		// No work item means no verdict can be lost from one — the same shape
+		// test the reap applies before closing anything.
+		{name: "no author", author: ""},
+		{name: "crew author", author: "mayor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := verdictFreeSubmitWarning(tc.verdict, tc.author, tc.deferDone)
+			if (got != "") != tc.want {
+				t.Fatalf("warning presence = %t, want %t (%q)", got != "", tc.want, got)
+			}
+			if !tc.want {
+				return
+			}
+			// It must name the item, and it must say what happens instead of
+			// merely that something is missing — the refusal that follows is
+			// scored as success, so this line is the only one that will say so.
+			if !strings.Contains(got, tc.author) {
+				t.Errorf("the warning must name the item it is about: %q", got)
+			}
+			for _, want := range []string{"already-done", "success"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("the warning must explain why nothing else will tell you (missing %q): %q", want, got)
+				}
+			}
+			if !strings.Contains(got, "--verdict") {
+				t.Errorf("the warning must name the flag that fixes it: %q", got)
+			}
+		})
+	}
 }

@@ -4731,6 +4731,23 @@ integration branch, or an item tagged post-merge-work): there you call
 harmless — it is recorded on the merge request and readable via
 'pogo refinery show <id> --json'.
 
+Submitting a work-item-authored branch with NO verdict prints a warning to
+stderr, and it does not change the exit status: a verdict-free submit is legal.
+The warning names the condition it checked ("no verdict was carried") rather
+than the lane, because two of the three deferrals are resolved by the daemon at
+merge time and not knowable here. Suppress it by passing a verdict, or by
+--defer-done when you own the post-merge flow. If the merge turns out to have
+been on the auto-done lane after all, pogod records that fact where you can find
+it afterwards: a work_item_closed_without_verdict event lands in
+~/.pogo/events.log at the close (mg-c456). It exists because until then the loss
+was scored as a SUCCESS by every signal on the path — the merge succeeded, the
+item closed, and your own 'mg done --result' was refused only because the item
+was already terminal.
+
+The work item itself is untouched by that record, on purpose: the drop-detector
+reads any unexpected sidecar key as "an outcome was written down", so a marker
+saying "no verdict here" would have made a verdict-free close read as answered.
+
 Example:
   pogo refinery submit polecat-a3f --repo=/path/to/repo`,
 		Args: cobra.ExactArgs(1),
@@ -4742,6 +4759,16 @@ Example:
 			verdict, err := readSubmitVerdict(submitVerdict, submitVerdictFile)
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			// STDERR, unconditionally — including under --json (mg-c456). The
+			// machine-readable contract is stdout, so a warning there would be a
+			// parse failure; a warning suppressed under --json would be absent
+			// from exactly the invocation a dispatch prompt uses. Printed BEFORE
+			// the submit so it is attached to the decision rather than trailing an
+			// MR id, and it never changes the exit status: a verdict-free submit is
+			// legal, and refusing one here would stall every hand-submitted branch.
+			if w := verdictFreeSubmitWarning(verdict, submitAuthor, submitDeferDone); w != "" {
+				fmt.Fprint(os.Stderr, w)
 			}
 			id, err := client.SubmitMerge(refinery.SubmitRequest{
 				RepoPath:            submitRepo,

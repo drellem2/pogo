@@ -474,6 +474,85 @@ and neither is true of a merge that left the item open.
 {"schema_version":1,"timestamp":"2026-08-13T02:27:07.000000000Z","event_type":"work_item_completion_notice","agent":"pogod","work_item_id":"mg-479c","details":{"route":"merge","creator":"pm-onethird","to":"pm-onethird","redirected":false,"sent":true,"closed":false,"not_closed_reason":"pogod declined to close it: work item is gated and was deliberately not closed: mg-479c is unclaimed and assigned to \"parked\"","branch":"polecat-c479c","merged_sha":"1a0240a"}}
 ```
 
+#### `work_item_closed_without_verdict`
+
+pogod's auto-done path closed a work item whose merge request carried no author
+verdict (mg-c456). Emitted by the daemon at the close, not reconstructed
+afterwards.
+
+**It exists because the moment of loss was the one moment nothing watched.**
+doctor's census filed with mg-c456 — `pogo check-verdicts`, unfiltered over every
+filer on 2026-08-19 — reported **385 ROUTING + 1014 LOST** rows in the live store,
+with a per-landing-date table putting the accrual at roughly 10–80 rows per working
+day, dropping to exactly **zero** across the 2026-08-15..18 fleet outage and
+resuming when throughput resumed. Those figures are doctor's and are not re-derived
+here. That outage is a natural control arm, and it is what makes the gap a product
+of NORMAL operation rather than one incident's backlog. `check-verdicts` finds
+those rows later by reconstruction and is deliberately report-only; nothing counted
+them as they were made.
+
+**And the reason nothing counted them is not a missing counter, which is why this
+is an event at the close rather than a metric on an existing path.** At the instant
+a verdict is lost the system's own answer is SUCCESS: the branch merged, the item
+closed, and the worker's later `mg done --result` was refused *because the item is
+already terminal* — a refusal the protocol scores as normal completion. Every
+signal on that path reads healthy, so a wider or better-aimed version of any
+existing check reports more success, not the loss. So the loss is recorded HERE,
+at the instant it is created, rather than counted on a path whose own answer is
+"fine". Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **`details` fields:**
+  - `route` (string, required): `"merge"`. There is only one, and it is stated rather than assumed — this writer is reached only on the auto-done path
+  - `worker_live_at_close` (bool, required): whether a polecat was registered for the item at the close and about to be stopped. `true` means a worker's submit-time window is now shut; `false` means a hand-submitted or stranded branch whose submitter carried no verdict either. Different findings, and folding them together is how a scope becomes wrong
+  - `branch`, `mr`, `target` (string, required): what merged, under which merge request, onto what
+  - `worker` (string, optional): the polecat's registry name; absent when none was running
+  - `merged_sha` (string, optional): the commit the merge landed as
+
+The shape, as the writer emits it (an illustration — the daemon carrying this event
+had not been restarted onto it when mg-c456 landed, so no live instance existed to
+quote):
+
+```json
+{"schema_version":1,"timestamp":"2026-08-19T10:14:02.000000000Z","event_type":"work_item_closed_without_verdict","agent":"pogod","work_item_id":"mg-1234","details":{"route":"merge","worker_live_at_close":true,"worker":"1234","branch":"polecat-mg-1234","mr":"mr-42","target":"main","merged_sha":"45b4421a"}}
+```
+
+The nearest real instance predates the event and is what the ticket was written
+around: on 2026-08-19 `polecat-pf867` was submitted on the worker's behalf with no
+`--verdict-file`, and mg-f867's stored result is merge bookkeeping and nothing
+else. Its verdict survived only because the worker noticed and the text was
+recovered from archived mail and appended to the item's **body** by hand — an
+accident, not a mechanism. This event is what that close would have said about
+itself.
+
+**Coverage, stated because an unstated limit is how this lineage keeps getting
+re-measured wrong.** This records closes *pogod itself* performed. A polecat that
+wins the race and writes a verdict-free result of its own is a real loss and is
+**not** counted here — the reap does not read the store back and cannot see it.
+`pogo check-verdicts` remains the instrument for that population, and the two
+answer different questions: this one counts at loss time and cannot see every
+loss; that one sees the whole store and only afterwards.
+
+**What the record asserts is two facts and deliberately not a third.** It asserts
+that the merge request carried no author verdict and that this close is the one
+that landed, so the single submit-time attachment point is shut. It does **not**
+assert that the worker had a conclusion it failed to record: a trivial item may
+genuinely have nothing to say, and an event that called every such close a
+destroyed verdict would be a detector reporting a loss it never measured.
+
+**Why this is an event and not a key on the work item, which was tried first.**
+The archive keeps a result sidecar forever and this log rotates, so marking the
+absence on the item looks like the better home. It is not: mg-bf3f's `d2_cause.py`
+D2.5 predicate for "did anybody write down an outcome" is **any field beyond
+`branch`/`mr`/`target`**, so a key stating the absence trips it and a verdict-free
+close reads as *answered* — the remedy exhibiting the defect it remedies. That
+proxy is also already stale, which is the reason to route around it rather than
+widen it: over the 578 result sidecars in `~/.macguffin/work/archive/2026-08` on
+2026-08-19 it calls 452 answered while only 401 record a verdict — **51 false
+positives**, produced by `merged_sha` and `post_merge_tag`, which are the
+refinery's own bookkeeping and not outcomes. A future fix that wants the durable
+on-item marker has to deal with that predicate first.
+
 ### Inter-agent communication
 
 #### `mail_sent`
