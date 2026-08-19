@@ -249,6 +249,7 @@ func (w *Watcher) sample(now time.Time) {
 				"too_fresh":       rep.TooFresh,
 				"beyond_lookback": rep.BeyondLookback,
 				"never_addressed": rep.NeverAddressed,
+				"misanchored":     rep.Misanchored,
 				"grace":           w.params.Grace.String(),
 			},
 		})
@@ -346,6 +347,7 @@ func (w *Watcher) announce(rep Report, now time.Time) {
 		"too_fresh":        rep.TooFresh,
 		"beyond_lookback":  rep.BeyondLookback,
 		"never_addressed":  rep.NeverAddressed,
+		"misanchored":      rep.Misanchored,
 		"grace":            w.params.Grace.String(),
 		"notified":         strings.Join(recipients, ","),
 		"escalated":        escalated,
@@ -502,7 +504,13 @@ func mailBody(rep Report, now, openedAt time.Time, p Params, notifyTo, escalateT
 	fmt.Fprintf(&b, "Judged %d of %d agents. Not judged: %d too fresh, %d beyond the lookback,\n",
 		len(rep.Judged), rep.Scanned, len(rep.TooFresh), len(rep.BeyondLookback))
 	fmt.Fprintf(&b, "%d never addressed by any fire (that one is deaf-watch's finding, not this\n", len(rep.NeverAddressed))
-	fmt.Fprintf(&b, "one). Polecats are never judged — see internal/firstturn.\n\n")
+	fmt.Fprintf(&b, "one). Polecats are never judged — see internal/firstturn.\n")
+	if len(rep.Misanchored) > 0 {
+		fmt.Fprintf(&b, "\n%d agent(s) carried evidence from BEFORE their own spawn and were not\n", len(rep.Misanchored))
+		fmt.Fprintf(&b, "judged either way: %s. That reading is impossible rather than\n", strings.Join(rep.Misanchored, ", "))
+		fmt.Fprintf(&b, "negative, and this arm refuses to turn it into a finding (mg-21ad).\n")
+	}
+	fmt.Fprintf(&b, "\n")
 	fmt.Fprintf(&b, "This is REPORT-ONLY. pogod did not restart, nudge, or respawn anything.\n")
 	return b.String()
 }

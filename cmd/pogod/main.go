@@ -2737,13 +2737,14 @@ Flags:
 				if !ok {
 					return firstturn.Snapshot{Now: now, Err: "agent registry unavailable"}
 				}
-				// The evidence read is anchored at the OLDEST spawn in the
-				// population rather than at a fixed window, so it costs a short
-				// scan on a healthy fleet and grows only while an outage does —
-				// which is the one time the extra reach is what makes the claim
-				// provable.
-				since := firstturn.EarliestStart(crew, now, firstturn.DefaultLookback)
-				ev, readErr := firstturn.ReadEvidence(schedulerLog, since, now)
+				// The evidence read anchors EACH agent at its OWN spawn, and
+				// does so inside ReadEvidence rather than here. It used to take
+				// a single population-wide `since` from EarliestStart, which is
+				// the right bound for the read and the wrong one for the join —
+				// a crew member respawned alone into an older fleet inherited
+				// the fleet's window and reported as having completed nothing
+				// while it was completing turns every few minutes (mg-21ad).
+				ev, readErr := firstturn.ReadEvidence(schedulerLog, crew, now, firstturn.DefaultLookback)
 				return firstturn.Attach(crew, ev, now, scanned, firstturn.DefaultLookback, readErr)
 			},
 			Mail:     client.SendMGMail,

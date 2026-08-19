@@ -70,13 +70,46 @@ func TestDetect_QuietWhenTheAgentActuallyAcked(t *testing.T) {
 // in its events log — thousands of them — all from the incarnation that died at
 // 22:20 the previous evening. A detector that matched on "this agent has acked
 // at some point" would have read green through the entire outage.
+//
+// It does not CLEAR the agent, and that is the property. Since mg-21ad it does
+// not alarm on it either: ReadEvidence anchors every agent at its own spawn, so
+// an agent whose only completions predate it arrives with FirstCompletion ZERO
+// — which is a finding, and is what fires on the real outage (see
+// TestReplay_TheDetectorGoesRedOnTheRealOutage). A NON-ZERO completion before
+// the spawn is therefore not constructible from the reader at all; the one
+// thing that ever produced it was a window measured from another agent's spawn,
+// and that read a mayor completing turns every few minutes as having completed
+// nothing. An impossible reading degrades to "cannot judge", never to a finding
+// on the only channel that can report a dead coordinator.
 func TestDetect_ACompletionBeforeTheSpawnDoesNotCount(t *testing.T) {
 	spawn := at("2026-08-11T02:01:33Z")
 	a := crew("pm-pogo", spawn, 4)
 	a.FirstCompletion = spawn.Add(-6 * time.Hour)
 	rep := Detect(Snapshot{Now: spawn.Add(time.Hour), Scanned: 1, Agents: []Agent{a}}, DefaultParams())
+	if len(rep.Judged) != 0 {
+		t.Errorf("judged = %v — a completion from a dead incarnation must never clear this agent", rep.Judged)
+	}
+	if len(rep.Findings) != 0 {
+		t.Errorf("findings = %v — the reading is impossible, not negative; alarming on it is mg-21ad", Names(rep.Findings))
+	}
+	if len(rep.Misanchored) != 1 || rep.Misanchored[0] != "pm-pogo" {
+		t.Fatalf("misanchored = %v, want [pm-pogo]", rep.Misanchored)
+	}
+}
+
+// TestDetect_NoCompletionAtAllSinceSpawnIsStillDark is the other half of the
+// pair above, and the one the outage actually produces: the reader filters
+// pre-spawn events, so an agent that has completed nothing since it spawned
+// arrives with a ZERO FirstCompletion. That is a finding, unchanged by mg-21ad.
+func TestDetect_NoCompletionAtAllSinceSpawnIsStillDark(t *testing.T) {
+	spawn := at("2026-08-11T02:01:33Z")
+	a := crew("pm-pogo", spawn, 4)
+	rep := Detect(Snapshot{Now: spawn.Add(time.Hour), Scanned: 1, Agents: []Agent{a}}, DefaultParams())
 	if rep.State != StateDark {
-		t.Fatalf("state = %s, want dark — the ack predates this incarnation", rep.State)
+		t.Fatalf("state = %s, want dark — 4 fires delivered since spawn and nothing completed", rep.State)
+	}
+	if len(rep.Misanchored) != 0 {
+		t.Errorf("misanchored = %v, want none", rep.Misanchored)
 	}
 }
 
