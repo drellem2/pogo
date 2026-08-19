@@ -221,6 +221,13 @@ type LaunchAgentAudit struct {
 // mg-b201 was filed for — and would make the auditor for the deploy witness
 // arrive by the deploy.
 //
+// com.pogo.fleetliveness is out for the same reason one level out (mg-f867). It
+// arms scripts/fleet-liveness-probe.sh, the witness that the FLEET is still
+// completing turns, and it must be armable on a box whose fleet has been dead
+// for five days — the condition it exists to report. A Go-rendered row would
+// make its auditor arrive by the `pogo` binary, i.e. by a working deploy and an
+// agent turn.
+//
 // This comment is the registry's promise kept rather than broken: the omission
 // is a decision with a reason, not a job somebody forgot. Auditing the probe's
 // job on the merge-activated path is filed as its own item, because a deferred

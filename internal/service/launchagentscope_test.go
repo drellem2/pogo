@@ -52,7 +52,7 @@ func TestScopeSplitsExplainedFromUnexplained(t *testing.T) {
 	audits := []LaunchAgentAudit{{Label: launchdLabel}, {Label: recoveryLabel}, {Label: deployLabel}}
 	loaded := []string{
 		launchdLabel, recoveryLabel, deployLabel,
-		"com.pogo.notify", "com.pogo.revisionprobe", // recorded reasons
+		"com.pogo.notify", "com.pogo.revisionprobe", "com.pogo.fleetliveness", // recorded reasons
 		"com.pogo.some-new-thing", // nobody has ruled on this one
 	}
 
@@ -64,8 +64,8 @@ func TestScopeSplitsExplainedFromUnexplained(t *testing.T) {
 	if len(s.Audited) != 3 {
 		t.Errorf("Audited = %v, want the three registry jobs", s.Audited)
 	}
-	if len(s.Excluded) != 3 {
-		t.Fatalf("Excluded = %+v, want the three loaded jobs outside the registry", s.Excluded)
+	if len(s.Excluded) != 4 {
+		t.Fatalf("Excluded = %+v, want the four loaded jobs outside the registry", s.Excluded)
 	}
 	un := s.Unexplained()
 	if len(un) != 1 || un[0].Label != "com.pogo.some-new-thing" {

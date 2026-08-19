@@ -75,7 +75,10 @@ package main
 // the thing that rots: it audits the jobs internal/service renders (the registry
 // in launchagentaudit.go) and it reports, but does not audit, the pogo jobs
 // loaded outside that registry. com.pogo.revisionprobe is deliberately outside
-// it (mg-a03d). And it compares BYTES ON DISK against this build's rendering —
+// it (mg-a03d), and com.pogo.fleetliveness for the same reason one level out
+// (mg-f867) — both must be armable on a box where the thing they witness is
+// broken, so neither may be rendered by anything that ships in this binary. And
+// it compares BYTES ON DISK against this build's rendering —
 // a plist launchd rejected or only partly parsed is a perfectly good-looking
 // file, so `launchctl print` remains the second read, exactly as
 // scripts/launchd/README.md says.
