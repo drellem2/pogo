@@ -133,7 +133,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    - If the change modifies output formats, verify the output.
    - Check edge cases mentioned in the spec.
 
-   **Evidence discipline — four habits, one idea: a claim about your own work is worth what it cost
+   **Evidence discipline — five habits, one idea: a claim about your own work is worth what it cost
    to make.** None of them is a gate; nothing verifies that a prediction preceded a run, that a
    measurement was taken, or that a near-miss was disclosed. What they change is what you write down
    before you look.
@@ -155,6 +155,12 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      more — mg-a893's acceptance said in terms "do not over-correct", and its commit
      asserted "AND NOT OVER-CORRECTED", sitting next to the over-correction mg-c6bc then found.
      Such a claim carries no evidential weight — quote what you measured, not what it claimed.
+   - **To attribute an effect to one of two candidates, vary one and MEASURE the other in every
+     cell, under the definition in play — an asserted invariant is not a control.** mg-db09 called
+     multiplicity-freeness measured-not-cited down a column of TL_n(β); mg-2060 measured it under
+     mg-db09's own definition and it varied in step with the variable under test, voiding the
+     attribution even though the conclusion survived by another route. Reporting the claimed
+     invariant is what made it checkable at all — not measuring it is what left it false.
    - **Weigh a self-accusation; discount a compliance claim.** "We did not do X" is free to produce
      and satisfies whoever asked for not-X, while "we caught ourselves doing X" invites scrutiny of
      the admitter's own work, so nobody says it unless it happened — which makes it strong evidence,

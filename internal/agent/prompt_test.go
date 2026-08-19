@@ -5162,8 +5162,8 @@ func TestPromptsDoNotAnchorAKillToAHardcodedBinaryPath(t *testing.T) {
 
 // THE EVIDENCE DISCIPLINE — one section in the two templates whose worker
 // verdicts on work someone else did (mg-0d85, folding mg-04c3 and mg-c742 in
-// with two additions). Four habits, one idea: a claim about your own work is
-// worth what it cost to make.
+// with two additions, and mg-622f). Five habits, one idea: a claim about your
+// own work is worth what it cost to make.
 //
 // 1. PREDICT BEFORE THE RUN (mg-04c3). mg-218d ran sixteen mutations against a
 // documentation control with each row's exit code predicted before the run;
@@ -5202,6 +5202,21 @@ func TestPromptsDoNotAnchorAKillToAHardcodedBinaryPath(t *testing.T) {
 // the one broken claim was the row its list omitted), and ask for near-misses
 // rather than compliance.
 //
+// 5. MEASURE THE HELD-CONSTANT HYPOTHESIS (mg-622f). To attribute an effect to
+// one of two candidates you vary one and hold the other fixed — and the holding
+// has to be measured under the definition in play, in every cell, or it is a
+// statement of intent. mg-db09 argued from TL_n(β) at β = 3, 2, 1, 0 that
+// semisimplicity rather than multiplicity-freeness carried a conclusion, saying
+// the branching graph was "MEASURED (not cited)" to be the same multiplicity-free
+// graph at each. mg-2060 measured it under the definition mg-db09 itself quotes
+// and it was false: the vertex counts differ across the column and multiplicities
+// reach 2. So the confounder moved in step with the variable under test — the one
+// pattern that makes an attribution worthless. The verdict survived by a route
+// needing no branching hypothesis at all, which is what makes this the hard case:
+// checking the conclusion confirms it and the separating example is still broken.
+// Cited as the cautionary instance, not a model. The half that worked was
+// reporting: mg-db09 published the invariant, so mg-2060 could refute it.
+//
 // Why the templates rather than a brief: the same argument as mg-2530. A rule in
 // one author's brief is bypassed by whoever is moving fastest — and a "do not X"
 // is worse than bypassed, it is *answered*. The templates are the one place every
@@ -5222,8 +5237,8 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 		body := string(data)
 
 		for _, want := range []string{
-			// The four are one section, and the section says what it is for.
-			"Evidence discipline — four habits, one idea",
+			// The five are one section, and the section says what it is for.
+			"Evidence discipline — five habits, one idea",
 
 			// 1. Predict, then run, then record both. The exit code is named
 			// specifically: "what do you expect" invites a mood, "pass or
@@ -5274,18 +5289,38 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 			// And what the worker owes about its own process.
 			"record your own near-misses",
 			"carries information; one saying everything went to plan carries none",
+
+			// 5. Vary one candidate cause and MEASURE the other, rather than
+			// asserting it held. "in every cell" and "under the definition in
+			// play" are both load-bearing: mg-db09's column was declared
+			// measured, and measuring it under the definition mg-db09 quoted
+			// is what refuted it.
+			"MEASURE the other in every",
+			"an asserted invariant is not a control",
+			// The cautionary instance, named — an invariant asserted,
+			// published, and false, not a model of control design.
+			"multiplicity-freeness measured-not-cited down a column of TL_n(β)",
+			// Why it voids the attribution: the confounder moved WITH the
+			// variable under test.
+			"varied in step with the variable under test",
+			// And the trap — a broken separating example under a conclusion
+			// that is nonetheless right, so checking the conclusion confirms it.
+			"attribution even though the conclusion survived by another route",
+			// The half that worked, kept because it is the reason the failure
+			// was catchable at all.
+			"invariant is what made it checkable at all",
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s: missing evidence discipline %q (mg-0d85)", path, want)
 			}
 		}
 
-		// One section, not four paragraphs bolted on in sequence. The whole
+		// One section, not five paragraphs bolted on in sequence. The whole
 		// point of the fold is that a template every worker of its type reads
 		// gets skimmed when it accretes; a second "Evidence discipline" heading
 		// means the next addition appended instead of merging.
 		if got := strings.Count(body, "Evidence discipline"); got != 1 {
-			t.Errorf("%s: %d evidence-discipline sections, want exactly 1 — the four habits are one idea and were folded into one section on purpose (mg-0d85)", path, got)
+			t.Errorf("%s: %d evidence-discipline sections, want exactly 1 — the habits are one idea and were folded into one section on purpose (mg-0d85)", path, got)
 		}
 		if got := strings.Count(body, "Predict the outcome before the run"); got != 1 {
 			t.Errorf("%s: %d copies of the predict-before-run rule, want exactly 1 — it lives in the evidence-discipline section, not also inline in a step (mg-0d85)", path, got)
@@ -5312,8 +5347,9 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 		}
 	}
 
-	// None of the four is a gate. Nothing can verify that a prediction preceded
-	// a run, that a measurement was taken, or that a near-miss was disclosed, so
+	// None of the five is a gate. Nothing can verify that a prediction preceded
+	// a run, that a measurement was taken, that a near-miss was disclosed, or
+	// that a control family was sought at all, so
 	// a template refusing on any of them would be enforcing an unobservable —
 	// and a refusal a worker cannot satisfy gets routed around, taking the cheap
 	// useful part with it. Their value is that they change what the worker
@@ -5324,6 +5360,7 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 		"do not report a verdict until you have measured",
 		"refuse to verdict unless",
 		"do not report a verdict until you have disclosed",
+		"do not report a verdict until you have measured the invariant",
 	} {
 		if strings.Contains(strings.ToLower(qaBody), forbid) {
 			t.Errorf("polecat-qa.md: turned the evidence discipline into a gate (%q); nothing can verify a prediction preceded a run, a measurement was taken, or a near-miss was disclosed (mg-0d85)", forbid)
@@ -5351,6 +5388,7 @@ func TestQAAndReviewTemplatesCarryTheEvidenceDiscipline(t *testing.T) {
 			"Evidence discipline",
 			"Predict the outcome before the run",
 			"constraints and check each BY MEASUREMENT",
+			"an asserted invariant is not a control",
 		} {
 			if strings.Contains(string(data), forbid) {
 				t.Errorf("%s: gained %q, but the evidence-discipline scope is QA + review; widening it to a build worker's template needs a separate argument (mg-0d85)", path, forbid)
