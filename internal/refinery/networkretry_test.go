@@ -85,6 +85,14 @@ func newRetryFixture(t *testing.T, gateExit int) *retryFixture {
 // optionally sets [gates] skip_on_retry.
 func newRetryFixtureWith(t *testing.T, gateExit int, markerPath string, skipOnRetry bool) *retryFixture {
 	t.Helper()
+	return newRetryFixtureScript(t, execScript(gateExit, markerPath), skipOnRetry)
+}
+
+// newRetryFixtureScript is the same fixture with the gate script written by the
+// caller, for the tests where WHAT the gate prints is the thing under test
+// (mg-15bb).
+func newRetryFixtureScript(t *testing.T, gateScript string, skipOnRetry bool) *retryFixture {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not found")
 	}
@@ -109,7 +117,7 @@ func newRetryFixtureWith(t *testing.T, gateExit int, markerPath string, skipOnRe
 		toml += "skip_on_retry = true\n"
 	}
 	os.WriteFile(filepath.Join(f.work, ".pogo", "refinery.toml"), []byte(toml), 0644)
-	os.WriteFile(filepath.Join(f.work, "build.sh"), []byte(execScript(gateExit, markerPath)), 0755)
+	os.WriteFile(filepath.Join(f.work, "build.sh"), []byte(gateScript), 0755)
 	run(t, f.work, "git", "add", ".")
 	run(t, f.work, "git", "commit", "-m", "initial")
 	run(t, f.work, "git", "push", "origin", "main")

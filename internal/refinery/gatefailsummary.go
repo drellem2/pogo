@@ -56,15 +56,6 @@ const (
 // what it reported before. A summary that guessed would be worse than none: the
 // whole complaint being answered is that readers were sent to the wrong place.
 func summarizeGateFailure(output string) string {
-	// A broken test SANDBOX is reported first and alone. mg-3412 is what the
-	// alternative costs: one setup failure printed fourteen assertion failures
-	// downstream of it, about a tree that was provably fine. If the envelope did
-	// not stand up, the assertion names underneath it are not findings and must
-	// not be offered as the headline.
-	if line, ok := reportedSetupFailureLine(output); ok {
-		return truncate("test setup failed, not the branch: "+line, maxSummaryLen)
-	}
-
 	// A gate that could not reach the NETWORK is reported before anything it
 	// named, and INSTEAD of it — same shape and same reason as the host-resource
 	// clause below (mg-67c9). runQualityGates builds a gateNetworkError and
@@ -93,6 +84,23 @@ func summarizeGateFailure(output string) string {
 	if sig, line, n, ok := outputReportsHostResourceExhaustion(output); ok {
 		return truncate(fmt.Sprintf("the HOST ran out of %s, not the branch (%q x%d): %s",
 			sig.resource, sig.pattern, n, line), maxSummaryLen)
+	}
+
+	// A broken test SANDBOX is reported instead of anything underneath it.
+	// mg-3412 is what the alternative costs: one setup failure printed fourteen
+	// assertion failures downstream of it, about a tree that was provably fine.
+	// If the envelope did not stand up, the assertion names underneath it are
+	// not findings and must not be offered as the headline.
+	//
+	// It sits BELOW the network and host clauses rather than above them, which
+	// is where it used to be (mg-15bb). Those two name something a banner does
+	// not — and, more to the point, runQualityGates now builds a gateSetupError
+	// in this same order, so a summary that preferred setup here would caption a
+	// merge request whose CLASS said host or infrastructure. Nothing about
+	// mg-3412's rationale is weakened: what it required is that the banner beat
+	// the assertion names, and it still does.
+	if line, ok := reportedSetupFailureLine(output); ok {
+		return truncate("test setup failed, not the branch: "+line, maxSummaryLen)
 	}
 
 	failedPkgs := failingGoPackages(output)

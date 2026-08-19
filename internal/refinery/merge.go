@@ -110,8 +110,15 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 	// spending 28 attempts here would hold one repo's lane for hours. See the
 	// sizing note in gatenetwork.go.
 	gateNetBudget := gateNetworkMaxAttempts
+	// A fifth budget, for a gate whose OWN SETUP did not stand up (mg-15bb).
+	// Separate from gateNetBudget even though both cost a whole gate run: the
+	// two conditions have unrelated durations, and sharing a counter would let
+	// a network outage spend the attempts that exist to ask "was the envelope
+	// broken once, or standing?" — which is the only question this budget buys
+	// an answer to. See the sizing note in gatesetup.go.
+	setupBudget := gateSetupMaxAttempts
 	unclassifiedBudget := defaultUnclassifiedAttempts
-	var contentionUsed, netUsed, gateNetUsed, unclassifiedUsed int
+	var contentionUsed, netUsed, gateNetUsed, setupUsed, unclassifiedUsed int
 	var backoffSpent time.Duration
 	// gatesReached records whether any attempt has got as far as the quality
 	// gates. It gates skip_on_retry — see the call site below.
@@ -121,7 +128,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 	// per-merge-request and revalidated against the rebased tree on every
 	// attempt — see gateHold.
 	hold := &gateHold{}
-	hardCap := contentionBudget + netBudget + gateNetBudget + unclassifiedBudget
+	hardCap := contentionBudget + netBudget + gateNetBudget + setupBudget + unclassifiedBudget
 
 	for attempt := 1; attempt <= hardCap; attempt++ {
 		// Cancellation is honoured at attempt boundaries as well as inside the
@@ -132,8 +139,8 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 			return mergeResult{GateOutput: gateOutput}, cancelledMergeError("before-attempt")
 		}
 		if attempt > 1 {
-			log.Printf("refinery: MR %s step=retry attempt=%d (cap=%d) contention=%d/%d network=%d/%d gate-network=%d/%d unclassified=%d/%d backoff_spent=%s",
-				mr.ID, attempt, hardCap, contentionUsed, contentionBudget, netUsed, netBudget, gateNetUsed, gateNetBudget, unclassifiedUsed, unclassifiedBudget, backoffSpent.Round(time.Second))
+			log.Printf("refinery: MR %s step=retry attempt=%d (cap=%d) contention=%d/%d network=%d/%d gate-network=%d/%d setup=%d/%d unclassified=%d/%d backoff_spent=%s",
+				mr.ID, attempt, hardCap, contentionUsed, contentionBudget, netUsed, netBudget, gateNetUsed, gateNetBudget, setupUsed, setupBudget, unclassifiedUsed, unclassifiedBudget, backoffSpent.Round(time.Second))
 		}
 
 		emitMergeAttempted(mr, attempt)
@@ -202,6 +209,12 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 
 		retry := false
 		reason := disp.Reason
+		// retryReason is the mirror of reason and is recorded when a retry DOES
+		// follow (mg-15bb). It is composed per arm rather than taken from the
+		// classifier alone, because the sentence a reader needs includes where
+		// in the budget this attempt sat — "attempt 2 of 3" is the difference
+		// between a policy and a loop.
+		retryReason := disp.RetryReason
 		var backoff time.Duration
 		switch {
 		case !disp.Retryable:
@@ -234,6 +247,21 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 			default:
 				retry, backoff = true, next
 			}
+		case disp.Class == ClassSetup:
+			setupUsed++
+			next := gateSetupBackoffFor(setupUsed)
+			switch {
+			case setupUsed >= setupBudget:
+				reason = fmt.Sprintf("not retryable: the setup retry budget is spent — %d of %d attempts used over %s of backoff, each one a whole gate run on the single serial slot every queued merge waits behind. The class is still SETUP: the gate's own setup failed on every attempt, so it never returned a verdict on this tree and this is NOT a finding against the branch. What the retries established is that the envelope is broken STANDING rather than once; they did NOT establish whose setup it is — a branch can break its own. Read the banner and establish which; do NOT dispatch a fix on this alone",
+					setupUsed, setupBudget, backoffSpent.Round(time.Second))
+			case backoffSpent+next > networkRetryBudget:
+				reason = fmt.Sprintf("not retryable: waiting %s more would exceed the %s retry budget (%s already slept). The class is still SETUP — the gate's own setup failed, not a verdict on the branch",
+					next, networkRetryBudget, backoffSpent.Round(time.Second))
+			default:
+				retry, backoff = true, next
+				retryReason = fmt.Sprintf("RETRYING (setup attempt %d of %d, after %s): %s",
+					setupUsed+1, setupBudget, next, disp.RetryReason)
+			}
 		case disp.Class == ClassContention:
 			contentionUsed++
 			if contentionUsed >= contentionBudget {
@@ -252,6 +280,16 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 
 		fail.Retried = retry
 		fail.BackoffSeconds = backoff.Seconds()
+		if retry {
+			if strings.TrimSpace(retryReason) == "" {
+				// Symmetric with the not-retried case below, and for the same
+				// reason: a retry with no stated purpose reads as a loop rather
+				// than as a decision that was made.
+				retryReason = fmt.Sprintf("RETRYING: the refinery classified this as %s, which establishes nothing about the branch that a re-run would repeat",
+					fail.Class)
+			}
+			fail.RetriedReason = retryReason
+		}
 		if !retry {
 			if strings.TrimSpace(reason) == "" {
 				// Never leave the field empty. A blank reason is exactly the
@@ -1144,6 +1182,19 @@ func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, 
 			// carve-out that retries.
 			if gne := newGateNetworkError(gate, output, err); gne != nil {
 				return allOutput.String(), ran, gne
+			}
+			// The gate's OWN SETUP did not stand up. Judged here for the same
+			// two reasons as the three above (mg-15bb, gatesetup.go): this is
+			// the last place the FULL output exists, and the summary below would
+			// otherwise be the ONLY place the distinction survived — it has said
+			// "test setup failed, not the branch" since mg-3412 while the class
+			// beside it said DEFECT, "a fix is warranted", in the same record.
+			//
+			// LAST of the four, because the three above each name something more
+			// specific and two of them do not retry. See classifyFailure for
+			// why that ordering is the safe direction.
+			if gse := newGateSetupError(gate, output, err); gse != nil {
+				return allOutput.String(), ran, gse
 			}
 			// Name what failed INSIDE the gate. `./build.sh failed: exit status 1`
 			// is the sentence that travels — onto the MR, into `pogo refinery
