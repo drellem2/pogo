@@ -2864,7 +2864,13 @@ export E2E_GOMODCACHE
 HOME="$E2E" GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" \
     go env GOBIN >/dev/null 2>&1 || true
 
-run_e2e() {   # run_e2e LABEL GIT_BIN GIT_TIMEOUT RUN_DEADLINE -> log on stdout
+run_e2e() {   # run_e2e LABEL GIT_BIN GIT_TIMEOUT RUN_DEADLINE [BOOTSTRAP_REPO] -> log on stdout
+    # The 5th argument defaults to exactly what the runner would derive on its
+    # own ($HOME/dev/pogo, and HOME is $E2E here), so the four-argument calls
+    # above and below behave identically to before it existed. It is a parameter
+    # only because the fallback section needs ONE arm where a bounce script can
+    # actually be found, and putting that script under $E2E/src instead would
+    # change the `ok` arm's gate 6 as a side effect.
     rm -rf "$E2E/lock" "$E2E/mail.log" "$E2E/stamp"
     HOME="$E2E" POGO_HOME="$E2E" \
     GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" \
@@ -2883,6 +2889,7 @@ run_e2e() {   # run_e2e LABEL GIT_BIN GIT_TIMEOUT RUN_DEADLINE -> log on stdout
     POGO_DEPLOY_SYNC_ATTEMPTS=1 \
     POGO_DEPLOY_SYNC_VIGIL=0 \
     POGO_DEPLOY_ALERT_TO=mayor \
+    POGO_DEPLOY_BOOTSTRAP_REPO="${5:-$E2E/dev/pogo}" \
         bash "$RUNNER" > "$E2E/$1.log" 2>&1
     echo "$?" > "$E2E/$1.rc"
 }
@@ -2940,6 +2947,144 @@ grep -q 'TIMEOUT' "$E2E/step.log" \
 grep -q 'pogo-deploy: end (rc=' "$E2E/step.log" \
     && pass "the step-bounded run writes a terminal line too" \
     || fail "the step-bounded run wrote no terminal line"
+
+# ---------------------------------------------------------------------------
+# DOES THE FAILURE PATH WRITE THE COUNTER AT ALL? (mg-62eb)
+# ---------------------------------------------------------------------------
+# THE QUESTION, and why it was open. On 08-17, 08-18 and 08-19 the nightly
+# aborted at the transport with class `unclassified` — which
+# transport_streak_verdict puts in the BUMP arm — and
+# $POGO_HOME/deploy-transport-streak.stamp was ABSENT, with zero bounce events
+# against a control of 251 deploy_nofire. Those three nights are explained: the
+# fallback merged at 11:27Z on 08-19 and the installed runner did not carry it
+# until 12:00Z, so there was no mechanism to have fired. But the explanation
+# retires only the dates. It leaves the mechanism itself never once exercised,
+# and on 2026-08-20 the deploy SUCCEEDED — proving the success path writes the
+# stamp (`2026-08-20 0 -`, mtime 03:00:11, the same second as the run's own
+# `sync:` line) and saying nothing whatever about the failure path.
+#
+# WHAT COVERED IT BEFORE THIS SECTION: three greps of the runner's own source
+# for the LINE NUMBER of the fallback_bounce call relative to retry_will_follow,
+# the sync alert, and arm_run_deadline. Those are assertions about where text
+# sits in a file. They cannot distinguish a wired call from one whose enclosing
+# branch is never reached, which is precisely the doubt on the ticket.
+#
+# THE WRITE WAS ALREADY EXECUTING ON EVERY SUITE RUN, and nothing read it. The
+# isolation note at the top of this file names pogo-deploy.sh:3759 — the bump —
+# as one of the two writes that used to escape into the real $POGO_HOME, and it
+# names `run_e2e step` as the arm that fires it. So the failure path's write was
+# discovered as a LEAK, by a wrapper somebody added to chase a different bug,
+# and was never once asserted as behaviour. An effect observed only as a side
+# effect is an effect nothing is holding to a contract.
+#
+# The stamp these arms read is the one the RUN derives, not a path this file
+# composes: run_e2e sets POGO_HOME="$E2E" and sets no
+# POGO_DEPLOY_TRANSPORT_STREAK, so ${POGO_HOME:-$HOME/.pogo}/... lands here. A
+# hand-built path would be this suite asserting against its own arithmetic, and
+# it is the same derive-instead-of-read slip that had two agents reporting the
+# real stamp ABSENT on 08-19 while a decoy sat at $HOME (mg-e121).
+E2E_STREAK="$E2E/deploy-transport-streak.stamp"
+# streak_count FILE — the count field, or "absent". Absence is a value here: it
+# is the exact state the ticket measured on three nights, so it must be
+# reportable rather than collapsing to 0.
+streak_count() { [ -f "$1" ] && awk '{print $2}' "$1" || echo absent; }
+
+# ARM 1 — a fresh box and a night lost at the transport. This is the state the
+# fleet was actually in: no stamp on disk at all.
+rm -f "$E2E_STREAK"
+run_e2e fresh "$FAKEBIN/hanggit" 2 600
+[ -f "$E2E_STREAK" ] \
+    && pass "ACCEPTANCE: the FAILURE path writes $E2E_STREAK — the three-night absence was a missing mechanism, not a missing write" \
+    || fail "a run that failed at the transport left NO streak stamp — the counter can never reach the threshold and the fallback can never fire (log: $(tail -5 "$E2E/fresh.log"))"
+[ "$(streak_count "$E2E_STREAK")" = "1" ] \
+    && pass "and it writes 1 — a first lost night counts once, from a stamp that did not exist (transport_streak_field degrades absence to 0, so the arithmetic starts where the ticket predicted)" \
+    || fail "the first lost night recorded $(streak_count "$E2E_STREAK"), not 1"
+
+# YESTERDAY, so a seeded count is a NIGHT that carries forward rather than a
+# second fire of tonight, which transport_streak_next deliberately does not count.
+E2E_YDAY="$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d yesterday +%Y-%m-%d)"
+
+# ARM 2 — the second consecutive night, with NO bouncer reachable. Two things at
+# once, and they have to be measured in this order: the count must reach the
+# threshold, and the fallback must then decline in a way that LEAVES THE COUNT
+# ALONE. A refusal that also reset the streak would silently re-arm the same
+# wait from zero every night, and the fleet would never bounce however long the
+# outage ran.
+printf '%s 1 -\n' "$E2E_YDAY" > "$E2E_STREAK"
+run_e2e thresh "$FAKEBIN/hanggit" 2 600
+[ "$(streak_count "$E2E_STREAK")" = "2" ] \
+    && pass "ACCEPTANCE: a second consecutive lost night carries the count to 2 — the counter ACCUMULATES ACROSS NIGHTS, which three nights of an absent stamp could not evidence in either direction" \
+    || fail "the second lost night recorded $(streak_count "$E2E_STREAK"), not 2 — the streak does not accumulate and the threshold is unreachable"
+grep -q 'consecutive nights lost at the TRANSPORT step (threshold 2)' "$E2E/thresh.log" \
+    && pass "ACCEPTANCE: and at the threshold the fallback DECIDES TO FIRE — reached through the sync-abort path with a count this run computed, not by calling fallback_bounce with a number handed to it as the unit arms above do" \
+    || fail "the fallback did not fire at the threshold: $(grep -i fallback "$E2E/thresh.log" | head -3)"
+# Asserted hard, not with an || pass escape: this arm passes no bootstrap repo,
+# so both candidates ($E2E/src and $E2E/dev/pogo) are absent by construction and
+# there is exactly one branch it can take. An assertion that passes either way is
+# the same unknown-polarity check this whole section exists to replace.
+grep -q 'refused-noscript' "$E2E/thresh.log" \
+    && pass "with no local pogo-self-deploy advertising 'bounce' it reports refused-noscript — an ABSENT bouncer is named, not reported as a broken one" \
+    || fail "no bouncer exists in this fixture, yet the run did not report refused-noscript: $(grep -i fallback "$E2E/thresh.log" | head -3)"
+
+# ARM 3 — the same night, with a bouncer that can actually be found. This is the
+# whole mechanism end to end: a transport failure, a counter crossing its
+# threshold, and a fleet restart invoked with NO REMOTE reached at any point.
+#
+# fallback_bounce itself already has unit coverage further up this file — at the
+# threshold, below it, refused, and out of window — driven by calling it directly
+# with a streak value. That is not what is asserted here. Here the count is the
+# one the RUN derived from a stamp on disk after its own sync failed, which is
+# the join those arms have to assume and cannot show.
+E2E_BOOT="$E2E/bootstrap"; mkdir -p "$E2E_BOOT/scripts"
+# resolve_bounce_script probes --help BY EXECUTION and requires the string
+# 'pogo-self-deploy bounce': a self-deploy predating mg-9fc9 exits 2 on the
+# subcommand, and without the probe that correct refusal would read as a broken
+# fallback rather than an absent one.
+cat > "$E2E_BOOT/scripts/pogo-self-deploy" <<'BOUNCER'
+#!/bin/sh
+[ "$1" = "--help" ] && { echo "usage: pogo-self-deploy bounce [--yes]"; exit 0; }
+echo "$@" >> "$E2E_BOUNCE_LOG"
+exit 0
+BOUNCER
+chmod +x "$E2E_BOOT/scripts/pogo-self-deploy"
+E2E_BOUNCE_LOG="$E2E/bounce.log"; export E2E_BOUNCE_LOG; rm -f "$E2E_BOUNCE_LOG"
+printf '%s 1 -\n' "$E2E_YDAY" > "$E2E_STREAK"
+run_e2e bounced "$FAKEBIN/hanggit" 2 600 "$E2E_BOOT"
+[ -s "$E2E_BOUNCE_LOG" ] \
+    && pass "ACCEPTANCE: the fallback INVOKES the bouncer — 'pogo-self-deploy $(head -1 "$E2E_BOUNCE_LOG")' — so the fleet's one network-independent recovery path runs from a transport failure all the way to a restart" \
+    || fail "the fallback fired but invoked no bouncer: $(grep -i fallback "$E2E/bounced.log" | head -3)"
+case "$(head -1 "$E2E_BOUNCE_LOG" 2>/dev/null)" in
+    bounce*--yes*) pass "and it is invoked UNATTENDED (bounce --yes) — a nightly that stops to ask a question at 03:00 has not recovered anything" ;;
+    *) fail "the bouncer was invoked as [$(head -1 "$E2E_BOUNCE_LOG" 2>/dev/null)]" ;;
+esac
+# THE RESET IS THE OTHER HALF OF THE THRESHOLD. Without it a fleet in a week-long
+# outage bounces every single night after the second — the restart it was already
+# given, repeated nightly, on top of a network that is still gone.
+[ "$(streak_count "$E2E_STREAK")" = "0" ] \
+    && pass "and a COMPLETED bounce resets the count to 0, so a prolonged outage bounces once per threshold rather than once per night" \
+    || fail "after a completed bounce the streak is $(streak_count "$E2E_STREAK"), not 0 — the fleet would be restarted every remaining night of the outage"
+# Field 3 against field 1, not against a `date` this file runs afterwards. Both
+# fields were written by the same deploy_date call in the same run, so they are
+# comparable without a clock; a fresh `date +%F` here would disagree with the run
+# for the fraction of a second either side of midnight, which is the same
+# second-granularity flake this suite has been bitten by before.
+[ "$(awk '{print $3}' "$E2E_STREAK" 2>/dev/null)" = "$(awk '{print $1}' "$E2E_STREAK" 2>/dev/null)" ] \
+    && pass "and the reset STAMPS TONIGHT'S DATE as the bounce date in field 3 — a 0 that means 'bounced tonight' stays distinguishable from a 0 that means 'the transport is fine'" \
+    || fail "the bounce date was not recorded: [$(cat "$E2E_STREAK" 2>/dev/null)]"
+
+# ARM 4 — THE POLARITY CONTROL. Without it every assertion above is satisfied by
+# a runner that writes the counter unconditionally, which would march a healthy
+# fleet to a threshold and bounce it. Same fixture, same seeded streak, a git
+# that RETURNS: the sync reaches the tree and the count must go to 0.
+printf '%s 1 -\n' "$E2E_YDAY" > "$E2E_STREAK"
+run_e2e cleared "$FAKEBIN/workinggit" 5 20
+[ "$(streak_count "$E2E_STREAK")" = "0" ] \
+    && pass "NEGATIVE CONTROL: a night whose sync REACHES THE TREE clears the count to 0 — the write is keyed on the transport failing, not on the run happening" \
+    || fail "a successful sync left the streak at $(streak_count "$E2E_STREAK") — a working transport must never accumulate toward a fleet bounce"
+grep -q 'consecutive nights lost at the TRANSPORT step (threshold' "$E2E/cleared.log" \
+    && fail "a night that synced fine still considered bouncing the fleet" \
+    || pass "NEGATIVE CONTROL: and it never reaches the fallback at all"
+rm -f "$E2E_BOUNCE_LOG"; rm -rf "$E2E_BOOT"
 
 # The skip paths get one as well. A fire that is locked out exits in
 # milliseconds and is perfectly healthy — and without a terminal line of its own
