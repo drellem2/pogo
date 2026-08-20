@@ -381,6 +381,23 @@ const (
 	// it.
 	DefaultReviewDeclNotifyTo = DefaultCoordinator
 
+	// DefaultPromptEditInterval is how often pogod's HAND-EDIT detector sweeps
+	// the installed prompt corpus for files whose body no longer matches the
+	// hash their own stamp records (mg-0c96). Coarse, and cost is not what sets
+	// it: the sweep is a non-recursive read of a handful of directories. What
+	// sets it is that a hand-edit is a STEADY STATE and not an event — the file
+	// stays edited until somebody reconciles it — so sampling faster buys
+	// nothing. Four samples a day is enough that a morning edit is reported the
+	// same working day.
+	DefaultPromptEditInterval = 6 * time.Hour
+	// DefaultPromptEditRenotify is how long an UNCHANGED hand-edit stays quiet.
+	// It matches DefaultPromptSyncRenotify's three days for the same reason:
+	// reconciling a prompt is a judgement about which local edits are still
+	// load-bearing, not a command to run, and a nag arriving faster than the
+	// work can be scheduled trains the recipient to filter it — which is the
+	// failure mode this detector exists to catch, one level up.
+	DefaultPromptEditRenotify = 72 * time.Hour
+
 	// DefaultAckWatchInterval is how often pogod's completion-deficit detector
 	// samples the scheduler's ack counters (mg-1935). Coarse: the condition is a
 	// RATE over hundreds of fires, so it moves by fractions of a point per tick
@@ -781,6 +798,13 @@ type Config struct {
 	GHTeardown GHTeardownConfig
 	GHIntake   GHIntakeConfig
 	ReviewDecl ReviewDeclConfig
+	// PromptEdit is the installed-prompt HAND-EDIT detector (mg-0c96). It sits
+	// beside ReviewDecl rather than inside DriftWatch because it asks a
+	// different question of a different artifact: drift asks whether the
+	// installed corpus matches what the repo ships, this asks whether a
+	// deployed file has been changed since the installer wrote it. The two come
+	// apart in both directions.
+	PromptEdit PromptEditConfig
 	AckWatch   AckWatchConfig
 	DeafWatch  DeafWatchConfig
 	// AbsentWatch is the configured-agent-is-missing announcer. It is the only
@@ -1179,6 +1203,43 @@ type ReviewDeclConfig struct {
 	// DefaultReviewDeclNotifyTo (the coordinator) — the only agent that files
 	// review tickets and therefore the only one that can write the missing line.
 	NotifyTo string
+}
+
+// PromptEditConfig configures pogod's HAND-EDIT detector (mg-0c96): the
+// heartbeat-driven sweep that reports installed prompts whose body no longer
+// matches the hash their own stamp records, and mails the agent that can act on
+// each one.
+//
+// It exists because the instrument was armed and unscheduled. Every deployed
+// prompt with an upstream already carries a self-describing stamp, and a
+// mismatch between it and sha256(body) IS the hand-edit signature — verified by
+// hand on 2026-08-20 (mg-0635). Nothing read it on a cadence: the one edit that
+// was noticed that night surfaced only because a shipped update happened to
+// collide with the edited region and pogod declined the sync. An edit sitting
+// where no shipped change touches would have gone unreported indefinitely.
+//
+// There is NO notify_to. Unlike every sibling above, findings are addressed
+// per-file to the agent that owns the prompt, because that agent is the only
+// party who can judge whether a given edit is still load-bearing — the
+// judgement this detector deliberately refuses to make. A single configurable
+// destination would either misroute every finding or recreate the pile a
+// fleet-wide inbox becomes.
+//
+// REPORT-ONLY, and here that is a hard constraint rather than a convention: a
+// repair that carries a local line forward changes the body, which stales the
+// stamp, and the stamp cannot be recomputed without the installer's exact
+// canonicalisation. There is no repair seam in internal/promptedit.
+type PromptEditConfig struct {
+	// Enabled turns the runner on. Defaults to true. No arming precondition:
+	// the sweep is a local filesystem read, so there is no external tool whose
+	// absence would turn an environment gap into a wall of findings.
+	Enabled bool
+	// Interval is the COARSE gap between sweeps. Zero falls back to
+	// DefaultPromptEditInterval.
+	Interval time.Duration
+	// RenotifyAfter is how long an unchanged finding stays quiet before being
+	// mailed again. Zero falls back to DefaultPromptEditRenotify.
+	RenotifyAfter time.Duration
 }
 
 // GHIntakeConfig configures pogod's gh-issue INTAKE detector (mg-039b): the
@@ -1788,6 +1849,7 @@ type parsedConfig struct {
 	ghTeardownEnabledSet     bool
 	ghIntakeEnabledSet       bool
 	reviewDeclEnabledSet     bool
+	promptEditEnabledSet     bool
 	ackWatchEnabledSet       bool
 	deafWatchEnabledSet      bool
 	absentWatchEnabledSet    bool
@@ -1904,6 +1966,11 @@ func Load() *Config {
 			Interval:      DefaultReviewDeclInterval,
 			RenotifyAfter: DefaultReviewDeclRenotify,
 			NotifyTo:      DefaultReviewDeclNotifyTo,
+		},
+		PromptEdit: PromptEditConfig{
+			Enabled:       true,
+			Interval:      DefaultPromptEditInterval,
+			RenotifyAfter: DefaultPromptEditRenotify,
 		},
 		AckWatch: AckWatchConfig{
 			Enabled:          true,
@@ -2078,6 +2145,15 @@ func Load() *Config {
 		}
 		if fileCfg.ReviewDecl.NotifyTo != "" {
 			cfg.ReviewDecl.NotifyTo = fileCfg.ReviewDecl.NotifyTo
+		}
+		if fileCfg.promptEditEnabledSet {
+			cfg.PromptEdit.Enabled = fileCfg.PromptEdit.Enabled
+		}
+		if fileCfg.PromptEdit.Interval > 0 {
+			cfg.PromptEdit.Interval = fileCfg.PromptEdit.Interval
+		}
+		if fileCfg.PromptEdit.RenotifyAfter > 0 {
+			cfg.PromptEdit.RenotifyAfter = fileCfg.PromptEdit.RenotifyAfter
 		}
 		if fileCfg.ghIntakeEnabledSet {
 			cfg.GHIntake.Enabled = fileCfg.GHIntake.Enabled
@@ -3264,6 +3340,20 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				}
 			case "notify_to":
 				cfg.ReviewDecl.NotifyTo = unquotedVal
+			}
+		case "prompt_edit":
+			switch key {
+			case "enabled":
+				cfg.PromptEdit.Enabled = val == "true"
+				cfg.promptEditEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.PromptEdit.Interval = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.PromptEdit.RenotifyAfter = d
+				}
 			}
 		case "agents":
 			switch key {

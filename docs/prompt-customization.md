@@ -273,19 +273,22 @@ body=… -->` stamp on the first line and decides:
   by overwriting.
 - `--force` → **install** (overwrite unconditionally).
 
-Today the gating compares the *embed* hash, not your edits. A `--force` run,
-or any embed advance under an edited canonical file, **silently overwrites
-your edits**. That's the failure mode the conflict-detection design (below)
-fixes.
+The stamp records **two** hashes: `embed` (the payload the file was written
+from) and `body` (the file body as written). The embed hash answers "has the
+shipped version moved"; the body hash answers "has this file been changed since
+we wrote it", and the two together are what let `pogo install` decline rather
+than overwrite. See the conflict handling below, and
+[the hand-edit detector](#detecting-a-hand-edited-prompt) for the reader that
+uses the body half on a cadence.
 
-### Reconciling on update — `.dist` files (Planned: mg-06cb)
+### Reconciling on update — `.dist` files
 
-> **Not yet shipped.** This describes the designed behavior; the install code
-> currently overwrites. Track via `mg show mg-06cb`.
+> **Shipped** (mg-06cb). `InstallPrompts` returns the conflict set and pogod
+> mails the affected agent about it at boot (mg-c3f0). This section described
+> it as planned long after it landed; corrected 2026-08-20.
 
-When the conflict-detection ticket lands, an embed advance under a
-user-edited canonical file will **preserve your edit** and write the new
-embed alongside as a sidecar:
+An embed advance under a user-edited canonical file **preserves your edit** and
+writes the new embed alongside as a sidecar:
 
 ```
 ~/.pogo/agents/
@@ -307,12 +310,12 @@ There's no automatic three-way merge — the design treats `.dist` as a
 "here's what shipped, now you decide" prompt, not a `git rebase --continue`
 flow.
 
-### `--force` semantics (Planned: mg-7c35)
+### `--force` semantics
 
-> **Not yet shipped.** This describes the designed behavior; today
-> `--force` overwrites silently with no backup.
+> **Shipped** (mg-7c35). `InstallOpts.NoBackup` and `InstallResult.Backups`
+> are live. Corrected 2026-08-20.
 
-When `mg-7c35` lands, `pogo install --force` will:
+`pogo install --force`:
 
 1. **Back up** any user-edited canonical file to `<name>.bak.<ISO-8601>`
    alongside the file (e.g., `mayor.md.bak.2026-05-09T14:30:00Z`).
@@ -325,11 +328,70 @@ To skip the backup (loud opt-out), pass `--no-backup`:
 pogo install --force --no-backup    # opt-in to silent stomp
 ```
 
-`pogo install` (without `--force`) under the new model will never overwrite
-edited files at all — it writes `.dist` instead and tells you to reconcile.
+`pogo install` (without `--force`) never overwrites edited files at all — it
+writes `.dist` instead and tells you to reconcile.
 
-Until those changes land, treat `--force` as destructive. Run a backup
-yourself before invoking it on a directory you've customized.
+Treat `--force` as destructive anyway. The backup is a recovery path, not a
+merge.
+
+## Detecting a hand-edited prompt
+
+The stamp on a prompt's first line records the hash of the body the installer
+wrote. If the body no longer hashes to that value, the file has been edited in
+place since it was installed — and you can check any file yourself with two
+commands, no `.dist` sidecar and no reference checkout involved:
+
+```bash
+head -1 ~/.pogo/agents/mayor.md
+tail -n +2 ~/.pogo/agents/mayor.md | shasum -a 256
+```
+
+pogod sweeps for this on a coarse interval (6h by default) and mails the agent
+that can act on each edited file. The on-demand half is:
+
+```bash
+pogo check-prompt-edits          # human report, exit 1 on a finding
+pogo check-prompt-edits --json   # findings plus the full classification
+```
+
+### What it reports, and what it deliberately does not
+
+An **unstamped** file is ambiguous: it may have no upstream at all (`crew/pa.md`,
+`crew/pm-*.md`, `pm/anti-drift-protocol.md` — the deployed file *is* the source),
+or it may have lost a stamp it should have. Nothing in the file tells the two
+apart, so the sweep never pools them into one "unknown" count. Every enumerated
+file lands in exactly one bucket:
+
+| bucket | meaning |
+|---|---|
+| **judged** | the shipped corpus has this path and the file is stamped. A mismatch is a finding; a match is clean. |
+| `stamp-missing` | the corpus ships it and the stamp is gone. Unjudgeable — and the one unstamped case worth attention. |
+| `upstream-withdrawn` | stamped by an older install, and the corpus no longer ships the path. What the stamp says is printed, but there is nothing to reconcile against. |
+| `no-upstream` | not shipped and not stamped. Expected, and normally the largest bucket. |
+
+The census prints on every run, clean or not.
+
+### It reports; it never repairs
+
+There is no `--fix`, and that is deliberate. Carrying a local line forward
+changes the body, which stales the stamp — and the stamp cannot be recomputed
+without the installer's exact canonicalisation. A tool that recomputed it anyway
+would certify a body it never validated, turning an honest "unknown" into a
+false "verified". You have two safe options:
+
+- **Keep the edit.** Expect the notice again on the renotify interval (72h).
+  The file reads as edited until an install rewrites it.
+- **Drop the edit.** `pogo install` restores the shipped text; `--force` writes
+  a `.bak` sidecar first.
+
+### This is a different notice from a declined sync
+
+Mail from `pogod-promptsync` is about a **shipped update that could not be
+applied** because of your edits — there is a `.dist` sidecar waiting.
+Reconciling that resolves both. Mail from `pogod-promptedit` on its own means
+the edits exist and no shipped update has collided with them yet, which is the
+case nothing used to report.
+
 
 ## Backup hygiene
 
@@ -410,3 +472,5 @@ next run.
   the design doc that this guide implements. Read it for the rationale,
   the failure-mode analysis, and the file-class boundary.
 - `pogo agent prompt --help` — `list`, `show`, `init`, `install`, `create`.
+- `pogo check-prompt-edits --help` — the hand-edit detector's on-demand half,
+  and the fullest written statement of the domain constraint it applies.

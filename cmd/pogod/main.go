@@ -50,6 +50,7 @@ import (
 	"github.com/drellem2/pogo/internal/platform/sleep"
 	"github.com/drellem2/pogo/internal/progresswatch"
 	"github.com/drellem2/pogo/internal/project"
+	"github.com/drellem2/pogo/internal/promptedit"
 	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/reaper"
 	"github.com/drellem2/pogo/internal/reconcile"
@@ -2591,6 +2592,57 @@ Flags:
 			"without a `reviews:` line will not be reported (mg-253e)")
 	}
 
+	// Build the installed-prompt HAND-EDIT detector (mg-0c96): the RUNNER the
+	// stamp never had.
+	//
+	// Every deployed prompt with an upstream already records the hash of the body
+	// the installer wrote, on its own first line, so a disagreement between that
+	// and sha256(body) IS the hand-edit signature — no .dist sidecar and no
+	// reference checkout involved. It was armed and unscheduled. The hand-edited
+	// mayor.md of 2026-08-20 was noticed only because a shipped update happened
+	// to collide with the edited region and notifyPromptSyncConflicts (just
+	// above) declined the sync and mailed about it; an edit sitting where no
+	// shipped change touched would have gone unreported indefinitely.
+	//
+	// IT RUNS HERE AND NOT BEHIND `pogo doctor --check`. mg-10e3 is a detector
+	// that is armed, correct, and reports into a surface whose read cadence is
+	// "when somebody thinks to type it" — 23 scheduler entries and none runs
+	// doctor, no launchd plist references it, and doctor's own auto_start is
+	// false. Siting this sweep there would reproduce that defect one level down.
+	// `pogo check-prompt-edits` is the on-demand half, not the delivery
+	// mechanism.
+	//
+	// IT MAILS THE AFFECTED AGENT, per file, for the reason its neighbour above
+	// does: that is the party who can judge whether a given edit is still
+	// load-bearing, and it is the channel that demonstrably worked on the night
+	// this was filed. REPORT-ONLY, and here that is load-bearing rather than
+	// conventional — carrying a local line forward stales the stamp, and the
+	// stamp cannot be recomputed without the installer's exact canonicalisation,
+	// so a repairing tool would silently certify a body it never validated.
+	// There is no seam in internal/promptedit through which a prompt could be
+	// written.
+	var promptEditWatcher *promptedit.Watcher
+	if cfg.PromptEdit.Enabled {
+		promptEditWatcher = promptedit.New(promptedit.Options{
+			Enabled:       true,
+			Root:          agent.PromptDir(),
+			ShippedFS:     agent.DefaultPromptsFS(),
+			Coordinator:   coordinator,
+			Mail:          client.SendMGMail,
+			Interval:      cfg.PromptEdit.Interval,
+			RenotifyAfter: cfg.PromptEdit.RenotifyAfter,
+			StatePath:     promptedit.NoticesPath(config.PogoHome()),
+		})
+		log.Printf("pogod: prompt hand-edit detector enabled (%s)", promptEditWatcher.Summary())
+	} else {
+		// Logged rather than left silent, for the same reason as its neighbour:
+		// a detector for a silent condition that is itself silently switched off
+		// is the same defect one more level up, and `[prompt_edit] enabled =
+		// false` is otherwise indistinguishable from a build that never had it.
+		log.Printf("pogod: prompt hand-edit detector DISABLED by config — a prompt edited in " +
+			"place after install will be reported only if a shipped update later collides with it (mg-0c96)")
+	}
+
 	// Build the scheduler-completion deficit detector (mg-1935): the READER the
 	// ack counters never had. mg-a754 gave every fire a completion signal and
 	// `pogo schedule list` even renders `⚠ N unacked`, but nothing consumed it —
@@ -3128,6 +3180,21 @@ Flags:
 		// write the `reviews:` line whose absence it reports.
 		if reviewDeclWatcher != nil {
 			go reviewDeclWatcher.Check(now)
+		}
+		// The prompt hand-edit detector rides the same tick on its own coarse
+		// interval. In a goroutine because a finding shells out to `mg mail
+		// send` — which must never delay a tick. Report-only: it mails, and it
+		// has no seam through which it could rewrite or re-stamp the prompt it
+		// names.
+		//
+		// It sits BESIDE notifyPromptSyncConflicts rather than inside it on
+		// purpose. That one fires at a DECISION POINT — pogod declined an update
+		// on this boot — and can only ever see an edit a shipped change happened
+		// to collide with. This one samples the corpus, so an edit in a region
+		// no shipped change touches is visible too, which is the whole gap
+		// mg-0c96 names.
+		if promptEditWatcher != nil {
+			go promptEditWatcher.Check(now)
 		}
 		// The completion-deficit detector rides the same tick and throttles
 		// itself to a COARSE interval. In a goroutine because a finding shells
