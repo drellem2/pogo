@@ -23,6 +23,13 @@
 # are the house pattern for installing a LaunchAgent and both live in the `pogo`
 # BINARY, which the redeploy installs. An arming step that needs a current
 # `pogo` cannot be run on the box that needs arming.
+#
+# SECTION 2b turns that unknown-polarity complaint on the INSTALLER'S OWN RENDER
+# GUARDS, which had only ever been shown to accept (mg-712e). It runs a copy of
+# the installer beside a doctored template and asserts both refusals: a surviving
+# placeholder at a render size that defeats the `| grep -q` spelling — measured
+# 5/5 SIGPIPE 141, and that spelling ACCEPTED such a render at exit 0 — and a
+# template that stops naming the stamp.
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -188,8 +195,15 @@ fi
 # A LaunchAgent installed with a literal YOUR_USERNAME is loaded, listed, and
 # permanently broken: this ticket's own defect, shipped by its own fix.
 install_probe >/dev/null 2>&1
-if grep '<string>' "$PLIST" | grep -q 'YOUR_USERNAME'; then
-    fail "a YOUR_USERNAME placeholder survived into an installed plist value: $(grep '<string>' "$PLIST" | grep YOUR_USERNAME)"
+# CAPTURED, not `| grep -q`. The producer here is an EXTERNAL grep and the
+# consumer leaves on first match, which under this file's `pipefail` is the
+# mg-7ce7 shape: 141, read as "no placeholder", from a plist that HAS one. It
+# wins against today's 10KB plist and loses 5/5 at 257KB (measured, mg-712e), so
+# the assertion would go quiet exactly as the job grew — and it would go quiet in
+# the direction that reports health.
+placeholder_hits="$(grep '<string>' "$PLIST" | grep 'YOUR_USERNAME')"
+if [ -n "$placeholder_hits" ]; then
+    fail "a YOUR_USERNAME placeholder survived into an installed plist value: $placeholder_hits"
 else
     pass "no placeholder survives into an installed plist value"
 fi
@@ -209,6 +223,125 @@ if grep -q "$SRC/scripts/revision-probe.sh" "$PLIST"; then
     pass "the job runs the TRACKED script in the checkout, not a copy taken at install time"
 else
     fail "the plist does not point at $SRC/scripts/revision-probe.sh — $(grep -A2 ProgramArguments "$PLIST" | head -5)"
+fi
+
+# ---------------------------------------------------------------------------
+# 2b. THE TWO RENDER GUARDS, WITH THE LOSING SIDE FORCED AND THE RED ARM RUN
+# ---------------------------------------------------------------------------
+# Everything above asks whether a GOOD render is accepted. Neither of the
+# installer's two render guards had ever been shown to REFUSE anything, which is
+# this file's own header complaint — a check that has only ever produced one of
+# the two is a check of unknown polarity — applied to the guards rather than to
+# the job.
+#
+# It is not academic. mg-712e is a gate run that failed here reporting "the
+# rendered plist does not mention <a sandbox path>", which is the mention
+# guard's refusal text, on a render that cannot have been wrong: the installer's
+# renderer and its checker read the same $HOME and $SRC in the same process, so
+# every path that loop can name is one the render just substituted in. The alarm
+# was reachable in a state it cannot detect.
+#
+# THAT RUN WAS NOT REPRODUCED — 22/22 standalone, 22/22 inside a green
+# full-suite gate, 0 failures in 1,150 runs of the failing section's shape — and
+# the SIGPIPE route to that particular message is separately measured DEAD: its
+# producer was bash's BUILTIN printf, which lost 0 of 1,200 races at payloads up
+# to 256KB with the match at byte 0. So what the conversion closes is the only
+# route by which that sentence could be FALSE; it is not a diagnosis of that run.
+# Both guards are now pure of a pipeline's exit status, and both are asserted
+# below in the direction they exist for, which is the part nothing had ever run.
+#
+# The installer reads its template relative to its own directory, so these cases
+# run a COPY of it beside a doctored template.
+
+FAKE_INST_DIR="$SANDBOX/fakeinst"
+mkdir -p "$FAKE_INST_DIR/launchd"
+cp "$INSTALLER" "$FAKE_INST_DIR/install-revision-probe.sh"
+chmod +x "$FAKE_INST_DIR/install-revision-probe.sh"
+FAKE_TEMPLATE="$FAKE_INST_DIR/launchd/com.pogo.revisionprobe.plist"
+fake_install() { bash "$FAKE_INST_DIR/install-revision-probe.sh" --src "$SRC" --url "$URL" \
+        --launch-agents-dir "$LA_DIR" --launchctl "$LC_OK" --dry-run 2>&1; }
+
+# The control on the control: run the copy against the REAL template first. If
+# this refused, the two refusals below would prove nothing about the doctoring.
+cp "$HERE/launchd/com.pogo.revisionprobe.plist" "$FAKE_TEMPLATE"
+rm -f "$PLIST"
+out="$(fake_install)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+    pass "the installer run from a copy, against the tracked template, still renders clean — so a refusal below is the doctoring and not the fixture"
+else
+    fail "the copied installer refused the REAL template (exit $rc) — the two cases below would be measuring the harness: $out"
+fi
+
+# CASE A — the placeholder guard, at a size that defeats the `| grep -q`
+# spelling. The placeholder is NOT under /Users/, because an unsubstituted
+# /Users/YOUR_USERNAME would be rewritten by the $HOME rule and would test
+# nothing.
+{
+    sed 's#<string>/Users/YOUR_USERNAME/go/bin:#<string>/Elsewhere/YOUR_USERNAME/go/bin:#' \
+        "$HERE/launchd/com.pogo.revisionprobe.plist" | sed '$d' | sed '$d'
+    echo "    <key>Padding</key>"
+    echo "    <array>"
+    # ~250KB of <string> lines: more than any pipe buffer, so a `grep -q`
+    # consumer closing early really does SIGPIPE the producer ahead of it.
+    for i in $(seq 1 3000); do
+        echo "        <string>padding $i ------------------------------------------------</string>"
+    done
+    echo "    </array>"
+    echo "</dict>"
+    echo "</plist>"
+} > "$FAKE_TEMPLATE"
+
+# First: prove the fixture really would lose the race, or this case certifies
+# timing luck rather than the fix (mg-7ce7's own requirement).
+pad_render="$(cat "$FAKE_TEMPLATE")"
+old_idiom_rc=0
+( set -uo pipefail; printf '%s\n' "$pad_render" | grep '<string>' | grep -q 'YOUR_USERNAME' ) || old_idiom_rc=$?
+if [ "$old_idiom_rc" -eq 141 ]; then
+    pass "the padded template reproduces mg-7ce7 on the INSTALLER's own guard: the old idiom returns 141, which reads as 'no placeholder found'"
+else
+    fail "the padded template did not SIGPIPE the old idiom (exit $old_idiom_rc, want 141) — this case would then be guarding nothing"
+fi
+
+rm -f "$PLIST"
+out="$(fake_install)"; rc=$?
+if [ "$rc" -eq 2 ] && case "$out" in *"still has YOUR_USERNAME in a value"*) true ;; *) false ;; esac; then
+    pass "the installer REFUSES a surviving placeholder even at a render size that defeats the pipefail spelling"
+else
+    fail "a 250KB render with a live placeholder was accepted (exit $rc) — the guard is the mg-7ce7 shape and lost its own race: $(printf '%s' "$out" | head -3)"
+fi
+
+# CASE B — the mention guard's RED ARM, which is the assertion mg-712e's report
+# named and which had never been run. Drop the stamp from the template and the
+# render genuinely stops mentioning it; the guard must say so, and must name the
+# path it could not find.
+grep -v -e '<string>--stamp</string>' \
+        -e '<string>/Users/YOUR_USERNAME/\.pogo/revision-probe\.stamp</string>' \
+        "$HERE/launchd/com.pogo.revisionprobe.plist" > "$FAKE_TEMPLATE"
+rm -f "$PLIST"
+out="$(fake_install)"; rc=$?
+if [ "$rc" -eq 2 ] \
+    && case "$out" in *"does not mention"*) true ;; *) false ;; esac \
+    && case "$out" in *"$HOME/.pogo/revision-probe.stamp"*) true ;; *) false ;; esac; then
+    pass "a template that stops naming the stamp is REFUSED, and the refusal names the missing path — the mention guard has a red arm at last"
+else
+    fail "a template with no stamp path rendered and was accepted (exit $rc) — the guard whose refusal text mg-712e reported has never been shown to fire: $(printf '%s' "$out" | head -3)"
+fi
+
+# And the guard must not be reachable by anything but a real omission. This is
+# the mg-712e shape stated as an assertion: every path the loop can name is one
+# the render just substituted in, so a clean render must never produce that
+# sentence — including at a size where a pipeline-status spelling would.
+cp "$HERE/launchd/com.pogo.revisionprobe.plist" "$FAKE_TEMPLATE"
+rm -f "$PLIST"
+mention_false_alarms=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    out="$(fake_install)"
+    case "$out" in *"does not mention"*) mention_false_alarms=$((mention_false_alarms + 1)) ;; esac
+done
+if [ "$mention_false_alarms" -eq 0 ]; then
+    pass "10 clean renders produced 0 'does not mention' refusals — the alarm mg-712e saw is not reachable from a good render"
+else
+    fail "$mention_false_alarms of 10 clean renders reported a render mismatch — the guard is alarming on something other than the comparison, which is mg-712e verbatim"
 fi
 
 # ---------------------------------------------------------------------------

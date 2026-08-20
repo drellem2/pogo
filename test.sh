@@ -255,7 +255,10 @@ gate_step "Testing the external redeploy revision probe" bash scripts/revision-p
 # green (stub daemon answering) and red (daemon gone), asserting a distinct
 # ledger line from each. Section 5 poisons go/pogo/pogod: an arming step that
 # needs a current `pogo` cannot arm the box whose `pogo` is ten days stale,
-# which is the box that needs arming.
+# which is the box that needs arming. Section 2b is that same unknown-polarity
+# argument aimed at the installer's own render guards: both had only ever been
+# shown to ACCEPT, and one of them was the `| grep -q` spelling that admits a
+# live placeholder at exit 0 once the render outgrows a pipe buffer (mg-712e).
 gate_step "Testing the revision probe's launchd arming" bash scripts/install-revision-probe_test.sh
 
 # The EXTERNAL witness that the FLEET is still completing turns (mg-f867). Same

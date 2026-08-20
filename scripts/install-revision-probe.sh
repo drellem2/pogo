@@ -234,13 +234,43 @@ RENDERED="$(render)" || die "could not render $TEMPLATE"
 # Scoped to <string> VALUES: the template's comments name the placeholder on
 # purpose, to tell a hand-installer what to substitute. A placeholder surviving
 # in a comment is documentation; one surviving in a value is a broken job.
-if printf '%s' "$RENDERED" | grep '<string>' | grep -q 'YOUR_USERNAME'; then
+#
+# NEITHER SCAN BELOW MAY TEST A PIPELINE'S EXIT STATUS (mg-7ce7, mg-712e), and
+# the two scans need that for DIFFERENT reasons.
+#
+# The placeholder scan's obvious spelling is
+#
+#     printf '%s' "$RENDERED" | grep '<string>' | grep -q 'YOUR_USERNAME'
+#
+# and it is the mg-7ce7 shape verbatim — the middle `grep` is an EXTERNAL
+# producer feeding a consumer that leaves on first match, under `pipefail`.
+# Measured on this box 2026-08-19: 0/5 against today's 10KB render, 5/5 SIGPIPE
+# 141 against a 257KB one. That is what "latent" means, and 141 is not zero, so
+# the `if` reads FALSE and the guard fails OPEN — a live placeholder installs.
+# install-fleet-liveness-probe.sh already carries the safe spelling; this file
+# was the remaining instance of the shape.
+#
+# The mention scan is pure shell for a second reason, and it is why mg-712e
+# arrived here. Its message asserts "the template and this installer disagree",
+# but the renderer and the checker read the SAME $HOME and $SRC in the same
+# process, so a content disagreement about those is impossible by construction:
+# every path this loop can name is one the render just substituted in. A
+# pipeline's exit status was therefore the only way that sentence could be
+# FALSE, and an alarm that can be false about a state it cannot detect is worse
+# than no alarm — it is read as a real render defect and sends the reader to the
+# template. mg-712e reproduced nothing (0 failures in 1,150 installs, a green
+# full-suite gate, and 0/1,200 for a BUILTIN producer at up to 256KB with the
+# match at byte 0). This closes the route; it does not diagnose that run.
+PLACEHOLDER_HITS="$(printf '%s\n' "$RENDERED" | grep '<string>' | grep 'YOUR_USERNAME')"
+if [ -n "$PLACEHOLDER_HITS" ]; then
     die "the rendered plist still has YOUR_USERNAME in a value — refusing to install a job that cannot run:
-$(printf '%s' "$RENDERED" | grep '<string>' | grep 'YOUR_USERNAME')"
+$PLACEHOLDER_HITS"
 fi
 for required in "$PROBE" "$SRC" "$LEDGER" "$STAMP"; do
-    printf '%s' "$RENDERED" | grep -qF "$required" \
-        || die "the rendered plist does not mention '$required' — the template and this installer disagree about the job's shape, and installing the result would arm something nobody described"
+    case "$RENDERED" in
+        *"$required"*) ;;
+        *) die "the rendered plist does not mention '$required' — the template and this installer disagree about the job's shape, and installing the result would arm something nobody described" ;;
+    esac
 done
 
 # ---------------------------------------------------------------------------
