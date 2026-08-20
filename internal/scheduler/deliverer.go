@@ -316,8 +316,10 @@ func (p *PogodDeliverer) sendMail(to, subject, body string) error {
 
 // buildBody assembles the message text delivered on fire. It always includes
 // the schedule id and the original fire time so the receiving agent can
-// distinguish a fresh fire from a replay during sleep recovery, and — when the
-// fire carries a completion token — the one-line command that acknowledges it.
+// distinguish a fresh fire from a replay during sleep recovery, the lateness
+// line that says how to USE that due time (see latenessInstruction), and — when
+// the fire carries a completion token — the one-line command that acknowledges
+// it.
 func buildBody(entry Entry, fireTime time.Time) string {
 	original := entry.NextFire.Format(time.RFC3339)
 	now := fireTime.Format(time.RFC3339)
@@ -331,7 +333,66 @@ func buildBody(entry Entry, fireTime time.Time) string {
 	default:
 		head = fmt.Sprintf("Scheduled fire id=%s cron=%q — fired at %s (was due %s).", entry.ID, entry.Cron, now, original)
 	}
-	return head + ackInstruction(entry)
+	return head + latenessInstruction(entry) + ackInstruction(entry)
+}
+
+// latenessInstruction tells the recipient how to find out how late it is, and
+// it rides every fire because the mechanism cannot know which recipient is
+// window-bound.
+//
+// # The due time was never the missing half — the COMPARISON was
+//
+// mg-d4a7 was filed on the premise that "a delivered fire carries no DUE TIME".
+// It does, and always has: `due=` has been in this footer since the scheduler's
+// first commit (mg-bcfa), and it holds the ORIGINAL due time because Tick fires
+// off entry.NextFire and only advances it afterwards. Read the footer of any
+// fire in ~/.pogo/events.log to see it.
+//
+// What is genuinely absent is the instruction to compare that due time against
+// the CURRENT clock. `fired=` sits right beside it and reads exactly like "when
+// you got this" — and it is not. It is when the bytes were SENT. A nudge typed
+// into a busy PTY, or a mailbox copy written for an absent agent, is consumed
+// by a turn that can run arbitrarily later.
+//
+// # What that cost, measured
+//
+// deploy-verify-architect's 2026-08-19 fire: original_due 03:33:00, fired_at
+// 03:33:10 — ten seconds, punctual by every measure this repo has, including
+// ackwatch's FireEvent.Late(), which is fired−due. It was delivered
+// nudge_unconfirmed into a stale architect and redeemed at 07:52:35, latency
+// 15,565,050 ms — 4h19m. Several of that procedure's reads are answerable only
+// inside the 03:00–03:35 deploy window; run at 06:52 they cannot tell the
+// deploy's write from a leftover. The run produced, in architect's own words,
+// "a report that was mostly correct with a small unmarked wrong region, which
+// is worse than wholly wrong". A wholly wrong report gets discarded; a
+// mostly-right one gets believed.
+//
+// So the footer was not silent. It was misread, in the one way its own shape
+// invites — and an agent that had compared due against `date` would have caught
+// it. This line names that comparison and names the wrong reference explicitly.
+//
+// # Why it does not refuse, and why it is unconditional
+//
+// Late is GRADED, not binary. Most of a late procedure still stands: sections
+// reading artifacts that carry their own timestamps are as good at 07:00 as at
+// 03:33; only the live-state reads — a stamp mtime, `dig`, `pgrep`, a daemon's
+// uptime — go stale. The honest late report is "most of this stands, these
+// three lines are REFUSED", which is neither a clean report nor a discarded
+// one. That judgement belongs to the procedure, which knows which of its own
+// reads are time-sensitive; the mechanism's whole job is to hand it the fact.
+//
+// Unconditional for the same reason: no per-schedule policy can know that, and
+// a schedule whose work becomes window-bound later would not get re-registered
+// to say so. A mail-check pays one line of noise; the alternative is the class
+// staying open for every window-bound schedule that has not been patched by
+// hand.
+func latenessInstruction(entry Entry) string {
+	return fmt.Sprintf(
+		"\nHow late am I: compare due=%s against the CURRENT clock — NOT against fired=, "+
+			"which is when these bytes were sent, not when you are reading them (measured gap "+
+			"between sent and read: 4h19m). Lateness is graded: if any of this work's reads "+
+			"depend on WHEN they run, mark those stale and answer the rest normally.",
+		entry.NextFire.Format(time.RFC3339))
 }
 
 // ackField renders the ` ack=<token>` addition to the metadata footer. Kept

@@ -460,17 +460,25 @@ func TestAckResolvesByIDWhenUnambiguous(t *testing.T) {
 }
 
 // TestBodyUnchangedWithoutToken pins backward compatibility: an Entry with no
-// issued token renders the exact pre-mg-a754 footer, so every doc and prompt
+// issued token renders the exact pre-mg-a754 FOOTER, so every doc and prompt
 // describing `[scheduler id=... due=... fired=...]` stays accurate.
+//
+// The footer is the first line and is compared byte for byte. What follows it
+// is the mg-d4a7 lateness line, which every fire now carries and which is
+// pinned separately in lateness_test.go — an entry with no token still gets no
+// `ack=` field and no ack command, which is what "unchanged" meant here.
 func TestBodyUnchangedWithoutToken(t *testing.T) {
 	at := time.Date(2026, 5, 3, 9, 0, 14, 0, time.UTC)
 	e := Entry{ID: "sweep-morning", Agent: "pm-pogo", Message: "sweep",
 		NextFire: time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC)}
 
 	body := buildBody(e, at)
-	want := "sweep\n\n[scheduler id=sweep-morning due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z]"
-	if body != want {
-		t.Errorf("body without a token changed shape:\n got: %q\nwant: %q", body, want)
+	wantFooter := "sweep\n\n[scheduler id=sweep-morning due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z]"
+	if !strings.HasPrefix(body, wantFooter+"\n") {
+		t.Errorf("body without a token changed shape:\n got: %q\nwant prefix: %q", body, wantFooter)
+	}
+	if strings.Contains(body, "ack=") || strings.Contains(body, "pogo schedule ack") {
+		t.Errorf("no token was issued, so nothing may advertise an ack: %q", body)
 	}
 }
 

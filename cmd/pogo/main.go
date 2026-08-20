@@ -3199,6 +3199,7 @@ Every fire is delivered with a completion token in its footer, plus the exact
 command that redeems it:
 
   [scheduler id=mail-check-a754 due=... fired=... ack=9f3c1ab2]
+  How late am I: compare due=... against the CURRENT clock — NOT against fired=, which is when these bytes were sent, not when you are reading them (measured gap between sent and read: 4h19m). Lateness is graded: if any of this work's reads depend on WHEN they run, mark those stale and answer the rest normally.
   When this fire's work is done, run: pogo schedule ack mail-check-a754 --agent a754 --token 9f3c1ab2
 
 Run it when the turn's work is done. pogod records the completion and emits a

@@ -1366,12 +1366,14 @@ When you receive a nudge that looks like:
 
   Check the research queue and act on any new items.
   [scheduler id=research-poll due=... fired=... ack=9f3c1ab2]
+  How late am I: compare due=... against the CURRENT clock — NOT against fired=, which is when these bytes were sent, not when you are reading them (measured gap between sent and read: 4h19m). Lateness is graded: if any of this work's reads depend on WHEN they run, mark those stale and answer the rest normally.
   When this fire's work is done, run: pogo schedule ack research-poll --agent crew-research --token 9f3c1ab2
 
-…run your normal processing loop. The bracketed metadata tells you whether
-this was an on-time fire or a recovery from a sleep — use the `due` /
-`fired` gap to decide whether to skim or catch up. When the work is done,
-run the `ack` command the fire handed you.
+…run your normal processing loop. `due` is when the fire came due; `fired` is
+when its bytes were sent — NOT when you are reading them. To find out how
+late you are, compare `due` against the current clock, which is what the
+`How late am I:` line says. When the work is done, run the `ack` command the
+fire handed you.
 ```
 
 Polecats use the same surface for one-shot wakeups (`--once --in 1h`) when
@@ -1442,6 +1444,62 @@ upstream cause and should page a human rather than trigger N restarts.
 `pogo schedule completion` is the query. Applied to 2026-07-22 00:00–23:40 it
 reads **647 delivered, 0 completed**, with per-schedule streaks climbing to 202
 (mayor) and 143 (each PM).
+
+### Lateness is graded, and `fired` is not when you read it (mg-d4a7)
+
+A window-bound procedure — one whose correctness depends on running inside a
+time window — needs to know how late it is. The due time has been on every fire
+since the scheduler's first commit: `[scheduler id=… due=… fired=… ack=…]`, where
+`due` is `Entry.NextFire` at fire time and therefore the ORIGINAL due time, not
+the rescheduled one. mg-d4a7 was filed on the premise that it was missing; it
+was not, and the ticket's proposed shape was already shipped.
+
+What was missing is the **comparison**. `fired=` sits next to `due=` and reads
+like "when you got this", and it is not: it is when the bytes were sent. A nudge
+typed into a busy PTY, or a mailbox copy written for an absent agent, is
+consumed by a turn that can run arbitrarily later — so `due ≈ fired` says
+nothing about whether the reader is on time.
+
+Measured, 2026-08-19. `deploy-verify-architect` was due 03:33:00 and fired
+03:33:10 — ten seconds, punctual by every lateness measure in this repo,
+including `ackwatch`'s `FireEvent.Late()`, which is `fired − due`. It was
+delivered `nudge_unconfirmed` into a stale architect and redeemed at 07:52:35,
+`latency_ms` 15,565,050: **4h19m**. Several of that procedure's reads are
+answerable only inside the 03:00–03:35 deploy window (a stamp is the deploy's
+only if its mtime falls inside it), so at 06:52 they could not tell the deploy's
+write from a leftover — and produced, in architect's own assessment, "a report
+that was mostly correct with a small unmarked wrong region, which is worse than
+wholly wrong". A wholly wrong report gets discarded; a mostly-right one gets
+believed.
+
+So every fire now carries one further line, between the footer and the ack
+command:
+
+    How late am I: compare due=<t> against the CURRENT clock — NOT against
+    fired=, which is when these bytes were sent, not when you are reading them
+    (measured gap between sent and read: 4h19m). Lateness is graded: if any of
+    this work's reads depend on WHEN they run, mark those stale and answer the
+    rest normally.
+
+Three deliberate properties:
+
+- **It informs; it does not refuse.** Late is graded, not binary. Sections
+  reading artifacts that carry their own timestamps are as good at 07:00 as at
+  03:33; only the live-state reads — a stamp mtime, `dig`, `pgrep`, a daemon's
+  uptime — go stale. The honest late report is "most of this stands, these three
+  lines are REFUSED", which is neither a clean report nor a discarded one. A
+  refusal gate at the entrance would discard a run that was mostly still valid.
+- **The judgement stays with the procedure.** Only the procedure knows which of
+  its own reads are time-sensitive. The mechanism's job is to hand it the fact.
+- **It is unconditional.** No per-schedule policy can know which work is
+  window-bound, and a schedule whose work becomes window-bound later would never
+  be re-registered to say so. A mail-check pays one line; the alternative leaves
+  the class open for every window-bound schedule nobody patched by hand.
+
+`buildBody` in `internal/scheduler/deliverer.go` renders it, and
+`internal/scheduler/lateness_test.go` pins all of the above — including that the
+line is built from `Entry.NextFire` and not from the fire time, which is the
+change that would quietly make every late fire read as on time.
 
 **Built-in prompt migration (mg-2f79).** The shipped prompt templates have
 all moved their recurring schedules from Claude's in-process `CronCreate` to
