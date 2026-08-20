@@ -43,6 +43,22 @@ import (
 // recoverable re-offer beats a silent loss, so the ordering stays and this gate
 // addresses the side effect.
 //
+// OBSERVED AT RUNTIME 2026-08-20 (mg-161a), which for ten days it had not been.
+// Two observations, and the second is the one that cost nothing to be wrong
+// about:
+//
+//	SANDBOX  scripts/mergedopen-runtime_test.sh drives a real refinery merge and
+//	         then a real spawn at it, with the item unclaimed back to available/
+//	         — the live shape. The refusal lands, nothing is left behind, and
+//	         --merged-override dispatches over the identical refusal, which is
+//	         what identifies THIS gate rather than one of the four ahead of it.
+//	LIVE     the running pogod refused a dispatch onto a work item whose branch
+//	         had merged eighteen minutes earlier, naming the commit on main.
+//	         Safe to aim at the live fleet because the probe passed a --template
+//	         that does not exist: ResolveTemplate runs after every gate and
+//	         before every side effect, so a gate that failed open would have
+//	         killed the request at 404 having created nothing.
+//
 // An interface so the handler is testable without a refinery, mirroring
 // DispatchGate, DispatchPairingGate, StrandedWorkGate and PreservedWorktreeGate.
 // Unlike those four the production implementation cannot live in this package:

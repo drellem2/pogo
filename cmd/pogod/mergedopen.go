@@ -52,16 +52,9 @@ import (
 //
 // # TELLING THIS ALERT FROM THE ONE THAT ALREADY ARRIVES (mg-f17c)
 //
-// This path has NEVER FIRED. Verified 2026-08-20 against the whole retained
-// record: zero `work_item_merged_not_closed` events across ~/.pogo/events.log and
-// events.log.1, and zero mails anywhere under ~/.macguffin/mail carrying this
-// alert's subject prefix. The running pogod is 1ebf2dc (2026-08-14) and 2c6c47d
-// is not an ancestor of it, so the code is merged and not live; it cannot fire
-// until a redeploy (mg-fa05 / mg-e121).
-//
-// Meanwhile a DIFFERENT merged-not-closed mail does arrive today, and confusing
-// the two would score the redeploy as verified when nothing new had run. They are
-// separable by inspection, no timing argument needed:
+// A DIFFERENT merged-not-closed mail arrives today, and confusing the two would
+// score this path as verified when nothing of it had run. They are separable by
+// inspection, no timing argument needed:
 //
 //	THIS path      subject `[merged-not-closed] <id> is MERGED but still open …`
 //	               to agent.CoordinatorName(), preceded by a
@@ -71,12 +64,33 @@ import (
 //	               mg-2b71), body opens "The work item you filed had its branch
 //	               MERGED". No event.
 //
-// So the runtime observation this alert still owes is specific: after the
-// redeploy, let one `declares-remainder` item merge with its polecat exiting
-// without a successor, and confirm a mail with the BRACKETED subject reaches the
-// coordinator's real mailbox and that `work_item_merged_not_closed` is on the
-// spine. A filer-addressed `MERGED BUT NOT CLOSED:` mail is not that observation
-// — it is the pre-existing path, and it fires either way.
+// # OBSERVED AT RUNTIME 2026-08-20 (mg-161a)
+//
+// This alert is no longer unexercised. scripts/mergedopen-runtime_test.sh builds
+// a pogod that is NOT a test binary, gives it a private everything, and drives a
+// real `declares-remainder` item through a real refinery merge; the sink below
+// runs for real and the mail lands in a real maildir the coordinator reads back
+// with `mg mail list`. That is the one observation no test in this package can
+// make, because defaultMergedOpenAlertMail refuses to send under
+// testing.Testing() — every unit test here asserts against a stub in its place.
+//
+// THE DELIVERY HAS A RED ARM AND IT BITES: with no coordinator mailbox
+// registered the send fails and `work_item_merged_not_closed_undelivered` is
+// emitted, with the event above already on the spine. Both arms are asserted, so
+// the control has been shown to distinguish them rather than merely to pass.
+//
+// WHAT IS STILL UNOBSERVED, stated so the next reader does not over-read the
+// above: this path has never fired on the LIVE fleet. Measured 2026-08-20 04:2xZ,
+// after the redeploy that made it live: zero `work_item_merged_not_closed` events
+// across ~/.pogo/events.log and events.log.1, and zero mails under
+// ~/.macguffin/mail whose SUBJECT line is this path's, against 18 old-path filer
+// mails. It has been shown to work; it has not yet had a live occasion.
+//
+// AND A TRAP IN THAT CENSUS, because mg-f17c's own wording invites it: a
+// SUBSTRING search for `[merged-not-closed]` over the live mail store returns 1
+// hit today, and it is not this path — it is mg-f17c's verdict, quoted verbatim
+// inside a filernotify `COMPLETED:` mail, which contains the string while
+// describing its absence. Anchor the census to `^Subject: `.
 
 // mergedOpenAlert is one merged-but-unclosed work item with everything a reader
 // needs to act, assembled at the moment the fact is established.
