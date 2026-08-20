@@ -381,6 +381,30 @@ belongs there instead. In order:
    | Announcement | a mail to `$POGO_DEPLOY_ALERT_TO` and `human` out of the **local** maildir, plus a `deploy_transport_fallback` event. On the night this fires, the network is what is broken. |
    | After a bounce | the streak resets, so a week-long outage bounces once every N nights rather than every night. A refused bounce does **not** reset it. |
 
+   **Has it ever fired? Not on this box — but the path is driven end to end in
+   the suite** (mg-62eb). The question was open for a real reason: on 08-17,
+   08-18 and 08-19 the nightly aborted at the transport with class
+   `unclassified` (a **counted** class) and the streak stamp was *absent*, with
+   zero bounce events. Those three nights predate the mechanism — it merged
+   11:27Z on 08-19 and the installed runner did not carry it until 12:00Z — so
+   they are evidence about nothing. What they left behind was a fallback that
+   had never run, and 08-20's deploy *succeeded*, which exercises the streak's
+   **clear** and not its bump.
+
+   `scripts/pogo-deploy_test.sh` now drives the real `main()` through four arms:
+   a fresh box plus a transport failure writes `<today> 1 -`; a second
+   consecutive night carries it to `2`; at the threshold the fallback invokes
+   `pogo-self-deploy bounce --yes --drain-timeout N` and the completed bounce
+   resets the count and stamps the date; and a night whose sync *reaches the
+   tree* clears to 0 without considering the fallback at all. Before that, the
+   wiring was covered only by greps of this runner's source for the **line
+   number** of the `fallback_bounce` call — assertions about where text sits in
+   a file, which cannot tell a wired call from one whose branch is never
+   reached. (`fallback_bounce` itself was unit-covered all along; what was not
+   was the sync-abort path reaching it with a count it had derived.) What is still untested is whether a real `bounce` unwedges agents
+   stuck the way the August fleet was; the suite asserts the invocation, not the
+   cure.
+
    Set `POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER=0` to disable the fallback entirely.
    Two couplings survive and are documented at `pogo-deploy.sh` section 5c: the
    state this fires in makes a drain refusal *more* likely (a wedged polecat that
