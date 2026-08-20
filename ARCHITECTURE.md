@@ -348,6 +348,48 @@ The same probe feeds stall-watch, so the surfaces that *advertise* an item stop
 advertising it: `internal/stallwatch`'s preserved-worktree check reports it with
 the opposite remedy instead of dropping it silently.
 
+**The committed half of the same tree (mg-fcba).** mg-836c defined this
+population over `git status`, which goes clean the instant a worker commits — so
+the state a polecat reaches when it gets *further* (commit, then be stopped
+before pushing) passed straight through the gate, and that is the state the
+nightly pre-deploy stop creates on purpose. Two instruments were blind for
+different reasons and one was not blind at all, which is worth keeping straight:
+
+- the mg-836c probe skipped the tree entirely, because a clean tree gives the
+  removal guard nothing to refuse;
+- **the stranded-work gate above already covers a committed polecat *branch***.
+  `strandedwork.Scan` reads `refs/heads/polecat-*` as well as
+  `refs/remotes/origin/polecat-*`, and a linked worktree's branch is a ref in the
+  *source repo's* namespace — so an unpushed branch has refused a spawn since
+  mg-bfe0;
+- what has **no ref at all** is a worktree on a **detached HEAD**. Its commits
+  are reachable from that tree's own HEAD and from nothing else, so a scan over
+  refs cannot see them by construction. `~/.pogo/polecats/p6b2d` is in that state
+  on this machine;
+- and **stall-watch reads no refs whatever** — it has an in-flight probe, a
+  capacity probe and this preserved probe, and no branch probe of any kind. So
+  priority-wake said "claim or dispatch now" for a committed-but-unpushed item
+  regardless of what the spawn gate would later have done about it. That is the
+  surface the report was filed on: one item advertised **four times** while its
+  only copy sat in a preserved tree.
+
+So the probe now carries both halves and every consumer inherits both. The
+predicate is `gitgc.BranchDurable` asked about the *worktree's HEAD* rather than
+about a named branch — deliberately not `git log HEAD --not --remotes`, because
+**the refinery rebases before merging**, so a SHA test calls every landed-and-
+preserved tree unpushed forever (71 of this repo's 146 polecat branches read
+`--no-merged main` while demonstrably having landed). `BranchDurable`'s third
+test compares patch ids for exactly that reason. Cost, which the report named as
+untimed: **92µs** per probe in the steady state (no tree names a wanted item) and
+**~60ms per candidate tree** on top of the ~18ms the removal guard already spent
+there.
+
+The refusal for this half does not prescribe `refinery submit` either, and for a
+second reason: the refinery merges `origin/<branch>` and **refuses a branch that
+is not on origin** (mg-586d), so the command cannot run for precisely this
+population. A detached tree gets the remedy that actually applies — give those
+commits a ref (`git -C <tree> switch -c <branch>`) before anything else.
+
 **Why the fifth exists**, given the third. They are complements, not degrees of
 the same check: the stranded-work gate covers a branch that is pushed and
 **unmerged**, and the case it stops applying to is the one that opens the moment

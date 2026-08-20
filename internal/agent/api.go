@@ -1625,7 +1625,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// no way out but deleting the very thing the gate exists to protect.
 	// --preserved-override costs a written reason, recorded as an event beside
 	// the refusal it bypassed.
-	if refusal := r.preservedWorktreeRefusal(spawnReq.Id, spawnReq.Repo); refusal != "" {
+	if refusal := r.preservedWorktreeRefusal(spawnReq.Id, spawnReq.Repo, spawnReq.Branch); refusal != "" {
 		if override := strings.TrimSpace(spawnReq.PreservedOverride); override != "" {
 			emitPolecatPreservedOverridden(spawnReq, override, refusal)
 			log.Printf("dispatch preserved-worktree: OVERRIDDEN for %s by explicit request: %s (refusal was: %s)",

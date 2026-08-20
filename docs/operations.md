@@ -1843,7 +1843,16 @@ call site all along — and the two halves combine:
   *was*.
 
 It reports, like the other two. No dispatch is refused and no tree is reclaimed on
-the strength of it: the detection was never what failed here.
+the strength of *this event*: the detection was never what failed here. **Dispatch
+itself is gated** — on the trees directly rather than on the event or its mail —
+by the spawn-time preserved-worktree gate (mg-836c) and, for the state one step
+later, by the same probe's committed half (mg-fcba): a polecat that commits and is
+stopped before it pushes leaves a tree `git status` calls clean, which is exactly
+what the nightly pre-deploy stop produces. The opening claim of this section —
+that every guard here is defined over pushed commits — has one standing exception
+worth naming: the stranded-work gate reads `refs/heads` as well as
+`refs/remotes/origin`, so an **unpushed polecat branch** already refuses a spawn
+(mg-bfe0). What no ref scan can reach is a worktree on a **detached HEAD**.
 
 **No third detector was built, and that was the point.** The signal existed and was
 correct both times it fired; what it lacked was one field, and therefore the

@@ -1106,10 +1106,11 @@ of defence: `pogo agent spawn-polecat` refuses an item with a retained tree and
 names it, and the stall-watch / priority-wake surfaces stop advertising it and
 report it with the opposite remedy instead. Three things follow for you:
 
-- **The remedy is not `refinery submit`.** Nothing is committed, so there is
-  nothing to submit. The disposition is a decision: commit the tree on its own
-  branch and land it, rescue what is worth keeping by hand, or rule the work
-  spent.
+- **The remedy is not `refinery submit`.** For an uncommitted tree there is
+  nothing to submit; for a committed one the refinery merges `origin/<branch>`
+  and refuses a branch that is not on origin, so the command still cannot run.
+  The disposition is a decision: make the work reachable on a branch and land
+  it, rescue what is worth keeping by hand, or rule the work spent.
 - **Never clear the refusal by removing the worktree.** That is the reflex
   remedy and it destroys the only copy. It is also what the incidental
   checked-out-branch error invites, because that error names a different reason.
@@ -1117,6 +1118,26 @@ report it with the opposite remedy instead. Three things follow for you:
   consequence is **not recoverable** — the tree is reaped once its item
   concludes. Read the tree before you use it, and say in the reason what you
   found.
+
+**The note you write when you stop a polecat is no longer the mechanism
+(mg-fcba).** It was, and that is what got reported: on the 2026-08-20 pre-deploy
+stop a polecat's work existed only in its preserved tree, priority-wake
+advertised the item as "ready, claim or dispatch now" **four times**, and the
+only thing between that advice and duplicated work was a note written from
+memory eight minutes earlier. Writing the note is still worth doing — it carries
+context no mechanism has — but it is no longer load-bearing, because the same
+probe now covers the state a polecat reaches when it commits and is stopped
+before it pushes. `git status` is clean then, which is exactly why mg-836c's
+gate walked past it. Two things follow:
+
+- **A clean worktree is not an empty one.** `pogo gc --list-preserved` now names
+  the commits that exist nowhere else under each tree it lists, and the spawn
+  refusal and the stall notices say `clean — its work is already committed`
+  rather than reporting zero dirty files.
+- **A tree on a DETACHED HEAD is the worst case and reads as `branch HEAD`.**
+  Its commits are held by that worktree's HEAD and by no ref at all, so nothing
+  that scans refs can see them and removing the tree orphans them. Give them a
+  ref first (`git -C <tree> switch -c <branch>`) before anything else.
 
 ### Intake reconciliation — `pogo check-intake`
 
