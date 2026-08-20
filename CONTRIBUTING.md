@@ -74,6 +74,25 @@ unreproduced gate failure, set beside a green CI run on the same commit, was
 escalated as MAIN IS RED four minutes before a nightly deploy — on a tree that
 was green throughout (`mg-5fc8`).
 
+**The converse is also true, and it is the more expensive direction.** A green
+merge gate is not evidence that CI is green, because a Linux-only failure
+cannot reach the gate at all: the gate runs on darwin, so a `linux-procfs` code
+path, a procps `ps` format, or a `/proc` read simply does not execute there. On
+2026-08-20 that gap ran for six and a half hours — 7 of the 15 runs then on
+`main` failed, **all 7 of them `TestReadRealHost`** (re-derived from
+`gh run list` + `--log-failed` on every failure), every merge correctly green
+on the instrument the fleet watches and red on the instrument external
+contributors see (`mg-d54a`). The
+failures interleave with successes, so **a check that reads only the newest
+completed run reports GREEN**; widen the window before concluding anything:
+
+```bash
+gh run list --repo drellem2/pogo --branch main --limit 15
+```
+
+If you touch a path whose behaviour differs by OS, say which OS you verified on
+in your report. "The gate passed" answers a question about darwin.
+
 Adding a suite to `test.sh` does **not** oblige you to add it to `ci.yml`.
 Several gate rows are darwin-specific, several stand up live daemons, and one
 drives the live fleet; closing the gap is not the goal, and `ci-coverage.sh`
