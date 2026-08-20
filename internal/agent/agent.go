@@ -569,6 +569,13 @@ type Registry struct {
 	// refinery from one it failed to ask.
 	refineryActivity RefineryActivity
 
+	// repoResolver turns a work item's `repo` field into the path the cap
+	// counts workers in, when that field is a bare NAME rather than a path.
+	// Nil leaves such names unresolved, and RepoOccupancyFor then says so
+	// instead of reporting an unresolvable name as an empty repository —
+	// which is the whole of mg-cd4a. See reporesolve.go.
+	repoResolver RepoResolver
+
 	// workItemClaimer takes a dispatched polecat's work item out of available/
 	// BEFORE its process starts, so ownership no longer depends on the polecat
 	// reaching its own `mg claim` step — which requires a model-API turn, and so

@@ -33,6 +33,12 @@ type RepoCapacity struct {
 	// than recomputed from Count and Cap, so this watcher can never disagree
 	// with the gate it is reporting on.
 	AtCap bool
+	// Unresolved, when non-empty, is why the repository could not be identified
+	// at all — the item's `repo` field is a bare NAME that matched no known
+	// repository, or a path that is not there. It accompanies known=false, and
+	// it is the REASON a notice can give instead of naming a repo the reader
+	// then has to go look up. See mg-cd4a.
+	Unresolved string
 	// Uncertain, when non-empty, is why Count may be an undercount (typically:
 	// the persisted polecat witness could not be read, or live workers could not
 	// be attributed to any repo). The cap FAILS OPEN on those, so an uncertain
@@ -153,15 +159,23 @@ func (w *Watcher) splitByCapacity(items []workitem.WorkItem) capacitySplit {
 			p = probed{cap: c, known: known}
 			seen[repo] = p
 		}
+		// Bucket under the repository the probe IDENTIFIED, not under the
+		// spelling the item used. `pogo` and `/Users/daniel/dev/pogo` are the
+		// same repository — 42 items spell it the first way and 883 the second
+		// (mg-cd4a) — and a notice carrying both must say so once, with one
+		// occupant list, rather than reporting one repository as two.
+		// `seen` stays keyed on the raw spelling so each distinct one is
+		// probed at most once, which is what the cost note above promises.
+		key := p.cap.Repo
 		switch {
 		case !p.known:
-			bucketAdd(unknownAcc, repo, p.cap, it.ID)
+			bucketAdd(unknownAcc, key, p.cap, it.ID)
 		case p.cap.AtCap:
-			bucketAdd(cappedAcc, repo, p.cap, it.ID)
+			bucketAdd(cappedAcc, key, p.cap, it.ID)
 		default:
 			s.free = append(s.free, it.ID)
 			if p.cap.Uncertain != "" {
-				uncertain[repo] = p.cap.Uncertain
+				uncertain[key] = p.cap.Uncertain
 			}
 		}
 	}
@@ -297,8 +311,12 @@ func (s capacitySplit) message(t noticeText) string {
 	}
 
 	for _, u := range s.unknown {
-		fmt.Fprintf(&b, " Occupancy for %s could not be determined, so %s may or may not be dispatchable right now — attempt the dispatch and read the refusal if there is one.",
-			u.repo, strings.Join(u.ids, ", "))
+		why := ""
+		if u.cap.Unresolved != "" {
+			why = " (" + u.cap.Unresolved + ")"
+		}
+		fmt.Fprintf(&b, " Occupancy for %s could not be determined%s, so %s may or may not be dispatchable right now — attempt the dispatch and read the refusal if there is one. Do NOT preempt a worker or snooze an item on the strength of this notice; if the dispatch is refused, the refusal says what to do.",
+			u.repo, why, strings.Join(u.ids, ", "))
 	}
 	if len(s.uncertain) > 0 {
 		fmt.Fprintf(&b, " (Worker counts for %s may be an undercount, so a dispatch there could still be refused.)",
@@ -353,6 +371,15 @@ func (s capacitySplit) stampDetails(details map[string]any) {
 	}
 	if len(s.unknownIDs) > 0 {
 		details["occupancy_unknown_ids"] = s.unknownIDs
+		var why []string
+		for _, b := range s.unknown {
+			if b.cap.Unresolved != "" {
+				why = append(why, b.cap.Unresolved)
+			}
+		}
+		if len(why) > 0 {
+			details["occupancy_unresolved"] = why
+		}
 	}
 	if len(s.uncertain) > 0 {
 		details["occupancy_uncertain"] = s.uncertain

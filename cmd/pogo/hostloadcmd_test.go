@@ -99,6 +99,25 @@ func TestRepoOccupancyRendersEveryState(t *testing.T) {
 			},
 			want: []string{"UNREADABLE", "may therefore be low", "Unattributed: 1", "x-mystery"},
 		},
+		{
+			// mg-cd4a. `Workers: 0` under a cap of 3 is this command making the
+			// mistake its own doc comment warns about: the caller is deciding
+			// whether to dispatch, and a fabricated zero reads as permission
+			// exactly as loudly as silence would. The count was never taken.
+			name: "an occupancy that was never counted does not print a zero",
+			occ: &agent.RepoOccupancy{
+				Repo: "pogo", Cap: 3, ConfiguredCap: 3, RefineryKnown: true,
+				Unresolvable: `"pogo" is a repository NAME, not a path, and it matches no single repository known to this host`,
+			},
+			want: []string{
+				"NOT COUNTED", "NAME, not a path",
+				"NOT an empty repository", "never looked for",
+				"lsp", "FAILS OPEN",
+			},
+			// The two numbers a skimming reader would keep, and both would be
+			// wrong: a worker count nobody took, and a refusal nobody made.
+			deny: []string{"Workers:    0", "would currently be refused"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer

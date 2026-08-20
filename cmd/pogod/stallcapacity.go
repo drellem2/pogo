@@ -46,11 +46,19 @@ func newStallCapacity(reg *agent.Registry) stallwatch.Capacity {
 // rule in perfectly confident prose.
 func stallCapacityFrom(occ agent.RepoOccupancy) (stallwatch.RepoCapacity, bool) {
 	c := stallwatch.RepoCapacity{
-		Repo:     occ.Repo,
-		Count:    occ.Count,
-		Cap:      occ.Cap,
-		Polecats: occ.Polecats,
-		AtCap:    occ.WouldRefuse,
+		Repo:       occ.Repo,
+		Count:      occ.Count,
+		Cap:        occ.Cap,
+		Polecats:   occ.Polecats,
+		AtCap:      occ.WouldRefuse,
+		Unresolved: occ.Unresolvable,
+	}
+	// An unresolvable repo is the mg-cd4a case: the item names a repository
+	// this host cannot identify, so no count was TAKEN. Reporting Count 0 as
+	// free slots is the defect — the repository behind the name may be at its
+	// cap, and it was, the night this was measured.
+	if occ.Unresolvable != "" {
+		return c, false
 	}
 	if occ.WitnessErr != "" && occ.Count == 0 {
 		return c, false
