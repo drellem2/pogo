@@ -1611,6 +1611,17 @@ redeploy is.
   fi
   ```
   Read that exit status every time. `pkill` returns 1 when it matched nothing, and "matched nothing" is indistinguishable from "was already dead" — which is exactly how a kill that never happened reads as a kill that succeeded.
+- **`pgrep` is not a liveness instrument here, and `cmd $(pgrep ...)` is worse than a wrong answer.** `pgrep`/`pkill` exclude the calling process **and every one of its ancestors** unless passed `-a` — that is `man pgrep`, not a quirk of this box — and pogod spawns every agent, so **pogod is always your ancestor**. Measured 2026-08-20 from a worker shell: `pgrep -x pogod`, `pgrep -f pogod` and bare `pgrep pogod` all returned empty at exit 1 while `lsof -iTCP:10000 -sTCP:LISTEN` showed pogod serving, and `pgrep -ax pogod` returned its pid. It is not a `-x` versus `-f` matter — the process is filtered out before your pattern is applied. The same is true of your own shell, of `claude`, and of `launchd`: `pgrep -x launchd` matches nothing from anywhere on the machine. **An empty `pgrep pogod` is not evidence that pogod is down**, and `pgrep -P <pid>` aimed at an ancestor does not even fail loudly — it returns every child except the branch you are standing on, at exit 0 (measured: 9 of pogod's 10 children).
+
+  The empty result is not the harm; what an empty command substitution does to the command around it is. `ps eww $(pgrep -x pogod)` loses its only argument and becomes bare `ps eww`, which describes **the caller's own processes, with their environments attached, and exits 0** — a well-formed answer to a question that was never asked. One {{.Worker}} read its own harness's `POGO_HOME` back out of exactly that and nearly filed a confident, well-evidenced, entirely false finding that the live daemon was misconfigured into a temp dir (mg-cbee). Adding `| head -1` makes it worse, not better: it discards `pgrep`'s exit status too.
+
+  **Ask pogod instead** — `pogo server status` prints `pid=<pogod's pid>`, and because pogod serves that line itself it cannot report a pid for a daemon that is not answering; it exits non-zero with the message "pogo server is not reachable". For agents, `pogo agent list` carries the pids. If you must use a pattern matcher, capture it, **refuse an empty result**, and quote the expansion:
+
+  ```bash
+  PID="$(pgrep -ax pogod | head -1)"
+  [ -n "$PID" ] || { echo "no match — the next command would answer a different question"; exit 1; }
+  ps eww "$PID"
+  ```
 - **Don't stop or redeploy pogod.** Both kill you and the fleet, and the redeploy path refuses you outright. Run `scripts/pogo-self-deploy check` to see the drift and hand off from there — see "Daemon Lifecycle (pogod itself)".
 - **Don't block on anything.** If something is stuck, note it, move on, come back later.
 

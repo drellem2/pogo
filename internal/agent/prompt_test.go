@@ -6504,6 +6504,120 @@ func TestPromptsDoNotAnchorAKillToAHardcodedBinaryPath(t *testing.T) {
 	}
 }
 
+// TestShippedPromptsWarnPgrepIsNotALivenessInstrument guards mg-cbee's hazard in
+// every prompt that drives a shell.
+//
+// THE MECHANISM, measured 2026-08-20 from a worker shell and reproducible on any
+// macOS box: `pgrep`/`pkill` exclude the calling process and every one of its
+// ancestors unless passed `-a` (`man pgrep`), and pogod is the ancestor of every
+// agent it spawns. `pgrep -x pogod`, `pgrep -f pogod` and bare `pgrep pogod` all
+// returned empty at exit 1 while `lsof -iTCP:10000 -sTCP:LISTEN` showed pogod
+// serving; `pgrep -ax pogod` returned the pid. It is not a `-x` versus `-f`
+// matter — the process is filtered out before the pattern is applied. Same for
+// the caller's own shell, for `claude`, and for `launchd`, which no caller
+// anywhere on the machine can ever see.
+//
+// THE HARM IS NOT THE EMPTY RESULT. An empty command substitution takes the
+// argument off the command wrapped around it: `ps eww $(pgrep -x pogod)` becomes
+// bare `ps eww`, which describes the CALLER's own processes with their
+// environments attached and exits 0. An architect polecat read its own harness's
+// `POGO_HOME` back out of that during a deploy verification and nearly filed a
+// confident, well-evidenced, entirely false finding that the live daemon was
+// misconfigured into a temp dir — on the night pogod's `POGO_HOME` was
+// independently confirmed correct.
+//
+// WHY IT IS PINNED IN THE POLECAT TEMPLATES SPECIFICALLY. The ancestor exclusion
+// was measured once before, under mg-ce2c, and written into mayor.md and
+// crew/doctor.md — inside the unanchored-`pkill` bullet, framed as a reason a
+// KILL will not land. The agent that hit this was a polecat, and it was reading,
+// not killing. Neither prompt that knew was in front of it. Two agents already
+// carried the trap in private memory; a fact in an agent's memory is not in the
+// corpus, which is why it kept being rediscovered at the cost of nearly-filed
+// false findings.
+//
+// BOTH HALVES are pinned, deliberately. A prompt that keeps only the "pgrep
+// misses pogod" half teaches the reader to reach for `-a` and leaves the
+// substitution armed against every OTHER pattern they write; a prompt that keeps
+// only the substitution half leaves them reading an empty `pgrep` as a dead
+// daemon. The replacement instrument is pinned too, because a bare prohibition
+// with nothing to do instead gets ignored under time pressure — the same lesson
+// the pkill ban above is written from.
+func TestShippedPromptsWarnPgrepIsNotALivenessInstrument(t *testing.T) {
+	names := []string{
+		"prompts/templates/polecat.md",
+		"prompts/templates/polecat-qa.md",
+		"prompts/templates/polecat-build-pr.md",
+		"prompts/templates/polecat-triage.md",
+		"prompts/templates/polecat-review.md",
+		"prompts/templates/polecat-architect.md",
+		"prompts/mayor.md",
+		"prompts/crew/doctor.md",
+	}
+	for _, name := range names {
+		data, err := defaultPrompts.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", name, err)
+		}
+		body := string(data)
+		for _, want := range []string{
+			// Half one: the mechanism, and that it is documented rather than a
+			// property of this box, so the reader does not go looking for a
+			// pogod bug that is not there.
+			"and every one of its ancestors",
+			"`man pgrep`",
+			// The reading that must not be made.
+			"is not evidence that pogod is down",
+			// Half two: the construction, in the exact form that cost a night.
+			"ps eww $(pgrep -x pogod)",
+			// Not "exits 0" — several of these prompts already contain that
+			// phrase for unrelated reasons, so it would pass on a prompt that
+			// had lost the paragraph entirely (checked: it did).
+			"loses its only argument",
+			// The replacement, without which the rule gets ignored.
+			"pogo server status",
+			`[ -n "$PID" ]`,
+			`pgrep -ax pogod`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing pgrep-liveness guidance %q (mg-cbee)", name, want)
+			}
+		}
+	}
+
+	// The rule applied to the whole corpus, not just the eight prompts above: any
+	// prompt that shows a `$(pgrep ...)` capture must ship the empty-guard with
+	// it. Unguarded, the substitution vanishes and the surrounding command
+	// answers a different question at exit 0 — which is the entire ticket. This
+	// is the same shape as the `pkill -f "^$BIN"` / `[ -n "$BIN" ]` pairing
+	// asserted above, and it is a sweep because the next prompt to grow one of
+	// these will not be one of the eight.
+	var entries []string
+	if err := fs.WalkDir(defaultPrompts, "prompts", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			entries = append(entries, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk prompts: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no shipped prompts found; the sweep below would pass vacuously")
+	}
+	for _, path := range entries {
+		data, err := defaultPrompts.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+		if strings.Contains(body, "$(pgrep") && !strings.Contains(body, `[ -n "$PID" ]`) {
+			t.Errorf("%s: shows a $(pgrep ...) capture with no `[ -n \"$PID\" ]` guard beside it; an empty match silently removes the argument and the wrapping command answers a different question at exit 0 (mg-cbee)", path)
+		}
+	}
+}
+
 // THE EVIDENCE DISCIPLINE — one section in the two templates whose worker
 // verdicts on work someone else did (mg-0d85, folding mg-04c3 and mg-c742 in
 // with two additions). Four habits, one idea: a claim about your own work is

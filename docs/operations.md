@@ -235,6 +235,39 @@ pogo agent diagnose <name> --json | jq .process_alive   # false ⇒ that process
 
 `process_alive` is a real `kill(pid, 0)` check against the agent's pid, and `health` reports `exited`/`dead` alongside it. Remember that for a `restart_on_crash` agent a false `process_alive` means *that* process is gone, not that the agent will stay down — only a park keeps it down.
 
+### Finding pogod's own pid — and why `pgrep` cannot
+
+`pogo server status` prints it:
+
+```
+$ pogo server status
+pogod:    ok  (mode=full, uptime=57m49s, pid=11579)
+```
+
+Use that, not a pattern match. `pgrep`/`pkill` exclude the calling process **and
+every one of its ancestors** unless passed `-a` (`man pgrep`), and pogod is the
+ancestor of every agent it spawns — so from inside any agent `pgrep -x pogod`
+returns **empty at exit 1 while pogod is serving on its port**. Measured
+2026-08-20: `pgrep -x pogod`, `pgrep -f pogod` and bare `pgrep pogod` all empty,
+`pgrep -ax pogod` returning the pid, `lsof -iTCP:10000 -sTCP:LISTEN` showing the
+daemon the whole time. The same is true of `launchd`, which no caller anywhere
+on the machine can see. `pgrep -P <pid>` aimed at an ancestor is worse: it
+returns every child except the branch you are standing on, at exit 0.
+
+**An empty `pgrep pogod` is not evidence that pogod is down.** And the empty
+result is not the real hazard — `ps eww $(pgrep -x pogod)` loses its only
+argument and becomes bare `ps eww`, which describes the *caller's* processes with
+their environments attached and exits 0. That is a well-formed answer to a
+question that was never asked, and it once looked exactly like a live daemon
+misconfigured into a temp dir. Full measurements:
+[pgrep-cannot-see-pogod-2026-08-20.md](investigations/pgrep-cannot-see-pogod-2026-08-20.md)
+(mg-cbee).
+
+The `pid` from `pogo server status` is served by pogod itself, so it cannot
+report a pid for a daemon that is not answering — the command fails with `pogo
+server is not reachable` instead. `GET /health/full` (`pogod.pid`) and
+`GET /version` (`pid`) carry the same value for programmatic callers.
+
 ## Pogod restart policy
 
 `pogod` runs under launchd with `KeepAlive=true` (see `scripts/launchd/com.pogo.daemon.plist`). That means **any uncoordinated kill is a loop**: launchd relaunches the daemon within seconds, and if the caller then re-evaluates "pogod looks broken — kill it again," the system gets stuck in a kill→relaunch→kill cycle. The decision recorded in mg-f5fc is that callers — polecats (disposable worker agents), crew agents, humans at a terminal — follow a three-tier escalation. Try tier 1 first; only escalate when the situation matches the criteria below.

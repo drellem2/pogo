@@ -393,3 +393,29 @@ func plural(n int, unit string) string {
 	}
 	return fmt.Sprintf("%d %ss", n, unit)
 }
+
+// formatHealthPogod renders the pogod line of `pogo server status`.
+//
+// The pid is on this line because until mg-cbee there was no way for an agent
+// to learn it. `pgrep`/`pkill` exclude the calling process and every one of its
+// ancestors unless passed `-a` (`man pgrep`), and pogod is the ancestor of every
+// agent it spawns — so `pgrep -x pogod` from any agent returns empty at exit 1
+// while pogod is serving. Measured 2026-08-20; see
+// docs/investigations/pgrep-cannot-see-pogod-2026-08-20.md.
+//
+// This line is the instrument that replaces the pattern match, and it is safe in
+// the way the pattern match is not: pogod serves it itself, so it cannot report
+// a pid for a daemon that is not answering — `pogo server status` fails with
+// "pogo server is not reachable" instead of printing something plausible.
+//
+// A daemon built before the field reports 0. That is rendered as a NAMED
+// absence rather than `pid=0`, because `pid=0` is a number a reader will carry
+// into `kill`/`ps` and a whole `pid=` token going missing is what the caller of
+// a `$(...)` capture cannot see (mg-cbee is a ticket about exactly that shape).
+func formatHealthPogod(p health.Pogod) string {
+	pid := fmt.Sprintf("pid=%d", p.PID)
+	if p.PID <= 0 {
+		pid = "pid=unreported (this pogod predates the field; `lsof -iTCP:<port> -sTCP:LISTEN -n -P` names it)"
+	}
+	return fmt.Sprintf("pogod:    %s  (mode=%s, uptime=%s, %s)\n", p.Status, p.Mode, p.Uptime, pid)
+}
