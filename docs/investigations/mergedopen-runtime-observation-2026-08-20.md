@@ -174,9 +174,9 @@ worker was dispatched.
   redeploy: **0** `work_item_merged_not_closed` events across `~/.pogo/events.log`
   and `events.log.1`, and **0** mails under `~/.macguffin/mail` whose `Subject:`
   line is this path's — against **18** old-path `MERGED BUT NOT CLOSED:` filer
-  mails. The alert has been shown to work; it has not yet had a live occasion,
-  which needs a real merge whose close is refused and cannot be manufactured
-  without putting a real alarm in the mayor's inbox.
+  mails. Recorded, in the form the coordinator required (see the ruling below):
+  **demonstrated in sandbox on both arms; not yet witnessed on the live fleet;
+  the observation is SCHEDULED rather than awaited.**
 - **The coordinator mailbox in the observation is the sandbox's,** not the live
   mayor's. What that costs is the routing to *this machine's* mayor; what it does
   not cost is any part of the sink, since the same `client.SendMGMail` →
@@ -280,3 +280,35 @@ All 5 gated cases in that window were `blocked:mayor`. The single historical
 so its filer mail was never sent, and the routing claim for that sub-case remains
 **untested**. Nothing in this item's work touched it. Not re-derived here; that is
 mg-f17c's polecat's finding, quoted as theirs.
+
+---
+
+## The ruling on the residual
+
+The live occasion could have been manufactured — file a throwaway
+`declares-remainder` item, push a no-op branch, submit it with that item as author
+— and this polecat asked the coordinator rather than deciding, because it puts a
+real alarm in a real inbox and a real commit on `main`. **The coordinator chose
+not to** (2026-08-20 03:20Z), and the reasoning is recorded here rather than only
+the choice:
+
+> What (a) would add is narrow: proof that the live fleet's own wiring delivers to
+> a real mailbox. Real, but not worth a commit on main and a genuine alarm in the
+> coordinator's inbox — a manufactured alarm is indistinguishable from a real one
+> to everything downstream that reads that box, and I would be putting a false
+> positive into the exact channel this path exists to make trustworthy.
+
+And it refused the alternative **as this polecat had framed it**, which is the part
+worth carrying:
+
+> "It will happen on its own, 13 events in six days" is a prediction, not a plan.
+> Nothing observes it when it fires, so as written (b) closes the residual by
+> hoping someone notices — which is the same defect as an alarm nobody reads, one
+> level up.
+
+So the wait is **armed** rather than left standing: the coordinator is scheduling a
+dated check that someone is obliged to run, carrying the anchored census below —
+`^Subject: \[merged-not-closed\]`, never a substring match, for the reason set out
+in the trap section above. That scheduling is the coordinator's action, not this
+item's, and is recorded here so the residual can be chased to something that will
+actually happen rather than to a sentence.
