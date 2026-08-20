@@ -40,7 +40,7 @@ fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE"; }
 # full 450-assertion run: TWO writes escape per suite run, both to
 # $POGO_HOME/deploy-transport-streak.stamp, from
 #
-#   pogo-deploy.sh:3759  the BUMP          <- run_e2e step  (logs "transport streak: 0 ...")
+#   pogo-deploy.sh:3759  the BUMP          <- run_e2e step  (logs "transport streak: ...")
 #   pogo-deploy.sh:3811  the post-sync CLEAR <- run_e2e ok  (SILENT: it logs only when prev0>0)
 #
 # neither of which sets POGO_DEPLOY_TRANSPORT_STREAK. The clear is the one worth
@@ -3298,6 +3298,53 @@ run_e2e cleared "$FAKEBIN/workinggit" 5 20
 grep -q 'consecutive nights lost at the TRANSPORT step (threshold' "$E2E/cleared.log" \
     && fail "a night that synced fine still considered bouncing the fleet" \
     || pass "NEGATIVE CONTROL: and it never reaches the fallback at all"
+
+# ARM 5 — THE ZERO THE IDEMPOTENCE PRODUCES, END TO END (mg-cfeb). This box
+# fires the deploy THREE times a night (03:00, 04:00, 05:00), so the state below
+# is available every single night on the only box the mechanism runs on: an
+# earlier fire reached the tree and wrote "<today> 0", and a LATER fire then
+# failed at the transport. transport_streak_next is idempotent per date, so the
+# later failure computes 0 — correctly, because the unit is nights and this night
+# was not lost — and the bump arm then announced that 0 on a run that had just
+# failed at the transport.
+#
+# The unit block above holds the STRING. This holds the JOIN: that the runner
+# reaches this state from a stamp on disk and its own failed sync, which is the
+# step those assertions have to assume. The count is asserted UNCHANGED here on
+# purpose — the semantics were never the defect and this arm would catch a fix
+# that "solved" the line by making the streak count fires.
+E2E_PIN=2026-08-19
+export POGO_DEPLOY_DATE="$E2E_PIN"   # pinned, not `date +%F`: a seed written on
+                                     # one side of midnight and read on the other
+                                     # would read as YESTERDAY and count a night.
+printf '%s 0 -\n' "$E2E_PIN" > "$E2E_STREAK"
+run_e2e latefire "$FAKEBIN/hanggit" 2 600
+unset POGO_DEPLOY_DATE
+grep -q 'ABORTED: could not sync' "$E2E/mail.log" 2>/dev/null \
+    && pass "the late fire really did FAIL AT THE TRANSPORT — this arm's premise is measured, not assumed" \
+    || fail "the latefire arm did not abort at the sync, so it is not the state the ticket describes: $(tail -5 "$E2E/latefire.log")"
+[ "$(streak_count "$E2E_STREAK")" = "0" ] \
+    && pass "and the count STAYS 0 — nights, not fires: three fires on one night still cannot manufacture a threshold" \
+    || fail "a second fire of the same night moved the count to $(streak_count "$E2E_STREAK") — the fix changed the semantics the ticket said to leave alone"
+grep -q '0 consecutive night(s) lost' "$E2E/latefire.log" \
+    && fail "ACCEPTANCE FAILED: the run logs '0 consecutive night(s) lost' immediately after failing at the transport — the one line a reader checks reads as reassurance: [$(grep -m1 'transport streak:' "$E2E/latefire.log")]" \
+    || pass "ACCEPTANCE: a fire that failed at the transport no longer logs '0 consecutive night(s) lost'"
+grep -q 'THIS FIRE FAILED AT THE TRANSPORT' "$E2E/latefire.log" \
+    && pass "ACCEPTANCE: it says the fire FAILED, first, and explains why the streak did not move — a wrong-looking line gets investigated, a reassuring one does not" \
+    || fail "the run said nothing about the failure on its streak line: [$(grep -m1 'transport streak:' "$E2E/latefire.log")]"
+grep -q '0 consecutive transport-lost night(s)' "$E2E/latefire.log" \
+    && fail "the fallback still reports '0 consecutive transport-lost night(s)' — and that string also goes out in the abort MAIL" \
+    || pass "ACCEPTANCE: and the fallback's not-due line — which is copied into the abort mail — carries the same correction"
+# The abort mail is composed from the same FALLBACK_DETAIL, and alert() writes
+# the composed body to stderr — which run_e2e captures into this same log. So
+# this greps the MAIL's `fallback:` field, not the log line above it.
+grep -q 'fallback: not-due — the streak is UNCHANGED at 0' "$E2E/latefire.log" \
+    && pass "and the abort MAIL's own fallback field reads 'not-due — the streak is UNCHANGED at 0' — the reader who only opens the mail gets the correction too" \
+    || fail "the abort mail's fallback field: [$(grep -m1 'fallback:' "$E2E/latefire.log")]"
+grep -q 'fallback: not-due' "$E2E/latefire.log" \
+    && pass "the fallback is still correctly NOT DUE at 0: the corrected wording did not turn a quiet night into a fleet bounce" \
+    || fail "the zero-streak night did not report not-due: $(grep -i fallback "$E2E/latefire.log" | head -3)"
+
 rm -f "$E2E_BOUNCE_LOG"; rm -rf "$E2E_BOOT"
 
 # The skip paths get one as well. A fire that is locked out exits in
@@ -3516,6 +3563,63 @@ done
     && pass "streak fields: an absent record degrades to '- 0 -' rather than to an unset expansion under set -u" || fail "streak field defaults"
 [ "$(transport_streak_field '2026-08-18 2 2026-08-15' 3)" = "2026-08-15" ] \
     && pass "streak: the last-bounce date survives a bump, so the mail can say when the fallback last fired" || fail "streak last-bounce field"
+
+# --- transport_streak_report: the ZERO the idempotence produces (mg-cfeb) ---
+# The count above is defensible and this block does not argue with it. What it
+# holds is the LINE. transport_streak_next returns 0 for a later fire on a night
+# an earlier fire already zeroed, and the bump arm printed that 0 into "0
+# consecutive night(s) lost at the transport step" — on a run that had just
+# failed at the transport. The assertion is therefore about what a READER takes
+# from the one line they check, so it is written as a red arm on the old string
+# and a green arm on the new one; a green-only check would be satisfied by a line
+# that says both things.
+TSR0="$(transport_streak_report 0 network 2026-08-19 2)"
+grep -q '0 consecutive night(s) lost' <<<"$TSR0" \
+    && fail "a fire that FAILED at the transport still reports '0 consecutive night(s) lost' — the one line a reader checks reads as reassurance: [$TSR0]" \
+    || pass "ACCEPTANCE: a streak of 0 on a failed fire does NOT announce itself as '0 consecutive night(s) lost'"
+grep -qi 'FAILED AT THE TRANSPORT' <<<"$TSR0" \
+    && pass "ACCEPTANCE: it leads with the FAILURE — the fire that just failed is the first thing on the line, not a zero" \
+    || fail "the zero-streak line does not say the fire failed: [$TSR0]"
+grep -q 'UNCHANGED at 0' <<<"$TSR0" \
+    && pass "and it says the streak is UNCHANGED rather than that no night was lost — the count is reported as a count, not as a verdict on the transport" \
+    || fail "the zero-streak line does not name the streak as unchanged: [$TSR0]"
+grep -q '2026-08-19 0' <<<"$TSR0" \
+    && pass "and it QUOTES the record it read, so the reader can go and look at the stamp instead of taking the line's word for it" \
+    || fail "the zero-streak line does not quote the stamp it read: [$TSR0]"
+# It must not GUESS which of the three zeroing paths ran. All three write
+# "<today> 0" and the record cannot tell them apart, so naming one would be this
+# ticket's own defect one level down: a confident line about something that was
+# never established.
+grep -q 'a fire that reached the tree, a tree-fault class, or a bounce that already ran' <<<"$TSR0" \
+    && pass "and it names ALL THREE ways the stamp could already read 0 rather than asserting the flattering one" \
+    || fail "the zero-streak line commits to one cause it cannot have established: [$TSR0]"
+
+# THE POLARITY CONTROL. Without it every assertion above is satisfied by a
+# function that prints the failure text for every count — which would make a
+# two-night streak, the state the fallback actually keys on, unreadable.
+TSR2="$(transport_streak_report 2 network 2026-08-19 2)"
+{ grep -q '2 consecutive night(s) lost at the transport step' <<<"$TSR2" \
+    && grep -q 'the fallback fires at 2' <<<"$TSR2" \
+    && ! grep -qi 'UNCHANGED at 0' <<<"$TSR2"; } \
+    && pass "NEGATIVE CONTROL: a real streak still reports '2 consecutive night(s) lost ... the fallback fires at 2' — the count that was never wrong is unchanged" \
+    || fail "the non-zero streak line was damaged by the zero case: [$TSR2]"
+[ "$(transport_streak_report 1 '' 2026-08-19 2)" = "$(transport_streak_report 1 unclassified 2026-08-19 2)" ] \
+    && pass "and an empty class degrades to 'unclassified' rather than to a blank in the middle of a sentence" || fail "empty class in transport_streak_report"
+
+# --- transport_streak_detail: the same zero, one field over and IN THE MAIL --
+# fallback_bounce is handed the count the bump arm just computed, and below the
+# threshold it reports it back into FALLBACK_DETAIL — which is logged AND lands
+# in the abort mail's `fallback:` field. "0 consecutive transport-lost night(s)"
+# there is the same reassurance with a wider audience.
+TSD0="$(transport_streak_detail 0)"
+grep -q '0 consecutive transport-lost night(s)' <<<"$TSD0" \
+    && fail "the abort mail's fallback field still says '0 consecutive transport-lost night(s)' on a night that failed at the transport: [$TSD0]" \
+    || pass "ACCEPTANCE: and the MAIL's fallback field does not carry the reassuring zero either"
+grep -q 'failed at the transport' <<<"$TSD0" \
+    && pass "it says the fire failed at the transport, in the field a reader skims for whether the fallback is coming" \
+    || fail "the zero detail does not name the failure: [$TSD0]"
+[ "$(transport_streak_detail 3)" = "3 consecutive transport-lost night(s)" ] \
+    && pass "NEGATIVE CONTROL: a real count is reported unchanged in that field" || fail "detail(3) = [$(transport_streak_detail 3)]"
 
 # --- transport_bounce_due: N > 1, and from the config ----------------------
 transport_bounce_due 1 2 && fail "one lost night fired the fallback — N must be > 1" \

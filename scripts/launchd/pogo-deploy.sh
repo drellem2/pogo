@@ -2388,6 +2388,52 @@ transport_streak_save() {
     printf '%s %s %s\n' "$2" "$3" "$4" > "$1"
 }
 
+# transport_streak_report STREAK CLASS TODAY THRESHOLD — what the BUMP arm says.
+# Pure, and it exists entirely for the count of ZERO (mg-cfeb).
+#
+# transport_streak_next is IDEMPOTENT PER DATE, and that is the right rule: this
+# box fires three times a night, and a streak that counted fires would cross any
+# threshold before sunrise. But idempotence has a consequence nobody wrote down.
+# If the stamp already reads "<today> 0" — an earlier fire tonight reached the
+# tree, or failed with a tree-fault class, or the fallback already bounced — then
+# a LATER fire that fails at the transport bumps to 0, and the line this run
+# printed was
+#
+#     transport streak: 0 consecutive night(s) lost at the transport step
+#
+# on a run that had just FAILED at the transport. That is the one line a reader
+# checks to find out whether the transport is in trouble, and on that run it read
+# as reassurance. A wrong-looking line gets investigated; a reassuring one does
+# not. The COUNT is not what is wrong here and this does not change it — the unit
+# is nights, and by that rule the night is genuinely not lost. What is wrong is a
+# failed fire announcing itself with a zero.
+#
+# It does NOT name which of the three zeroing paths ran: this function cannot
+# distinguish them from the record (all three write "<today> 0"), and guessing
+# one would be the same defect a level down.
+transport_streak_report() {
+    local streak="$1" class="${2:-unclassified}" today="${3:--}" after="${4:-0}"
+    case "$streak" in
+        0)  printf 'transport streak: THIS FIRE FAILED AT THE TRANSPORT (class %s) and the streak is UNCHANGED at 0 — the stamp already reads "%s 0", so something EARLIER TONIGHT zeroed it: a fire that reached the tree, a tree-fault class, or a bounce that already ran. The unit is NIGHTS, not fires, so tonight adds nothing toward the fallback at %s. This is not a report that the transport is healthy.' \
+                "$class" "$today" "$after" ;;
+        *)  printf 'transport streak: %s consecutive night(s) lost at the transport step (class %s); the fallback fires at %s' \
+                "$streak" "$class" "$after" ;;
+    esac
+}
+
+# transport_streak_detail STREAK — the same judgement for FALLBACK_DETAIL, which
+# is logged AND lands in the abort mail's `fallback:` field. Reached with a 0 by
+# the same route: the bump arm hands fallback_bounce the count it just computed,
+# and below the threshold it is reported back verbatim. "0 consecutive
+# transport-lost night(s)" on a night that failed at the transport is the
+# mg-cfeb line again, one field over and in the mail rather than the log.
+transport_streak_detail() {
+    case "${1:-}" in
+        0) printf 'the streak is UNCHANGED at 0 — this fire failed at the transport, but the stamp already reads tonight with a 0 (see the "transport streak:" line above), and the unit is nights' ;;
+        *) printf '%s consecutive transport-lost night(s)' "$1" ;;
+    esac
+}
+
 # transport_bounce_due COUNT [THRESHOLD] — is the fallback owed? A threshold of
 # 0 (or one that is not a number) disables it, and disabled is reported by the
 # caller rather than passed over silently.
@@ -2460,7 +2506,7 @@ fallback_bounce() {
                 FALLBACK_DETAIL="POGO_DEPLOY_TRANSPORT_BOUNCE_AFTER=${TRANSPORT_BOUNCE_AFTER:-} disables the fallback" ;;
             *)
                 FALLBACK_STATUS="not-due"
-                FALLBACK_DETAIL="$streak consecutive transport-lost night(s); the fallback fires at $TRANSPORT_BOUNCE_AFTER" ;;
+                FALLBACK_DETAIL="$(transport_streak_detail "$streak"); the fallback fires at $TRANSPORT_BOUNCE_AFTER" ;;
         esac
         log "fallback: $FALLBACK_STATUS — $FALLBACK_DETAIL"
         return 0
@@ -3829,7 +3875,7 @@ deployed and the running pogod is untouched.
                     streak="$(transport_streak_next "$today" "$sline")"
                     transport_streak_save "$TRANSPORT_STREAK" "$today" "$streak" \
                         "$(transport_streak_field "$sline" 3)"
-                    log "transport streak: $streak consecutive night(s) lost at the transport step (class ${SYNC_CLASS:-unclassified}); the fallback fires at ${TRANSPORT_BOUNCE_AFTER:-0}"
+                    log "$(transport_streak_report "$streak" "${SYNC_CLASS:-unclassified}" "$today" "${TRANSPORT_BOUNCE_AFTER:-0}")"
                     fallback_bounce "$today" "$streak" ;;
                 clear)
                     transport_streak_save "$TRANSPORT_STREAK" "$today" 0 \
