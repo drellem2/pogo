@@ -108,10 +108,14 @@ Each fire arrives as a nudge whose body ends with metadata:
 Check your mail with mg mail list doctor and handle any unread messages.
 
 [scheduler id=mail-check-doctor due=2026-05-03T09:00:00Z fired=2026-05-03T09:00:14Z ack=9f3c1ab2]
+How late am I: compare due=2026-05-03T09:00:00Z against the CURRENT clock — NOT against fired=, which is when these bytes were sent, not when you are reading them (measured gap between sent and read: 4h19m). Lateness is graded: if any of this work's reads depend on WHEN they run, mark those stale and answer the rest normally.
 When this fire's work is done, run: pogo schedule ack mail-check-doctor --agent doctor --token 9f3c1ab2
 ```
 
 When `due` ≈ `fired` it is an on-time fire. When `fired` is much later than `due`, the host slept through the due time and pogod's heartbeat replayed the schedule on wake; `--replay once` means it fires **exactly once** regardless of how many 10-minute marks were missed, and one mail check drains everything queued during the sleep. Either way the action is the same — check mail — so never register extra schedules to "make up" missed fires.
+
+**`fired` is not when you read this, and `due` ≈ `fired` does NOT mean you are on time.** A fire is stamped when its bytes are *sent*; the turn that consumes them can run much later. On 2026-08-19 `deploy-verify-architect` fired 10 seconds behind its due time — punctual by every measure this fleet has — and was not acted on for **4h19m**, producing a mostly-correct report with an unmarked wrong region, which is worse than a wholly wrong one. To know how late you are, compare `due` against the **current clock**; that is what the `How late am I:` line on every fire tells you to do. Lateness is **graded**, not binary: reads that carry their own timestamps are as good hours later, so mark only the reads whose answer depends on WHEN they run and answer the rest normally (mg-d4a7).
+
 
 **Ack the fire when its work is done**, using the command the footer hands you:
 
