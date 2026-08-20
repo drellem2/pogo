@@ -375,6 +375,7 @@ belongs there instead. In order:
    | Counted | `network`, `remote`, `unclassified`, `timeout` — the classes where the sync never reached the tree. |
    | Not counted | `dirty`, `diverged`, `checkout` **clear** the streak (they are read after a successful fetch, so the transport worked); `config` **leaves** it (it fails before any network call). A bad tree must never accumulate toward a fleet bounce. |
    | Unit | **nights**, not fires — the count is idempotent per date, so three fires of one bad night cannot cross a threshold of two. |
+   | What it says at **0** | Idempotence has a consequence. If an earlier fire tonight already zeroed the stamp — it reached the tree, or failed with a tree-fault class, or the fallback bounced — a *later* fire that fails at the transport computes **0**, and used to announce that as `transport streak: 0 consecutive night(s) lost`: reassurance on the one line a reader checks, printed by a run that had just failed at the transport. The count is right and is unchanged; the line now leads with the failure, says the streak is UNCHANGED at 0, quotes the record it read, and names all three ways the stamp could already read 0 rather than guessing one (mg-cfeb). The abort mail's `fallback:` field carries the same correction. |
    | Record | `~/.pogo/deploy-transport-streak.stamp`, `<date> <count> <last-bounce-date>`. Unreadable reads as no streak, so a corrupt file delays a bounce and cannot invent one. |
    | Window | its own reserve, `POGO_DEPLOY_BOUNCE_RESERVE` (300s), **not** the deploy's 1200s. The vigil probes until the *deploy's* budget hits zero, so charging the bounce the deploy's reserve would starve it on exactly the nights it exists for. |
    | Drain | the same gate, and `--force` is **refused** by `bounce`. A polecat holding commits that exist only in its worktree stops the bounce; that is reported, not overridden. |
@@ -391,12 +392,14 @@ belongs there instead. In order:
    had never run, and 08-20's deploy *succeeded*, which exercises the streak's
    **clear** and not its bump.
 
-   `scripts/pogo-deploy_test.sh` now drives the real `main()` through four arms:
+   `scripts/pogo-deploy_test.sh` now drives the real `main()` through five arms:
    a fresh box plus a transport failure writes `<today> 1 -`; a second
    consecutive night carries it to `2`; at the threshold the fallback invokes
    `pogo-self-deploy bounce --yes --drain-timeout N` and the completed bounce
    resets the count and stamps the date; and a night whose sync *reaches the
-   tree* clears to 0 without considering the fallback at all. Before that, the
+   tree* clears to 0 without considering the fallback at all; and a *late* fire
+   on a night already stamped `<today> 0` keeps the count at 0 while saying it
+   failed at the transport. Before that, the
    wiring was covered only by greps of this runner's source for the **line
    number** of the `fallback_bounce` call — assertions about where text sits in
    a file, which cannot tell a wired call from one whose branch is never
