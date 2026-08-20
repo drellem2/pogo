@@ -1705,6 +1705,15 @@ Flags:
 	// reserve against a refinery nobody is using any more.
 	agentRegistry.SetRefineryActivity(refineryRepoActivity(func() *refinery.Refinery { return mergeQueue }))
 
+	// How that cap reads a work item whose `repo` field is a bare NAME rather
+	// than a path — 42 items spell this repository `pogo` and 883 spell it
+	// `/Users/daniel/dev/pogo` (mg-cd4a, counted by pm-pogo). Reached through a
+	// thunk over the project index rather than a snapshot, because the index
+	// grows as repositories are visited and a resolver closed over the list as
+	// it stood at startup would go on failing to resolve a repository pogo
+	// learned about an hour ago.
+	agentRegistry.SetRepoResolver(newRepoResolver(project.Projects))
+
 	// The merged-work gate (mg-9d4e), reached through the SAME thunk and for the
 	// same reason: an orchestration restart replaces *mergeQueue, and a gate
 	// closed over the old pointer would answer "nothing merged" from a refinery

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -66,6 +68,19 @@ type RepoOccupancy struct {
 	// polecats that outlived a previous pogod are invisible to this count. The
 	// gate FAILS OPEN in that case — see repoCapRefusal.
 	WitnessErr string `json:"witness_err,omitempty"`
+	// Unresolvable is set when the requested repo is a non-empty string that
+	// names no repository this host can count workers in — a bare NAME with no
+	// resolver wired or no unique match, or a path that is not a directory. It
+	// carries the reason.
+	//
+	// It is NOT the same as an empty repo, and the difference is the whole of
+	// mg-cd4a. An empty repo means "contends for nothing", and Count 0 is the
+	// true answer. An unresolvable one means the count could not be TAKEN, and
+	// Count 0 is a fabrication — the repository may well be saturated. Callers
+	// that report capacity must render this as "could not be determined";
+	// WouldRefuse stays false because the cap fails open, so the gate itself is
+	// unchanged.
+	Unresolvable string `json:"unresolvable,omitempty"`
 	// WouldRefuse is what the spawn path would do with a request for this repo
 	// right now.
 	WouldRefuse bool `json:"would_refuse"`
@@ -137,6 +152,33 @@ func (r *Registry) RepoOccupancyFor(repo string) RepoOccupancy {
 		// "" bucket, which would let unrelated in-place edits block each other.
 		return occ
 	}
+	// unresolved reports an occupancy that could not be TAKEN. It still carries
+	// the ceiling, because Cap == 0 is this struct's signal for "the cap is
+	// disarmed" — returning the zero value here would say the fleet has no
+	// per-repo limit, which is a second confident falsehood in the slot the
+	// first one just vacated.
+	unresolved := func(why string) RepoOccupancy {
+		occ.Unresolvable = why
+		occ.Cap = cfg.EffectiveCap(false)
+		return occ
+	}
+	if !filepath.IsAbs(norm) {
+		// A bare NAME, not a path. Every comparison below runs through
+		// config.SameRepo, which compares cleaned strings, so counting against
+		// this string would find nothing and report a saturated repository as
+		// empty. Resolve it, or say it could not be resolved.
+		res := r.getRepoResolver()
+		if res == nil {
+			return unresolved("\"" + norm + "\" is a repository NAME, not a path, " +
+				"and this pogod has no name resolver wired to look it up")
+		}
+		path, ok := res.ResolveRepo(norm)
+		if !ok {
+			return unresolved("\"" + norm + "\" is a repository NAME, not a path, " +
+				"and it matches no single repository known to this host")
+		}
+		occ.Repo, norm = path, path
+	}
 
 	inRepo := map[string]bool{}
 	var unattributed []string
@@ -169,6 +211,20 @@ func (r *Registry) RepoOccupancyFor(repo string) RepoOccupancy {
 	sort.Strings(occ.Polecats)
 	occ.Count = len(occ.Polecats)
 	occ.Unattributed = dedupeSorted(unattributed, inRepo)
+
+	// An absolute path that is not a directory is the same fabrication one
+	// spelling further along: nobody is working in a repository that is not
+	// there, but nobody can work in it either, so "0 of 3, dispatch away" is
+	// advice that can only be refused.
+	//
+	// Guarded on Count == 0 deliberately. A repository holding live workers is
+	// self-evidently real, and a transient stat failure on a SATURATED repo
+	// must never demote it to "could not be determined" — that would drop the
+	// at-cap guidance for exactly the repositories that need it, which is the
+	// defect this function is being fixed for, re-entered through the fix.
+	if occ.Count == 0 && !isDirectory(norm) {
+		return unresolved(norm + " is not a directory on this host")
+	}
 
 	if act := r.getRefineryActivity(); act != nil {
 		occ.RefineryHasWork, occ.RefineryKnown = act.HasWorkIn(norm)
@@ -265,4 +321,12 @@ func (r *Registry) repoCapRefusal(repo string) string {
 	b.WriteString("Read both numbers with `pogo host load --repo=" + occ.Repo + "` — it reports this " +
 		"count and the host's core share from the same gates that refuse on them.")
 	return b.String()
+}
+
+// isDirectory reports whether p is a directory right now. Any error — missing,
+// unreadable, a plain file — answers false, and the caller turns that into
+// "could not be determined" rather than into a refusal.
+func isDirectory(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }

@@ -457,6 +457,52 @@ reason nobody downstream can check or clear.
 `pogo host load` reports the same numbers from the same gate, so a
 coordinator's plan and pogod's enforcement cannot disagree.
 
+### A work item's `repo` field is a path, and what happens when it is a name
+
+A seventh gate sits beside the two above and is not in the table because it
+refuses on neither the item nor the machine but on the **repository**: at most
+`[dispatch] max_polecats_per_repo` workers may be live in one repo at a time,
+because what saturates is one repository's test suite run concurrently. Like the
+host gate it is a *later*, not a no, and like it, `pogo host load --repo=<path>`
+reports the same numbers from the same code that enforces them.
+
+Every comparison that gate makes runs through `config.SameRepo`, which compares
+`filepath.Clean`'d strings. A work item's `repo` field is free text and is not
+always a path: measured across the whole item store on 2026-08-20, 42 items
+spell this repository `pogo` against 883 spelling it `/Users/daniel/dev/pogo`,
+and two other products are bare more often than they are not. `SameRepo` matches
+none of those against a live worker's `SourceRepo`, so **a saturated repository
+reported zero occupants** — and the aging-item notices built on that report
+dropped their at-cap guidance and told the coordinator to dispatch into a repo
+that was full (mg-cd4a).
+
+Three states now, and the distinctions carry the weight:
+
+- **Empty** `repo` — contends for nothing (a `--no-worktree` dispatch runs no
+  repository's suite), so zero really is the count and the plain "dispatch it"
+  is correct. 280 items are in this state, more than every bare spelling
+  combined, and they must not be swept in with the others.
+- **Resolvable name** — matched against the project index by
+  `agent.MatchRepoName` before the count is taken, so `pogo` reads exactly as
+  the path does. The match is a **component-aligned suffix**: `pogo` does not
+  match `pogo-reminders`. Pogo's own checkouts are dropped from the candidates
+  first — three names on this machine's index collide with a refinery worktree
+  of the same name, and a derived checkout is never a work item's target.
+- **Unresolvable** — no candidate, or more than one. `riemann` is the standing
+  example, indexed at `~/files/riemann` and `~/research/riemann` with neither
+  derived from the other. This is **not** zero occupants: the count was never
+  taken. It reports as unresolvable, the cap still fails open, and the notices
+  say the occupancy could not be determined rather than naming a remedy.
+
+Ambiguity resolving to nothing is the deliberate part. A wrong resolution raises
+no error anywhere — it produces a confident sentence about the wrong
+repository's occupants, which is the original defect with a better disguise.
+
+**Filing convention:** pass a path. `mg new --repo=/Users/daniel/dev/pogo`, not
+`--repo=pogo`. Resolution is a repair for the items already in the store, not a
+licence to file names — a name that becomes ambiguous later silently degrades
+every notice about that item.
+
 ### The `declares-remainder` warning is injected, not composed
 
 One thing at the dispatch point is **not** a gate and must not become one. An

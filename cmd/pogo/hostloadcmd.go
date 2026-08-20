@@ -175,6 +175,22 @@ func printRepoOccupancy(w io.Writer, occ *agent.RepoOccupancy, hostWouldRefuse b
 		return
 	}
 	fmt.Fprintf(w, "\nRepo:       %s\n", occ.Repo)
+	// An occupancy that could not be TAKEN stops here, before the count. The
+	// count is zero in that state and printing it would be this command making
+	// the mistake its own doc comment warns about one line up: the caller is
+	// deciding whether to dispatch, and `Workers: 0` under a cap of 3 reads as
+	// permission just as loudly as silence does. It is the same fabrication
+	// stall-watch was repeating when a work item spelled its repository by name
+	// (mg-cd4a) — the repository behind that name may be full, and was.
+	if occ.Unresolvable != "" {
+		fmt.Fprintf(w, "Workers:    NOT COUNTED — %s.\n", occ.Unresolvable)
+		fmt.Fprintf(w, "            This is missing information, NOT an empty repository: the workers\n"+
+			"            in it, if any, were never looked for. Re-run with the repository's\n"+
+			"            PATH (`lsp` lists the ones this host knows) to get a real count.\n")
+		fmt.Fprintf(w, "            The cap FAILS OPEN on this, so `spawn-polecat` is not being refused\n"+
+			"            by THIS gate — but a dispatch may still be refused once the path is known.\n")
+		return
+	}
 	if occ.ConfiguredCap <= 0 {
 		fmt.Fprintf(w, "Cap:        DISARMED (max_polecats_per_repo = 0) — this repo refuses nothing.\n")
 	} else if occ.RefineryReserved > 0 {
