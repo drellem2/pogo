@@ -1548,28 +1548,99 @@ EOF
 # Leaves first is the whole content of this function. `git fetch` execs an ssh
 # or git-remote-https child and it is the CHILD that holds the half-open socket;
 # killing git alone can leave that child running and the socket held, which on
-# this box is indistinguishable from the hang we were trying to end. pgrep is
-# used when present and its absence degrades to killing the named process only,
-# which is still strictly better than the unbounded wait it replaces.
+# this box is indistinguishable from the hang we were trying to end. The child
+# enumeration degrades to killing the named process only, which is still
+# strictly better than the unbounded wait it replaces.
 # KILL_TREE_SKIP is a pid the walk must not signal or descend into. The run
 # deadline's watchdog is itself a descendant of the run it is killing, so without
 # this it kills itself partway through and never reaches the SIGKILL.
 KILL_TREE_SKIP=""
+# KILL_TREE_SELF is set by the walk itself, once per top-level call, and is the
+# reason a caller that FORGETS KILL_TREE_SKIP no longer kills itself mid-walk.
+KILL_TREE_SELF=""
 
-kill_tree() {
-    local pid="${1:-}" sig="${2:-TERM}" child
-    [ -n "$pid" ] || return 0
-    [ "$pid" = "${KILL_TREE_SKIP:-}" ] && return 0
-    for child in $(pgrep -P "$pid" 2>/dev/null); do
-        kill_tree "$child" "$sig"
-    done
-    kill -"$sig" "$pid" 2>/dev/null || true
+# child_pids PID — the pids whose parent is PID. `ps`, not `pgrep -P` (mg-19e4).
+#
+# `pgrep` excludes the calling process AND EVERY ONE OF ITS ANCESTORS unless
+# passed -a (man pgrep), and -P is subject to that same filter. Unlike a name
+# match it does not come back empty — it comes back SHORT, at exit 0. A walk run
+# from inside the tree it is killing is therefore handed every child EXCEPT the
+# branch it is standing on, so every node on the path from the root down to the
+# caller is skipped and every subtree hanging off those nodes is never visited.
+# The walk then terminates normally and signals the root, having returned
+# success after silently missing a subtree. Measured on this box (mg-19e4) with
+# root -> mid -> {leaf, caller}: the leaf SURVIVED a kill_tree the caller ran to
+# completion. `ps -ax` applies no such filter and answers the question asked.
+#
+# -aP is the flag that turns the exclusion off and is NOT the fix: -a also stops
+# excluding the CALLER, so the walk hands the kill loop its own pid. That is the
+# other failure direction, and it is handled below by KILL_TREE_SELF rather than
+# by re-blinding the enumeration.
+child_pids() {
+    [ -n "${1:-}" ] || return 0
+    ps -ax -o pid=,ppid= 2>/dev/null | awk -v p="$1" '$2 == p { print $1 }'
 }
 
-# self_pid — this process's OWN pid, which `$$` does not give inside a subshell:
-# bash 3.2 (what macOS ships) has no BASHPID, and `$$` stays the parent's. The
-# watchdog needs it to exclude itself from the kill.
-self_pid() { sh -c 'echo $PPID'; }
+kill_tree() {
+    local pid="${1:-}" sig="${2:-TERM}" child top=false
+    # A ROOT THE BLIND WALK COULD NOT REACH. `pgrep -P 0` and `pgrep -P 1` both
+    # came back empty for the same reason everything else here did — pid 1 is
+    # every caller's ancestor — so the exclusion was accidentally acting as a
+    # safety rail on a root of 0 or 1. `ps` has no such scruples: it answers
+    # "children of 0" with launchd, and one more step down that walk is the
+    # whole machine. Nothing in this file passes either value today; this is
+    # here because removing the blindness removed the rail with it.
+    case "$pid" in
+        '' | *[!0-9]*) return 0 ;;
+        0 | 1) err "kill_tree REFUSED a root of $pid — that walk descends into every process on this box"; return 0 ;;
+    esac
+    if [ -z "$KILL_TREE_SELF" ]; then
+        # Empty would make the self guard inert AND make every recursion frame
+        # pay for another fork trying again, so it is pinned to a pid no child
+        # can have. An inert guard is a return to the pre-mg-19e4 behaviour for
+        # a caller that declared KILL_TREE_SKIP, which every caller here does.
+        KILL_TREE_SELF="$(self_pid)"
+        [ -n "$KILL_TREE_SELF" ] || KILL_TREE_SELF="0"
+        top=true
+    fi
+    # Two guards, not one. KILL_TREE_SKIP is the caller's declaration; the
+    # KILL_TREE_SELF check is the walk refusing to signal the process it is
+    # running in whether or not anyone declared it. Neither descends: a pid the
+    # walk must not kill is standing on a subtree it must not kill either.
+    if [ "$pid" != "${KILL_TREE_SKIP:-}" ] && [ "$pid" != "$KILL_TREE_SELF" ]; then
+        for child in $(child_pids "$pid"); do
+            kill_tree "$child" "$sig"
+        done
+        kill -"$sig" "$pid" 2>/dev/null || true
+    fi
+    if $top; then KILL_TREE_SELF=""; fi
+    return 0
+}
+
+# self_pid — the pid of the process that CALLS it, which `$$` does not give
+# inside a subshell: bash 3.2 (what macOS ships) has no BASHPID, and `$$` stays
+# the parent's. The watchdog needs it to exclude itself from the kill.
+#
+# CAPTURE IT WITH $( ) — never call it bare. The obvious body, `sh -c 'echo
+# $PPID'`, is one fork too DEEP: `$(self_pid)` forks a subshell to run the
+# function body and `sh` is that subshell's child, so $PPID names a process that
+# has already exited by the time the caller uses the value. Measured on bash
+# 3.2.57 (mg-19e4) in six contexts — top level, plain subshell, doubly-nested
+# subshell, inside a function, a subshell with a trap set, a backgrounded
+# subshell — it was wrong in ALL SIX, by 5 to 9 pids.
+#
+# `exec` is what makes this depth-independent: it replaces the command
+# substitution's own subshell with `sh`, so $PPID is by definition the caller,
+# with no assumption about how many levels bash inserted. It is safe only
+# because every call site captures it; a bare `self_pid` would replace the
+# running shell. pogo-deploy_test.sh asserts both — that the value is the
+# caller's real pid, and that no call site in this file omits the $( ).
+#
+# Until mg-19e4 this was wrong AND INVISIBLE, because the two defects masked
+# each other: KILL_TREE_SKIP held a stale pid that matched nothing, and the
+# pgrep ancestor exclusion above was what actually kept the walk off the
+# caller's branch. Fixing either one alone breaks the watchdog.
+self_pid() { exec sh -c 'echo $PPID'; }
 
 # run_bounded SECONDS CMD... — run CMD with a wall-clock bound.
 #

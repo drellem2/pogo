@@ -715,9 +715,18 @@ the volume went from healthy to 571 MiB free inside a working day.
 
 `go clean -modcache` deletes module trees a running build is **reading**, so a
 racing build does not get slower — it fails, with a missing-file error that
-reads like a broken branch. The fire therefore defers (exit 5) when `pgrep -x`
+reads like a broken branch. The fire therefore defers (exit 5) when `pgrep -ax`
 finds a `go`/`compile`/`link` process or `pogo refinery queue --json` shows a
 processing MR.
+
+`-a` is load-bearing and `-f` is still deliberately absent (mg-19e4). Without
+`-a`, `pgrep` excludes the caller **and every one of its ancestors**, so a
+reclaim run from inside a build is told the box is quiet — measured from a shell
+spawned by a `go test`, `pgrep -x go` returned empty while `pgrep -ax go` found
+the one `go` process, which was that shell's own ancestor. The launchd fire was
+never exposed (its ancestors are launchd and its own bash), but the manual
+dry-run below is. `-f` stays out because a pattern matched against full command
+lines matches half the fleet.
 
 Two honest limits, both stated in the log rather than assumed away:
 
