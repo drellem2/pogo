@@ -4529,6 +4529,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// residual: it is enforced by an instruction, and an unfollowed instruction
 	// emits nothing.
 	rootCmd.AddCommand(newCheckReviewDeclCmd(&jsonOutput))
+	rootCmd.AddCommand(newInEffectCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdCheckCommitBody)
 	rootCmd.AddCommand(newCheckPromptsCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckStalenessCmd(&jsonOutput))
