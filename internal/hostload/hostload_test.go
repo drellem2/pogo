@@ -242,17 +242,54 @@ func TestReadRespectsContextCancellation(t *testing.T) {
 	}
 }
 
+// spinCore burns one core inside this process until the test ends. It is what
+// turns the real-host assertion below into an assertion about the INSTRUMENT
+// rather than about the machine: a sample can only report CPU that was
+// actually spent, and the only CPU a test can guarantee was spent is its own.
+//
+// One goroutine — one core at most — deliberately. The suite shares this host
+// with the merge gate and with other agents, and a test that measures
+// contention must not manufacture it.
+func spinCore(t *testing.T) {
+	t.Helper()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-done })
+}
+
 // TestReadRealHost exercises the real process-table path. It asserts shape,
 // not values: what the host is doing while the suite runs is not ours to
 // predict.
 //
-// The one value it does assert — that SOMETHING is using CPU on a host that is
-// currently running this test — is the assertion that went red across CI from
-// 11:17 on 2026-07-30 (mg-79e3), and it is kept. What changed is that the
-// window is now chosen from the host's measured CPU-time resolution instead of
-// being hardcoded at 200ms, so the test measures over a window this host can
-// actually answer. Where no such window exists the test says so and skips,
-// rather than asserting a number the environment cannot produce.
+// The one value it does assert — that CPU which was demonstrably spent is
+// reported as spent — is the assertion that went red across CI from 11:17 on
+// 2026-07-30 (mg-79e3), and it is kept. Two things have changed since:
+//
+//   - mg-79e3: the window is chosen from the host's measured CPU-time
+//     resolution instead of being hardcoded at 200ms, so the test measures
+//     over a window this host can actually answer. Where no such window exists
+//     the test says so and skips, rather than asserting a number the
+//     environment cannot produce.
+//   - mg-d54a: the CPU is now SPENT BY THIS TEST. The old form asserted
+//     "UsedCores != 0 on a host that is running this test" and took the host's
+//     busyness for granted, which is not a property of any host — 7 of 15 CI
+//     runs on main failed exactly there, on an idle 4-core Linux runner. The
+//     premise was false at the root, because the process running this test
+//     SLEEPS through the window it is measuring: its own CPU across a 200ms
+//     window, read from getrusage on 2026-08-20, was 34-162µs — ZERO ticks of
+//     a 10ms column, ten times out of ten. Every nonzero the old assertion
+//     ever saw came from OTHER processes on a busy developer box, and an idle
+//     runner has none. See TestSubTickWorkIsAnHonestZero for the arithmetic.
 func TestReadRealHost(t *testing.T) {
 	src := proctable.Current()
 	t.Logf("process-table source: %s", src)
@@ -269,12 +306,30 @@ func TestReadRealHost(t *testing.T) {
 			src, src.MinWindow())
 	}
 
+	// Burn a core for the rest of the test, so that there is CPU on this host
+	// for the sample to find whatever else the host is or is not doing.
+	spinCore(t)
+
 	r := &Reader{Roots: []int{1}, Window: window}
-	s, err := r.Read(context.Background())
-	if err != nil {
-		t.Fatalf("Read: %v", err)
+
+	// Up to three samples. The claim is "work that was done is reported", not
+	// "the scheduler handed us a core on the first try", so any one nonzero
+	// reading settles it. No MAGNITUDE is asserted: cores are shared, and a
+	// floor on a shared resource is an assertion about the box, which is how
+	// four innocent branches went red in one evening (mg-6c90).
+	var s Sample
+	for attempt := 1; attempt <= 3; attempt++ {
+		var err error
+		s, err = r.Read(context.Background())
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		t.Logf("sample %d over %s: %s", attempt, window, s)
+		if s.UsedCores() > 0 {
+			break
+		}
 	}
-	t.Logf("sample over %s: %s", window, s)
+
 	if s.Cores <= 0 {
 		t.Errorf("Cores = %d", s.Cores)
 	}
@@ -292,7 +347,56 @@ func TestReadRealHost(t *testing.T) {
 		t.Error("Attributed = false rooted at pid 1")
 	}
 	if s.UsedCores() == 0 {
-		t.Errorf("UsedCores = 0 on a host that is running this test (source %s, window %s)", src, s.Window)
+		t.Errorf("UsedCores = 0 while this test was burning a core (source %s, window %s) — "+
+			"a sample that cannot see CPU this process demonstrably spent is not measuring",
+			src, s.Window)
+	}
+}
+
+// TestSubTickWorkIsAnHonestZero pins the state the old TestReadRealHost denied
+// could exist, and it runs on every platform — which is the point, because the
+// merge gate runs on darwin and this failure only ever showed up on Linux.
+//
+// Every Row.CPU is truncated to the source's Resolution, so a process that
+// spent less than one tick inside the window reports the SAME cumulative
+// figure at both ends of it. Real work, zero delta.
+//
+// Over a window the source CAN resolve, that zero is a measurement — "nothing
+// crossed a tick here" — and Read must report it as one. It is emphatically
+// not Unresolvable, which means the window was too short for the instrument;
+// conflating the two throws away the distinction that field exists for.
+func TestSubTickWorkIsAnHonestZero(t *testing.T) {
+	// A 10ms source over a 200ms window: resolvable five times over. The
+	// processes are doing work, but each spent under one tick of it, so the
+	// truncated column they report does not move.
+	procs := []proc{
+		{pid: 100, ppid: 1, before: 12, at: 12},
+		{pid: 200, ppid: 100, before: 3, at: 3},
+		{pid: 300, ppid: 1, before: 900, at: 900},
+	}
+	snap, _ := snapshots(procs, 200*time.Millisecond)
+	r := &Reader{
+		Roots:    []int{100},
+		Window:   time.Millisecond, // the real wait; the snapshot stamps drive the math
+		Source:   proctable.Source{Name: "linux-procfs", Resolution: 10 * time.Millisecond},
+		snapshot: snap,
+		loadavg:  func() float64 { return 1.98 },
+		cores:    4,
+	}
+	s, err := r.Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !s.Resolved() {
+		t.Fatalf("a 200ms window is resolvable at 10ms resolution, but Read called it %q", s.Unresolvable)
+	}
+	if s.UsedCores() != 0 {
+		t.Errorf("UsedCores = %.3f, want 0 — no process crossed a tick inside the window", s.UsedCores())
+	}
+	// The roots WERE found: this is an idle fleet, not a missing one, and the
+	// two must stay distinguishable at a zero.
+	if !s.Attributed {
+		t.Error("Attributed = false with pid 100 in the table — a zero here means idle, not unattributed")
 	}
 }
 

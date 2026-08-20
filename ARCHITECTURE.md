@@ -1084,6 +1084,24 @@ instead, and both records name the source they were taken with. Reporting that
 quantised zero as a measurement is how the signal went silently blind on Linux
 while reading correctly on the machine it was written on (mg-79e3).
 
+**Above `MinWindow` a zero is still a legitimate reading, and that is a
+different fact.** `Unresolvable` covers only "the window was too short for this
+instrument". Inside a window the instrument *can* resolve, every `Row.CPU` is
+still truncated to the source's tick, so a process that spent less than one
+tick reports the same cumulative figure at both ends and contributes a zero
+delta. At 10ms over a 200ms window the smallest nonzero a sample can report is
+therefore 0.05 cores, and a host on which nothing crossed a tick reads 0.0 —
+resolved, attributed, and correct. `internal/hostload`'s
+`TestSubTickWorkIsAnHonestZero` pins that combination.
+
+A test must not confuse the two by asserting that some host is busy. The one
+that did asserted `UsedCores != 0` "on a host that is running this test" and
+failed 7 of 15 CI runs on main against an idle 4-core Linux runner; measured on
+the real path, a process sleeping through its own 200ms window spends 34-162µs
+— zero ticks, ten times out of ten. A real-host CPU test asserts on CPU it
+**spends itself** (`spinCore` here, `spinGate` in the refinery's gate watch),
+never on CPU it hopes to find (mg-d54a).
+
 The same measurement gates dispatch — see **Dispatch gates** below.
 
 **Cancelling a merge.** `pogo refinery cancel <id>` reaches a **processing** MR,
