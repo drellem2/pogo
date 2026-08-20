@@ -177,6 +177,19 @@ root.
   `mg list` truncates around 90 chars, and more to the point the blocked-on agent
   is not reading that list, which is the entire premise of the ticket. A title fix
   and a notification fix solve different problems for different people.
+- **It does not know about `pogo schedule`, and since mg-8188 it says so.** The
+  messages originally read *"nothing scheduled will move them"* / *"Nothing else
+  will."* Both were true **of mg** and phrased as claims about the world. mg work
+  items and scheduler entries are separate stores and this check reads only the
+  first, so a one-shot registered against a blocked item moves it while the
+  reminder calls it unmoved — architect had exactly that pending on `mg-dafb`
+  (`work-mg-dafb`, one-shot, 2026-08-20 04:43) when the reminder was firing on it.
+  A reader who takes the unscoped sentence literally on an item someone has
+  mechanised externally concludes the work is stranded and picks it up:
+  duplicated effort sourced from a true-but-overscoped sentence. Both now say
+  **"nothing IN MG"**, and `TestBlockedReminderScopesItsClaimToMG` fails if either
+  reverts. The general rule, worth applying to any operator-facing sentence: say
+  which system you are speaking for, especially when the answer is "only mine".
 - **It does not persist across a pogod restart.** The backoff state is
   in-process, like every other stall-watch category, so a restart re-notifies each
   blocked item once and the count starts over. That is consistent with the

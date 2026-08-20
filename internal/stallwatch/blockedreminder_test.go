@@ -460,3 +460,71 @@ func hasCapEvent(rec *recorder, id string) bool {
 	}
 	return false
 }
+
+// TestBlockedReminderScopesItsClaimToMG pins mg-8188: both of the reminder's
+// messages must say which system they speak for.
+//
+// The old text asserted "nothing scheduled will move them", which was true of mg
+// and false of the world. mg work items and `pogo schedule` entries are separate
+// systems and this check reads only the first, so a one-shot registered against
+// a blocked item — architect had one pending on mg-dafb — moves it while the
+// reminder calls it unmoved. A reader who takes the unscoped sentence literally
+// concludes the work is stranded and picks it up, which is duplicated effort
+// sourced from a true-but-overscoped sentence.
+//
+// Both the reachable and the unreachable notice are asserted, because the defect
+// was one sentence per path and fixing only the one named in the ticket would
+// leave the other live.
+func TestBlockedReminderScopesItsClaimToMG(t *testing.T) {
+	// Reachable: the named agent has a maildir, so the notice goes to them.
+	t.Run("reachable", func(t *testing.T) {
+		w, rec, workRoot, mailRoot := testEnv(t, blockedCfg())
+		makeMailbox(t, mailRoot, "architect")
+		now := time.Now()
+		writeItem(t, workRoot, "mg-dafb", "blocked:architect", now)
+
+		w.Check(now)
+
+		got := blockedNudges(rec)
+		if len(got) != 1 {
+			t.Fatalf("want 1 blocked-reminder nudge, got %d: %+v", len(got), got)
+		}
+		assertScopedToMG(t, got[0].message, "nothing IN MG will move them")
+	})
+
+	// Unreachable: no maildir for the blocker, so the coordinator gets the
+	// other message — the one that used to end "Nothing else will."
+	t.Run("unreachable", func(t *testing.T) {
+		w, rec, workRoot, _ := testEnv(t, blockedCfg())
+		now := time.Now()
+		writeItem(t, workRoot, "mg-typo", "blocked:danell", now)
+
+		w.Check(now)
+
+		got := blockedNudges(rec)
+		if len(got) != 1 {
+			t.Fatalf("want 1 blocked-reminder nudge, got %d: %+v", len(got), got)
+		}
+		assertScopedToMG(t, got[0].message, "Nothing IN MG will.")
+	})
+}
+
+// assertScopedToMG checks that msg carries the scoped wording and none of the
+// unscoped phrasings the fix replaced. The negative half is the load-bearing
+// one: a message could gain the scoped sentence and still carry an unscoped
+// claim elsewhere, and that is precisely the failure — the misreading survives
+// as long as ONE sentence in the notice makes the overscoped claim.
+func assertScopedToMG(t *testing.T, msg, want string) {
+	t.Helper()
+	if !strings.Contains(msg, want) {
+		t.Errorf("message does not scope its claim to mg — want %q in: %q", want, msg)
+	}
+	// "nothing scheduled" is the exact phrase mg-8188 names, and it is doubly
+	// wrong here: the reader's most likely mechanisation IS a pogo schedule.
+	for _, unscoped := range []string{"nothing scheduled", "Nothing scheduled", "Nothing else will"} {
+		if strings.Contains(msg, unscoped) {
+			t.Errorf("message makes an unscoped claim %q — a pogo one-shot can move a blocked item, "+
+				"and this sentence denies it: %q", unscoped, msg)
+		}
+	}
+}

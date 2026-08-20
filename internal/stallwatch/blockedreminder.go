@@ -20,7 +20,12 @@ import (
 const categoryBlockedReminder = "blocked_reminder"
 
 // checkBlockedReminders tells an agent named by a `blocked:<agent>` assignee
-// that a decision is owed on an item nothing else will move (mg-3844).
+// that a decision is owed on an item nothing IN MG will move (mg-3844).
+//
+// The "IN MG" is load-bearing, and BOTH emitted messages carry it — see the
+// comment on each. This check reads work items and nothing else; a `pogo
+// schedule` one-shot aimed at a blocked item lives in a separate system, is
+// invisible here, and does move it (mg-8188).
 //
 // # Why this is not the rejected park-sweeper
 //
@@ -152,8 +157,22 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 	for _, who := range recipients {
 		group := byRecipient[who]
 		ids := itemIDs(group)
+		// "nothing IN MG will move them", not "nothing scheduled". mg work
+		// items and `pogo schedule` entries are separate systems, and this
+		// check reads only the first: it is handed available/ and knows nothing
+		// about the scheduler's store. A one-shot registered against an item
+		// (`pogo schedule <agent> --once --in ... --id work-<id>`) WILL move it,
+		// invisibly to this sentence — architect had exactly such a fire pending
+		// on mg-dafb while the reminder called it unmoved.
+		//
+		// The old wording was true *of mg* and phrased as a claim about the
+		// world. A reader who took it literally on an item someone had
+		// mechanised externally could reasonably conclude the work was stranded
+		// and pick it up: duplicated effort sourced from a true-but-overscoped
+		// sentence (mg-8188). Say which system you are speaking for, especially
+		// when the answer is "only mine".
 		msg := fmt.Sprintf(
-			"blocked-reminder: %d work item(s) are BLOCKED ON YOU and nothing scheduled will move them — %s. "+
+			"blocked-reminder: %d work item(s) are BLOCKED ON YOU and nothing IN MG will move them — %s. "+
 				"This is NOT a dispatch request: they are gated away from automatic dispatch and stay that way "+
 				"until you act. Run `mg show <id>` for what each one is waiting on, do it, then tell whoever set "+
 				"the block (or clear it yourself with `mg edit <id> --assignee=<owner>`). "+
@@ -234,11 +253,14 @@ func (w *Watcher) fireUnreachableBlockers(now time.Time, unreachable map[string]
 	}
 	sort.Strings(allIDs)
 
+	// "Nothing IN MG will" is scoped for the same reason as the reachable
+	// notice above (mg-8188): a `pogo schedule` one-shot aimed at this item is
+	// in a different system, so it can chase a blocker this check cannot see.
 	msg := fmt.Sprintf(
 		"blocked-reminder: %d work item(s) name a blocker no reminder could reach — %s. "+
 			"This is NOT a dispatch request; they stay gated and `pogo agent spawn-polecat` will refuse them. "+
 			"Check the name for a typo, rewrite the assignee as `blocked:<agent>` if it is bare, or chase the "+
-			"blocker yourself. Nothing else will.",
+			"blocker yourself. Nothing IN MG will.",
 		len(allIDs), strings.Join(parts, "; "))
 	msg += subsetRepeatNotice(sel, allIDs)
 
