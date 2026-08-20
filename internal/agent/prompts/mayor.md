@@ -1385,6 +1385,76 @@ mg archive <id>
 See step 3 for the two-line check that precedes it and for why the `--days=0` sweep is never the
 right instrument.
 
+### Before you stop a live {{.Worker}}: the durability check
+
+Stopping a {{.Worker}} is as good as landing its work **only if that work is already durable**, and
+the check that establishes it is the one step here that is easy to get structurally wrong. It was, on
+2026-08-20 (mg-5b5e). The pre-deploy sweep read `queue=0 history=0` at 00:51:23Z — true at that
+instant — `p8188` submitted `mr-da34v72tjv1k9tlmubpg` at 00:51:40Z, the stop went out at 00:51:42Z on
+a 19-second-old reading, and `mg-8188` was then recorded as having "left NO state" and being "safe to
+dispatch fresh". The MR merged at 01:03:47Z. **The {{.Worker}} did exactly what the warning told it to
+do, and was credited with having done nothing.** No byte was lost — the failure fell entirely on the
+record, which is where the next reader acts from.
+
+**1. The check races the warning that precedes it.** The procedure is *warn them to push → wait →
+check → stop*, and the warning is an instruction to create the very state the check tests for. The
+interval between the check and the stop is therefore precisely when a push is most likely to land.
+That window is guaranteed by the ordering, not by carelessness, so the remedy is about where the
+check sits and what you are entitled to write from it:
+
+- Run the check **per agent, as the last act before that agent's stop** — not once over the fleet,
+  and never on the near side of a warn-and-wait interval.
+- **That narrows the window; it does not close it.** Any check that precedes an action is stale by
+  construction. A fix claiming otherwise would be this same defect one layer up, so state the limit
+  rather than design around it.
+- **Never write a universal into a ticket from a pre-stop reading.** "Left no state" is a claim about
+  every instant, drawn from an instrument that answered about one. Record what you measured, when,
+  and with which view — *"`queue` and `history --since=6h` showed no MR authored by mg-8188 at
+  00:51:23Z"* — so the next reader can see the timestamp they are being asked to trust.
+- **pogod's `[stranded-push]` mail is the after-the-fact authority.** It runs inside pogod *after* the
+  process is gone, so nothing can race it. If one arrives for an agent you have already recorded as
+  clean, the mail wins and your note needs correcting — see "Work that already exists".
+
+**2. No single refinery view covers the whole life of an MR.** Each is blind to a different part of
+it, so read the pipeline **and** the log, both keyed on the author — which is the `--author` the
+{{.Worker}} submitted with, i.e. its work-item id. Take that id from `pogo agent list`; never guess it
+from a branch name:
+
+```bash
+pogo refinery queue --json | jq -r '.[] | select(.author=="<work-item-id>") | .id + " " + .status'
+pogo refinery history --since=6h --json | jq -r '.[] | select(.author=="<work-item-id>") | .id + " " + .status'
+```
+
+| View | Covers | Blind to |
+|---|---|---|
+| `pogo refinery queue` | submit → merge: the in-flight row and everything pending behind it | anything already finished — the queue is drained, never archived |
+| `pogo refinery history --since=<window>` | first merge ATTEMPT → completion, reconstructed from `~/.pogo/events.log` | an MR submitted but still QUEUED: no `refinery_merge_attempted` is written until a gate picks it up, and behind a running gate that is tens of minutes, not seconds |
+| `pogo refinery history` (no `--since`) | completed merges, retained window only | everything in flight, and everything past the 100-entry cap |
+
+**A hit in either view means the work is durable, whatever its status** — a merge request exists only
+because a branch was pushed, and a pushed branch outlives the {{.Worker}}, the stop and the redeploy
+alike.
+
+**Zero in both views is not "left no state".** It is "no merge request", and those differ by the case
+that costs most: a {{.Worker}} that pushed a branch and never submitted it is invisible to both views
+and its work is durable anyway. That case has its own instruments — `pogo check-stranded` before the
+stop, and pogod's `[stranded-push]` mail after it — so say which question you answered. A stop is
+still safe on a zero reading; what a zero reading does not license is the sentence in the ticket.
+
+**Do not take any of these blind spots on faith, this table's included.** The in-flight row used to be
+the one row `queue` did not print — that is where the advice to distrust `queue` came from — and
+mg-0c51 (`ef18372`, 2026-07-30) fixed it. What matters is whether the fix is in the daemon you are
+actually asking, so ask it:
+
+```bash
+rev=$(curl -s http://127.0.0.1:10000/version | jq -r .revision)
+git -C <repo> merge-base --is-ancestor ef18372 "$rev" && echo "this pogod's queue shows the in-flight row"
+```
+
+Measured 2026-08-20: the running pogod was `c6091d3`, of which `ef18372` is an ancestor — so on this
+box `queue` is the *more* complete of the two views, and a directive sending you to the event log
+alone would have sent you to the one that cannot see a queued MR at all.
+
 ### Refinery logs
 
 When diagnosing merge failures, the refinery logs every pipeline step with structured key=value fields (MR ID, branch, step name). The lines go to pogod's stdout/stderr, so **where they land is wherever the service manager was told to redirect them — ask it, don't assume a path.** A literal path written here is exactly the claim that rots silently, and this paragraph shipped a nonexistent one for weeks (mg-f766).
@@ -1446,6 +1516,9 @@ When an agent seems stuck, follow this process:
      pogo agent stop <name>          # also releases the {{.Worker}}'s claim (mg-fb13)
      mg unclaim <work-item-id>       # idempotent confirmation; expect "nothing to release"
      ```
+     Run the durability check immediately before that `stop` — see "Before you stop a live
+     {{.Worker}}" under The Refinery. A stalled {{.Worker}} that you nudged may have pushed
+     while you were deciding, and re-dispatching over pushed work is what mg-5b5e cost.
 
 4. **For dead agents**: The OS process is gone but the agent is still registered. This can happen after OOM kills or crashes. Stop the agent to clean up the registration — that releases its claim too — and confirm with `mg unclaim <work-item-id>` before re-dispatching.
 
