@@ -14,13 +14,15 @@ import (
 // stubPreservedGate answers with a fixed set of trees, and records what it was
 // asked, so the handler wiring can be tested without a polecats directory.
 type stubPreservedGate struct {
-	trees   []gitgc.PreservedTree
-	err     error
-	askedID []string
+	trees       []gitgc.PreservedTree
+	err         error
+	askedID     []string
+	askedTarget []string
 }
 
-func (s *stubPreservedGate) PreservedWorktrees(workItemID, repo string) ([]gitgc.PreservedTree, error) {
+func (s *stubPreservedGate) PreservedWorktrees(workItemID, repo, target string) ([]gitgc.PreservedTree, error) {
 	s.askedID = append(s.askedID, workItemID)
+	s.askedTarget = append(s.askedTarget, target)
 	return s.trees, s.err
 }
 
@@ -122,7 +124,7 @@ func TestPreservedRefusalOnATreeThatCouldNotBeRead(t *testing.T) {
 			Outcome: "undetermined", StatusError: "status: exit status 128: fatal: not a git repository",
 		}},
 	})
-	refusal := reg.preservedWorktreeRefusal("mg-fbaf", "/repo")
+	refusal := reg.preservedWorktreeRefusal("mg-fbaf", "/repo", "main")
 	if refusal == "" {
 		t.Fatal("a retained tree that could not be read must still refuse: what we failed to " +
 			"establish is whether it holds the only copy of somebody's work")
@@ -143,13 +145,13 @@ func TestPreservedRefusalOnATreeThatCouldNotBeRead(t *testing.T) {
 func TestPreservedGateFailsOpenOnError(t *testing.T) {
 	reg := newDrainTestRegistry(t)
 	reg.SetPreservedWorktreeGate(&stubPreservedGate{err: errors.New("read polecats dir: EACCES")})
-	if refusal := reg.preservedWorktreeRefusal("mg-516e", "/repo"); refusal != "" {
+	if refusal := reg.preservedWorktreeRefusal("mg-516e", "/repo", "main"); refusal != "" {
 		t.Fatalf("the gate refused on an unanswerable question: %s", refusal)
 	}
 	// And no id is not a question at all.
 	stub := &stubPreservedGate{}
 	reg.SetPreservedWorktreeGate(stub)
-	if refusal := reg.preservedWorktreeRefusal("", "/repo"); refusal != "" {
+	if refusal := reg.preservedWorktreeRefusal("", "/repo", "main"); refusal != "" {
 		t.Fatalf("the gate refused a spawn with no work item id: %s", refusal)
 	}
 }
@@ -170,7 +172,7 @@ func TestGitPreservedWorktreeGateReadsRealTrees(t *testing.T) {
 	}
 
 	g := GitPreservedWorktreeGate{PolecatsDir: polecats}
-	trees, err := g.PreservedWorktrees("mg-9d4e", repo)
+	trees, err := g.PreservedWorktrees("mg-9d4e", repo, "main")
 	if err != nil {
 		t.Fatalf("PreservedWorktrees: %v", err)
 	}
@@ -183,7 +185,7 @@ func TestGitPreservedWorktreeGateReadsRealTrees(t *testing.T) {
 	}
 
 	// A different item gets no refusal from the same directory.
-	other, err := g.PreservedWorktrees("mg-0000", repo)
+	other, err := g.PreservedWorktrees("mg-0000", repo, "main")
 	if err != nil {
 		t.Fatalf("PreservedWorktrees: %v", err)
 	}
@@ -204,8 +206,192 @@ func TestPreservedGateConsultsNoLiveness(t *testing.T) {
 	reg.SetPreservedWorktreeGate(&stubPreservedGate{
 		trees: []gitgc.PreservedTree{preservedTree("/Users/x/.pogo/polecats/p516e", "polecat-p516e")},
 	})
-	if refusal := reg.preservedWorktreeRefusal("mg-516e", "/repo"); refusal == "" {
+	if refusal := reg.preservedWorktreeRefusal("mg-516e", "/repo", "main"); refusal == "" {
 		t.Fatal("the gate went quiet because a polecat was live on the item. A live worker is why " +
 			"the tree is dirty; it is not a reason to dispatch a second one")
+	}
+}
+
+// unpushedTree is mg-fcba's shape: a CLEAN worktree whose polecat committed and
+// was stopped before it pushed. `git status` reports nothing, so every count in
+// preservedTree above is zero and the whole finding lives in the commits.
+func unpushedTree(path, branch string, commits ...string) gitgc.PreservedTree {
+	return gitgc.PreservedTree{
+		Path: path, Owner: filepath.Base(path), Branch: branch, Outcome: "unpushed",
+		Commits: &gitgc.WorktreeCommitFinding{
+			Head: "0123456789abcdef0123456789abcdef01234567", Verdict: gitgc.DurabilityLocalOnly,
+			Commits: commits,
+		},
+	}
+}
+
+// TestSpawnRefusedForACleanTreeHoldingUnpushedCommits is mg-fcba at the moment
+// it costs something.
+//
+// mg-836c's gate is defined over `git status`, which is clean the instant a
+// worker commits — so the state a polecat reaches when it gets FURTHER (commit,
+// then be stopped before pushing) passed straight through it. That is the state
+// the nightly pre-deploy stop creates on purpose.
+func TestSpawnRefusedForACleanTreeHoldingUnpushedCommits(t *testing.T) {
+	reg := newDrainTestRegistry(t)
+	reg.SetPreservedWorktreeGate(&stubPreservedGate{
+		trees: []gitgc.PreservedTree{unpushedTree("/Users/x/.pogo/polecats/p3d0e", "polecat-p3d0e",
+			"abc1234 feat(ineffect): the new command")},
+	})
+
+	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "q3d0e", Id: "mg-3d0e", Repo: "/repo", Branch: "main", Template: BuildWorkerTemplate,
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("spawn onto an item whose commits exist only in a worktree: status = %d, want 409", rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		"p3d0e",                            // the path is what stops the reflex remedy
+		"COMMITS THAT EXIST NOWHERE",       // and the headline must name the right loss
+		"no uncommitted files",             // not "UNCOMMITTED work": git status calls this tree clean
+		"push `polecat-p3d0e` and land it", // the remedy for work that is already committed
+		"--preserved-override",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the refusal does not mention %q; got: %s", want, body)
+		}
+	}
+	// Saying UNCOMMITTED here would send a reader looking for dirty files in a
+	// tree git calls clean. The obvious conclusion from that is that the gate is
+	// wrong, which is how a gate gets overridden rather than read.
+	if strings.Contains(body, "UNCOMMITTED work in a RETAINED WORKTREE") {
+		t.Errorf("the refusal claims uncommitted work about a CLEAN tree; got: %s", body)
+	}
+	// And it must not prescribe the refinery: it merges origin/<branch> and
+	// refuses a branch that is not on origin (mg-586d), which is exactly this
+	// population.
+	if strings.Contains(body, "refinery submit") {
+		t.Errorf("the refusal prescribes `refinery submit` for a branch that is not on origin; got: %s", body)
+	}
+}
+
+// TestPreservedRefusalOnADetachedTreeNamesTheMissingRef. A detached worktree is
+// the sub-case no ref scan can cover — the stranded-work gate reads refs/heads
+// and would refuse an unpushed BRANCH (mg-bfe0), but there is no ref here at
+// all. The remedy has to differ too: there is no branch to push.
+func TestPreservedRefusalOnADetachedTreeNamesTheMissingRef(t *testing.T) {
+	reg := newDrainTestRegistry(t)
+	// git's literal "HEAD" is what WorktreeBranch passes through for a detached
+	// head, and what `pogo gc --list-preserved` prints for p6b2d today.
+	reg.SetPreservedWorktreeGate(&stubPreservedGate{
+		trees: []gitgc.PreservedTree{unpushedTree("/Users/x/.pogo/polecats/p6b2d", "HEAD",
+			"def5678 census: overtaken.py")},
+	})
+
+	refusal := reg.preservedWorktreeRefusal("mg-6b2d", "/repo", "main")
+	if refusal == "" {
+		t.Fatal("a detached worktree holding commits no ref holds must refuse")
+	}
+	if !strings.Contains(refusal, "DETACHED HEAD") {
+		t.Errorf("the refusal must say the tree is detached — it is what makes removing the tree "+
+			"orphan the commits; got: %s", refusal)
+	}
+	if !strings.Contains(refusal, "switch -c") {
+		t.Errorf("the remedy must give those commits a ref first; there is no branch to push. "+
+			"got: %s", refusal)
+	}
+	// Naming a branch to push would be a remedy with a hole in it — the failure
+	// strandedgate records under mg-bfe0.
+	if strings.Contains(refusal, "push `HEAD`") {
+		t.Errorf("the refusal tells the reader to push a branch called HEAD; got: %s", refusal)
+	}
+}
+
+// TestPreservedRefusalCarriesBothHalvesWhenATreeHasBoth. A tree can be dirty AND
+// hold unpushed commits, and the two lose differently: an edit to a tracked file
+// still has its committed version in the object store, while these commits have
+// no copy anywhere. A refusal that reported only the half it was built for would
+// understate exactly the worse half.
+func TestPreservedRefusalCarriesBothHalvesWhenATreeHasBoth(t *testing.T) {
+	reg := newDrainTestRegistry(t)
+	both := preservedTree("/Users/x/.pogo/polecats/p516e", "polecat-p516e")
+	both.Commits = &gitgc.WorktreeCommitFinding{
+		Verdict: gitgc.DurabilityLocalOnly,
+		Commits: []string{"aaa1111 first", "bbb2222 second"},
+	}
+	reg.SetPreservedWorktreeGate(&stubPreservedGate{trees: []gitgc.PreservedTree{both}})
+
+	refusal := reg.preservedWorktreeRefusal("mg-516e", "/repo", "main")
+	for _, want := range []string{"14 modified", "2 untracked", "2 COMMIT(S) THAT EXIST NOWHERE ELSE"} {
+		if !strings.Contains(refusal, want) {
+			t.Errorf("the refusal drops %q; got: %s", want, refusal)
+		}
+	}
+}
+
+// TestPreservedGatePassesTheSpawnTarget. The target is what spares a
+// rebase-landed tree a false finding, and getting it wrong costs a false
+// refusal. A gate that quietly asked about "main" while the spawn targeted
+// something else would refuse dispatches on a branch nobody compared against.
+func TestPreservedGatePassesTheSpawnTarget(t *testing.T) {
+	reg := newDrainTestRegistry(t)
+	stub := &stubPreservedGate{}
+	reg.SetPreservedWorktreeGate(stub)
+
+	spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "q516e", Id: "mg-516e", Repo: "/repo", Branch: "release-2", Template: BuildWorkerTemplate,
+	})
+	if len(stub.askedTarget) == 0 || stub.askedTarget[0] != "release-2" {
+		t.Errorf("the gate was asked about target %v, want [release-2]", stub.askedTarget)
+	}
+}
+
+// TestPreservedRefusalNeverPrintsAZeroCommitCount is this ticket's own defect
+// shape turned on the fix. A local-only verdict whose commit list could not be
+// re-read has len(Commits)==0, and "0 COMMIT(S) THAT EXIST NOWHERE ELSE" is a
+// sentence whose number says the opposite of its verb — the number being the
+// half that survives a skim.
+func TestPreservedRefusalNeverPrintsAZeroCommitCount(t *testing.T) {
+	reg := newDrainTestRegistry(t)
+	reg.SetPreservedWorktreeGate(&stubPreservedGate{trees: []gitgc.PreservedTree{{
+		Path: "/Users/x/.pogo/polecats/p3d0e", Owner: "p3d0e", Branch: "polecat-p3d0e",
+		Outcome: "unpushed",
+		Commits: &gitgc.WorktreeCommitFinding{
+			Verdict: gitgc.DurabilityLocalOnly, CommitsError: "cherry -v: exit status 128",
+		},
+	}}})
+
+	refusal := reg.preservedWorktreeRefusal("mg-3d0e", "/repo", "main")
+	if refusal == "" {
+		t.Fatal("a local-only verdict must refuse even when its commit list could not be read")
+	}
+	if strings.Contains(refusal, "0 COMMIT") {
+		t.Errorf("the refusal printed a zero commit count under a local-only verdict; got: %s", refusal)
+	}
+	if !strings.Contains(refusal, "HOW MANY IS UNKNOWN") {
+		t.Errorf("an unread count must say so rather than render as none; got: %s", refusal)
+	}
+}
+
+// TestPreservedRefusalOnAnUnknownDurabilityVerdict. "We could not ask" is
+// reported as itself and still refuses. Folding it into "durable" is the
+// collapse mg-65b2 records costing files, and folding it into "local-only"
+// would assert a measurement nobody made.
+func TestPreservedRefusalOnAnUnknownDurabilityVerdict(t *testing.T) {
+	reg := newDrainTestRegistry(t)
+	reg.SetPreservedWorktreeGate(&stubPreservedGate{trees: []gitgc.PreservedTree{{
+		Path: "/Users/x/.pogo/polecats/p3d0e", Owner: "p3d0e", Branch: "polecat-p3d0e",
+		Outcome: "unpushed",
+		Commits: &gitgc.WorktreeCommitFinding{
+			Verdict: gitgc.DurabilityUnknown, Detail: "no integration ref resolves for \"main\"",
+		},
+	}}})
+
+	refusal := reg.preservedWorktreeRefusal("mg-3d0e", "/repo", "main")
+	if refusal == "" {
+		t.Fatal("an unanswerable durability question must still refuse")
+	}
+	if !strings.Contains(refusal, "could NOT be established") {
+		t.Errorf("the refusal must say the question failed, not assert commits it never counted; "+
+			"got: %s", refusal)
+	}
+	if strings.Contains(refusal, "COMMIT(S) THAT EXIST NOWHERE ELSE") {
+		t.Errorf("an unknown verdict was reported as a positive finding; got: %s", refusal)
 	}
 }

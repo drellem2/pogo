@@ -287,6 +287,27 @@ mistake **systematically** rather than once. Reclaiming is one already-existing
 command and was never the hard part; knowing which of twenty-three trees can
 safely take it is, and that is a question about the files.
 
+**It also names the commits that exist nowhere else (mg-fcba).** The fields
+above are all about the *uncommitted* half of a tree. A polecat that got further
+— committed, then was stopped before it pushed — leaves a tree whose work
+`git status` cannot see at all, and the nightly pre-deploy stop produces that
+state on purpose. Each listed tree therefore carries whether its HEAD reaches
+commits that **no ref under `refs/remotes/origin/` holds and that have no
+patch-equivalent on the integration branch**, with the commit subjects. The
+patch-id half is not decoration: the refinery rebases before merging, so a
+SHA-only test would call every landed-and-preserved tree unpushed forever.
+
+A tree on a **detached HEAD** — printed as `branch HEAD` — is the worst case and
+says so in its own line: those commits are held by that worktree's HEAD and by
+no ref at all, so removing the tree orphans them.
+
+The **listed population is unchanged**, and the omission is deliberate rather
+than pending: a *clean* tree holding unpushed commits is not a tree gc refused,
+so it does not belong in a list of trees gc refused. It is the **dispatch guard**
+that must see it, and `spawn-polecat` plus the stall-watch surfaces do
+(`internal/gitgc.PreservedForItems`). Widening this listing is a separate
+decision about what `--list-preserved` means.
+
 **Untracked paths are never truncated in the listing; modified entries are
 capped and the cap announces itself.** A modified tracked file has a committed
 version in the object store. An untracked path is on no branch, in no stash and

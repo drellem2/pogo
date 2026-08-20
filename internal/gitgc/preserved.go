@@ -10,9 +10,19 @@ import (
 	"time"
 )
 
-// PreservedTree is one worktree that IS BEING RETAINED — kept rather than
-// reclaimed because the removal guard refused it (a dirty tree, mg-ee02) or
-// could not read it (mg-4d45).
+// PreservedTree is one worktree that HOLDS WORK THE FLEET CANNOT REACH FROM
+// ANYWHERE ELSE — because the removal guard refused it (a dirty tree, mg-ee02),
+// because it could not be read (mg-4d45), or because its HEAD reaches commits
+// no origin ref holds and the integration branch has no equivalent of
+// (mg-fcba, the Commits field).
+//
+// The first two are the population `pogo gc --list-preserved` enumerates: trees
+// gc declined to reclaim. The third is NOT that population and the difference
+// matters — a clean worktree whose polecat committed and never pushed is one gc
+// would happily reap, and reaping it on a detached HEAD orphans the only copy
+// of those commits. PreservedForItems reports all three because a DISPATCH must
+// not be advertised over any of them; ScanPreserved lists the first two and
+// annotates them with the third.
 //
 // # It is a set of FACTS, and deliberately not a verdict (mg-f4c0)
 //
@@ -89,6 +99,23 @@ type PreservedTree struct {
 
 	// StatusError is the `git status` failure on the "undetermined" outcome.
 	StatusError string `json:"status_error,omitempty"`
+
+	// Commits is what this tree's HEAD holds that exists nowhere else — the
+	// COMMITTED half of "work that only lives in a worktree", where every
+	// field above it describes the uncommitted half (mg-fcba).
+	//
+	// The two halves are independent and a tree can be in either, both, or
+	// neither. A polecat stopped before it committed leaves a dirty tree and no
+	// commits; one stopped after it committed and before it pushed leaves a
+	// CLEAN tree whose work is invisible to `git status` — and if that tree is
+	// on a detached HEAD, invisible to every ref scan as well, because its
+	// commits are reachable from the worktree's HEAD and from nothing else.
+	//
+	// Populated by PreservedForItems for every candidate tree, and by
+	// ScanPreserved for every tree it lists. Nil means the question was not
+	// asked or the tree's HEAD reached nothing at risk; AtRisk() on the finding
+	// is what separates those from a finding.
+	Commits *WorktreeCommitFinding `json:"commits,omitempty"`
 
 	// UntouchedSeconds is how long the tree has gone unwritten, and
 	// UntouchedKnown whether it could be established. It is a REPORT and
@@ -176,6 +203,10 @@ type PreservedScanOptions struct {
 	// that does not work: an unavailable `mg` costs the ticket column, and the
 	// tree listing — which is the part nothing else can produce — still lands.
 	Tickets TicketIndex
+	// Target is the integration branch used to spare a rebase-landed tree a
+	// false at-risk annotation. Empty resolves to DefaultTargetBranch. See
+	// PreservedItemOptions.Target.
+	Target string
 }
 
 // PreservedReport is the population of retained worktrees, plus what the scan
@@ -342,6 +373,27 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 			tree.Branch = branch
 		} else {
 			tree.BranchError = berr.Error()
+		}
+
+		// Annotate — never filter — with the COMMITTED half (mg-fcba). A tree
+		// already listed here is retained for a reason `git status` gave; this
+		// says additionally whether its HEAD reaches commits no origin ref
+		// holds, which is the fact that separates "reclaiming this loses an
+		// edit" from "reclaiming this loses the only copy of some commits".
+		//
+		// The listed POPULATION is unchanged, and the omission is deliberate
+		// rather than pending: a CLEAN tree holding unpushed commits is not a
+		// tree gc refused, so it does not belong in a list of trees gc refused.
+		// The dispatch guard is where that tree matters and PreservedForItems
+		// reports it there. Widening this listing is a separate decision about
+		// what `--list-preserved` means, and the reclaim path's own blindness
+		// to a detached HEAD's commits is a separate defect from this one.
+		if find, ferr := WorktreeCommitsAtRisk(path, tree.Repo, opts.Target); ferr != nil {
+			rep.Errors = append(rep.Errors, fmt.Sprintf(
+				"could not check whether %s holds commits that exist nowhere else: %v", path, ferr))
+		} else if find.AtRisk() {
+			f := find
+			tree.Commits = &f
 		}
 
 		id, state := tickets.OwnerState(tree.Owner)
@@ -592,6 +644,7 @@ func writeTree(b *strings.Builder, t PreservedTree) {
 	fmt.Fprintf(b, "\n  %s\n", t.Path)
 	fmt.Fprintf(b, "    owner %s, branch %s, work item %s, %s\n",
 		t.Owner, branchOrNone(t), workItemOrUnresolved(t), t.UntouchedText())
+	writeTreeCommits(b, t)
 
 	if t.Outcome == "preserved" {
 		fmt.Fprintf(b, "    %d uncommitted: %d modified, %d UNTRACKED   `--force` reclaims it: %s\n",
@@ -660,4 +713,54 @@ func groupByRepo(trees []PreservedTree) []repoGroup {
 		out = append(out, repoGroup{Repo: t.Repo, Trees: []PreservedTree{t}})
 	}
 	return out
+}
+
+// writeTreeCommits renders the COMMITTED half of what a tree holds (mg-fcba) —
+// commits reachable from its HEAD that no ref under refs/remotes/origin/ holds
+// and that the integration branch has no patch-equivalent of.
+//
+// It prints only on a finding, and it is placed ABOVE the uncommitted block on
+// purpose. The two halves lose differently: an uncommitted edit to a tracked
+// file still has its committed version in the object store, while these commits
+// have no copy anywhere — and on a detached HEAD they have no REF anywhere
+// either, so nothing but this worktree's own HEAD keeps them from being pruned.
+// A reader who stops after the first section has read the worse half.
+func writeTreeCommits(b *strings.Builder, t PreservedTree) {
+	if t.Commits == nil {
+		return
+	}
+	if t.Commits.Verdict == DurabilityUnknown {
+		fmt.Fprintf(b, "    COMMITS: whether this tree's HEAD holds commits that exist nowhere else\n")
+		fmt.Fprintf(b, "    could NOT be established (%s). That is not a report of none.\n", t.Commits.Detail)
+		return
+	}
+	// The COUNT is only printed when it was read. A local-only verdict with an
+	// unreadable list would otherwise render "0 COMMIT(S) EXIST ONLY HERE" —
+	// true of the list and false of the tree, and the number is the half that
+	// gets skimmed. A caveat two lines further down does not reach the reader
+	// who has already taken the zero.
+	if len(t.Commits.Commits) == 0 {
+		fmt.Fprintf(b, "    COMMITS EXIST ONLY HERE, HOW MANY IS UNKNOWN: no ref under\n")
+		fmt.Fprintf(b, "    refs/remotes/origin/ holds them and none has a patch-equivalent on the\n")
+		fmt.Fprintf(b, "    integration branch; the list itself could not be read.\n")
+	} else {
+		fmt.Fprintf(b, "    %d COMMIT(S) EXIST ONLY HERE: no ref under refs/remotes/origin/ holds them\n",
+			len(t.Commits.Commits))
+		fmt.Fprintf(b, "    and none has a patch-equivalent on the integration branch.\n")
+	}
+	if t.Branch == "" || t.Branch == "HEAD" {
+		// The detached case, stated whenever the branch reads that way rather
+		// than only when git said so, because it changes what a rescuer can do:
+		// there is no ref to fetch, cherry-pick or push FROM, and removing the
+		// worktree drops the last thing making these commits reachable.
+		fmt.Fprintf(b, "    This tree is on a DETACHED HEAD, so those commits are held by this\n")
+		fmt.Fprintf(b, "    worktree's HEAD and by NO REF AT ALL. Removing the tree orphans them.\n")
+	}
+	if t.Commits.CommitsError != "" {
+		fmt.Fprintf(b, "    (the commit list could not be read: %s)\n", t.Commits.CommitsError)
+		return
+	}
+	for _, c := range t.Commits.Commits {
+		fmt.Fprintf(b, "      %s\n", c)
+	}
 }

@@ -9,8 +9,9 @@ import (
 	"github.com/drellem2/pogo/internal/workitem"
 )
 
-// An available item whose work is sitting UNCOMMITTED in a retained worktree is
-// not ready to dispatch (mg-836c).
+// An available item whose work is sitting in a retained worktree — UNCOMMITTED
+// (mg-836c), or COMMITTED and reachable from nothing but that tree (mg-fcba) —
+// is not ready to dispatch.
 //
 // THE DEFECT THIS CLOSES. When a polecat exits holding uncommitted work, pogod
 // preserves its worktree rather than reaping it, emits worktree_preserved, and
@@ -38,6 +39,17 @@ import (
 // anything would trade a wrong instruction for a silent hole, and silence is
 // what this package keeps relearning not to ship. So the FINDING survives and
 // only the REMEDY changes.
+//
+// THE COMMITTED HALF (mg-fcba). mg-836c defined this population over `git
+// status`, which is clean the moment a worker commits — so an item whose
+// polecat was stopped AFTER committing and BEFORE pushing was suppressed
+// nowhere and advertised everywhere. That is the state the nightly pre-deploy
+// stop creates on purpose. The spawn-time gate is not the backstop here that it
+// is for the uncommitted half: the stranded-work gate does refuse an unpushed
+// polecat BRANCH (mg-bfe0), but a worktree on a DETACHED HEAD has no ref for
+// any ref scan to find, and this package reads no refs at all. So the same
+// probe now carries both halves and every check that consults it inherits
+// both.
 
 // categoryPreservedWorktree keys this check's cooldown and stamps its event. It
 // is distinct from the dispatch categories on purpose: it is the opposite
@@ -63,24 +75,71 @@ type PreservedTree struct {
 	// store, while an untracked path is on no branch, in no stash and on no
 	// remote — the tree is its only copy on the machine.
 	Modified, Untracked int
-	// Unread is true when the tree was found but `git status` could not read
-	// it, so no claim about its contents was established. Such a tree is
-	// reported anyway: "there may be work in here" is precisely the state not
-	// to dispatch over.
-	Unread bool
+	// Outcome is what was established about the tree, in gitgc's vocabulary:
+	// "preserved" (uncommitted work positively read), "unpushed" (clean, and
+	// holding commits that exist nowhere else), or anything else — including
+	// the ZERO VALUE — meaning nobody established what is in it.
+	//
+	// A string rather than the `Unread bool` this replaced, because the zero
+	// value of that bool asserted "this tree was read" and the summary then
+	// printed "0 modified, 0 untracked" about a tree nobody had looked at. That
+	// is survivable while there is one shape of finding; with two it is not,
+	// since an unset flag would now render a dirty tree as "clean — its work is
+	// already committed", which is a false sentence rather than a thin one. The
+	// zero value here falls into the unknown arm, so a caller that forgets to
+	// set it understates instead of lying.
+	Outcome string
+	// Commits is how many commits this tree's HEAD reaches that exist nowhere
+	// else — no ref under refs/remotes/origin/ holds them and none has a
+	// patch-equivalent on the integration branch (mg-fcba). Meaningful only
+	// when CommitsFinding is non-empty.
+	Commits int
+	// CommitsFinding is "" when the tree holds no such commits, "local-only"
+	// when it does, and "unknown" when the question could not be answered.
+	// Unknown is reported as ITSELF and is still a finding: a question we
+	// failed to ask is not an answer of none.
+	CommitsFinding string
+	// Detached is true when the tree has no branch checked out. It is the worst
+	// case and the reason the committed half needed covering at all: those
+	// commits are held by this worktree's HEAD and by NO REF, so nothing that
+	// scans refs — the stranded-work gate included — can see them.
+	Detached bool
 }
 
 // summary renders one tree as a clause. Never a bare total — see the field docs
 // for why the split carries the decision.
 func (t PreservedTree) summary() string {
-	if t.Unread {
+	var s string
+	switch t.Outcome {
+	case "preserved":
+		s = fmt.Sprintf("%s (%d modified, %d untracked", t.Path, t.Modified, t.Untracked)
+		if t.Untracked > 0 {
+			s += " — untracked paths exist ONLY here"
+		}
+	case "unpushed":
+		s = t.Path + " (clean — no uncommitted files"
+	default:
 		return t.Path + " (could NOT be read, so whether it holds work is unknown)"
 	}
-	s := fmt.Sprintf("%s (%d modified, %d untracked", t.Path, t.Modified, t.Untracked)
-	if t.Untracked > 0 {
-		s += " — untracked paths exist ONLY here"
+	switch t.CommitsFinding {
+	case "local-only":
+		// Only a count that was READ is printed. Commits==0 under a local-only
+		// verdict means the list could not be re-read, and "0 commit(s) exist
+		// NOWHERE ELSE" is a sentence whose number says the opposite of its
+		// verb — the number being the half that survives a skim.
+		if t.Commits == 0 {
+			s += "; commit(s) exist NOWHERE ELSE, how many is UNKNOWN"
+		} else {
+			s += fmt.Sprintf("; %d commit(s) exist NOWHERE ELSE", t.Commits)
+		}
+		if t.Detached {
+			s += " and NO REF holds them — the tree is on a detached HEAD"
+		}
+	case "unknown":
+		s += "; whether it holds commits that exist nowhere else could NOT be established"
 	}
-	if t.Branch != "" {
+	// A detached tree said so above; ", on HEAD" would read as a branch name.
+	if t.Branch != "" && t.Branch != "HEAD" {
 		s += ", on " + t.Branch
 	}
 	return s + ")"
@@ -226,15 +285,17 @@ func (w *Watcher) checkPreservedWorktrees(now time.Time, items []workitem.WorkIt
 
 	ids := itemIDs(due)
 	msg := fmt.Sprintf(
-		"stall-watch: %d work item(s) sit in available/ while their work is already written and "+
-			"UNCOMMITTED in a retained worktree — %s. This is NOT a dispatch request, it is the "+
-			"opposite. A polecat spawned at one of these gets a FRESH worktree, cannot see those files, "+
+		"stall-watch: %d work item(s) sit in available/ while their work already exists in a "+
+			"retained worktree and nowhere else — UNCOMMITTED, or COMMITTED and held by nothing but "+
+			"that tree — %s. This is NOT a dispatch request, it is the "+
+			"opposite. A polecat spawned at one of these gets a FRESH worktree, cannot see any of it, "+
 			"and re-derives work that already exists; the original is then destroyed by the next gc "+
 			"reap. DO NOT clear this by removing the worktree — nothing else on this machine holds "+
-			"those files. Read them (`pogo gc --list-preserved` lists every retained tree and splits "+
-			"modified from untracked), then decide: commit them on the tree's own branch and land it, "+
+			"it. Read it (`pogo gc --list-preserved` lists every retained tree, splits "+
+			"modified from untracked, and names the commits that exist nowhere else), then decide: "+
+			"make the work reachable on a branch and land it, "+
 			"rescue what is worth keeping by hand, or rule the work spent. `pogo agent spawn-polecat` "+
-			"refuses these items until then (mg-836c).",
+			"refuses these items until then (mg-836c, mg-fcba).",
 		len(due), strings.Join(preservedSentences(due, trees), "; "))
 	msg += sel.repeatNotice()
 
@@ -280,7 +341,15 @@ func preservedDetails(items []workitem.WorkItem, trees map[string][]PreservedTre
 				"branch":          t.Branch,
 				"modified_paths":  t.Modified,
 				"untracked_paths": t.Untracked,
-				"unread":          t.Unread,
+				"unread":          t.Outcome != "preserved" && t.Outcome != "unpushed",
+				"outcome":         t.Outcome,
+				// The committed half, stamped so "this item is held because its
+				// files are unsaved" and "held because its commits never left
+				// the box" are countable apart in events.log rather than only
+				// distinguishable by reading the prose (mg-fcba).
+				"commits_finding":     t.CommitsFinding,
+				"unreachable_commits": t.Commits,
+				"detached":            t.Detached,
 			})
 		}
 	}

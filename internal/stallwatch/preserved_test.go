@@ -41,10 +41,15 @@ func (f *fakePreserved) calls() int {
 }
 
 // heldIn builds a snapshot naming one retained tree on one item, in the shape
-// of the 2026-08-19 finding.
+// of the 2026-08-19 finding: DIRTY, with the work uncommitted.
+//
+// The outcome is stated rather than left to default. It is the fixture's claim
+// about what the probe read, and since mg-fcba there are two things it could
+// have read — a tree with the outcome unset is one nobody established anything
+// about, which is a third state and not this one.
 func heldIn(item, path, branch string, modified, untracked int) PreservedWork {
 	return PreservedWork{Items: map[string][]PreservedTree{
-		item: {{Path: path, Branch: branch, Modified: modified, Untracked: untracked}},
+		item: {{Path: path, Branch: branch, Outcome: "preserved", Modified: modified, Untracked: untracked}},
 	}}
 }
 
@@ -253,7 +258,7 @@ func TestPreservedHoldRespectsTheDispatchGate(t *testing.T) {
 // belongs on the notice that might be wrong, and never replaces it.
 func TestPreservedUncertaintyTravelsWithTheDispatchAdvice(t *testing.T) {
 	probe := &fakePreserved{held: PreservedWork{
-		Items:     map[string][]PreservedTree{"mg-held": {{Path: "/polecats/pheld", Unread: true}}},
+		Items:     map[string][]PreservedTree{"mg-held": {{Path: "/polecats/pheld", Outcome: "undetermined"}}},
 		Uncertain: "the polecats directory could not be fully read",
 	}}
 	w, rec, workRoot := preservedEnv(t, baseConfig(), nil, probe)
@@ -271,5 +276,128 @@ func TestPreservedUncertaintyTravelsWithTheDispatchAdvice(t *testing.T) {
 	// than as a positively-read empty one.
 	if !strings.Contains(msgs, "could NOT be read") {
 		t.Errorf("an unread retained tree must be reported as unread: %s", msgs)
+	}
+}
+
+// heldCommitsIn builds a snapshot in mg-fcba's shape: a CLEAN tree whose
+// polecat committed and never pushed. Every dirty count is zero — that is the
+// premise, not an omission — and the finding lives entirely in the commits.
+func heldCommitsIn(item, path, branch string, commits int, detached bool) PreservedWork {
+	return PreservedWork{Items: map[string][]PreservedTree{
+		item: {{
+			Path: path, Branch: branch, Outcome: "unpushed",
+			Commits: commits, CommitsFinding: "local-only", Detached: detached,
+		}},
+	}}
+}
+
+// TestPriorityWakeDoesNotAdvertiseAnItemWhoseCommitsNeverLeftTheBox is the
+// finding this ticket was filed on, on the surface it travelled on.
+//
+// A polecat was stopped mid-work by the pre-deploy stop. Its work existed only
+// in the preserved worktree, and priority-wake advertised the item as "ready,
+// claim or dispatch now" FOUR TIMES. Every instrument agreed: the item is
+// available, unclaimed, and no branch exists on origin. The only thing standing
+// between that advice and duplicated work was a note somebody had written from
+// memory eight minutes earlier.
+//
+// mg-836c's suppression could not cover it: that one is defined over `git
+// status`, which is clean once a worker commits.
+func TestPriorityWakeDoesNotAdvertiseAnItemWhoseCommitsNeverLeftTheBox(t *testing.T) {
+	probe := &fakePreserved{held: heldCommitsIn("mg-hi", "/polecats/phi", "polecat-phi", 3, false)}
+	w, rec, workRoot := preservedEnv(t, baseConfig(), nil, probe)
+	now := time.Now()
+	writePriorityItem(t, workRoot, "mg-hi", "mayor", "high", now.Add(-5*time.Minute))
+
+	w.Check(now)
+
+	for _, cat := range categories(rec) {
+		if cat == categoryPriorityWake {
+			t.Fatalf("priority-wake advertised an item whose commits exist only in a retained "+
+				"worktree: %q", rec.nudges[0].message)
+		}
+	}
+	// And it must not go silent instead. The item needs a DECISION — make the
+	// work reachable, rescue it, or rule it spent — and nothing else in the
+	// fleet is assigned to ask for one. Trading a wrong instruction for a silent
+	// hole is what this package keeps relearning not to ship.
+	msgs := strings.Join(nudgeMessages(rec), " ")
+	for _, want := range []string{
+		"/polecats/phi",                  // the path is what stops the reflex remedy
+		"3 commit(s) exist NOWHERE ELSE", // the size of the loss
+		"NOT a dispatch request",
+	} {
+		if !strings.Contains(msgs, want) {
+			t.Errorf("the notice does not carry %q; got: %s", want, msgs)
+		}
+	}
+	// "clean" must survive into the text. A reader told to look for uncommitted
+	// files in a tree git calls clean concludes the check is broken.
+	if !strings.Contains(msgs, "clean — no uncommitted files") {
+		t.Errorf("the notice does not say the tree is clean, so a reader will look for dirty "+
+			"files that are not there; got: %s", msgs)
+	}
+	// And it states only what git said. "its work is already committed" asserts
+	// there IS work, which a clean tree under an UNKNOWN durability verdict has
+	// not established — the same overstatement this whole surface refuses to
+	// make about an unreadable tree.
+	if strings.Contains(msgs, "already committed") {
+		t.Errorf("the notice claims work exists on the strength of a clean status; got: %s", msgs)
+	}
+}
+
+// TestPreservedNoticeNamesADetachedTree. The detached case is the one no ref
+// scan can cover — the stranded-work gate reads refs/heads and would see an
+// unpushed branch, but a detached worktree's commits are held by that tree's
+// own HEAD and by nothing else. Removing the tree orphans them, so the notice
+// has to say so where its reader is deciding what to do with the tree.
+func TestPreservedNoticeNamesADetachedTree(t *testing.T) {
+	probe := &fakePreserved{held: heldCommitsIn("mg-det", "/polecats/pdet", "", 2, true)}
+	w, rec, workRoot := preservedEnv(t, baseConfig(), nil, probe)
+	now := time.Now()
+	writeItem(t, workRoot, "mg-det", "mayor", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	msgs := strings.Join(nudgeMessages(rec), " ")
+	if !strings.Contains(msgs, "NO REF holds them") {
+		t.Errorf("the notice does not say the commits are held by no ref; got: %s", msgs)
+	}
+	if !strings.Contains(msgs, "detached HEAD") {
+		t.Errorf("the notice does not name the detached head; got: %s", msgs)
+	}
+}
+
+// TestPreservedTreeWithNoOutcomeUnderstatesRatherThanLies is the fail-safe
+// arm. This struct crosses a package boundary and its zero value used to assert
+// "this tree was read" — which, once there are two shapes of finding, renders a
+// dirty tree as "clean, its work is already committed". Understating is
+// survivable; a confident false sentence about somebody's only copy is not.
+func TestPreservedTreeWithNoOutcomeUnderstatesRatherThanLies(t *testing.T) {
+	got := PreservedTree{Path: "/polecats/pzero", Modified: 14, Untracked: 2}.summary()
+	if !strings.Contains(got, "could NOT be read") {
+		t.Errorf("an unset outcome must read as unestablished; got %q", got)
+	}
+	if strings.Contains(got, "already committed") {
+		t.Errorf("an unset outcome rendered as a clean tree — that is a false claim about a tree "+
+			"nobody looked at; got %q", got)
+	}
+}
+
+// TestPreservedNoticeNeverPrintsAZeroCommitCount is this ticket's own defect
+// shape turned on the fix. A local-only verdict whose commit list could not be
+// re-read arrives here as Commits==0, and "0 commit(s) exist NOWHERE ELSE" is a
+// sentence whose NUMBER says the opposite of its verb. The number is the half a
+// skimming reader keeps, so a caveat elsewhere in the paragraph does not reach
+// them.
+func TestPreservedNoticeNeverPrintsAZeroCommitCount(t *testing.T) {
+	got := PreservedTree{
+		Path: "/polecats/pzero", Outcome: "unpushed", CommitsFinding: "local-only", Commits: 0,
+	}.summary()
+	if strings.Contains(got, "0 commit") {
+		t.Errorf("the notice printed a zero commit count under a local-only verdict; got %q", got)
+	}
+	if !strings.Contains(got, "how many is UNKNOWN") {
+		t.Errorf("an unread count must say so rather than render as none; got %q", got)
 	}
 }

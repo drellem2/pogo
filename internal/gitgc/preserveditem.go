@@ -10,8 +10,17 @@ import (
 )
 
 // PreservedForItems answers, for a named set of work items, whether any of them
-// has a surviving worktree that gc will not reclaim — a tree holding
-// uncommitted work, or one whose contents could not be read at all.
+// has a surviving worktree holding work that exists nowhere else — a tree with
+// uncommitted changes, a tree whose contents could not be read at all, or a
+// tree whose HEAD reaches commits no origin ref holds (mg-fcba).
+//
+// The third arm is the one a dispatch guard could not do without and the one
+// this function shipped without. mg-836c closed the uncommitted half and both
+// its surfaces work; what stayed open is the state a polecat reaches when it
+// gets FURTHER — it commits, and is stopped before it pushes. `git status` is
+// clean then, so this function skipped the tree, and the item went on reading
+// dispatchable to every instrument in the path. See WorktreeCommitFinding for
+// which of those instruments were blind and why they were blind differently.
 //
 // # Why this exists beside ScanPreserved (mg-836c)
 //
@@ -127,12 +136,44 @@ func PreservedForItems(opts PreservedItemOptions) (PreservedItemReport, error) {
 		// called rather than re-implemented, so this cannot claim a tree is
 		// retained that gc would happily reap.
 		chk := checkWorktreeRemoval(path)
-		if chk.Refusal == nil {
+
+		// The COMMITTED half of the same question (mg-fcba), asked of every
+		// candidate tree whether or not the removal guard refused it. A clean
+		// tree is exactly the shape a polecat leaves when it is stopped after
+		// committing and before pushing, and `git status` is silent about it by
+		// construction — so a probe that reached this line and skipped on
+		// `chk.Refusal == nil`, as this one did, went quiet on the population
+		// the pre-deploy stop creates on purpose every night.
+		//
+		// A tree whose repo pointer or HEAD could not be read is NOT turned
+		// into a finding here: `git status` is the arm that covers an
+		// unreadable tree (and refuses, see the caller's doc), and a second
+		// unreadable-arm would refuse dispatches over trees the first arm read
+		// fine. The failure is reported through rep.Errors, which every caller
+		// already carries as "this snapshot may be incomplete".
+		if find, ferr := WorktreeCommitsAtRisk(path, tree.Repo, opts.Target); ferr != nil {
+			rep.Errors = append(rep.Errors, fmt.Sprintf(
+				"could not check whether %s holds commits that exist nowhere else: %v", path, ferr))
+		} else if find.AtRisk() {
+			f := find
+			tree.Commits = &f
+		}
+
+		if chk.Refusal == nil && tree.Commits == nil {
 			continue
 		}
 		var dwe *DirtyWorktreeError
 		var uwe *UndeterminedWorktreeError
 		switch {
+		case chk.Refusal == nil:
+			// Clean, and holding commits that exist nowhere else. Named as its
+			// own outcome rather than folded into "preserved": that word means
+			// "uncommitted work was positively read" everywhere else in this
+			// package and in the worktree_preserved event, and asserting it
+			// about a tree `git status` called clean would be a claim nobody
+			// made. It also gets the remedy wrong — there is nothing to commit
+			// here, the work is already committed and merely unreachable.
+			tree.Outcome = "unpushed"
 		case errors.As(chk.Refusal, &dwe):
 			tree.Outcome = "preserved"
 			if _, files, ferr := WorktreeDirty(path); ferr == nil {
@@ -184,6 +225,16 @@ type PreservedItemOptions struct {
 	// silently widened to every item would refuse dispatches it was never
 	// asked about.
 	Items []string
+	// Target is the integration branch a candidate tree's commits would land
+	// on — the spawn request's own target where the caller has one. Empty
+	// resolves to DefaultTargetBranch inside BranchDurable.
+	//
+	// It exists only to spare the REBASE case a false finding: a polecat whose
+	// commits landed on the integration branch under rewritten SHAs is durable,
+	// and the patch-id test that establishes that needs something to compare
+	// against. Getting it wrong therefore costs a false refusal, never a missed
+	// one.
+	Target string
 }
 
 // PreservedItemReport is what PreservedForItems found.
