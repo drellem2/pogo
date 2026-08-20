@@ -2698,6 +2698,220 @@ SELF_INNER="$( ( self_pid ) )"
     && pass "self_pid returns the SUBSHELL's own pid, not the parent's (bash 3.2 has no BASHPID)" \
     || fail "self_pid returned '$SELF_INNER' in a subshell of $SELF_OUTER — the watchdog cannot exclude itself"
 
+# "Different from $$" is the weak half, and on its own it passed for months
+# against a self_pid that was WRONG — the value it returned was the command
+# substitution's own throwaway subshell, which is also different from $$ and had
+# already exited. So the assertion that matters compares against the caller's
+# pid measured INDEPENDENTLY: `sleep &` is forked by the enclosing shell, so the
+# child's ppid is that shell, and no command substitution stands in between.
+#
+# The two must be taken in the SAME shell, which is why this is written inline
+# in each context rather than factored into a helper — a helper would be called
+# through $( ) and would measure the helper's subshell, which is precisely the
+# bug being tested for.
+selfchk() { # $1 = context label; must be invoked as a plain statement
+    local label="$1" mark real self
+    sleep 5 & mark=$!
+    real="$(ps -o ppid= -p "$mark" 2>/dev/null | tr -d ' ')"
+    kill "$mark" 2>/dev/null
+    wait "$mark" 2>/dev/null
+    self="$(self_pid)"
+    if [ -n "$real" ] && [ "$self" = "$real" ]; then
+        pass "self_pid is the CALLER's real pid in a $label (self=$self)"
+    else
+        fail "self_pid returned '$self' in a $label whose real pid is '$real' — KILL_TREE_SKIP would hold a pid that matches nothing"
+    fi
+}
+# selfchk is itself a function, so `selfchk foo` runs in THIS shell (bash does
+# not fork for a function call) and both readings describe the same process.
+selfchk "function body"
+( selfchk "plain subshell" )
+( ( selfchk "doubly-nested subshell" ) )
+( trap 'true' TERM; selfchk "subshell with a TERM trap set" )
+( selfchk "backgrounded subshell" ) & wait
+
+# No call site may drop the $( ). self_pid execs `sh` over the substitution's
+# own subshell — that is what makes it depth-independent — so a bare call would
+# replace the running shell with an `sh` that prints a pid and exits, taking the
+# deploy with it.
+BARE_SELF_PID="$(grep -n 'self_pid' "$RUNNER" \
+    | grep -v '^[0-9]*:#' \
+    | grep -v 'self_pid() {' \
+    | grep -v '\$(self_pid)' || true)"
+[ -z "$BARE_SELF_PID" ] \
+    && pass "every self_pid call site in the runner captures it with \$( ) — a bare call would exec over the shell" \
+    || fail "self_pid is called without \$( ) — that call execs sh over the running shell: $BARE_SELF_PID"
+
+# --- kill_tree run from INSIDE the tree it is killing (mg-19e4) -------------
+# The walk used to enumerate children with `pgrep -P`, and pgrep excludes the
+# calling process AND ALL OF ITS ANCESTORS (man pgrep) — a filter that applies
+# to -P as well. Unlike a name match it does not come back empty, it comes back
+# SHORT at exit 0, so the walk drops every node on the path from the root down
+# to the caller together with everything hanging off those nodes, signals the
+# root, and returns success. That is the deadline watchdog's exact shape: it is
+# a descendant of the run it is killing.
+#
+# The fixture is root -> {leafB, mid -> {leafA, caller}}, with kill_tree invoked
+# from `caller`. leafA is the assertion: it is a leaf of the tree, it is not on
+# the caller's path, and it is only reachable by descending THROUGH mid, which
+# is the node the exclusion removes.
+KT_FIXTURE="$WORK/kill_tree_fixture.sh"
+cat > "$KT_FIXTURE" <<'KTEOF'
+#!/usr/bin/env bash
+set -u
+RUNNER="$1"; D="$2"; WALK="$3"; DECLARE_SKIP="$4"
+source "$RUNNER"
+
+# The shipped-until-mg-19e4 walk, kept verbatim as the negative control: if this
+# arm ever stops leaving leafA alive, the fixture has stopped exercising the
+# exclusion and the positive arm below is not measuring anything.
+kill_tree_pgrep() {
+    local pid="${1:-}" sig="${2:-TERM}" child
+    [ -n "$pid" ] || return 0
+    [ "$pid" = "${KILL_TREE_SKIP:-}" ] && return 0
+    for child in $(pgrep -P "$pid" 2>/dev/null); do kill_tree_pgrep "$child" "$sig"; done
+    kill -"$sig" "$pid" 2>/dev/null || true
+}
+
+echo "$$" > "$D/root"
+sleep 120 & echo "$!" > "$D/leafB"
+(
+    sleep 120 & MIDLEAF=$!
+    echo "$MIDLEAF" > "$D/leafA"
+    ps -o ppid= -p "$MIDLEAF" | tr -d ' ' > "$D/mid"
+    (
+        [ "$DECLARE_SKIP" = "1" ] && KILL_TREE_SKIP="$(self_pid)"
+        sleep 0.3
+        "$WALK" "$(cat "$D/root")" TERM
+        # Written only if the caller was still alive at the END of the walk. A
+        # walk that kills the shell running it never reaches this line, and the
+        # missing marker is the only way to tell that apart from a walk that
+        # finished — the tree looks identical either way.
+        echo done > "$D/finished"
+    )
+    wait
+) &
+wait
+KTEOF
+chmod +x "$KT_FIXTURE"
+
+# kill_tree_case WALK DECLARE_SKIP — run the fixture, wait for it to settle, and
+# leave the verdict in KT_ALIVE (space-separated names) and KT_FINISHED.
+KT_ALIVE=""
+KT_FINISHED=false
+kill_tree_case() {
+    local walk="$1" skip="$2" d n p i
+    d="$WORK/kt-$walk-$skip"
+    rm -rf "$d"; mkdir -p "$d"
+    ( POGO_HOME="$d/pogohome" HOME="$d/home" bash "$KT_FIXTURE" "$RUNNER" "$d" "$walk" "$skip" >/dev/null 2>&1 & )
+    # Settle on the ROOT dying, not on a fixed sleep: every arm kills the root.
+    for i in $(seq 1 60); do
+        p="$(cat "$d/root" 2>/dev/null)"
+        [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null && break
+        sleep 0.25
+    done
+    sleep 0.5
+    KT_ALIVE=""
+    for n in root leafB mid leafA; do
+        p="$(cat "$d/$n" 2>/dev/null)"
+        [ -n "$p" ] && kill -0 "$p" 2>/dev/null && KT_ALIVE="$KT_ALIVE $n"
+    done
+    KT_ALIVE="${KT_ALIVE# }"
+    [ -f "$d/finished" ] && KT_FINISHED=true || KT_FINISHED=false
+    # BY PID. An unanchored pkill on this box takes the fleet's own pollers with
+    # it, which idle in exactly this command (mg-c675).
+    for n in root leafB mid leafA; do
+        p="$(cat "$d/$n" 2>/dev/null)"
+        [ -n "$p" ] && kill -9 "$p" 2>/dev/null
+    done
+    return 0
+}
+
+# THE PREMISE CONTROL. Without this arm the positive arm below cannot be told
+# apart from a fixture whose tree was never deep enough to exercise anything.
+kill_tree_case kill_tree_pgrep 1
+case " $KT_ALIVE " in
+    *" leafA "*) pass "premise: the pgrep -P walk really does leave leafA alive (survivors: $KT_ALIVE) — the exclusion is live on this box" ;;
+    *) fail "the pgrep -P control reaped leafA (survivors: '$KT_ALIVE') — this fixture is not exercising the ancestor exclusion, so the assertion below proves nothing" ;;
+esac
+$KT_FINISHED \
+    && pass "premise: the pgrep -P walk returns SUCCESS having skipped a subtree — short, not empty, at exit 0" \
+    || fail "the pgrep -P control did not finish its walk — the control is measuring something other than the undercount"
+
+kill_tree_case kill_tree 1
+[ -z "$KT_ALIVE" ] \
+    && pass "kill_tree run from INSIDE the tree reaps EVERY descendant, including the branch the caller is standing on" \
+    || fail "kill_tree left $KT_ALIVE alive — the walk is still blind to its own branch"
+$KT_FINISHED \
+    && pass "kill_tree does not kill the shell running it when KILL_TREE_SKIP is declared (the watchdog reaches its SIGKILL)" \
+    || fail "kill_tree killed its own caller mid-walk despite KILL_TREE_SKIP — the watchdog would never reach the SIGKILL"
+
+# The OTHER failure direction, and the reason `pgrep -aP` was not the fix. -a
+# stops excluding the ancestors AND the caller, so a caller that does not
+# declare KILL_TREE_SKIP is handed its own pid. Measured under mg-19e4: with -aP
+# and no declared skip the caller was killed mid-walk. kill_tree therefore
+# refuses to signal the process it is running in whether or not anyone declared
+# it, and this arm is what holds that guard in place.
+kill_tree_case kill_tree 0
+$KT_FINISHED \
+    && pass "kill_tree protects its own process even when the caller FORGETS KILL_TREE_SKIP" \
+    || fail "kill_tree killed its own caller with no KILL_TREE_SKIP declared — the self guard is gone"
+[ -z "$KT_ALIVE" ] \
+    && pass "the self guard costs nothing: everything under the root still dies" \
+    || fail "the self guard spared $KT_ALIVE — it is protecting more than the caller"
+
+# --- kill_tree must refuse a root of 0 or 1 (mg-19e4) -----------------------
+# Removing the ancestor exclusion removed a rail nobody had noticed leaning on
+# it: `pgrep -P 0` and `pgrep -P 1` returned empty because pid 1 is every
+# caller's ancestor, so a stray root of 0 or 1 was a no-op. `ps` answers the
+# same question honestly, and honestly is the whole machine.
+#
+# THE SOURCE CHECK COMES FIRST AND GATES THE LIVE CALL. If the guard has been
+# removed, `kill_tree 0` on this box walks into launchd's children — so a suite
+# that exercised it unconditionally would be a regression test that destroys the
+# box it detects the regression on.
+KT_GUARD_SRC="$(grep -c '0 | 1) err "kill_tree REFUSED a root of' "$RUNNER" || true)"
+if [ "$KT_GUARD_SRC" -ge 1 ]; then
+    pass "kill_tree carries the 0/1 root refusal in source (checked BEFORE calling it: without it this assertion kills the box)"
+    sleep 30 & KT_BYSTANDER=$!
+    KT_REFUSAL="$(kill_tree 0 TERM 2>&1)"
+    KT_RC=$?
+    [ "$KT_RC" -eq 0 ] \
+        && pass "kill_tree returns 0 on a refused root — a refusal is not an error the caller must handle" \
+        || fail "kill_tree returned $KT_RC on a root of 0"
+    case "$KT_REFUSAL" in
+        *"REFUSED a root of 0"*) pass "and it SAYS it refused, rather than looking like a walk that found nothing" ;;
+        *) fail "kill_tree 0 was silent: '$KT_REFUSAL' — indistinguishable from an empty tree" ;;
+    esac
+    kill -0 "$KT_BYSTANDER" 2>/dev/null \
+        && pass "a bystander process of this shell survived kill_tree 0 (the walk did not start)" \
+        || fail "kill_tree 0 reached this shell's children — the refusal is not refusing"
+    kill_tree 1 TERM >/dev/null 2>&1
+    kill -0 "$KT_BYSTANDER" 2>/dev/null \
+        && pass "and a root of 1 is refused too — launchd is every caller's ancestor, so the blind walk never reached it either" \
+        || fail "kill_tree 1 walked into this shell's children"
+    kill_tree "not-a-pid" TERM >/dev/null 2>&1
+    kill -0 "$KT_BYSTANDER" 2>/dev/null \
+        && pass "a non-numeric root is refused rather than passed to ps and kill" \
+        || fail "kill_tree accepted a non-numeric root"
+    kill "$KT_BYSTANDER" 2>/dev/null
+    wait "$KT_BYSTANDER" 2>/dev/null
+else
+    fail "kill_tree has lost its 0/1 root refusal — NOT exercising it, because with ps enumerating children that walk descends into every process on this box"
+fi
+
+# The regression this file exists to catch is a return to the blind primitive,
+# and it would pass every behavioural assertion above on any box where the
+# caller happens to sit outside the tree.
+# Comment lines are excluded deliberately: the runner EXPLAINS pgrep -P at
+# length right above child_pids, and an assertion that cannot tell the
+# explanation from the call would have to be deleted the first time someone
+# documents the hazard properly.
+PGREP_P_CALLS="$(grep -n 'pgrep -P' "$RUNNER" | grep -v '^[0-9]*:[[:space:]]*#' || true)"
+[ -z "$PGREP_P_CALLS" ] \
+    && pass "no live pgrep -P call in the runner: the child walk reads ps, which applies no ancestor filter" \
+    || fail "the runner is enumerating children with pgrep -P again — that walk cannot see its own branch (mg-19e4): $PGREP_P_CALLS"
+
 # --- git_step: a hung step is a TIMEOUT, and timeouts are retryable ---------
 SAVED_GIT_TIMEOUT="$GIT_TIMEOUT"
 GIT_TIMEOUT=2

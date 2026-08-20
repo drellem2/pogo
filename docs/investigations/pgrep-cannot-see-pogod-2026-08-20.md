@@ -187,11 +187,22 @@ generalised.
   never visited — leaves-first, the property the function exists for, is not
   guaranteed on that branch. **Not measured against a live deploy here, and not
   fixed here** (out of mg-cbee's scope); filed as **mg-19e4**.
+  *Resolved under mg-19e4: the walk now enumerates children from `ps`. `-aP` was
+  NOT the fix — it stops excluding the caller too, and was measured killing the
+  walking shell mid-walk. It also turned up that `self_pid()` returned the wrong
+  pid in all six contexts tried, so `KILL_TREE_SKIP` matched nothing and this
+  exclusion was what had been protecting the watchdog from itself. See
+  `pgrep-P-undercount-kill-tree-2026-08-20.md`.*
 - `scripts/launchd/pogo-reclaim.sh:448` — `builds_in_flight()` does
   `pgrep -x go|compile|link` to defer a reclaim while something is building.
   A reclaim running as a descendant of a `go` process would be told nothing is
   building. Whether that arrangement can occur was not established; filed with
   the above as **mg-19e4**.
+  *Settled under mg-19e4: it cannot occur on the launchd path — `com.pogo.reclaim`
+  execs the script directly, so its ancestors are launchd and its own bash and
+  nothing else. The exposure is the operator's manual run. Fixed anyway with
+  `-a`, whose only new rows here are true ones and whose error direction is an
+  over-count, i.e. a deferred reclaim.*
 
 ## 6. Not established
 

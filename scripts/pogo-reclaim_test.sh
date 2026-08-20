@@ -271,6 +271,41 @@ called "go clean" && fail "deleted the module cache out from under a running bui
 case "$OUT" in *"DEFERRED"*) pass "says it deferred and why" ;; *) fail "no deferral line: $OUT" ;; esac
 cleanup
 
+echo "-- 5a. the in-flight probe cannot be blind to its own ancestors (mg-19e4) --"
+# `pgrep` excludes the calling process AND ALL OF ITS ANCESTORS unless passed -a
+# (man pgrep). This count is a DEFER-GUARD, so the direction of that error is
+# the dangerous one: a reclaim running underneath a build is told nothing is
+# building and deletes the module cache the compile is reading — this suite's
+# §5 complaint, produced by §5's own remedy.
+#
+# THE CONTROL IS LIVE, not stubbed, because the property under test belongs to
+# the real pgrep and nothing about a stub could establish it. A symlink to
+# /bin/sh gives an ancestor with a unique exact process name, so the two
+# readings differ only in the flag.
+ANC_DIR="$(mktemp -d)"
+ln -sf /bin/sh "$ANC_DIR/pogoreclaimanc"
+ANC_OUT="$("$ANC_DIR/pogoreclaimanc" -c 'echo "plain=$(pgrep -x pogoreclaimanc | wc -l | tr -d " ") ancestors=$(pgrep -ax pogoreclaimanc | wc -l | tr -d " ")"' 2>/dev/null)"
+case "$ANC_OUT" in
+    "plain=0 ancestors="[1-9]*)
+        pass "premise: pgrep -x reports 0 for a process that IS the caller's ancestor, while pgrep -ax finds it ($ANC_OUT)" ;;
+    *)
+        fail "the ancestor-exclusion control did not reproduce ($ANC_OUT) — the -a below may be load-bearing for a reason this box no longer exhibits, or may have stopped being needed" ;;
+esac
+rm -rf "$ANC_DIR"
+
+# And the script must actually pass the flag. The stub records its whole argv,
+# so this reads the invocation rather than the source: a rewrite that keeps the
+# comment and drops the flag fails here.
+fixture
+echo $((10 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((7 * GB)) > "$WORK/cache"
+run
+called "pgrep -ax go" \
+    && pass "the in-flight process check asks pgrep to include ANCESTORS — without -a a reclaim under a build reads as a quiet box" \
+    || fail "the in-flight check ran pgrep without -a: $(grep '^pgrep' "$WORK/calls.log" | tr '\n' ' ')"
+cleanup
+
 echo "-- 5b. deferral on an in-flight refinery merge --"
 fixture
 echo $((10 * GB)) > "$WORK/free"

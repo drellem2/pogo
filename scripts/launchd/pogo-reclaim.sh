@@ -441,11 +441,29 @@ fi
 # the EXACT process name; `pgrep -f` is never used here, because a pattern
 # matched against full command lines matches half the fleet (see the standing
 # rule about unanchored pkill on this box).
+#
+# `-a` IS LOAD-BEARING (mg-19e4). Without it pgrep excludes the calling process
+# and every one of its ANCESTORS (man pgrep), so a reclaim running underneath a
+# build is told nothing is building — and this count is a defer-guard, so the
+# wrong answer here is the one that deletes the module cache out from under the
+# compile that is reading it. Measured on this box from a shell spawned by a
+# `go test`: `pgrep -x go` returned EMPTY while `pgrep -ax go` and `ps` both
+# found the one `go` process, which was the shell's own ancestor.
+#
+# ON THE LAUNCHD PATH THIS WAS ALREADY CORRECT, and that is worth recording
+# rather than leaving ambiguous: com.pogo.reclaim execs this script directly, so
+# its ancestor chain is launchd and this bash and nothing else — never a `go`,
+# `compile` or `link`. The exposure is the operator's manual run (README's
+# dry-run line) and any future caller that reaches this script from inside a
+# build. `-a` is bought cheaply: it also stops excluding the CALLER, but the
+# caller is `pgrep`, which cannot match any of these three names, so the only
+# rows it can add are true ones — and the error it can introduce is an
+# over-count, which defers a reclaim rather than firing one.
 IN_FLIGHT_WHY=""
 builds_in_flight() {
     local n name
     for name in go compile link; do
-        n="$(pgrep -x "$name" 2>/dev/null | wc -l | tr -d ' ')"
+        n="$(pgrep -ax "$name" 2>/dev/null | wc -l | tr -d ' ')"
         if [ "${n:-0}" -gt 0 ]; then
             IN_FLIGHT_WHY="$n process(es) named '$name' are running"
             return 0
