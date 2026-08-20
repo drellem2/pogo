@@ -4531,6 +4531,12 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(newInEffectCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdCheckCommitBody)
 	rootCmd.AddCommand(newCheckPromptsCmd(&jsonOutput))
+	// check-prompt-edits (mg-0c96): the eleventh sibling — an installed prompt
+	// edited in place after the installer wrote it, which its own stamp already
+	// records and which nothing read on a cadence. The on-demand half; the
+	// cadence is pogod's heartbeat (internal/promptedit), deliberately not this
+	// command and deliberately not doctor --check (mg-10e3).
+	rootCmd.AddCommand(newCheckPromptEditsCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckStalenessCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckOrphansCmd(&jsonOutput))
 	// turn-done / check-turns (mg-a270): the fleet's turn-completion artifact

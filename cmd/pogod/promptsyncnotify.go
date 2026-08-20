@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
@@ -148,42 +147,17 @@ func savePromptSyncNotices(path string, n promptSyncNotices) error {
 // agent that can act on it, and reports whether that agent OWNS the prompt or
 // is merely the fallback.
 //
-// The mapping mirrors ListPrompts, which is the authority on how a file under
-// ~/.pogo/agents/ becomes an agent:
+// The routing table itself lives in internal/agent beside ListPrompts, which is
+// the authority on how a file under ~/.pogo/agents/ becomes an agent. It moved
+// there when a second caller appeared — the hand-edit detector (mg-0c96), which
+// must address exactly the same agents for exactly the same reason — because a
+// second copy of a routing table is a second chance to misroute, and mail to a
+// name no agent reads is silently accepted into a phantom mailbox and lost.
 //
-//   - mayor.md      → the CONFIGURED coordinator name. The file is always
-//     mayor.md (mechanism) but the agent it starts as follows
-//     [agents] coordinator (policy), so hardcoding "mayor"
-//     here would misroute on any consumer who renamed it.
-//   - crew/<n>.md   → <n>. This is the same string the agent checks mail as,
-//     because it is the same string ListPrompts and autostart
-//     name it by.
-//   - anything else → the coordinator, owned=false. templates/polecat*.md and
-//     pm/pm-template.md are consumed at spawn and belong to
-//     no running agent, so there is no inbox to address; the
-//     coordinator is who dispatches from them.
-//
-// NEVER GUESS A NAME. Mail to a name no agent reads is silently accepted into a
-// phantom mailbox and lost, which would recreate this ticket's defect with
-// extra steps. Every branch above returns either a name taken from the prompt
-// tree itself or the configured coordinator — never a name synthesized from a
-// path we did not recognize.
+// This wrapper stays so the notifier reads at its own level of abstraction and
+// so the tests that pin this behaviour keep pinning it from the caller's side.
 func promptSyncAddressee(rel, coordinator string) (to string, owned bool) {
-	clean := filepath.ToSlash(filepath.Clean(rel))
-	switch {
-	case clean == "mayor.md":
-		return coordinator, true
-	case strings.HasPrefix(clean, "crew/") && strings.HasSuffix(clean, ".md"):
-		name := strings.TrimSuffix(strings.TrimPrefix(clean, "crew/"), ".md")
-		// A nested path under crew/ is not a crew agent, and neither is an
-		// empty stem. Fall back rather than address a name we invented.
-		if name == "" || strings.Contains(name, "/") {
-			return coordinator, false
-		}
-		return name, true
-	default:
-		return coordinator, false
-	}
+	return agent.PromptAddressee(rel, coordinator)
 }
 
 // promptSyncFingerprint hashes the shipped content that was declined.
