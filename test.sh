@@ -138,6 +138,21 @@ gate_step "Testing pogo-self-deploy live mail-check control" bash scripts/pogo-s
 # this file therefore does not have to pay 60s to restate.
 gate_step "Testing the live control's sandbox isolation and setup-failure reporting" bash scripts/pogo-self-deploy_live_setup_test.sh
 
+# The merged-not-closed ALERT and the merged-work GATE, against a pogod that is
+# NOT a test binary (mg-161a). This is the one control in the tree that cmd/pogod
+# structurally cannot host: defaultMergedOpenAlertMail refuses to send under
+# testing.Testing(), by construction and correctly — without that guard a `go
+# test ./cmd/pogod/...` run manufactures a real fleet alarm in the coordinator's
+# real inbox. So every unit test of that path asserts against a STUB installed in
+# its place, a green cmd/pogod suite is evidence about the stub, and mg-9d4e's
+# alert went ten days merged and unexercised on the strength of it.
+#
+# It costs ~15s: two trivial merges through a real refinery in a private sandbox.
+# It asserts BOTH arms of the delivery (no coordinator mailbox -> the undelivered
+# event; registered -> the mail on disk and in `mg mail list`), and it separates
+# this alert from the pre-existing filernotify one that fires on the same merges.
+gate_step "Testing the merged-not-closed alert and merged-work gate at runtime" bash scripts/mergedopen-runtime_test.sh
+
 # The pogod condition annunciator's live controls (mg-342d). The MERGE-TIME
 # SUBSET — the negative control plus A2, the enumeration's own highest severity —
 # because those are the two that decide whether any of the rest mean anything, and
