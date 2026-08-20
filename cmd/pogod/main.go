@@ -610,11 +610,12 @@ type versionInfo struct {
 	Modified  bool         `json:"modified"`   // vcs.modified (dirty tree at build)
 	GoVersion string       `json:"go_version"` // toolchain that built it
 	StartTime string       `json:"start_time"` // RFC3339 process start
+	PID       int          `json:"pid"`        // pid of the process that served this (mg-cbee)
 	Build     version.Info `json:"build"`      // the ldflags stamp, with its source named
 }
 
 func versionHandler(w http.ResponseWriter, r *http.Request) {
-	info := versionInfo{StartTime: startTime.Format(time.RFC3339), Build: version.Get()}
+	info := versionInfo{StartTime: startTime.Format(time.RFC3339), PID: os.Getpid(), Build: version.Get()}
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		info.GoVersion = bi.GoVersion
 		for _, s := range bi.Settings {
@@ -647,6 +648,9 @@ func healthFull(w http.ResponseWriter, r *http.Request) {
 		Status: "ok",
 		Uptime: time.Since(startTime).Truncate(time.Second).String(),
 		Mode:   mode,
+		// The pid of the process answering, so an agent can identify pogod
+		// without `pgrep` — which cannot see it (mg-cbee, see health.Pogod).
+		PID: os.Getpid(),
 	}
 
 	// Agents health

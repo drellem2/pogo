@@ -24,10 +24,24 @@ type FullResponse struct {
 }
 
 // Pogod reports basic daemon health.
+//
+// PID is the pid of the process that SERVED this response, and it is here so
+// that "what is pogod's pid" has an answer that does not go through `pgrep`.
+// On macOS `pgrep`/`pkill` exclude the calling process and every one of its
+// ancestors unless passed `-a` (`man pgrep`), and pogod is the ancestor of
+// every agent it spawns — so `pgrep -x pogod` run from any agent returns empty
+// at exit 1 while pogod is demonstrably serving on its port (measured
+// 2026-08-20, mg-cbee; see docs/investigations/pgrep-cannot-see-pogod-2026-08-20.md).
+// An empty pattern match is then substituted into whatever command was wrapped
+// around it, which is where the silent part starts. This field is the
+// instrument that construction was standing in for: it is served by pogod
+// itself, so it cannot report a pid for a daemon that is not answering — the
+// request fails instead.
 type Pogod struct {
 	Status string `json:"status"`
 	Uptime string `json:"uptime"`
 	Mode   string `json:"mode"`
+	PID    int    `json:"pid"`
 }
 
 // AgentDetail is a summary of one agent.

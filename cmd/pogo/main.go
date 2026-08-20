@@ -396,8 +396,7 @@ Use --json for the raw structured response.`,
 				cli.PrintJSON(report)
 				return
 			}
-			fmt.Printf("pogod:    %s  (mode=%s, uptime=%s)\n",
-				report.Pogod.Status, report.Pogod.Mode, report.Pogod.Uptime)
+			fmt.Print(formatHealthPogod(report.Pogod))
 			fmt.Printf("agents:   %d total, %d running, %d exited\n",
 				report.Agents.Total, report.Agents.Running, report.Agents.Exited)
 			refState := "stopped"
