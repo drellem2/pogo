@@ -1796,6 +1796,17 @@ Flags:
 		conditions.Clear(rowA10RolePin, time.Now())
 	}
 
+	// mg-a19a — is this daemon writing to the log its own service definition
+	// names? Raised here rather than at the top of main for the same reason A14
+	// is deferred: the addressee is the whole mechanism, and this is the first
+	// line at which a coordinator name exists.
+	//
+	// A daemon with no installed job to compare against is UNDETERMINED, not
+	// clear: it neither raises nor clears, so a box that has never installed the
+	// service does not accumulate a standing alarm, and a real condition is not
+	// silently cleared by a plist going missing.
+	annunciateLogDestination(conditions, coordinator, time.Now())
+
 	// Register every known harness provider into the registry, then set the
 	// global default. Before mg-b31b a single provider was resolved here, once,
 	// at startup; now the registry resolves a provider per spawn from the
@@ -3152,6 +3163,20 @@ Flags:
 		// coordinator process to nudge yet. This tick is also the proof that the
 		// wake channel does not depend on the failed subsystem: the heartbeat
 		// drives the scheduler (`if sched != nil` below), not the reverse.
+		// mg-a19a — re-read this daemon's log destination on every tick, not
+		// only at boot. A startup-only detector would have said nothing for the
+		// whole 57-hour episode this condition was written for: that daemon was
+		// detached from its first instant and never restarted, so the one moment
+		// a boot-time check fires had already passed before anybody looked.
+		// Riding the tick makes the notice re-announce on the annunciator's
+		// renotify window until somebody fixes it.
+		//
+		// Rate-limit-critical for the same reason A11 above is, and safe for the
+		// same reason: the per-condition floor. The reading itself is a plist
+		// read plus two stats — the same order of work as the heartbeat write
+		// beside it, and deliberately re-read rather than cached, so a plist
+		// edited to name a different file is noticed instead of inherited.
+		annunciateLogDestination(conditions, coordinator, now)
 		conditions.retryWakes(now)
 		if sched != nil {
 			sched.Tick(context.Background(), now)

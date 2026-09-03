@@ -4594,6 +4594,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	cmdService.AddCommand(cmdServiceCheckDrift)
 	cmdService.AddCommand(cmdServiceVerifyRevision)
 	cmdService.AddCommand(cmdServiceSupervision)
+	cmdService.AddCommand(newServiceLogCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdService)
 
 	// Recovery commands (mg-f5fc tier-3). The agent itself is installed via
