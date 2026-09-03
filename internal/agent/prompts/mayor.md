@@ -1508,6 +1508,22 @@ No `pogo` subcommand prints the log location, so the plist/journal above is the 
 
 **An empty grep is evidence only once you know the thing you grepped exists.** `grep <mr-id> <path>` against a missing file, and `journalctl -u` against the wrong unit, both print nothing and exit quietly — indistinguishable from "the refinery logged nothing about this MR", which is the wrong conclusion to reach mid-diagnosis of a stuck merge. Confirm the file (`ls -l`) or the unit first. On macOS also note pogod rotates its log at startup past 10 MiB: lines from an older run are in `pogod.log.1` (up to `.3`), not in `pogod.log`.
 
+**EXISTENCE IS NOT LIVENESS, and the file that exists is the one that fooled everybody (mg-a19a).** `ls -l` clears the paragraph above and does not clear this one. Measured 2026-09-03: pogod pid 6610 had been up 57h45m — holding the lock, serving `:10000`, delivering scheduled fires, running a refinery gate — with its fd 2 on `/dev/ttys007`, no descriptor on `pogod.log`, and **zero lines ever written there**. Its parent was Emacs, not launchd. Meanwhile `launchctl print` reported `runs = 4639` for `com.pogo.daemon`: 4,639 spawns that each refused the lock held by 6610 and exited 1, and the log's last 9,278 lines are those refusals. So the file passed `ls -l` at 8.9 MB of rich, correctly-formatted daemon output, every byte of it written by processes that lived milliseconds.
+
+**Ask before you grep:**
+
+```bash
+pogo service log        # exit 0 LIVE · 1 DETACHED · 3 UNKNOWN (a reading was missing — not a pass)
+```
+
+`DETACHED` means the running daemon writes somewhere else, so an empty grep proves nothing **and a non-empty one is about some other process.** Any question whose window reaches past the point where the daemon stopped writing gets **"the record is absent"**, never "the record is negative" — those are different answers and the file renders them identically.
+
+Do **not** substitute a freshness check for this. It reads green in the worst case: for the thirteen hours of that respawn loop, `pogod.log`'s mtime was continuously under ten seconds old while the live daemon wrote nothing to it. `pogo service log` compares the daemon's *descriptor* against the path for exactly that reason, and prints mtime only underneath a line saying what it does not prove.
+
+**The cost is on the record.** On 2026-09-03, mid-incident, an architect grepped this file for a fleet-stop window, found 51 `cause=modal_wedge signatures=[rating_dialog]` lines and 1,875 `ANIMATING BUT NOT WORKING` lines, and built a specific, mechanically plausible root cause on them. Every one of those lines predated the window by days. The real cause was an entitlement refusal (mg-6616), proven from agent transcripts. Withdrawing the lead took a second investigator and a second source; the file alone gave no signal its answer was out of date.
+
+If `pogo service log` says `DETACHED`, also run `pogo service supervision` — the running pogod was probably not started by launchd, which means launchd is supervising nothing and a wedged daemon would never be restarted (mg-fa79). Same displacement, different question, and it owes its own fix.
+
 All refinery log lines are prefixed with `refinery:`. To find logs for a specific merge request, grep for its MR ID. The failure mail you receive includes the error message and quality gate output, but the log shows the full step-by-step trace (worktree, fetch, checkout, rebase, quality-gates, merge, push).
 
 You can also query refinery state via the CLI (these talk to pogod for you):
