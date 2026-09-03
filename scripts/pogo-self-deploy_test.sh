@@ -593,17 +593,28 @@ VO_UNK="$(vo_run "$MODE_UNREACHABLE")"
 # deploying, so "a pogod answered" vs "the fleet came back" is exactly as
 # separable there — and the check it uses in place of verify_running is
 # verify_bounced, which deliberately asks less (it has no main to compare to).
+# Since mg-a854 the verifier is reached THROUGH verify_or_recover, which retries
+# the kickstart and then splits "a pogod answered and it is wrong" (8) from
+# "nothing is answering" (13). The propagation line is therefore
+# `exit "$verify_rc"` rather than a literal `exit 8`; asserting the literal is
+# what would now be wrong, because it would forbid the split.
 for fn_pair in "cmd_redeploy:verify_running" "cmd_bounce:verify_bounced"; do
     FN="${fn_pair%%:*}"; LIVENESS="${fn_pair#*:}"
-    L_LINE="$(fn_line "$FN" "$LIVENESS || verify_rc=")"
+    L_LINE="$(fn_line "$FN" "verify_or_recover $LIVENESS .* || verify_rc=")"
     # The STATEMENT, not the comment two dozen lines above it that quotes the
     # same text while explaining why the code is not written that way.
-    E8_LINE="$(fn_line "$FN" '^    \[ "\$verify_rc" -eq 0 \] || exit 8$')"
+    E8_LINE="$(fn_line "$FN" '^    \[ "\$verify_rc" -eq 0 \] || exit "\$verify_rc"$')"
     VO_LINE="$(fn_line "$FN" 'verify_orchestration || exit 11')"
     { [ -n "$L_LINE" ] && [ -n "$E8_LINE" ] && [ -n "$VO_LINE" ] \
         && [ "$L_LINE" -lt "$E8_LINE" ] && [ "$E8_LINE" -lt "$VO_LINE" ]; } \
-        && pass "$FN runs verify_orchestration (exit 11) AFTER $LIVENESS (exit 8) — both checks, in order" \
+        && pass "$FN runs verify_orchestration (exit 11) AFTER $LIVENESS (exit 8/13) — both checks, in order" \
         || fail "$FN does not wire $LIVENESS -> verify_orchestration; the post-restart check is back to reading /version alone (${L_LINE:-?}/${E8_LINE:-?}/${VO_LINE:-?})"
+    # THE PROPAGATION, asserted separately. A `|| exit 8` here would silently
+    # collapse 13 back into 8 and undo mg-a854's whole distinction while every
+    # ordering assertion above stayed green.
+    [ -z "$(fn_line "$FN" '|| exit 8$')" ] \
+        && pass "$FN propagates verify_or_recover's OWN code — a hardcoded 'exit 8' would fold 'this box has no pogod' back into 'the restart did not land'" \
+        || fail "$FN still exits a literal 8, so exit 13 can never reach the runner"
 done
 
 # --- drain_wait: the gate that used to fail OPEN (mg-65b2) -----------------
@@ -3089,7 +3100,7 @@ OUT="$(format_spawn_report 7 7 "" "")"
 # when the fleet was already broken.
 for FN in cmd_redeploy cmd_bounce; do
     SPAWN_LINE="$(fn_line "$FN" 'report_spawns "\$spawns_pre"')"
-    EXIT8_LINE="$(fn_line "$FN" '^    \[ "\$verify_rc" -eq 0 \] || exit 8$')"
+    EXIT8_LINE="$(fn_line "$FN" '^    \[ "\$verify_rc" -eq 0 \] || exit "\$verify_rc"$')"
     PRE_LINE="$(fn_line "$FN" 'spawns_pre="\$(spawn_snapshot)"')"
     RESTART_LINE="$(fn_line "$FN" '^    do_restart$')"
     { [ -n "$SPAWN_LINE" ] && [ -n "$EXIT8_LINE" ] && [ "$SPAWN_LINE" -lt "$EXIT8_LINE" ]; } \
@@ -3389,6 +3400,95 @@ verify_bounced >/dev/null 2>&1 \
     && fail "verify_bounced passed an UNREACHABLE daemon — the bounce killed the old one, so that is the fleet down harder than before" \
     || pass "an unreachable daemon FAILS (exit 8): the bounce killed the old pogod and nothing replaced it"
 unset -f running_rev
+
+# --- verify_or_recover: the remedy for the state a failed verify creates ---
+# (mg-a854)
+#
+# THE NIGHT THIS IS ABOUT. 2026-08-26 04:32: the no-remote fallback stopped
+# pogod, failed to bring a replacement up, said exactly that, mailed about it,
+# and exited 8. Detection was already perfect; there was no remediation at all
+# for the state the run had itself produced, and no way for a reader to tell
+# "the bounce did not complete" from "this box now has no daemon". Both halves
+# are asserted here, and the second one is asserted by its NEGATIVE: a verifier
+# that fails while a daemon IS answering must NOT report a daemonless box.
+VOR_KICKS="$(mktemp)"
+vor_reset() { : > "$VOR_KICKS"; }
+do_restart() { echo kick >> "$VOR_KICKS"; }
+
+# 1. A verifier that passes first time costs nothing extra. The negative control
+#    for every assertion below: if the retry fired here it would be firing
+#    unconditionally, and every "it retried" result would mean nothing.
+vor_reset; RESTART_RETRIES=1
+verify_ok() { return 0; }
+{ verify_or_recover verify_ok test >/dev/null 2>&1 && [ ! -s "$VOR_KICKS" ]; } \
+    && pass "verify_or_recover: a verify that passes first time kickstarts NOTHING — the retry is conditional, which is what makes the retried cases evidence" \
+    || fail "verify_or_recover kickstarted on a passing verify ($(wc -l < "$VOR_KICKS") times)"
+
+# 2. THE RETRY. A verifier that fails once and then passes is the case launchd's
+#    own 10s respawn throttle produces (mg-9cc0: a spawn that died 29ms in on
+#    OS_REASON_CODESIGNING, with the survivor arriving on the throttle). Before
+#    mg-a854 this box was reported lost.
+vor_reset; RESTART_RETRIES=1
+VOR_N=0
+verify_flaky() { VOR_N=$(( VOR_N + 1 )); [ "$VOR_N" -ge 2 ]; }
+OUT="$(verify_or_recover verify_flaky test 2>&1)"; VOR_RC=$?
+{ [ "$VOR_RC" -eq 0 ] && [ "$(grep -c kick "$VOR_KICKS")" = "1" ]; } \
+    && pass "verify_or_recover: a verify that fails then passes is RECOVERED by one extra kickstart — the fleet is not declared lost over a burned spawn" \
+    || fail "verify_or_recover did not retry (rc=$VOR_RC, kicks=$(grep -c kick "$VOR_KICKS")): $OUT"
+grep -q 'RECOVERED' <<<"$OUT" \
+    && pass "and it SAYS it recovered on a retry — a silent second kickstart would make the first failure unobservable, which is mg-9cc0's defect in the remedy for it" \
+    || fail "the recovery is silent: $OUT"
+
+# 3. THE SPLIT, arm one: the verifier keeps failing and NOTHING answers the port.
+#    This is the 2026-08-26 state, and it is the one that needs a human.
+vor_reset; RESTART_RETRIES=1
+verify_no() { return 1; }
+running_rev() { echo "$REV_UNREACHABLE"; }
+OUT="$(verify_or_recover verify_no bounce 2>&1)"; VOR_RC=$?
+[ "$VOR_RC" -eq 13 ] \
+    && pass "verify_or_recover returns 13 (EXIT_NO_DAEMON) when nothing answers /version after the retry — 'this box now has no pogod' is its own condition, not a shade of exit 8" \
+    || fail "a daemonless box returned $VOR_RC, not 13"
+grep -q 'THIS BOX NOW HAS NO POGOD' <<<"$OUT" \
+    && pass "and it says so in the words a 07:00 reader needs, with the launchctl line to end it" \
+    || fail "the daemonless escalation does not name the condition: $OUT"
+[ "$(grep -c kick "$VOR_KICKS")" = "1" ] \
+    && pass "and it spent exactly RESTART_RETRIES=1 extra kickstart before concluding it — the retry is bounded, so a wedged launchctl cannot loop the deploy" \
+    || fail "kickstart count on the daemonless path: $(grep -c kick "$VOR_KICKS")"
+
+# 4. THE SPLIT, arm two — THE NEGATIVE CONTROL, and the reason the split is drawn
+#    on reachability rather than on the verifier's return value. A pogod that
+#    answers with the wrong revision is a deploy that did not land, with a live
+#    fleet still dispatching behind it. Reporting THAT as "no pogod" would be the
+#    same collapse in the other direction, and it would spend the alert.
+vor_reset; RESTART_RETRIES=1
+running_rev() { echo "deadbeefcafe"; }
+OUT="$(verify_or_recover verify_no redeploy 2>&1)"; VOR_RC=$?
+[ "$VOR_RC" -eq 8 ] \
+    && pass "verify_or_recover returns 8 when a pogod IS answering and merely failed the verify — the fleet is up on the old code, which is a different night's problem" \
+    || fail "a live-but-wrong daemon returned $VOR_RC, not 8"
+grep -q 'THIS BOX NOW HAS NO POGOD' <<<"$OUT" \
+    && fail "an answering daemon was reported as daemonless — the alert that must mean 'nothing is running' now fires when something is" \
+    || pass "and it does NOT claim the box is daemonless: the strongest alert this script has stays reserved for the state that earns it"
+
+# 5. RESTART_RETRIES=0 restores the pre-mg-a854 behaviour exactly. This is what
+#    makes the retry OBSERVABLE as a change rather than asserted from the source.
+vor_reset; RESTART_RETRIES=0
+running_rev() { echo "$REV_UNREACHABLE"; }
+verify_or_recover verify_no bounce >/dev/null 2>&1; VOR_RC=$?
+{ [ "$VOR_RC" -eq 13 ] && [ ! -s "$VOR_KICKS" ]; } \
+    && pass "RESTART_RETRIES=0 spends no extra kickstart and still splits the condition — the retry and the split are separable, and the controls can drive either without the other" \
+    || fail "RESTART_RETRIES=0: rc=$VOR_RC, kicks=$(grep -c kick "$VOR_KICKS" 2>/dev/null || echo 0)"
+RESTART_RETRIES=1
+unset -f running_rev do_restart verify_ok verify_no verify_flaky
+rm -f "$VOR_KICKS"
+
+# THE CODES ARE NAMED CONSTANTS, and 8 keeps its number. A renumber would be read
+# by a pogo-deploy.sh that may be older than this script — the runner is a static
+# copy installed by `pogo service install-deploy`, so the two can be generations
+# apart on the same box.
+{ [ "$EXIT_VERIFY_FAILED" = "8" ] && [ "$EXIT_NO_DAEMON" = "13" ]; } \
+    && pass "EXIT_VERIFY_FAILED is still 8 and EXIT_NO_DAEMON is 13 — nothing renumbered, so an older installed runner still reads 8 the way it always did" \
+    || fail "exit codes moved: VERIFY_FAILED=$EXIT_VERIFY_FAILED NO_DAEMON=$EXIT_NO_DAEMON"
 
 # --- cmd_bounce, driven end to end with every impure step stubbed --------
 # The sequence is the thing being asserted: drain, then read the schedules, then

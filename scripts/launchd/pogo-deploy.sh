@@ -426,6 +426,18 @@
 #                            (2; 0 disables the fallback entirely) — see section 5c
 #   POGO_DEPLOY_TRANSPORT_STREAK  where that count is kept across nights
 #                            ($POGO_HOME/deploy-transport-streak.stamp)
+#   POGO_DEPLOY_LIVENESS_BOUNCE_AFTER  after this many CONSECUTIVE nights on which
+#                            NO agent completed a turn and NO code drift was owed,
+#                            bounce the fleet on liveness (2; 0 disables the
+#                            TRIGGER but never the reading or its mail) — section 6b
+#   POGO_DEPLOY_LIVENESS_STREAK  where that count is kept across nights
+#                            ($POGO_HOME/deploy-liveness-streak.stamp)
+#   POGO_DEPLOY_LIVENESS_MAX_AGE  the window inside which a completed turn still
+#                            counts (3h — turnlog.DefaultMaxAge, measured in
+#                            mg-3cbb; anything under ~3h false-positives on a
+#                            healthy fleet mid-turn)
+#   POGO_DEPLOY_SERVER_URL   pogod's base URL for the liveness reachability hop
+#                            (http://127.0.0.1:10000)
 #   POGO_DEPLOY_BOUNCE_RESERVE  seconds of the window the FALLBACK keeps back for
 #                            its restart+verify (300). Deliberately not RESERVE:
 #                            a bounce owes no build and no do_prove, and charging
@@ -2565,7 +2577,18 @@ fallback_bounce() {
         # for 7, mailed the deploy-stalled sink. What this adds is the ONE thing
         # only the caller knows: that this was the mg-9fc9 fallback firing, and
         # that the fleet therefore did NOT get the restart it is owed.
-        FALLBACK_STATUS="failed"
+        # TWO statuses, not one (mg-a854). Exit 13 is pogo-self-deploy's
+        # measurement that nothing is answering the port after it retried the
+        # kickstart, and "the fallback could not restart the fleet" is the wrong
+        # sentence for it: the fleet is not merely un-restarted, it is gone, and
+        # the bounce is what removed it. The 2026-08-26 mail said the true thing
+        # in its body and the wrong thing in its subject, and the subject is the
+        # part that travels.
+        if [ "$rc" -eq 13 ]; then
+            FALLBACK_STATUS="daemonless"
+        else
+            FALLBACK_STATUS="failed"
+        fi
         FALLBACK_DETAIL="$(bounce_reason_line "$reason_file" "$rc")"
         err "fallback: the bounce exited $rc — $FALLBACK_DETAIL"
         # The streak is NOT reset. Nothing was bounced, so the count still
@@ -2602,6 +2625,7 @@ fallback_subject() {
     case "$FALLBACK_STATUS" in
         bounced) echo "[pogo-deploy] FLEET BOUNCED by the no-remote fallback — $streak nights lost to the transport" ;;
         failed)  echo "[pogo-deploy] no-remote fallback COULD NOT bounce the fleet — $streak nights lost to the transport" ;;
+        daemonless) echo "[pogo-deploy] THIS BOX NOW HAS NO POGOD — the no-remote fallback bounce killed it and nothing replaced it" ;;
         *)       echo "[pogo-deploy] no-remote fallback DECLINED to bounce — $streak nights lost to the transport" ;;
     esac
 }
@@ -2625,6 +2649,18 @@ been unreachable." ;;
             headline="THE FALLBACK FIRED AND DID NOT COMPLETE. The fleet has now gone $streak
 nights without the restart the nightly deploy would have given it, and this run
 could not supply one either." ;;
+        daemonless)
+            headline="THIS BOX NOW HAS NO POGOD, AND THIS RUN IS WHY. The bounce stopped the
+old daemon, the kickstart was retried, and nothing is answering
+http://127.0.0.1:10000/version afterwards. This is not a deploy that failed to
+land — there is no daemon left to be out of date. Nothing is dispatching, no
+merge is running, no schedule is firing, and NO AUTOMATIC PATH ON THIS BOX WILL
+RECOVER IT: the nightly deploy, this fallback and com.pogo.recovery are all
+downstream of pogod. Start it by hand:
+
+    launchctl kickstart -k gui/\$(id -u)/com.pogo.daemon
+    launchctl print gui/\$(id -u)/com.pogo.daemon | head -40
+    curl -s http://127.0.0.1:10000/version" ;;
         *)
             headline="THE FALLBACK WAS DUE AND DID NOT RUN. The fleet has gone $streak nights
 without the restart the nightly deploy would have given it." ;;
@@ -2706,6 +2742,423 @@ is_clean_verdict() {
 }
 
 # ---------------------------------------------------------------------------
+# 6b. THE LIVENESS INPUT (mg-a854)
+# ---------------------------------------------------------------------------
+# WHAT SIX QUIET NIGHTS LOOKED LIKE. From 2026-08-27 to 2026-09-03 this gate
+# printed, once a night, six times:
+#
+#     transport streak: CLEARED (was 4)
+#     drift: none — ... NOT bouncing the fleet. Exit 0.
+#
+# over a fleet that was not running. The deploy was not malfunctioning. It reads
+# CODE DRIFT and a TRANSPORT STREAK; neither is a liveness signal, so every input
+# read healthy and "do nothing" was the correct answer to each of them on all six
+# nights. It answers *is this box running the right code?* and never *is anything
+# on this box doing work?*
+#
+# THIS IS A CLASS DEFECT, not one bug. This box has three independent automatic
+# recovery paths and each is keyed on a signal that a dead fleet satisfies:
+#
+#     nightly deploy        -> code drift          -> "none"
+#     no-remote fallback    -> transport streak    -> "cleared"
+#     com.pogo.recovery     -> recovery queue      -> "empty"
+#
+# The third is worth stating precisely, because it was filed as a hypothesis and
+# measured here rather than assumed. `pogo-recovery.sh` does NOT ask pogod
+# anything — its "queue" is a directory of *.req files and it globs it. So its
+# green is not a false green from an unanswered query; it is a TRUE statement
+# that nobody asked for recovery. But only `pogo recovery request` writes those
+# files, and only a person or a polecat runs that, so a fleet with nothing left
+# alive to ask produces an empty queue forever. Different mechanism, identical
+# reading: the deader it gets, the greener it looks.
+#
+# WHAT MAKES THE LIVENESS SIGNAL DIFFERENT. `pogo check-turns` joins pogod's
+# registry (who is PRESENT) against $POGO_HOME/turnlog/<agent>.log (who FINISHED
+# A TURN), and nothing but a completed turn writes that artifact. It is the one
+# reading on this box that a fleet which is merely up-to-date cannot satisfy.
+#
+# FOUR CONSTRAINTS, and each is a line in the ticket rather than a preference.
+#
+#   1. IT MUST NOT ASK AN AGENT. mg-d616: the crew liveness check has no executor
+#      but mayor, and mayor being dark is inside the failure being detected. This
+#      shells to the `pogo` CLI, which reads the turnlog files off disk. No agent
+#      is asked anything, and no mail is waited on.
+#
+#   2. THERE MUST BE A FLOOR. A bounce is what killed the daemon on 2026-08-26,
+#      and a liveness-triggered bounce that fails verify reproduces exactly that
+#      state. So the floor is two things at once: POGO_DEPLOY_LIVENESS_BOUNCE_AFTER
+#      consecutive NIGHTS (not fires) before any bounce, and mg-a854's other half
+#      — pogo-self-deploy now retries the kickstart and reports a daemonless box
+#      as its own condition (exit 13). Shipping this trigger without that retry
+#      would be arming a remedy whose known failure mode is the outage it treats.
+#
+#   3. "MEASURED NOTHING" MUST NEVER READ AS EITHER ANSWER. check-turns exits 3
+#      on an unreachable registry precisely so that a run which measured nothing
+#      cannot report a clean fleet, and this gate keeps that distinction: an
+#      unmeasured night neither bumps the streak nor clears it. A missed bounce
+#      costs a night; a wrong one costs every agent its session.
+#
+#   4. A DAEMONLESS BOX IS NOT A BOUNCE CANDIDATE — IT IS AN ALERT. If pogod is
+#      not answering at all, a bounce cannot help: `pogo-self-deploy bounce` runs
+#      the drain gate first and drain_gate REFUSES on the `down` disposition
+#      (HTTP 000) with exit 6, by design, because a deploy cannot drain a fleet it
+#      cannot reach. Firing a bounce at that state would spend a fleet restart on
+#      a guaranteed refusal. What that state has never had is a VOICE: six nights
+#      of exit 0 over an absent daemon. It gets one here, every night, until a
+#      human ends it.
+LIVENESS_STREAK="${POGO_DEPLOY_LIVENESS_STREAK:-${POGO_HOME:-$HOME/.pogo}/deploy-liveness-streak.stamp}"
+LIVENESS_BOUNCE_AFTER="${POGO_DEPLOY_LIVENESS_BOUNCE_AFTER:-2}"
+# The window inside which a completed turn still counts. Not chosen here: it is
+# turnlog.DefaultMaxAge, measured in mg-3cbb (six crew agents demonstrably
+# working went two hours with zero completions, so anything under ~3h
+# false-positives on a healthy fleet). Passed explicitly so this file states the
+# number it is deciding on rather than inheriting whatever a future default says.
+LIVENESS_MAX_AGE="${POGO_DEPLOY_LIVENESS_MAX_AGE:-3h}"
+LIVENESS_URL="${POGO_DEPLOY_SERVER_URL:-http://127.0.0.1:10000}"
+
+# Set by liveness_gate. `not-considered` on every path that never reached it,
+# which is every night with drift owed.
+LIVENESS_CLASS="not-considered"
+LIVENESS_DETAIL=""
+LIVENESS_STREAK_N=0
+
+# daemon_answering — is anything serving the port at all? One hop, no CLI, no
+# agent, no registry. Deliberately NOT `pogo agent list`: that goes through the
+# same daemon, so it cannot separate "pogod is down" from "the CLI is broken",
+# and this is the reading that decides between an alert and a bounce.
+daemon_answering() {
+    curl -sf --max-time 5 "$LIVENESS_URL/version" >/dev/null 2>&1
+}
+
+# liveness_num FIELD JSON — a top-level integer out of check-turns' --json.
+# Pure, jq-free (the deploy path stays dependency-free on purpose), and safe
+# against the per-agent rows because none of them carries these keys: a State has
+# agent/type/verdict/last/age_secs/note/path/started/detail and no counters.
+# The [,{] anchor is not decoration: without it, a turn NOTE containing the text
+# "live":0 would be a candidate match. The counters are the LAST fields Go
+# marshals (dir, now, max_age, agents, then the five integers), and sed's .* is
+# greedy, so the match taken is the top-level one even if an agent row carried a
+# lookalike — which is why the greed is left in rather than made lazy.
+liveness_num() {
+    local field="$1"
+    tr -d ' \t\n' | sed -n "s/.*[,{]\"$field\":\([0-9][0-9]*\).*/\1/p" | head -1
+}
+
+# liveness_class RC JSON — the whole judgement, and PURE so the controls can
+# drive every arm without a fleet. Echoes "CLASS<TAB>DETAIL".
+#
+#   live         at least one present agent completed a turn inside the window
+#   stalled      agents are present and NOT ONE of them completed a turn
+#   absent       the registry answered and holds no crew agent at all
+#   unmeasured   this run established nothing (no CLI, timeout, exit 2/3, or
+#                output that would not parse)
+#
+# WHY `live` IS "AT LEAST ONE" AND NOT "ALL". check-turns exits 1 if ANY single
+# agent is stale, which is the right sensitivity for a report a person reads and
+# far too much for a trigger that bounces the whole fleet: one crew agent between
+# long turns would restart every other agent's session. The question this gate
+# asks is the fleet-level one the incident is about — is ANYTHING on this box
+# doing work — so it reads the counts, not the exit code.
+#
+# `absent` counts as a bounce candidate rather than as unmeasured, and the
+# difference is that the registry ANSWERED. A pogod serving an empty crew roster
+# is a fleet that is gone, and a restart re-spawns the crew; that is a remedy,
+# not a guess. An unreachable registry is the other thing entirely, and it is
+# `unmeasured` here and `daemonless` at the callsite.
+liveness_class() {
+    local rc="$1" out="$2" live stale silent bad pop
+    case "$rc" in
+        0|1) ;;
+        124) printf 'unmeasured\tthe check-turns call timed out; this run measured nothing'; return 0 ;;
+        3)   printf 'unmeasured\tcheck-turns exited 3 (INSTRUMENT FAILURE — the agent registry could not be read), which is its contract for a run that measured nothing rather than a clean fleet'; return 0 ;;
+        *)   printf 'unmeasured\tcheck-turns exited %s, which is not a census result\n' "$rc" | tr -d '\n'; return 0 ;;
+    esac
+    live="$(printf '%s' "$out" | liveness_num live)"
+    stale="$(printf '%s' "$out" | liveness_num stale)"
+    silent="$(printf '%s' "$out" | liveness_num silent)"
+    bad="$(printf '%s' "$out" | liveness_num unreadable)"
+    # Every one of the four must parse. A partial read would let a missing field
+    # default to zero and turn a healthy fleet into `stalled`, which is the one
+    # direction that costs a fleet-wide restart.
+    for n in "$live" "$stale" "$silent" "$bad"; do
+        case "${n:-}" in ''|*[!0-9]*) printf 'unmeasured\tcheck-turns exited %s but its JSON did not carry the live/stale/silent/unreadable counters this gate reads' "$rc"; return 0 ;; esac
+    done
+    pop=$(( live + stale + silent + bad ))
+    if [ "$pop" -eq 0 ]; then
+        printf 'absent\tpogod answered and its crew roster is EMPTY — no agent is present to complete a turn'
+        return 0
+    fi
+    if [ "$live" -gt 0 ]; then
+        printf 'live\t%s of %s present crew agent(s) completed a turn within %s' "$live" "$pop" "$LIVENESS_MAX_AGE"
+        return 0
+    fi
+    printf 'stalled\t%s crew agent(s) present and NOT ONE completed a turn within %s (%s stale, %s silent, %s unreadable)' \
+        "$pop" "$LIVENESS_MAX_AGE" "$stale" "$silent" "$bad"
+}
+
+# liveness_probe — run the census. Echoes the JSON; returns check-turns' rc, or
+# 127 when there is no CLI to run.
+#
+# --max-age is passed rather than defaulted, and --all-types is NOT: polecat
+# prompts carry no turn-completion clause, so including them would make this
+# permanently red and the trigger meaningless.
+liveness_probe() {
+    [ -n "$POGO_CLI" ] || return 127
+    run_bounded "$TOOL_PROBE_TIMEOUT" "$POGO_CLI" check-turns --json --max-age "$LIVENESS_MAX_AGE" 2>/dev/null
+}
+
+# liveness_gate — read the signal and set LIVENESS_CLASS / LIVENESS_DETAIL.
+# Takes no action; the caller decides. Separated so the reading is testable
+# without a fleet and so "what did it read" and "what did it do" stay two lines
+# in the log rather than one.
+liveness_gate() {
+    # Reachability FIRST, and by a direct hop. Everything below this line goes
+    # through the CLI, and a CLI that cannot reach pogod reports the same
+    # instrument failure as a CLI that is missing.
+    if ! daemon_answering; then
+        LIVENESS_CLASS="daemonless"
+        LIVENESS_DETAIL="nothing is answering $LIVENESS_URL/version — there is no daemon on this box to be running the right code"
+        log "liveness: DAEMONLESS — $LIVENESS_DETAIL"
+        return 0
+    fi
+    local out rc=0
+    out="$(liveness_probe)" || rc=$?
+    $BOUNDED_TIMED_OUT && rc=124
+    if [ "$rc" -eq 127 ]; then
+        LIVENESS_CLASS="unmeasured"
+        LIVENESS_DETAIL="no 'pogo' CLI was resolved, so the turn-completion census could not run"
+    else
+        local verdict; verdict="$(liveness_class "$rc" "$out")"
+        LIVENESS_CLASS="${verdict%%	*}"
+        LIVENESS_DETAIL="${verdict#*	}"
+    fi
+    log "liveness: $(printf '%s' "$LIVENESS_CLASS" | tr '[:lower:]' '[:upper:]') — $LIVENESS_DETAIL"
+    return 0
+}
+
+# liveness_bounce_due COUNT [THRESHOLD] — the same shape as the transport
+# fallback's, and deliberately a SECOND predicate rather than a shared one: the
+# two thresholds are separate config and could legitimately differ, and a shared
+# function would make a change to one silently change the other.
+liveness_bounce_due() {
+    local count="$1" after="${2-$LIVENESS_BOUNCE_AFTER}"
+    case "${after:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$after" -gt 0 ] || return 1
+    [ "$count" -ge "$after" ]
+}
+
+# liveness_subject / liveness_body — the announcement. Same rule as
+# fallback_subject: the status is in the subject, because "the fleet was
+# restarted", "it could not be" and "there is no daemon here" need three
+# different reactions from a reader who skims one line at 07:00.
+LIVENESS_STATUS="not-considered"
+LIVENESS_BOUNCE_DETAIL=""
+liveness_subject() {
+    local n="$1"
+    case "$LIVENESS_STATUS" in
+        bounced)    echo "[pogo-deploy] FLEET BOUNCED on LIVENESS — $n consecutive nights with no agent completing a turn" ;;
+        failed)     echo "[pogo-deploy] liveness bounce COULD NOT restart the fleet — $n nights with no agent completing a turn" ;;
+        daemonless) echo "[pogo-deploy] THIS BOX HAS NO POGOD, and the nightly deploy has nothing to deploy to" ;;
+        *)          echo "[pogo-deploy] the fleet completed NO turns tonight and the deploy owed nothing — $n of $LIVENESS_BOUNCE_AFTER nights toward a liveness bounce" ;;
+    esac
+}
+
+liveness_body() {
+    local n="$1" headline
+    case "$LIVENESS_STATUS" in
+        bounced)
+            headline="THE FLEET WAS RESTARTED BECAUSE IT WAS NOT WORKING, not because it was
+out of date. Code drift was NONE on this and every preceding night." ;;
+        failed)
+            headline="A LIVENESS BOUNCE WAS DUE AND DID NOT COMPLETE. The fleet has now gone
+$n nights completing no turns, and this run could not restart it." ;;
+        daemonless)
+            headline="THERE IS NO POGOD ON THIS BOX. Nothing is answering $LIVENESS_URL/version.
+
+This is NOT a bounce candidate and the deploy did not try to make it one: a
+bounce runs the drain gate first, and the drain gate refuses outright (exit 6)
+when pogod does not answer — correctly, because a deploy cannot drain a fleet it
+cannot reach. So this is an ALERT, and it will repeat every night until somebody
+starts the daemon:
+
+    launchctl kickstart -k gui/\$(id -u)/com.pogo.daemon
+    launchctl print gui/\$(id -u)/com.pogo.daemon | head -40
+    curl -s $LIVENESS_URL/version" ;;
+        *)
+            headline="NOTHING ON THIS BOX COMPLETED A TURN, and the deploy owed nothing, so
+under every check that existed before mg-a854 tonight was a clean exit 0." ;;
+    esac
+    cat <<EOF
+$headline
+
+  liveness:     $LIVENESS_CLASS — $LIVENESS_DETAIL
+  nights:       $n consecutive (a liveness bounce fires at $LIVENESS_BOUNCE_AFTER)
+  drift:        none — running pogod and installed binaries are at $DEPLOY_REF
+  outcome:      $LIVENESS_STATUS${LIVENESS_BOUNCE_DETAIL:+ — $LIVENESS_BOUNCE_DETAIL}
+  streak file:  $LIVENESS_STREAK
+  log:          $HOME/Library/Logs/pogo/pogo-deploy.log
+
+WHY THIS ALERT EXISTS. Between 2026-08-27 and 2026-09-03 this job printed
+"drift: none ... NOT bouncing the fleet. Exit 0." on six consecutive nights over
+a fleet that was doing no work, after its own fallback bounce had left the box
+without a daemon. Nothing was broken: the deploy reads code drift and a transport
+streak, and both were genuinely green. The reading it never had is this one.
+
+WHAT THIS SIGNAL IS. $LIVENESS_URL is not consulted for it. \`pogo check-turns\`
+joins pogod's registry (who is PRESENT) against the turnlog files (who FINISHED A
+TURN, written by the agent itself). Nothing but a completed turn writes that
+artifact, which is why a box that is merely up-to-date cannot satisfy it — and
+why no agent is asked anything to produce it (mg-d616: mayor being dark is inside
+the failure being detected).
+
+WHAT IT IS NOT. It is not per-agent health. One crew agent between long turns
+does not produce this — the trigger requires that NOT ONE present agent completed
+a turn in $LIVENESS_MAX_AGE. Read the census before restarting anything:
+
+  pogo check-turns
+  pogo check-turns --probe        # can this check still go red?
+  pogo agent list
+
+WHAT TO DO
+  - outcome 'bounced': confirm the fleet came back, then read check-turns again
+    in an hour. A bounce that restores turns closes this; one that does not means
+    the agents are wedged on something a restart does not clear.
+  - outcome 'daemonless': start pogod by hand. No automatic path on this box will
+    do it — all three of them are downstream of the daemon.
+  - a bare count with no bounce: nothing yet. This is night $n of
+    $LIVENESS_BOUNCE_AFTER, and one bad night is not a run.
+  - To change the threshold, set POGO_DEPLOY_LIVENESS_BOUNCE_AFTER. 0 disables
+    the liveness trigger entirely, and the READING is still logged and mailed.
+EOF
+}
+
+# liveness_act TODAY — the whole decision, given a clean drift verdict. Bumps or
+# clears the streak, bounces when the floor is crossed, announces either way.
+#
+# THE RESET RULE, which is the transport fallback's and is here for the same
+# reason: the streak resets on a bounce, so a fleet that stays dead bounces once
+# every N nights rather than every night. Not resetting would turn a persistent
+# stall into a nightly fleet restart, which is the destructive-noise failure
+# mg-9fc9's constraint 1 names.
+liveness_act() {
+    local today="$1" line="" n rc=0 bbudget
+    [ -f "$LIVENESS_STREAK" ] && line="$(head -1 "$LIVENESS_STREAK" 2>/dev/null || true)"
+
+    case "$LIVENESS_CLASS" in
+        live)
+            n="$(transport_streak_field "$line" 2)"
+            if [ "$n" -gt 0 ]; then
+                log "liveness streak: CLEARED (was $n) — $LIVENESS_DETAIL"
+            fi
+            transport_streak_save "$LIVENESS_STREAK" "$today" 0 "$(transport_streak_field "$line" 3)"
+            return 0
+            ;;
+        unmeasured|not-considered)
+            # NEITHER bump NOR clear. The stamp is left exactly as it is, so a
+            # run that measured nothing cannot arm a bounce and cannot disarm
+            # one either. Said out loud, because a silent skip here is
+            # indistinguishable in the log from a healthy fleet — which is the
+            # defect this whole section is about.
+            log "liveness streak: UNCHANGED at $(transport_streak_field "$line" 2) — this run MEASURED NOTHING ($LIVENESS_DETAIL). That is not a report that the fleet is working."
+            return 0
+            ;;
+        daemonless)
+            LIVENESS_STATUS="daemonless"
+            n="$(transport_streak_field "$line" 2)"
+            # Not bumped: the streak counts nights toward a BOUNCE, and this
+            # state is not a bounce candidate. Counting it would arm a fleet
+            # restart that drain_gate is guaranteed to refuse.
+            log "liveness: NOT bouncing — a bounce drains first, and drain_gate refuses (exit 6) when pogod does not answer. Alerting instead; the streak stays at $n."
+            liveness_announce "$n" 0
+            return 0
+            ;;
+    esac
+
+    # stalled or absent: the two readings a restart can act on.
+    n="$(transport_streak_next "$today" "$line")"
+    LIVENESS_STREAK_N="$n"
+    transport_streak_save "$LIVENESS_STREAK" "$today" "$n" "$(transport_streak_field "$line" 3)"
+
+    if ! liveness_bounce_due "$n"; then
+        case "${LIVENESS_BOUNCE_AFTER:-}" in
+            ''|*[!0-9]*|0)
+                LIVENESS_STATUS="disabled"
+                LIVENESS_BOUNCE_DETAIL="POGO_DEPLOY_LIVENESS_BOUNCE_AFTER=${LIVENESS_BOUNCE_AFTER:-} disables the liveness trigger; the reading above still stands" ;;
+            *)
+                LIVENESS_STATUS="not-due"
+                LIVENESS_BOUNCE_DETAIL="night $n of $LIVENESS_BOUNCE_AFTER — one bad night is not a run" ;;
+        esac
+        log "liveness: $LIVENESS_STATUS — $LIVENESS_BOUNCE_DETAIL"
+        liveness_announce "$n" 0
+        return 0
+    fi
+
+    log "liveness: $n consecutive nights with NO agent completing a turn (threshold $LIVENESS_BOUNCE_AFTER) and NO code drift owed. Bouncing the fleet on liveness (mg-a854)."
+
+    bbudget="$(drain_budget "$WINDOW_END" "$BOUNCE_RESERVE" "$MAX_DRAIN" "$MIN_DRAIN")"
+    if [ "$bbudget" -le 0 ]; then
+        LIVENESS_STATUS="refused-window"
+        LIVENESS_BOUNCE_DETAIL="under ${MIN_DRAIN}s of usable window is left before ${WINDOW_END}:00 (bounce reserve ${BOUNCE_RESERVE}s), and a drain that cannot finish stops dispatch for its whole length and delivers nothing"
+        err "liveness: NOT bouncing — $LIVENESS_BOUNCE_DETAIL"
+        liveness_announce "$n" 0
+        return 0
+    fi
+    if ! resolve_bounce_script; then
+        LIVENESS_STATUS="refused-noscript"
+        LIVENESS_BOUNCE_DETAIL="no local pogo-self-deploy advertising a 'bounce' subcommand could be found (tried $SRC and $BOOTSTRAP_REPO)"
+        liveness_announce "$n" 0
+        return 0
+    fi
+
+    if [ -n "$POGO_CLI" ]; then
+        "$POGO_CLI" events emit --type=deploy_liveness_bounce --agent=pogo-deploy \
+            --details="{\"phase\":\"start\",\"streak\":$n,\"threshold\":$LIVENESS_BOUNCE_AFTER,\"liveness\":\"$LIVENESS_CLASS\",\"drain_timeout\":$bbudget}" >/dev/null 2>&1 || true
+    fi
+
+    local reason_file="$HOME/Library/Logs/pogo/pogo-bounce-reason.$today"
+    mkdir -p "$(dirname "$reason_file")" 2>/dev/null || true
+    rm -f "$reason_file" 2>/dev/null || true
+    log "liveness: $BOUNCE_SCRIPT bounce --yes --drain-timeout $bbudget"
+    POGO_DEPLOY_REASON_FILE="$reason_file" "$BOUNCE_SCRIPT" bounce --yes --drain-timeout "$bbudget" || rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+        LIVENESS_STATUS="bounced"
+        LIVENESS_BOUNCE_DETAIL="the fleet was drained and restarted onto the binaries already installed; no code was delivered, because none was owed"
+        log "liveness: BOUNCED — $LIVENESS_BOUNCE_DETAIL"
+        transport_streak_save "$LIVENESS_STREAK" "$today" 0 "$today"
+    elif [ "$rc" -eq 13 ]; then
+        # The remedy exhibiting the defect it remedies, which is the thing to
+        # look for rather than to hope about: a liveness bounce that fails its
+        # verify leaves the box daemonless, exactly as 2026-08-26's did. It says
+        # so in its own voice, and the streak is NOT reset — the fleet has still
+        # had no restart it could use.
+        LIVENESS_STATUS="daemonless"
+        LIVENESS_BOUNCE_DETAIL="$(bounce_reason_line "$reason_file" "$rc") — THIS BOUNCE left the box with no daemon"
+        err "liveness: the bounce exited 13 — $LIVENESS_BOUNCE_DETAIL"
+    else
+        LIVENESS_STATUS="failed"
+        LIVENESS_BOUNCE_DETAIL="$(bounce_reason_line "$reason_file" "$rc")"
+        err "liveness: the bounce exited $rc — $LIVENESS_BOUNCE_DETAIL"
+    fi
+    liveness_announce "$n" "$rc"
+    if [ -n "$POGO_CLI" ]; then
+        "$POGO_CLI" events emit --type=deploy_liveness_bounce --agent=pogo-deploy \
+            --details="{\"phase\":\"end\",\"status\":\"$LIVENESS_STATUS\",\"exit\":$rc,\"streak\":$n,\"threshold\":$LIVENESS_BOUNCE_AFTER,\"liveness\":\"$LIVENESS_CLASS\"}" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# liveness_announce N RC — out of band, like the transport fallback's, and for a
+# different reason that lands in the same place: this fires on a night when the
+# fleet is not working, so the mayor cannot be relied on to relay anything.
+liveness_announce() {
+    local n="$1" rc="$2"
+    alert "$(liveness_subject "$n")" "$(liveness_body "$n")" \
+        "\"liveness\":\"$LIVENESS_CLASS\",\"status\":\"$LIVENESS_STATUS\",\"streak\":$n,\"threshold\":$LIVENESS_BOUNCE_AFTER,\"bounce_exit\":$rc" \
+        deploy_liveness
+}
+
+# ---------------------------------------------------------------------------
 # 7. Outcome classification
 # ---------------------------------------------------------------------------
 # THE REASON CHANNEL COMES FIRST (mg-0155). Everything in this section is the
@@ -2745,7 +3198,7 @@ describe_exit() {
         # most: the run stopped before do_build, so nothing was installed.
         6) echo "drain precondition refused, BEFORE the build — nothing was built, installed or restarted (the reason line says which refusal)" ;;
         7) echo "drain stalled" ;;
-        8) echo "verify_running failed — the new pogod did not come up" ;;
+        8) echo "verify failed — a pogod IS answering but not with what this run installed; the fleet is up on the old code (since mg-a854 this code no longer covers an unreachable daemon — that is 13)" ;;
         9) echo "do_prove RED — the control suite refused the artifact BEFORE the restart; the running pogod is UNTOUCHED" ;;
         # 10 is this runner's own, not pogo-self-deploy's: the sync aborted
         # before the deploy script was ever invoked, on a class that established
@@ -2759,6 +3212,11 @@ describe_exit() {
         # not-answering cases.
         11) echo "FLEET DOWN: pogod restarted but orchestration did NOT start — /agents, /refinery, /scheduler are all 503" ;;
         12) echo "FLEET DOWN: orchestration was ALREADY stopped, so the deploy refused before the restart — nothing was bounced and nothing was fixed" ;;
+        # 13 is mg-a854's, and it is the one the 2026-08-26 night needed and did
+        # not have. It is returned only after the kickstart has been retried and
+        # the port measured again, so it is a MEASUREMENT that this box has no
+        # daemon — not an inference from a verifier's return value.
+        13) echo "FLEET DOWN — THIS BOX HAS NO POGOD: the restart killed the old daemon, the retry did not produce a new one, and nothing is answering /version. Every automatic recovery path on this box is downstream of pogod, so none of them will fire for this" ;;
         # 130/143 are the shell's, not either script's: SIGINT and SIGTERM during
         # the drain window, converted to exits so the restore trap runs. They
         # rendered as "unclassified failure" until the mg-0155 enumeration asked
@@ -2879,16 +3337,20 @@ what_the_run_changed() {
 # Scoped to the outcomes where the fleet is provably not dispatching when the
 # script exits:
 #   5   the kickstart itself failed after a successful install
-#   8   the restart landed but no pogod came back at main's revision
+#   8   a pogod is answering, but not with the revision this run installed
 #   11  a pogod came back, in index-only mode, dispatching nothing
 #   12  orchestration was already off and this run did not restart it
+#   13  nothing is answering the port at all, measured after a retried kickstart
+#       (mg-a854). The strongest member of this set and the newest: it is the
+#       state the 2026-08-26 fallback bounce created, reported under 8's heading,
+#       and then left in place.
 #
 # NOT 6, 7 or 9. Those exit with the old pogod alive and dispatching — a missed
 # deploy, not an outage — and putting them under the same banner would spend the
 # banner. A subject that shouts on every failure is the generic subject again.
 fleet_is_down() {
     case "$1" in
-        5|8|11|12) return 0 ;;
+        5|8|11|12|13) return 0 ;;
         *)         return 1 ;;
     esac
 }
@@ -2992,14 +3454,47 @@ EOF
             ;;
         8)
             cat <<'EOF'
-The new pogod was installed and started but did not verify. The binary on disk is
-the NEW one while the process may be missing or unhealthy, so this is the state
+The new pogod was installed and started, and a pogod IS answering the port — it
+just is not the revision this run installed. Since mg-a854 that is all this code
+means: an unreachable daemon is now exit 13, and the kickstart has already been
+retried once before either code is chosen. So the fleet is very likely still
+dispatching, on the OLD code, and what did not happen is the deploy.
+
+The binary on disk is the NEW one while the process is not, so this is the state
 to resolve by hand rather than leave for the next nightly. Confirm what is
 actually running, then decide whether to kickstart again or roll the install
 back:
 
   curl -s http://127.0.0.1:10000/version
   tail -50 ~/Library/Logs/pogo/pogod.log
+EOF
+            ;;
+        13)
+            cat <<'EOF'
+THIS BOX HAS NO POGOD, and that is a measurement rather than an inference: the
+restart killed the old daemon, the kickstart was retried, and nothing answered
+http://127.0.0.1:10000/version afterwards.
+
+This is NOT "the deploy did not land" (that is exit 8, and it leaves a fleet up
+on the old code). Nothing is running. No polecat is dispatched, no merge runs, no
+mail-check fires, and no crew agent completes a turn.
+
+It needs a human, and the reason is structural rather than a matter of urgency:
+every automatic recovery path on this box is downstream of pogod. The nightly
+deploy asks pogod for a revision. The no-remote fallback's drain gate refuses
+outright when pogod does not answer. `com.pogo.recovery` drains a queue that only
+pogod's clients write to. A dead daemon does not trigger any of them, and on
+2026-08-26 exactly that produced six consecutive nights of "nothing owed, exit 0"
+over a box with no daemon on it (mg-a854).
+
+  launchctl kickstart -k gui/$(id -u)/com.pogo.daemon
+  launchctl print gui/$(id -u)/com.pogo.daemon | head -40
+  curl -s http://127.0.0.1:10000/version
+  tail -50 ~/Library/Logs/pogo/pogod.log
+
+If the kickstart does not stick, `launchctl print`'s `last exit reason` is the
+field to read first — a Launch Constraint Violation against a freshly installed
+binary has done this before (mg-9cc0).
 EOF
             ;;
         7)
@@ -3957,7 +4452,27 @@ $check_out"
         exit 1
     fi
     if is_clean_verdict "$check_out"; then
-        log "drift: none — running pogod and installed binaries are at $DEPLOY_REF. NOT bouncing the fleet. Exit 0."
+        # --- gate 6b: LIVENESS (mg-a854) ------------------------------------
+        # "No drift owed" used to end the run here, and for six consecutive
+        # nights it ended it over a fleet that was not running. Code drift
+        # answers *is this box running the right code?*; it has never answered
+        # *is anything on this box doing work?*, and only the second question
+        # has an answer a dead fleet cannot satisfy. So the clean-drift arm now
+        # asks one more thing before it exits 0.
+        #
+        # It is asked ONLY in this arm on purpose. When drift IS owed the
+        # redeploy below bounces the fleet anyway, so a liveness reading could
+        # not change what happens — and the redeploy's success resets the
+        # liveness streak further down, because a bounce is a bounce whichever
+        # signal called for it.
+        log "drift: none — running pogod and installed binaries are at $DEPLOY_REF. That answers 'is this box running the right code?' and nothing else; reading liveness before deciding not to bounce."
+        liveness_gate
+        if $DRY_RUN; then
+            log "dry-run: liveness reads $LIVENESS_CLASS — would act on it here. Stopping."
+            exit 0
+        fi
+        liveness_act "$today"
+        log "drift: none, liveness $LIVENESS_CLASS (outcome ${LIVENESS_STATUS}). Exit 0."
         exit 0
     fi
     log "drift: work owed — proceeding to redeploy"
@@ -4032,6 +4547,13 @@ $check_out"
             "\"exit\":$rc,\"fleet_down\":$fleet_down"
         exit "$rc"
     fi
+
+    # The redeploy bounced the fleet, so the liveness streak has had its remedy
+    # applied whether or not liveness is what called for it (mg-a854). Not
+    # resetting it here would let a stalled fleet accumulate nights THROUGH the
+    # nightly restarts that were already treating it, and then bounce a second
+    # time on a count that no longer describes anything.
+    transport_streak_save "$LIVENESS_STREAK" "$today" 0 "$today"
 
     # --- post-bounce verification ------------------------------------------
     log "grace: waiting ${GRACE}s before re-reading schedules"
