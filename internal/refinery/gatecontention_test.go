@@ -121,6 +121,20 @@ func TestTimeoutOnAnIdleHostReadsAsBefore(t *testing.T) {
 // TestUnsampledTimeoutIsUnchanged: with sampling off, the error is exactly
 // what it was before this existed. A host we could not measure must not
 // acquire either an excuse or an accusation.
+//
+// What "says nothing about the host" means is asserted STRUCTURALLY — no
+// HOST-layer signal row, no samples behind one — and then, at the message
+// level, against the load sampler's own vocabulary only.
+//
+// It used to forbid the bare word "cores", and that was over-broad to the
+// point of being a different assertion. setLoadSampler(nil) disables the
+// HOST-layer load sampler and nothing else; the GATE-layer subtree instrument
+// in gateprogress.go is a second, independent instrument that writes "N.N
+// cores busy" into the same message on its own. Under load it lands its first
+// usable reading inside this test's 250ms budget (measured at 252ms) and the
+// test failed for a true reading it was never written to check — a flake
+// visible only on a loaded box, which is normal operation on this fleet
+// (mg-84f0; diagnosed by pc456, whose 252ms figure this is).
 func TestUnsampledTimeoutIsUnchanged(t *testing.T) {
 	r := newProgressTestRefinery(t, 10*time.Millisecond)
 	r.setLoadSampler(nil)
@@ -134,8 +148,39 @@ func TestUnsampledTimeoutIsUnchanged(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the gate to time out")
 	}
+
+	// The structural arm. A HOST row is the only way a host reading reaches a
+	// reader, so its absence is the property, and it does not depend on how
+	// any instrument happens to be worded.
+	var te *gateTimeoutError
+	if !errors.As(err, &te) {
+		t.Fatalf("expected a gate timeout error, got %T: %v", err, err)
+	}
+	if te.Contention.Samples != 0 {
+		t.Errorf("an unsampled run must carry no host samples, got %+v", te.Contention)
+	}
+	for _, s := range te.Signals {
+		if s.Layer == LayerHost {
+			t.Errorf("an unsampled run must emit no %s-layer signal, got %+v", LayerHost, s)
+		}
+	}
+
+	// The message arm, scoped to wording only the load sampler can produce:
+	// every string below is reachable solely from a contentionClause or from
+	// hostload.Summary.Report, and none of them can be written by the subtree
+	// instrument or by any other layer.
 	msg := err.Error()
-	for _, unwanted := range []string{"CONTENDED", "was not saturated", "cores"} {
+	for _, unwanted := range []string{
+		"CONTENDED",
+		"was not saturated",
+		"WAS saturated",
+		"HOST SATURATED",
+		"host had spare capacity",
+		"host used",
+		"fleet held",
+		"host contention not sampled",
+		"load average",
+	} {
 		if strings.Contains(msg, unwanted) {
 			t.Errorf("an unsampled run must say nothing about the host; found %q in: %s", unwanted, msg)
 		}
