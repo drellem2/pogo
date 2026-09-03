@@ -32,11 +32,27 @@ class. It proves the presence of legitimate history does not mask a live
 failure, and that the reader does not simply key on "the file has an error in it
 somewhere".
 
-## Live verification
+## Live verification, and its decay date
 
 The checked-in fixtures are what CI runs. `TestScan_LiveIncidentTranscripts` in
 `live_test.go` additionally verifies against the untouched originals still on
-this machine — `pm-pogo` FIRING across the 2026-07-22 window and `doctor`, which
-received no nudges that day and therefore emitted nothing, STAYING SILENT over
-the identical window. It skips when those paths are absent, which is every
-machine but this one.
+the machine the incident happened on — `pm-pogo` FIRING across the 2026-07-22
+window, `doctor` (which received no nudges that day and therefore emitted
+nothing) STAYING SILENT over the identical window, and `pm-pogo` STAYING SILENT
+again over the adjacent recovery hour of real work.
+
+Those originals rotate. Its guard used to skip only when the agent had **zero**
+transcripts, which is a presence check that cannot see the thing it is checking
+for: on 2026-09-03 it found 22 `pm-pogo` transcripts, all of them newer than the
+incident, concluded the fixture was present, and turned `main` red for every
+merge request in the fleet (mg-ae5a).
+
+Each sub-test now guards on **its own asserted window** and skips naming that
+window when the transcripts do not reach it. The guard reads record timestamps
+only — never `Scan`, never the synthetic-turn signature — because a guard that
+asked the detector whether it had found anything would skip whenever the
+detector broke, and a broken detector is the one answer that must stay a
+failure. `TestMeasureTranscripts_SeesAWindowItIsGiven` is its positive control:
+it runs the guard against `auth-expired-2026-07-22.jsonl`, whose six records and
+their timestamps are known on every machine, so a harness that renames its
+timestamp field fails loudly in CI instead of quietly disarming the live check.
