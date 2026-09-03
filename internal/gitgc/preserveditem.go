@@ -135,7 +135,7 @@ func PreservedForItems(opts PreservedItemOptions) (PreservedItemReport, error) {
 		// wanted items. The same guard the sweep and the exit hook consult,
 		// called rather than re-implemented, so this cannot claim a tree is
 		// retained that gc would happily reap.
-		chk := checkWorktreeRemoval(path)
+		chk := checkWorktreeRemoval(path, tree.Repo, opts.Target)
 
 		// The COMMITTED half of the same question (mg-fcba), asked of every
 		// candidate tree whether or not the removal guard refused it. A clean
@@ -164,8 +164,9 @@ func PreservedForItems(opts PreservedItemOptions) (PreservedItemReport, error) {
 		}
 		var dwe *DirtyWorktreeError
 		var uwe *UndeterminedWorktreeError
+		var oce *OrphanCommitsError
 		switch {
-		case chk.Refusal == nil:
+		case chk.Refusal == nil || errors.As(chk.Refusal, &oce):
 			// Clean, and holding commits that exist nowhere else. Named as its
 			// own outcome rather than folded into "preserved": that word means
 			// "uncommitted work was positively read" everywhere else in this
@@ -173,6 +174,13 @@ func PreservedForItems(opts PreservedItemOptions) (PreservedItemReport, error) {
 			// about a tree `git status` called clean would be a claim nobody
 			// made. It also gets the remedy wrong — there is nothing to commit
 			// here, the work is already committed and merely unreachable.
+			//
+			// The OrphanCommitsError arm is the SAME state, arriving by a
+			// second route since mg-8d25: the removal guard now refuses a clean
+			// DETACHED tree holding commits nothing else holds, so this
+			// classifier would otherwise have dropped a subset of its own
+			// population into "retained" — a refusal it could not name, for a
+			// tree it had already read correctly. Same fact, same word.
 			tree.Outcome = "unpushed"
 		case errors.As(chk.Refusal, &dwe):
 			tree.Outcome = "preserved"

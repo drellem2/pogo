@@ -544,7 +544,21 @@ type worktreeRemovalCheck struct {
 // callee reads is the same defect as a doc naming a mechanism that does not
 // exist, so it is gone here rather than threaded through. RemoveWorktree still
 // accepts one because that is mg-4d45's public API; retiring it is a follow-up.
-func checkWorktreeRemoval(worktreeDir string) worktreeRemovalCheck {
+//
+// # repo and target are the DURABILITY question's arguments (mg-8d25)
+//
+// They were added when the clean arm stopped meaning "reclaimable". `git status`
+// goes quiet the moment a polecat commits, so a CLEAN tree on a DETACHED HEAD
+// can hold the only copy of some commits — held by that worktree's own HEAD and
+// by no ref at all — and this guard used to clear it. The probe that answers
+// this (WorktreeCommitsAtRisk) already existed and already had two dispatch-side
+// consumers (mg-fcba); what was missing was the DESTRUCTIVE caller asking it.
+//
+// repo is the SOURCE repository whose ref namespace the question is asked of;
+// empty means resolve it from the tree's own .git pointer. target is the
+// integration branch, empty resolving to DefaultTargetBranch. See
+// checkOrphanCommits for why detachment alone is not the trigger.
+func checkWorktreeRemoval(worktreeDir, repo, target string) worktreeRemovalCheck {
 	if worktreeDir == "" {
 		return worktreeRemovalCheck{}
 	}
@@ -571,6 +585,11 @@ func checkWorktreeRemoval(worktreeDir string) worktreeRemovalCheck {
 					Modified: modified, Untracked: untracked,
 				},
 			}
+		}
+		// Clean by `git status`, which is silent about COMMITTED work by
+		// construction. One more question before the tree goes.
+		if orphan := checkOrphanCommits(worktreeDir, repo, target); orphan != nil {
+			return worktreeRemovalCheck{Refusal: orphan}
 		}
 		return worktreeRemovalCheck{}
 	}
@@ -835,10 +854,28 @@ func WorktreeBranch(worktreeDir string) (string, error) {
 // out in a worktree), which is why Sweep processes worktrees before branches.
 // TestRemoveWorktreeFreesCheckedOutBranch guards it.
 func RemoveWorktree(sourceRepo, worktreeDir string, _ WorktreeOwner) error {
+	return removeWorktreeGuarded(sourceRepo, worktreeDir, "")
+}
+
+// removeWorktreeGuarded is RemoveWorktree with the integration branch named.
+//
+// The split exists so the sweep's SECOND look asks the same question its first
+// one did (mg-8d25). Sweep runs checkWorktreeRemoval, decides, and then calls
+// back in to remove — and the guard re-runs immediately before destroying
+// anything, on purpose, so a tree that changed in between is caught. With the
+// durability arm added, a second look that defaulted its target while the sweep
+// had been given a different one would be asking a DIFFERENT question than the
+// one that cleared the removal, which is drift of exactly the kind the
+// single-implementation rule above exists to prevent.
+//
+// RemoveWorktree keeps its mg-4d45 signature and passes the empty target, which
+// resolves to DefaultTargetBranch — the value Sweep normalises to anyway, and
+// the only one any caller uses today.
+func removeWorktreeGuarded(sourceRepo, worktreeDir, target string) error {
 	if worktreeDir == "" {
 		return nil
 	}
-	if chk := checkWorktreeRemoval(worktreeDir); chk.Refusal != nil {
+	if chk := checkWorktreeRemoval(worktreeDir, sourceRepo, target); chk.Refusal != nil {
 		return chk.Refusal
 	}
 	return removeWorktreeFn(sourceRepo, worktreeDir)

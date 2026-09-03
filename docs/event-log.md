@@ -1821,10 +1821,20 @@ preservation notice worked (22 delivered notices over three days) but emitted no
 three days of preservations had to be reconstructed by grepping `PRESERVED worktree` out of
 `pogod.log` — which pogod writes to inherited stderr and which is therefore not durable at all.
 
-**One event type covers both retention outcomes**, discriminated by `outcome` and using
+**One event type covers all three retention outcomes**, discriminated by `outcome` and using
 `worktree_notice_undelivered`'s vocabulary so the two join on that field. A consumer asking "does this
-item have work nobody pushed?" wants both: `preserved` is a positive finding and `undetermined` is a
-tree that could not be ruled out.
+item have work nobody pushed?" wants all of them: `preserved` is a positive finding about uncommitted
+files, `undetermined` is a tree that could not be ruled out, and `unpushed` (mg-8d25) is a tree that
+was read, is CLEAN, and holds commits that exist nowhere else — no ref under `refs/remotes/origin/`
+holds them and none has a patch-equivalent on the integration branch.
+
+**`unpushed` is the one whose loss is unrecoverable and whose tree looks fine.** It arises on a
+DETACHED HEAD, where the commits are held by the worktree's own per-worktree `HEAD` under
+`.git/worktrees/<name>/` and by no ref anywhere — so `git worktree remove` orphans them and no ref
+scan could ever have found them. `git status` is clean the whole time, which is why the removal guard
+cleared such a tree until mg-8d25 taught it to ask. Detachment ALONE is not the condition and must not
+be read as one: on 2026-09-03 the single detached polecat tree on this host was an ancestor of
+`origin/main`, and a guard that refused it would have trained its readers to override by reflex.
 
 **It reports; it blocks nothing — and for eight days that was the whole defect.** No tree is reclaimed
 on the strength of it, and no dispatch was refused on it either. The mail beside it fires ONCE, says so,
@@ -1842,7 +1852,7 @@ being the durable record. Additive — no `schema_version` bump.
   `repo`
 - **`details` fields:**
   - `worktree` (string, required): the retained tree
-  - `outcome` (string, required): `"preserved"` or `"undetermined"`, as above
+  - `outcome` (string, required): `"preserved"`, `"undetermined"` or `"unpushed"`, as above
   - `pushed` (bool, required): always `false`, stated rather than implied — this is the population
     every pushed-commit guard misses, and a consumer should not have to infer that from a type name
   - `detail` (string, required): the underlying refusal, including the dirty paths or the `git status`
@@ -1850,7 +1860,8 @@ being the durable record. Additive — no `schema_version` bump.
   - `dirty_paths` (int), `modified_paths` (int), `untracked_paths` (int) and `files` ([]string):
     present only when `outcome` is `"preserved"`, because a count is meaningful only when the tree
     was actually read — a `0` on an unreadable tree would assert it was clean, which is a claim
-    nobody established. `files` is capped at 10 entries; the three counts are computed over the
+    nobody established, and a `0` on an `unpushed` tree would answer a question nobody asked while
+    burying the one that matters. `files` is capped at 10 entries; the three counts are computed over the
     **full** porcelain output, so `modified_paths + untracked_paths == dirty_paths` holds even when
     `files` is truncated
   - `branch` (string) **or** `branch_error` (string), never both (mg-d45b): the branch checked out in
@@ -1859,7 +1870,11 @@ being the durable record. Additive — no `schema_version` bump.
     indistinguishable from one nobody implemented, which is this event's own defect one layer down.
     A detached HEAD reports the literal `"HEAD"`, git's own answer, because a preserved tree with no
     branch name to hand a rescuer is a worse situation and must stay distinguishable from a failed
-    read. `branch_error` is the norm on `outcome: "undetermined"`, where `git status` has already
+    read. Do not derive DETACHMENT from that string, and do not derive it from an empty
+    `git symbolic-ref --short HEAD` either — that prints nothing for a detached HEAD *and* for a
+    directory that is not a worktree at all, and a first pass at measuring this population mislabelled
+    19 orphan directories on this host that way. The exit code discriminates (`1` detached, `128` not
+    a repository); `gitgc.WorktreeDetached` is that check. `branch_error` is the norm on `outcome: "undetermined"`, where `git status` has already
     failed and `rev-parse` usually fails for the same reason
 
 **Why the modified/untracked split is not cosmetic (mg-d45b).** The two halves have different
