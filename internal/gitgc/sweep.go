@@ -221,7 +221,7 @@ func Sweep(opts Options) (Result, error) {
 		// reports exactly what an apply would do — and so the log line can name
 		// the status failure rather than the ticket state. It is the guard's
 		// own function, so the two cannot drift.
-		chk := checkWorktreeRemoval(wt.Path)
+		chk := checkWorktreeRemoval(wt.Path, opts.Repo, opts.TargetBranch)
 		if chk.Refusal != nil && !opts.Force {
 			kept := WorktreeAction{Path: wt.Path, Owner: owner, Branch: wt.Branch}
 			// A refusal with no arm in refusalReason cannot happen today, but a
@@ -255,7 +255,7 @@ func Sweep(opts Options) (Result, error) {
 			if opts.Force {
 				rerr = removeWorktreeFn(opts.Repo, wt.Path)
 			} else {
-				rerr = RemoveWorktree(opts.Repo, wt.Path, OwnerUnproven)
+				rerr = removeWorktreeGuarded(opts.Repo, wt.Path, opts.TargetBranch)
 			}
 			if rerr != nil {
 				// A refusal here rather than a failure means the tree changed
@@ -430,6 +430,27 @@ func refusalReason(err error) (string, bool) {
 	var dwe *DirtyWorktreeError
 	if errors.As(err, &dwe) {
 		return fmt.Sprintf("%d uncommitted change(s) — rerun with --force to discard", dwe.Total), true
+	}
+	var oce *OrphanCommitsError
+	if errors.As(err, &oce) {
+		// A DIFFERENT fact again, and the operator's next move differs a third
+		// way (mg-8d25): there are no files to rescue here — the work is
+		// already committed — so the line has to send them to the COMMITS, and
+		// to a push or cherry-pick rather than to `git status`. Reusing the
+		// dirty wording would send a reader hunting uncommitted files in a tree
+		// git calls clean.
+		if oce.Finding.Verdict == DurabilityUnknown {
+			return "whether its HEAD holds commits that exist nowhere else could NOT be " +
+				"established — rerun with --force to discard", true
+		}
+		if n := len(oce.Finding.Commits); n > 0 {
+			return fmt.Sprintf("detached HEAD holding %d commit(s) that exist nowhere else — "+
+				"rescue them (`git -C %s log --oneline HEAD --not --remotes`) or rerun with "+
+				"--force to discard", n, oce.Path), true
+		}
+		return fmt.Sprintf("detached HEAD holding commits that exist nowhere else, count unknown — "+
+			"rescue them (`git -C %s log --oneline HEAD --not --remotes`) or rerun with --force "+
+			"to discard", oce.Path), true
 	}
 	var uwe *UndeterminedWorktreeError
 	if errors.As(err, &uwe) {

@@ -71,9 +71,10 @@ type PreservedTree struct {
 
 	// Outcome is why the tree is retained, using worktree_preserved's
 	// vocabulary exactly: "preserved" means uncommitted work was positively
-	// read, "undetermined" means `git status` failed and we could not look.
-	// Folding the second into the first would state a fact about the tree that
-	// nobody established.
+	// read, "undetermined" means `git status` failed and we could not look, and
+	// "unpushed" means the tree is CLEAN and readable and holds commits that
+	// exist nowhere else (mg-8d25). Folding any of these into another would
+	// state a fact about the tree that nobody established.
 	Outcome string `json:"outcome"`
 
 	// Total, Modified and Untracked are the dirty split, present only on the
@@ -132,13 +133,17 @@ type PreservedTree struct {
 
 	// ForceReclaims answers, for THIS tree, whether
 	// `pogo gc --repo=<Repo> --apply --force` would actually take it: "yes",
-	// "no", or "unknown" when the ticket index could not be loaded.
+	// "no", "no (detached)", or "unknown" when the ticket index could not be
+	// loaded.
 	//
-	// It exists because --force is NOT the whole gate. The sweep checks the
-	// owner's ticket state BEFORE it consults the dirty guard, so a retained
-	// tree whose work item is still in flight survives --force untouched, and
-	// an operator who reads --force as "reclaims everything listed" is wrong in
-	// both directions.
+	// It exists because --force is NOT the whole gate, and there are two
+	// independent reasons it is not. The sweep checks the owner's ticket state
+	// BEFORE it consults the dirty guard, so a retained tree whose work item is
+	// still in flight survives --force untouched. And the sweep only ever
+	// considers a worktree checked out on a polecat-* branch, so a DETACHED tree
+	// — which `git worktree list` reports with no branch at all — is skipped
+	// with or without the flag (mg-8d25, measured). An operator who reads
+	// --force as "reclaims everything listed" is wrong in three directions.
 	ForceReclaims string `json:"force_reclaims"`
 }
 
@@ -327,7 +332,7 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 		// The same guard the sweep and the exit hook consult, called rather
 		// than re-implemented, so the listing cannot claim a tree is retained
 		// that gc would happily reap.
-		chk := checkWorktreeRemoval(path)
+		chk := checkWorktreeRemoval(path, tree.Repo, opts.Target)
 		if chk.Refusal == nil {
 			rep.CleanCount++
 			continue
@@ -335,7 +340,22 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 
 		var dwe *DirtyWorktreeError
 		var uwe *UndeterminedWorktreeError
+		var oce *OrphanCommitsError
 		switch {
+		case errors.As(chk.Refusal, &oce):
+			// Clean by `git status`, detached, and holding commits nothing else
+			// holds (mg-8d25). The same word PreservedForItems uses for the same
+			// state: not "preserved", which asserts uncommitted work was read,
+			// and not "undetermined", which asserts git failed. Neither happened.
+			//
+			// The COMMITS block below is what this tree's entry is FOR, and it is
+			// filled by the annotation further down rather than from the refusal,
+			// so the listing and the guard read the tree independently.
+			tree.Outcome = "unpushed"
+			if newest, werr := newestWrite(path); werr == nil {
+				tree.UntouchedSeconds = int(time.Since(newest).Seconds())
+				tree.UntouchedKnown = true
+			}
 		case errors.As(chk.Refusal, &dwe):
 			tree.Outcome = "preserved"
 			// Re-read the full porcelain list: DirtyWorktreeError.Files is
@@ -381,13 +401,21 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 		// holds, which is the fact that separates "reclaiming this loses an
 		// edit" from "reclaiming this loses the only copy of some commits".
 		//
-		// The listed POPULATION is unchanged, and the omission is deliberate
-		// rather than pending: a CLEAN tree holding unpushed commits is not a
-		// tree gc refused, so it does not belong in a list of trees gc refused.
-		// The dispatch guard is where that tree matters and PreservedForItems
-		// reports it there. Widening this listing is a separate decision about
-		// what `--list-preserved` means, and the reclaim path's own blindness
-		// to a detached HEAD's commits is a separate defect from this one.
+		// # What the listed POPULATION now is, and what changed (mg-8d25)
+		//
+		// This used to read "the listed population is unchanged", on the ground
+		// that a clean tree holding unpushed commits is not a tree gc refused.
+		// That ground is gone: the removal guard now refuses a CLEAN tree on a
+		// DETACHED HEAD whose commits exist nowhere else, so such a tree IS a
+		// tree gc refused and it is listed above with outcome "unpushed". The
+		// listing did not choose to widen — it calls the guard, and the guard's
+		// answer changed. That is the point of calling it rather than
+		// re-implementing it.
+		//
+		// A clean tree on a BRANCH holding unpushed commits is still NOT listed,
+		// and still deliberately: removing it drops the tree and the branch ref
+		// keeps the objects, so gc does not refuse it. The dispatch guard is
+		// where that tree matters and PreservedForItems reports it there.
 		if find, ferr := WorktreeCommitsAtRisk(path, tree.Repo, opts.Target); ferr != nil {
 			rep.Errors = append(rep.Errors, fmt.Sprintf(
 				"could not check whether %s holds commits that exist nowhere else: %v", path, ferr))
@@ -406,7 +434,13 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 			rep.InUse = append(rep.InUse, tree)
 			continue
 		}
-		tree.ForceReclaims = forceReclaims(rep.TicketsLoaded, tickets, tree.Owner, tree.Branch)
+		// Detachment is asked with the probe rather than inferred from the
+		// branch reading "HEAD" — that string is what `rev-parse --abbrev-ref`
+		// prints, and inferring a state from it is the shape of instrument this
+		// whole ticket is about. An unreadable answer leaves the column alone.
+		detached, derr := WorktreeDetached(path)
+		tree.ForceReclaims = forceReclaims(rep.TicketsLoaded, tickets, tree.Owner, tree.Branch,
+			detached && derr == nil)
 		rep.Retained = append(rep.Retained, tree)
 	}
 
@@ -425,7 +459,24 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 //
 // The classification is classifyTree's, called rather than restated, so this
 // column cannot drift from what the sweep will actually do.
-func forceReclaims(ticketsLoaded bool, tickets TicketIndex, owner, branch string) string {
+func forceReclaims(ticketsLoaded bool, tickets TicketIndex, owner, branch string, detached bool) string {
+	if detached {
+		// MEASURED, not reasoned (mg-8d25): the sweep's phase 1 skips any
+		// worktree whose Branch does not start with "polecat-", and `git
+		// worktree list --porcelain` reports an EMPTY branch for a detached
+		// tree — so Worktree.IsPolecat() is false and the tree is never
+		// considered, with or without --force. Phase 1b does not pick it up
+		// either: it only scans directories with no registration, and this one
+		// has one.
+		//
+		// Saying "yes" here was wrong before this ticket too (a dirty detached
+		// tree has always read that way). It matters more now, because the
+		// removal guard newly RETAINS this shape, so the listing prints the
+		// column for a population it used to skip — and a reclaim column that
+		// names a command which silently does nothing is how a pinned tree
+		// becomes permanent while its owner believes they cleared it.
+		return "no (detached)"
+	}
 	if !ticketsLoaded {
 		return "unknown"
 	}
@@ -510,11 +561,18 @@ const preservedModifiedCap = 20
 func (r PreservedReport) Summary() string {
 	var b strings.Builder
 
-	preserved, undetermined := 0, 0
+	// Three counts, not two. "unpushed" trees hold no uncommitted work and are
+	// perfectly readable, so folding them into either existing bucket states a
+	// fact about them that nobody established — and the headline count is the
+	// line a reader takes away (mg-8d25).
+	preserved, undetermined, unpushed := 0, 0, 0
 	for _, t := range r.Retained {
-		if t.Outcome == "undetermined" {
+		switch t.Outcome {
+		case "undetermined":
 			undetermined++
-		} else {
+		case "unpushed":
+			unpushed++
+		default:
 			preserved++
 		}
 	}
@@ -525,8 +583,9 @@ func (r PreservedReport) Summary() string {
 			"   a tree whose .git pointer could not be read is shown anyway, since it may be this one)\n",
 			r.RepoFilter, r.OtherRepoCount)
 	}
-	fmt.Fprintf(&b, "  %d retained: %d holding uncommitted work, %d unreadable\n",
-		len(r.Retained), preserved, undetermined)
+	fmt.Fprintf(&b, "  %d retained: %d holding uncommitted work, %d unreadable, "+
+		"%d clean but holding commits that exist nowhere else\n",
+		len(r.Retained), preserved, undetermined, unpushed)
 	fmt.Fprintf(&b, "  %d dirty tree(s) in use by a live polecat — not retained, listed at the end\n",
 		len(r.InUse))
 	fmt.Fprintf(&b, "  %d clean, %d not linked worktrees (no .git — see `pogo gc` orphan dirs)\n",
@@ -605,13 +664,15 @@ func writeRepoGroup(b *strings.Builder, g repoGroup) {
 		fmt.Fprintf(b, "\n%s\n", repo)
 	}
 
-	var eligible, held, unknown []string
+	var eligible, held, unknown, detached []string
 	for _, t := range g.Trees {
 		switch t.ForceReclaims {
 		case "yes":
 			eligible = append(eligible, t.Owner)
 		case "unknown":
 			unknown = append(unknown, t.Owner)
+		case "no (detached)":
+			detached = append(detached, t.Owner)
 		default:
 			held = append(held, t.Owner)
 		}
@@ -629,6 +690,16 @@ func writeRepoGroup(b *strings.Builder, g repoGroup) {
 			// sweep checks the owner's ticket state first, so an unconcluded
 			// item's tree survives the flag entirely.
 			fmt.Fprintf(b, "    it would NOT touch (work item not concluded): %s\n", strings.Join(held, ", "))
+		}
+		if len(detached) > 0 {
+			// A SECOND reason --force does not mean "everything", and unlike the
+			// ticket-state one it is not about the item at all: `pogo gc` only
+			// ever considers a worktree checked out on a polecat-* branch, and a
+			// detached tree reports no branch. The command below is what
+			// actually reclaims one.
+			fmt.Fprintf(b, "    it would NOT touch (DETACHED — `pogo gc` only sees worktrees on a "+
+				"%s* branch): %s\n", BranchPrefix, strings.Join(detached, ", "))
+			fmt.Fprintf(b, "      reclaim one of those with: git -C %s worktree remove --force <path>\n", repo)
 		}
 		if len(unknown) > 0 {
 			fmt.Fprintf(b, "    unknown, work-item states could not be read: %s\n", strings.Join(unknown, ", "))
@@ -672,6 +743,18 @@ func writeTree(b *strings.Builder, t PreservedTree) {
 					len(mod)-len(shown), t.Path)
 			}
 		}
+		return
+	}
+
+	if t.Outcome == "unpushed" {
+		// No file list, because there are no files to list — `git status` read
+		// this tree and found it clean. Printing the dirty block's zeros here
+		// would answer a question nobody asked and bury the one that matters,
+		// which writeTreeCommits printed above (mg-8d25).
+		fmt.Fprintf(b, "    CLEAN — nothing uncommitted. This tree is retained for its COMMITS above,\n")
+		fmt.Fprintf(b, "    not for its files, so there is nothing here to `git add`. Push the branch,\n")
+		fmt.Fprintf(b, "    or cherry-pick the commits somewhere that has a ref, before reclaiming.\n")
+		fmt.Fprintf(b, "    `--force` reclaims it: %s\n", t.ForceReclaims)
 		return
 	}
 

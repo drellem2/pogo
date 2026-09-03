@@ -11,7 +11,7 @@ import (
 )
 
 // worktreeCleanupOutcome reports what cleanupAgentWorktree decided, so callers
-// and tests can distinguish the three cases without parsing log lines.
+// and tests can distinguish the cases without parsing log lines.
 type worktreeCleanupOutcome int
 
 const (
@@ -25,6 +25,14 @@ const (
 	// "there is work here", undetermined means "I could not look". Folding
 	// the second into the first would report a false claim about the tree.
 	worktreeUndetermined
+	// worktreeUnpushed: the tree was CLEAN, on a detached HEAD, and holding
+	// commits that exist nowhere else — so removing it would have left them
+	// reachable from no ref at all (mg-8d25). Kept, and distinct from the two
+	// above for the same reason those are distinct from each other: the FACT is
+	// different and so is the remedy. There are no files to rescue here; the
+	// work is already committed and merely unreachable, so the reader needs a
+	// push or a cherry-pick, not a `git add`.
+	worktreeUnpushed
 	// worktreeCleanupFailed: removal was attempted and errored.
 	worktreeCleanupFailed
 	// worktreeNone: the agent had no worktree.
@@ -128,13 +136,18 @@ func cleanupAgentWorktree(
 	// with work still in the tree, and it is the route that cost us a 201-line
 	// race test.
 	//
-	// What actually saves that tree is not this argument but the two rules
-	// RemoveWorktree applies unconditionally: a dirty tree is PRESERVED, and a
-	// tree it could not read is REFUSED and reported. Both are handled below.
+	// What actually saves that tree is not this argument but the three rules
+	// RemoveWorktree applies unconditionally: a dirty tree is PRESERVED, a tree
+	// it could not read is REFUSED and reported, and a CLEAN tree on a detached
+	// HEAD holding commits nothing else holds is REFUSED too (mg-8d25) — that
+	// last one because `git status` goes silent the moment a polecat commits,
+	// and this hook is the path that actually reaps such a tree. All three are
+	// handled below.
 	err := gitgc.RemoveWorktree(sourceRepo, worktreeDir, gitgc.OwnerUnproven)
 
 	var dwe *gitgc.DirtyWorktreeError
 	var uwe *gitgc.UndeterminedWorktreeError
+	var oce *gitgc.OrphanCommitsError
 	switch {
 	case errors.As(err, &dwe):
 		// Preservation rather than refusal is deliberate, and the choice is
@@ -188,6 +201,56 @@ func cleanupAgentWorktree(
 			}
 		}
 		return worktreePreserved
+	case errors.As(err, &oce):
+		// Clean, detached, and holding commits nothing else holds (mg-8d25).
+		//
+		// The notice must NOT say "uncommitted work" and must NOT say "could
+		// not look": `git status` ran and found the tree clean. What it says is
+		// the third fact — the work IS committed, and the only thing keeping
+		// those commits reachable is this worktree's HEAD, which the reap would
+		// have deleted. That distinction decides what the reader does next, and
+		// there is nothing here to `git add`.
+		log.Printf("agent %s: KEPT worktree %s (work item %s) — %v",
+			agentName, worktreeDir, workItemOrNone(a.WorkItemID), oce)
+		emitWorktreePreserved(a, "unpushed", nil, oce.Error())
+		if mail != nil && coordinator != "" {
+			subject := fmt.Sprintf("kept %s's worktree — its commits exist nowhere else", agentName)
+			if a.WorkItemID != "" {
+				subject = fmt.Sprintf("kept %s's worktree — its commits exist nowhere else; "+
+					"do NOT dispatch at %s", agentName, a.WorkItemID)
+			}
+			body := fmt.Sprintf(
+				"Polecat %s exited with a CLEAN worktree whose commits exist in no other place — "+
+					"no ref under refs/remotes/origin/ holds them and none has a patch-equivalent "+
+					"on the integration branch. The tree was KEPT rather than reaped (mg-8d25).\n\n"+
+					"This is NOT the uncommitted-work case. `git status` ran and the tree is clean; "+
+					"there is nothing here to `git add`. The work is already COMMITTED, and on a "+
+					"detached HEAD those commits are held by this worktree's own HEAD and by no ref "+
+					"at all — so `git worktree remove` would have orphaned them and no branch scan "+
+					"could ever have found them.\n\n"+
+					"  worktree:  %s\n  repo:      %s\n%s  %v\n\n"+
+					"%s"+
+					"Rescue them — they are commits, so this is a push or a cherry-pick, not a "+
+					"rescue of files:\n\n  git -C %s log --oneline HEAD --not --remotes\n"+
+					"  git -C %s push origin HEAD:refs/heads/rescue-%s\n\n"+
+					"Then reclaim it with:\n\n  git -C %s worktree remove --force %s\n\n"+
+					"NOT `pogo gc --apply --force`: the sweep only ever considers a worktree checked "+
+					"out on a polecat-* branch, and a detached tree reports NO BRANCH to `git "+
+					"worktree list` — so gc skips it with or without the flag, and an operator who "+
+					"runs gc here will believe they cleared a tree that is still there (mg-8d25).\n\n"+
+					"%s"+
+					"Until it is reclaimed this worktree is retained, and reclaiming it destroys "+
+					"the only copy of those commits.",
+				agentName, worktreeDir, sourceRepo, workItemLine(a.WorkItemID), oce,
+				dispatchWarning(a.WorkItemID, "unpushed"),
+				worktreeDir, worktreeDir, agentName, sourceRepo, worktreeDir,
+				standingListNote(sourceRepo))
+			if mErr := mail(coordinator, "pogod", subject, body); mErr != nil {
+				log.Printf("agent %s: failed to mail unpushed-worktree notice: %v", agentName, mErr)
+				emitWorktreeNoticeUndelivered(a, coordinator, "unpushed", mErr)
+			}
+		}
+		return worktreeUnpushed
 	case errors.As(err, &uwe):
 		// Cannot-tell. The notice must NOT say "uncommitted work" — we do not
 		// know that, and sending an operator to rescue files that may not
@@ -290,6 +353,21 @@ func dispatchWarning(workItemID, outcome string) string {
 			"DO NOT DISPATCH A WORKER AT %s UNTIL THIS TREE HAS BEEN READ. We did not establish "+
 				"that there is uncommitted work here; we established that we could not look, which "+
 				"is not the same as finding nothing. %s",
+			workItemID, common)
+	}
+	if outcome == "unpushed" {
+		// A THIRD claim, because the default sentence below is false here in
+		// its first clause: this tree's work WAS committed. Saying "never
+		// committed" about it sends the reader to `git status`, finds them a
+		// clean tree, and ends the investigation on the reading that the notice
+		// was spurious — the plausible-innocent-cause failure gh #97 recorded,
+		// arriving through the mail instead of the log (mg-8d25).
+		return fmt.Sprintf(
+			"DO NOT DISPATCH A WORKER AT %s. This tree's work IS committed — and on a detached "+
+				"HEAD those commits are held by this worktree's HEAD and by NO REF ANYWHERE, so no "+
+				"branch scan, no `git cherry` and no stranded-push reporter can see them: they are "+
+				"all defined over refs. `git status` will show you a clean tree; that is not "+
+				"evidence the work is safe, it is evidence the work is committed. %s",
 			workItemID, common)
 	}
 	return fmt.Sprintf(
