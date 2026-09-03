@@ -294,29 +294,68 @@ fi
 # not depend on anything the deploy installs. That is not a stylistic
 # preference — it is the entire reason the file exists, and it is asserted in
 # scripts/revision-probe_test.sh with all three poisoned on PATH.
+#
+# AND NOTE HOW EVERY IDENTITY CHECK BELOW IS SPELLED (mg-7ce7). Output is
+# captured into a variable and matched with `case`. It is NOT
+# `"$cand" --version | grep -q ...`, and the difference is not a style
+# preference either — it is the defect that made this file's `--mail` path
+# undeliverable for 55 consecutive runs, mid-incident, with no code change:
+#
+#     `grep -q` exits on the FIRST match. The producer, still writing, takes
+#     SIGPIPE and exits 141. `set -uo pipefail` (line 93) makes 141 the
+#     PIPELINE's status, `|| continue` fires, and A CAPABILITY PROBE REPORTS A
+#     WORKING TOOL AS ABSENT — silently, and in the safe-looking direction.
+#
+# Whether it loses is a RACE between how much the producer still has to write
+# and how soon the consumer closes the pipe. Measured on this host, 10 runs each
+# under `set -o pipefail`, at the three call sites this file used to have:
+#
+#     git  --version | grep -q 'git version'    0/10 fail   ~25 bytes, small binary
+#     curl --version | grep -q '^curl '         0/10 fail   ~25 bytes, small binary
+#     mg   --help    | grep -q 'macguffin'     10/10 fail   2404 bytes, 7.7MB Go binary
+#
+# So only ONE of the three was failing, and the other two were the identical
+# defect winning on timing luck — one grown binary, one loaded box or one slower
+# disk from reporting "no working git found" on the probe whose whole job is to
+# read a git revision. All three are fixed here, not just the one that was red.
+# Section 13 of scripts/revision-probe_test.sh guards all three the way a race
+# has to be guarded: it FORCES THE LOSING SIDE with a deliberately chatty
+# producer and asserts the old idiom really does get 141 against that fixture
+# BEFORE asserting these resolvers survive it. One passing run of a race is a
+# coin landing the right way, not a verification — and that is precisely how
+# this file's own suite stayed green over the idiom, with a stub mg that echoes
+# one short line and never loses the race the real binary loses every time.
+#
+# AND THE TRIAGE RULE THIS TICKET SHIPPED IS WRONG WHERE IT MATTERS MOST — it
+# said a shell BUILTIN producer is safe at any size, so `printf | grep -q` sites
+# need not be looked at. Measured here, bash 3.2 and zsh alike, match at byte 0,
+# 20 runs each: builtin `printf` into `grep -q` is 0/20 at 8KB and 20/20 SIGPIPE
+# 141 at 64KB and at 256KB. The predicate is the PIPE BUFFER, not the producer's
+# class: whoever is writing dies if bytes remain when the consumer exits. See
+# CONTRIBUTING.md, "`cmd | grep -q` under `set -o pipefail` is a race".
 
 resolve_git() {
-    local cand
+    local cand out
     for cand in "${GIT:-}" /opt/homebrew/bin/git /usr/local/bin/git /usr/bin/git \
                 "$(command -v git 2>/dev/null)"; do
         [ -n "$cand" ] || continue
         [ -x "$cand" ] || continue
-        "$cand" --version 2>/dev/null | grep -q 'git version' || continue
-        GIT="$cand"
-        return 0
+        out="$("$cand" --version 2>/dev/null)"
+        case "$out" in *'git version'*) GIT="$cand"; return 0 ;; esac
     done
     return 1
 }
 
 resolve_curl() {
-    local cand
+    local cand out
     for cand in "${CURL:-}" /usr/bin/curl /opt/homebrew/bin/curl /usr/local/bin/curl \
                 "$(command -v curl 2>/dev/null)"; do
         [ -n "$cand" ] || continue
         [ -x "$cand" ] || continue
-        "$cand" --version 2>/dev/null | grep -q '^curl ' || continue
-        CURL="$cand"
-        return 0
+        out="$("$cand" --version 2>/dev/null)"
+        # `^curl ` was an anchored grep; the equivalent without a pipeline is a
+        # prefix pattern on the captured output.
+        case "$out" in 'curl '*) CURL="$cand"; return 0 ;; esac
     done
     return 1
 }
@@ -598,13 +637,19 @@ if [ "$DO_MAIL" -eq 1 ]; then
     # editor. Every candidate must self-identify as macguffin before it is
     # trusted (mg-015f / mg-dd5f). `go env` is deliberately NOT consulted for
     # GOBIN/GOPATH here — this probe must run without a toolchain.
+    #
+    # THE IDENTITY CHECK HAS NO PIPE IN IT, and this is the call site that made
+    # that mandatory (mg-7ce7): `mg --help | grep -q macguffin` under pipefail
+    # rejected a working mg 10 times out of 10, so this branch always fell
+    # through to the refusal below and 55 correctly-computed alerts reached
+    # nobody. See the long note above resolve_git.
     MG=""
+    mg_out=""
     for cand in "${GOBIN:-}/mg" "${GOPATH:-}/bin/mg" "$HOME/go/bin/mg" "$(command -v mg 2>/dev/null)"; do
         case "$cand" in ""|"/mg"|"/bin/mg") continue ;; esac
         [ -x "$cand" ] || continue
-        "$cand" --help 2>/dev/null | grep -q 'macguffin' || continue
-        MG="$cand"
-        break
+        mg_out="$("$cand" --help 2>/dev/null)"
+        case "$mg_out" in *macguffin*) MG="$cand"; break ;; esac
     done
     if [ -z "$MG" ]; then
         echo "revision-probe: --mail was asked for but no macguffin 'mg' was found — refusing bare 'mg' (that is /usr/bin/mg, the EDITOR). The alert above is still the exit status." >&2

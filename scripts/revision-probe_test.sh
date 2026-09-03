@@ -557,6 +557,163 @@ else
     fail "a failed send was stamped as delivered, buying silence for an alert nobody received — stamp: $(cat "$STAMP")"
 fi
 
+# --- 13. THE TOOL RESOLVERS MUST NOT DIE ON SIGPIPE (mg-7ce7) ----------------
+# `set -uo pipefail` + `CMD --version | grep -q PATTERN`: grep exits on the FIRST
+# match, the producer is still writing, takes SIGPIPE and exits 141, pipefail
+# makes 141 the PIPELINE's status, `|| continue` fires, and A CAPABILITY PROBE
+# REPORTS A WORKING TOOL AS ABSENT. That is what made this probe's `--mail` path
+# undeliverable: 55 consecutive runs computed the alert correctly and refused to
+# send it, three delivered alerts in and with NO code change between the last
+# delivery (2026-08-17T23:20Z) and the silence.
+#
+# ALL THREE RESOLVERS ARE ASSERTED HERE, not just the one that was failing. mg
+# lost 10/10 (2404 bytes out of a 7.7MB Go binary); git and curl won 0/10 (~25
+# bytes each) — the IDENTICAL defect, passing on timing luck, one grown binary
+# or one loaded box away from this probe announcing "no working git found" about
+# the git that is sitting right there.
+#
+# AND THE FIXTURE IS CHECKED BEFORE THE PROBE IS. Section 12's stub mg echoes
+# one short line, so it never loses the race the real binary lost every time,
+# and the suite stayed green over the defect for months. A test for a race that
+# does not FORCE THE LOSING SIDE certifies timing luck as correctness. So 13a
+# asserts the old idiom really does get 141 against these stubs; without it 13b
+# and 13c guard nothing.
+
+RACEBIN="$SANDBOX/racebin"
+mkdir -p "$RACEBIN"
+REAL_GIT="$(command -v git 2>/dev/null)"
+REAL_CURL="$(command -v curl 2>/dev/null)"
+[ -n "$REAL_GIT" ] && [ -n "$REAL_CURL" ] \
+    || pogo_sandbox_fail "no real git/curl to delegate to — section 13's stubs cannot be built and nothing below would mean anything"
+
+# make_chatty BIN IDENTITY-FLAG IDENTITY-LINE DELEGATE USED-MARKER
+# Prints the identity line the resolver matches on, then far more than any pipe
+# buffer holds, so an early-exiting consumer really does kill it. Everything
+# else is delegated to the real tool, so the probe under test still works —
+# and every delegated call is recorded in USED-MARKER.
+#
+# THE MARKER IS THE LOAD-BEARING PART, and leaving it out is a trap this section
+# fell into on the first draft. `resolve_git`'s candidate list is
+# `"${GIT:-}" /opt/homebrew/bin/git /usr/local/bin/git /usr/bin/git ...`, so a
+# rejected $GIT does not fail the probe — it falls through to the real git and
+# the run succeeds ANYWAY. Asserting "the probe reached its verdict" therefore
+# passes against the defect: measured, the pre-fix probe passes that assertion
+# 100% of the time. What separates accepted from silently-skipped is whether the
+# handed candidate is the one that does the WORK.
+make_chatty() {
+    local bin="$1" flag="$2" line="$3" delegate="$4" used="$5"
+    cat > "$bin" <<EOF
+#!/usr/bin/env bash
+FLAG="$flag"
+LINE="$line"
+DELEGATE="$delegate"
+USED="$used"
+EOF
+    cat >> "$bin" <<'INNER'
+if [ "${1:-}" = "$FLAG" ]; then
+    echo "$LINE"
+    for i in $(seq 1 20000); do
+        echo "filler line $i ------------------------------------------------"
+    done
+    exit 0
+fi
+echo "$*" >> "$USED"
+exec "$DELEGATE" "$@"
+INNER
+    chmod +x "$bin"
+}
+
+GIT_USED="$SANDBOX/race.git.used"
+CURL_USED="$SANDBOX/race.curl.used"
+make_chatty "$RACEBIN/git"  --version "git version 2.99.0 (chatty stub)" "$REAL_GIT"  "$GIT_USED"
+make_chatty "$RACEBIN/curl" --version "curl 8.99.0 (chatty stub)"        "$REAL_CURL" "$CURL_USED"
+
+RACE_SENT="$SANDBOX/race.mail.sent"
+cat > "$RACEBIN/mg" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+    --help)
+        echo "macguffin work-item tracker (chatty stub)"
+        for i in \$(seq 1 20000); do
+            echo "filler line \$i ------------------------------------------------"
+        done
+        exit 0
+        ;;
+esac
+echo "\$*" >> "$RACE_SENT"
+exit 0
+EOF
+chmod +x "$RACEBIN/mg"
+
+# 13a. THE FIXTURE MUST REPRODUCE THE DEFECT, or 13b/13c guard nothing.
+old_idiom_rc() {
+    local rc=0
+    ( set -uo pipefail; "$1" "$2" 2>/dev/null | grep -q "$3" ) || rc=$?
+    echo "$rc"
+}
+for spec in "git|--version|git version" "curl|--version|^curl " "mg|--help|macguffin"; do
+    tool="${spec%%|*}"; rest="${spec#*|}"; flag="${rest%%|*}"; pat="${rest#*|}"
+    rc="$(old_idiom_rc "$RACEBIN/$tool" "$flag" "$pat")"
+    if [ "$rc" -eq 141 ]; then
+        pass "the $tool fixture reproduces mg-7ce7: the OLD idiom (pipefail + grep -q) rejects a working $tool with SIGPIPE 141"
+    else
+        fail "the chatty $tool stub did not SIGPIPE the old idiom (exit $rc, want 141) — section 13 would then be certifying timing luck as correctness, which is exactly how this suite stayed green over the defect"
+    fi
+done
+
+# 13b. git AND curl must survive it. These two were never the reported failure —
+# they were the same defect winning the race — so a fix that only touched the mg
+# site would leave the probe one binary-growth away from reporting that the git
+# it is holding does not exist.
+serve_revision "$C3"
+rm -f "$STAMP" "$GIT_USED" "$CURL_USED"
+printf '%s %s %s\n' "$T0" "$C3" "$C3" > "$STAMP"
+out="$(GIT="$RACEBIN/git" CURL="$RACEBIN/curl" run_probe --repo "$FRESH" --now "$NOW_OLD" --stale-after 24h)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+    pass "the probe reaches its verdict with a chatty git and curl in hand"
+else
+    fail "the probe exited $rc against chatty git/curl, want 0. If this says \"no working 'git' found\" or \"no working 'curl' found\", the pipefail+grep -q idiom is back at revision-probe.sh's resolve_git/resolve_curl — output: $out"
+fi
+if [ -s "$GIT_USED" ]; then
+    pass "resolve_git ACCEPTED the git whose --version outruns grep -q — it did the run's git work"
+else
+    fail "the handed git was skipped and the probe fell through to another candidate — that is mg-7ce7 at resolve_git, and it is invisible from the exit status because the fallback works. Output: $out"
+fi
+if [ -s "$CURL_USED" ]; then
+    pass "resolve_curl ACCEPTED the curl whose --version outruns grep -q — it read the daemon with it"
+else
+    fail "the handed curl was skipped and the probe fell through to another candidate — that is mg-7ce7 at resolve_curl. Output: $out"
+fi
+if printf '%s' "$out" | grep -q "no working"; then
+    fail "the probe declared a WORKING tool absent — that is mg-7ce7 exactly, and it fails in the safe-looking direction: $out"
+else
+    pass "no tool was declared absent — the resolvers judged output, not a pipeline's exit status"
+fi
+
+# 13c. And the mail path, which is the one that actually went dark. The
+# assertion is that a mail is SENT — not that the probe exited 1, which it did
+# throughout the 55 refusals.
+rm -f "$RACE_SENT"
+serve_revision "$C1"
+printf '%s %s %s\n' "$T0" "$C1" "$C3" > "$STAMP"
+out="$(PATH="$RACEBIN:$PATH" GOBIN="$RACEBIN" run_probe --repo "$FRESH" --now "$NOW_OLD" --stale-after 24h --mail)"; rc=$?
+sent=0; [ -f "$RACE_SENT" ] && sent="$(wc -l < "$RACE_SENT" | tr -d ' ')"
+if [ "$sent" = "1" ]; then
+    pass "the alert is DELIVERED through an mg whose --help outruns grep -q — the 55-run refusal cannot recur"
+else
+    fail "$sent mail(s) sent through the chatty mg, want 1 — the alert was computed and reached nobody, which is the whole defect: $out"
+fi
+if printf '%s' "$out" | grep -q "no macguffin"; then
+    fail "the probe refused a self-identifying macguffin mg — mg-7ce7 has regressed at revision-probe.sh's MG resolver: $out"
+else
+    pass "the probe did not refuse the mg it was handed"
+fi
+if [ "$rc" -eq 1 ]; then
+    pass "a delivered notification does not change the ALERT or its exit status"
+else
+    fail "a run that mailed exited $rc, want 1 — output: $out"
+fi
+
 # --- tally -------------------------------------------------------------------
 echo
 echo "=== scripts/revision-probe.sh controls ==="
