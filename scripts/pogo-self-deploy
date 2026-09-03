@@ -3897,6 +3897,99 @@ verify_bounced() {
 }
 
 # ---------------------------------------------------------------------------
+# THE STATE A FAILED VERIFY HAS JUST CREATED (mg-a854)
+# ---------------------------------------------------------------------------
+# On 2026-08-26 04:32 the no-remote fallback stopped pogod, failed to bring a
+# replacement up, and said so exactly:
+#
+#   ERROR: the bounce KILLED the old daemon and no replacement is answering,
+#          so the fleet is [gone]
+#   exit 8 at stage verify
+#
+# Detection was already perfect. What was missing is everything after it: the
+# run mailed about a daemonless box and then exited, having taken no action
+# whatsoever against the state it had itself produced. Two things are added
+# here, and neither of them is a tuning knob.
+#
+# 1. A RETRY OF THE KICKSTART. `launchctl kickstart -k` can burn a spawn —
+#    report_spawns exists because one did (mg-9cc0: an OS_REASON_CODESIGNING
+#    death 29ms in, with launchd's 10s respawn throttle behind it). The deploy
+#    path survives that because launchd retries on its own; a bounce that gives
+#    up at 60s can outrun the throttle and call a recoverable box lost. One more
+#    kickstart costs a second and covers it.
+#
+# 2. A DISTINCT CONDITION FOR "THIS BOX HAS NO POGOD". `the bounce did not
+#    complete` and `nothing is serving this port` need opposite reactions, and
+#    exit 8 said both. They are now different integers, so the runner's subject
+#    line, its describe_exit row and fleet_is_down can all tell them apart
+#    without parsing prose.
+#
+# WHY THE DISTINCTION IS DRAWN ON REACHABILITY AND NOT ON THE VERIFIER'S RC.
+# verify_running fails for two unrelated reasons — nothing answered, or
+# something answered with a revision that is not main — and only the first is an
+# outage. A half-installed binary serving the old revision is a deploy that did
+# not land, with a live fleet still dispatching behind it. Collapsing those two
+# into one alert is the mg-6d2f defect one layer up, so the classification is
+# made by asking the port directly, once, after the retry has been spent.
+#
+# EXIT CODES. 8 keeps its meaning (the verify failed, a pogod is answering); 13
+# is the new one and means the port is dead. Nothing renumbers, because these
+# integers are read by a runner that may be older than this script.
+EXIT_VERIFY_FAILED=8
+EXIT_NO_DAEMON=13
+
+# How many extra kickstarts a failed verify is allowed to spend. One, and it is
+# config rather than a literal so the controls can drive both arms without
+# paying two 60s verify windows per assertion. Zero restores the pre-mg-a854
+# behaviour exactly, which is what makes the retry observable as a change.
+RESTART_RETRIES="${RESTART_RETRIES:-1}"
+
+# verify_or_recover VERIFIER LABEL — run VERIFIER; if it fails, kickstart again
+# and run it once more per RESTART_RETRIES; then classify what is left.
+#
+# Echoes nothing. Returns:
+#   0                    the daemon verified (on the first attempt or a retry)
+#   EXIT_VERIFY_FAILED   a pogod is ANSWERING but did not satisfy VERIFIER
+#   EXIT_NO_DAEMON       nothing is answering $(base_url)/version at all
+#
+# The caller exits with the returned code, so the two states stay separable all
+# the way out to the reason record and the mail.
+verify_or_recover() {
+    local verifier="$1" label="${2:-restart}" attempt=0
+    if "$verifier"; then return 0; fi
+
+    while [ "$attempt" -lt "$RESTART_RETRIES" ]; do
+        attempt=$(( attempt + 1 ))
+        err "$label verify FAILED — retrying the kickstart (attempt $attempt of $RESTART_RETRIES) before calling this box lost"
+        err "  a kickstart can burn a spawn and land on launchd's 10s respawn throttle (mg-9cc0); a single retry covers that"
+        # do_restart exits 5 on a launchctl failure, and that is the right code
+        # for it: the retry cannot succeed if launchctl itself refuses.
+        do_restart
+        if "$verifier"; then
+            log "$label verify RECOVERED on kickstart retry $attempt — the first kickstart did not produce a daemon, the retry did"
+            return 0
+        fi
+    done
+
+    # The classification, made by measurement rather than by inheriting the
+    # verifier's rc. running_rev returns REV_UNREACHABLE only when curl could not
+    # get an answer at all, which is exactly the state that needs a human.
+    local rev; rev="$(running_rev)"
+    if [ "$rev" = "$REV_UNREACHABLE" ]; then
+        err "THIS BOX NOW HAS NO POGOD. Nothing is answering $(base_url)/version after $(( RESTART_RETRIES + 1 )) kickstart(s)."
+        err "  This is NOT 'the $label did not complete' — that would leave a daemon up. There is no daemon."
+        err "  Every automatic recovery path on this box is downstream of pogod, so none of them will fire for this."
+        err "  A human has to start it:"
+        err "    launchctl kickstart -k gui/$(id -u)/${DAEMON_LABEL}"
+        err "    launchctl print gui/$(id -u)/${DAEMON_LABEL} | head -40"
+        err "    curl -s $(base_url)/version"
+        return "$EXIT_NO_DAEMON"
+    fi
+    err "$label verify FAILED after $(( RESTART_RETRIES + 1 )) kickstart(s), but a pogod IS answering at $(short "$rev") — the fleet is not down, this $label did not land"
+    return "$EXIT_VERIFY_FAILED"
+}
+
+# ---------------------------------------------------------------------------
 # THE DRAIN GATE, as one function with one caller-independent policy (mg-9fc9)
 # ---------------------------------------------------------------------------
 # This was cmd_redeploy's step 1 and nothing else could reach it. `bounce` needs
@@ -4156,10 +4249,18 @@ cmd_redeploy() {
     # `|| verify_rc=$?` rather than a bare call: this script is `set -u` only
     # today, but under a future `set -e` a bare failing call would abort here —
     # before the report — which is the same silence by a different route.
+    #
+    # verify_or_recover wraps it (mg-a854) for the reason the bounce does: a
+    # redeploy's kickstart -k has killed the old pogod too, so a failed verify
+    # here can also leave the box daemonless. The retry is the same retry and the
+    # split is the same split — 8 stays "a pogod answered and it is not what we
+    # installed" (a deploy that did not land, fleet still up), 13 is "nothing is
+    # answering the port" (an outage). Before this they were one integer, and the
+    # subject line a 03:00 reader gets could not tell them apart.
     local verify_rc=0
-    verify_running || verify_rc=$?
+    verify_or_recover verify_running redeploy || verify_rc=$?
     report_spawns "$spawns_pre"
-    [ "$verify_rc" -eq 0 ] || exit 8
+    [ "$verify_rc" -eq 0 ] || exit "$verify_rc"
     # BOTH, and in this order. verify_running answers "is a pogod at main's
     # revision answering?"; verify_orchestration answers "did the fleet come
     # back?". Only the second is the question this deploy exists to close, and
@@ -4333,10 +4434,16 @@ cmd_bounce() {
     local spawns_pre; spawns_pre="$(spawn_snapshot)"; spawns_pre="${spawns_pre%%	*}"
     do_restart
     deploy_stage "verify"
+    # verify_or_recover, not verify_bounced directly (mg-a854): a failed verify
+    # here means this run has just killed the fleet's only daemon, so it retries
+    # the kickstart and then reports "no pogod" as a DIFFERENT condition from
+    # "the bounce did not complete". report_spawns still runs before the exit,
+    # for mg-9cc0's reason — it is the only record of a burned spawn, and the
+    # retry above makes burned spawns MORE likely to appear, not less.
     local verify_rc=0
-    verify_bounced || verify_rc=$?
+    verify_or_recover verify_bounced bounce || verify_rc=$?
     report_spawns "$spawns_pre"
-    [ "$verify_rc" -eq 0 ] || exit 8
+    [ "$verify_rc" -eq 0 ] || exit "$verify_rc"
     verify_orchestration || exit 11
 
     # 3. Who launchd actually supervises. A bounce is a launchctl kickstart, so

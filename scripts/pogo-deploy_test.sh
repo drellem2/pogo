@@ -71,7 +71,10 @@ export POGO_HOME="$WORK"
 # change) and the leak check (which requires it not to).
 state_fingerprint() {
     local d="$1" f out=""
-    for f in deploy-attempt.stamp deploy-transport-streak.stamp; do
+    # deploy-liveness-streak.stamp joined the list with mg-a854 and is the same
+    # kind of file for the same reason: a counter that arms a FLEET-WIDE BOUNCE.
+    # A suite run that leaves it at 1 arms a real restart on the next dead night.
+    for f in deploy-attempt.stamp deploy-transport-streak.stamp deploy-liveness-streak.stamp; do
         if [ -e "$d/$f" ]; then
             out="$out$f=$(cksum < "$d/$f" 2>/dev/null | tr -d ' \n')@$(stat -f %m "$d/$f" 2>/dev/null || stat -c %Y "$d/$f" 2>/dev/null);"
         else
@@ -3901,13 +3904,198 @@ sed -n "${RWF_LINE},${SYNC_ALERT_LINE}p" "$RUNNER" | grep -q 'if \$ATTEMPT_ARMED
 # The reset lives on the OBSERVATION, not on an exit code: this line is the one
 # place a run has proved the transport works.
 SR_LINE="$(grep -n 'sync_recovery_notice "\$SYNC_TRIES"' "$RUNNER" | cut -d: -f1)"
-CLR_LINE="$(grep -n 'transport streak: CLEARED (was' "$RUNNER" | cut -d: -f1)"
+# Anchored on `log "`, not on the bare sentence. mg-a854 added a section whose
+# COMMENT quotes this very log line (it is the line six quiet nights printed), and
+# an unanchored grep then returned two line numbers — which `cut -d: -f1` turned
+# into a two-line CLR_LINE, `[` rejected as "integer expression expected", and the
+# inverted assertion below scored as a PASS on stderr nobody reads. A grep for a
+# call site must not be satisfiable by prose about the call site.
+CLR_LINE="$(grep -n 'log "transport streak: CLEARED (was' "$RUNNER" | cut -d: -f1)"
 { [ -n "$SR_LINE" ] && [ -n "$CLR_LINE" ] && [ "$CLR_LINE" -gt "$SR_LINE" ] && [ "$CLR_LINE" -lt "$RWF_LINE" ]; } \
     && fail "the streak reset sits before the sync-failure branch — check the line numbers, it must follow a SUCCESSFUL sync" \
     || pass "the streak is cleared on the successful-sync path, keyed on the fetch having returned rather than on the run's final exit code"
 grep -q '  fallback: \$FALLBACK_STATUS' "$RUNNER" \
     && pass "and the sync-abort alert cross-references what the fallback did, so one mail is not read without the other" \
     || fail "the sync alert does not report the fallback's outcome"
+
+# ---------------------------------------------------------------------------
+# 6b. THE LIVENESS INPUT (mg-a854)
+# ---------------------------------------------------------------------------
+# WHAT THIS IS FOR. Six consecutive nights, 2026-08-27 to 2026-09-03:
+#
+#     drift: none — ... NOT bouncing the fleet. Exit 0.
+#
+# over a fleet that was not running. Every input the decision read was genuinely
+# green, and "do nothing" was the correct answer to each of them. The tests below
+# are about the reading that was missing, and about the three ways adding it
+# could make things worse rather than better:
+#
+#   - bouncing a healthy fleet (one agent between long turns is not a stall)
+#   - bouncing on a run that MEASURED NOTHING (the mg-de08 rule: absence of
+#     evidence is not evidence)
+#   - bouncing a box with no daemon, which drain_gate is guaranteed to refuse
+
+# --- liveness_class: every arm, driven purely -------------------------------
+LC_STALLED='{"dir":"/x","agents":[{"agent":"mayor","verdict":"silent"}],"live":0,"stale":1,"silent":2,"unreadable":0,"findings":3}'
+LC_LIVE='{"dir":"/x","agents":[{"agent":"mayor","verdict":"live"}],"live":3,"stale":1,"silent":0,"unreadable":0,"findings":1}'
+LC_EMPTY='{"dir":"/x","agents":null,"live":0,"stale":0,"silent":0,"unreadable":0,"findings":0}'
+lc() { liveness_class "$1" "$2" | cut -f1; }
+
+[ "$(lc 1 "$LC_STALLED")" = "stalled" ] \
+    && pass "liveness_class: agents present and NOT ONE completed a turn reads 'stalled' — the reading six nights of green never made" \
+    || fail "stalled arm: $(lc 1 "$LC_STALLED")"
+
+# THE FALSE-POSITIVE THAT WOULD MATTER MOST, and note the rc: check-turns exits 1
+# here (one agent IS stale), so a gate keyed on the exit code would bounce the
+# whole fleet over a single agent mid-turn. This gate reads the counts.
+[ "$(lc 1 "$LC_LIVE")" = "live" ] \
+    && pass "liveness_class: one stale agent among live ones is 'live' EVEN AT rc=1 — the trigger is fleet-level, so a crew agent between long turns cannot restart everybody else's session" \
+    || fail "a fleet with 3 live agents was classified $(lc 1 "$LC_LIVE") — this would bounce a working fleet"
+
+[ "$(lc 0 "$LC_EMPTY")" = "absent" ] \
+    && pass "liveness_class: an EMPTY crew roster that pogod answered is 'absent' — a fleet that is gone, and a restart re-spawns the crew" \
+    || fail "absent arm: $(lc 0 "$LC_EMPTY")"
+
+# THE mg-de08 RULE, and check-turns' own contract: exit 3 is INSTRUMENT FAILURE,
+# which exists precisely so a run that measured nothing cannot report a clean
+# fleet. It must not report a dead one either.
+for arm in "3:an unreachable agent registry" "124:a timed-out probe" "2:a usage error" "0:output that will not parse"; do
+    RC="${arm%%:*}"; WHAT="${arm#*:}"
+    BODY=""; [ "$RC" = "0" ] && BODY="not json at all"
+    [ "$(lc "$RC" "$BODY")" = "unmeasured" ] \
+        && pass "liveness_class: $WHAT reads 'unmeasured' — neither green nor red, because this run established nothing" \
+        || fail "$WHAT classified as $(lc "$RC" "$BODY")"
+done
+
+# A PARTIAL PARSE IS UNMEASURED, NOT ZERO. The one direction that costs a fleet
+# restart: a missing counter defaulting to 0 turns a healthy fleet into 'stalled'.
+[ "$(lc 0 '{"live":3,"stale":0}')" = "unmeasured" ] \
+    && pass "liveness_class: JSON missing any of the four counters is unmeasured — a field that silently defaulted to 0 would manufacture a stall out of a healthy fleet" \
+    || fail "a partial JSON read as $(lc 0 '{"live":3,"stale":0}')"
+
+# liveness_num must not be satisfiable by a lookalike inside an agent row. The
+# counters are marshalled last, so the greedy match takes the top-level one.
+[ "$(printf '%s' '{"agents":[{"agent":"a","note":"\"live\":9"}],"live":4,"stale":0,"silent":0,"unreadable":0}' | liveness_num live)" = "4" ] \
+    && pass "liveness_num reads the TOP-LEVEL counter even when an agent's note contains a lookalike — the counters are the last fields Go marshals, so greed is correct here" \
+    || fail "liveness_num picked up a lookalike: $(printf '%s' '{"agents":[{"note":"\"live\":9"}],"live":4}' | liveness_num live)"
+
+# --- the floor -------------------------------------------------------------
+liveness_bounce_due 1 2 && fail "one dead night bounced the fleet — the floor is nights, and one bad night is not a run" \
+    || pass "liveness: ONE night with no completed turn does NOT bounce — the floor the ticket asks for, in nights"
+liveness_bounce_due 2 2 && pass "two consecutive dead nights DO bounce" || fail "N=2 at count 2"
+liveness_bounce_due 9 0 && fail "threshold 0 still bounced" || pass "POGO_DEPLOY_LIVENESS_BOUNCE_AFTER=0 disables the TRIGGER"
+liveness_bounce_due 9 '' && fail "an empty threshold bounced" || pass "a non-numeric threshold disables rather than crashes"
+[ "$LIVENESS_BOUNCE_AFTER" -gt 1 ] \
+    && pass "the shipped liveness threshold is $LIVENESS_BOUNCE_AFTER — greater than one, and in the config rather than at the callsite" \
+    || fail "the default liveness threshold is $LIVENESS_BOUNCE_AFTER; one night must not bounce the fleet"
+[ "$(POGO_DEPLOY_LIVENESS_BOUNCE_AFTER=4 bash -c 'source "'"$RUNNER"'"; echo "$LIVENESS_BOUNCE_AFTER"')" = "4" ] \
+    && pass "and it is env-overridable — config, not a constant" || fail "POGO_DEPLOY_LIVENESS_BOUNCE_AFTER is not honoured"
+
+# THE CONSTRAINT THE TICKET STATES TWICE: defect 1 must be fixed FIRST or in the
+# same change, because a liveness-triggered bounce that fails verify reproduces
+# the state that started this. Asserted against the script that would actually
+# run, not against this repo's copy of an idea.
+grep -q 'verify_or_recover' "$HERE/pogo-self-deploy" \
+    && pass "the bounce script this trigger calls HAS the kickstart retry and the daemonless split (mg-a854 defect 1) — arming a liveness bounce without it would be arming a remedy whose known failure mode is the outage it treats" \
+    || fail "pogo-self-deploy has no verify_or_recover: the liveness trigger is armed over the 2026-08-26 failure mode"
+
+# --- liveness_act: what each class DOES to the streak ------------------------
+# The streak file is the counter that arms a fleet-wide bounce, so what may and
+# may not move it is the whole safety argument.
+LS="$WORK/liveness.stamp"
+lact() {  # lact CLASS PRIOR_LINE -> the stamp's line afterwards
+    local cls="$1" prior="$2"
+    rm -f "$LS"; [ -n "$prior" ] && printf '%s\n' "$prior" > "$LS"
+    (
+        LIVENESS_STREAK="$LS" LIVENESS_CLASS="$cls" LIVENESS_DETAIL="stub"
+        LIVENESS_BOUNCE_AFTER=99   # never due, so this exercises the streak only
+        liveness_announce() { :; }
+        liveness_act 2026-09-04 >/dev/null 2>&1
+    )
+    head -1 "$LS" 2>/dev/null || echo "<absent>"
+}
+[ "$(lact stalled "2026-09-03 1 -")" = "2026-09-04 2 -" ] \
+    && pass "liveness_act: a stalled night BUMPS the streak, in nights" || fail "stalled bump: [$(lact stalled "2026-09-03 1 -")]"
+[ "$(lact stalled "2026-09-04 2 -")" = "2026-09-04 2 -" ] \
+    && pass "and it is IDEMPOTENT PER DATE — this box fires three times a night, and a streak counting fires would cross a threshold of 2 before sunrise" \
+    || fail "same-night double count: [$(lact stalled "2026-09-04 2 -")]"
+[ "$(lact absent "2026-09-03 1 -")" = "2026-09-04 2 -" ] \
+    && pass "an ABSENT crew roster bumps it too — pogod answering with nobody home is a fleet that is gone, not a fleet that is fine" \
+    || fail "absent bump: [$(lact absent "2026-09-03 1 -")]"
+[ "$(lact live "2026-09-03 3 -")" = "2026-09-04 0 -" ] \
+    && pass "a LIVE night clears it — the streak measures consecutive nights, so one working night ends the run" \
+    || fail "live clear: [$(lact live "2026-09-03 3 -")]"
+# THE TWO THAT MUST NOT MOVE IT, and they must not move it in EITHER direction.
+[ "$(lact unmeasured "2026-09-03 1 -")" = "2026-09-03 1 -" ] \
+    && pass "an UNMEASURED night leaves the stamp byte-identical — it cannot arm a bounce, and it cannot disarm one either" \
+    || fail "unmeasured moved the streak: [$(lact unmeasured "2026-09-03 1 -")]"
+[ "$(lact daemonless "2026-09-03 1 -")" = "2026-09-03 1 -" ] \
+    && pass "a DAEMONLESS night does not bump it — a bounce drains first and drain_gate refuses (exit 6) when pogod does not answer, so counting toward a guaranteed-refused restart would be counting toward nothing" \
+    || fail "daemonless moved the streak: [$(lact daemonless "2026-09-03 1 -")]"
+
+# --- and what each class SAYS ----------------------------------------------
+# The six quiet nights were quiet in the log AND in the mail. A reading that is
+# taken and not announced is the same defect one layer in.
+lsay() {  # lsay CLASS -> the log+mail this class produces
+    local cls="$1"
+    (
+        LIVENESS_STREAK="$WORK/say.stamp" LIVENESS_CLASS="$cls" LIVENESS_DETAIL="stub detail"
+        LIVENESS_BOUNCE_AFTER=99
+        alert() { echo "SUBJECT: $1"; echo "$2"; }
+        rm -f "$WORK/say.stamp"
+        liveness_act 2026-09-04 2>&1
+    )
+}
+grep -q 'THIS BOX HAS NO POGOD' <<<"$(lsay daemonless)" \
+    && pass "a daemonless night MAILS, with the condition in the subject — six nights of exit 0 over an absent daemon is the thing this ticket is named after" \
+    || fail "daemonless is silent: $(lsay daemonless)"
+grep -q 'MEASURED NOTHING' <<<"$(lsay unmeasured)" \
+    && pass "an unmeasured night SAYS it measured nothing — a silent skip here reads in the log exactly like a healthy fleet, which is the defect one level down" \
+    || fail "unmeasured does not announce itself: $(lsay unmeasured)"
+grep -q 'SUBJECT:' <<<"$(lsay stalled)" \
+    && pass "and a stalled night below the threshold still mails the count — the nights before a bounce are the ones a human can act on cheaply" \
+    || fail "a sub-threshold stalled night is silent: $(lsay stalled)"
+# NEGATIVE CONTROL: a working fleet must NOT mail. An alert that fires on every
+# night is an alert nobody reads, which is how the 2026-08-26 fallback mail went
+# unread for eight days.
+grep -q 'SUBJECT:' <<<"$(lsay live)" \
+    && fail "a LIVE night mailed — an alert that fires nightly is one nobody reads" \
+    || pass "NEGATIVE CONTROL: a live fleet mails nothing; the new alert only fires on a reading that is not green"
+
+# --- the wiring: the gate is in the clean-drift arm, before the exit --------
+CLEAN_ARM="$(sed -n '/if is_clean_verdict "\$check_out"; then/,/^    fi$/p' "$RUNNER")"
+{ grep -q 'liveness_gate' <<<"$CLEAN_ARM" && grep -q 'liveness_act "\$today"' <<<"$CLEAN_ARM"; } \
+    && pass "the clean-drift arm reads liveness and acts on it BEFORE exiting 0 — the line that ran six times over a dead fleet now has a second question to answer" \
+    || fail "the no-drift arm still exits 0 on drift alone"
+grep -q 'if \$DRY_RUN; then' <<<"$CLEAN_ARM" \
+    && pass "and a dry run reads the signal but never acts on it — same rule as the transport fallback's ATTEMPT_ARMED guard" \
+    || fail "a --dry-run can reach liveness_act and bounce a fleet"
+# The reset after a real redeploy: a bounce is a bounce whichever signal called
+# for it, and a streak that kept counting through nightly restarts would fire a
+# second bounce on a count describing nothing.
+grep -q 'transport_streak_save "\$LIVENESS_STREAK" "\$today" 0 "\$today"' "$RUNNER" \
+    && pass "a successful redeploy resets the liveness streak — the fleet got its restart, so the count that measures 'nights without one' starts over" \
+    || fail "the liveness streak survives a redeploy that bounced the fleet"
+
+# THE REMEDY UNDER ITS OWN DEFECT. This gate exists because three recovery paths
+# were each keyed on a signal a dead fleet satisfies. The way this fix would
+# exhibit that defect is by keying itself on something the CLI answers even when
+# the fleet is gone — so the reachability hop must NOT go through the CLI.
+DA_BODY="$(sed -n '/^daemon_answering() {/,/^}/p' "$RUNNER")"
+{ [ -n "$DA_BODY" ] && grep -q 'curl' <<<"$DA_BODY" && ! grep -q 'POGO_CLI' <<<"$DA_BODY"; } \
+    && pass "daemon_answering hops the port DIRECTLY, with no CLI in the path — a missing CLI and a missing daemon report the same instrument failure, and this is the reading that decides between an alert and a bounce" \
+    || fail "daemon_answering goes through the pogo CLI: $DA_BODY"
+# And the census must not ask an AGENT anything (mg-d616: mayor being dark is
+# inside the failure being detected).
+LP_BODY="$(sed -n '/^liveness_probe() {/,/^}/p' "$RUNNER")"
+{ grep -q 'check-turns' <<<"$LP_BODY" && ! grep -qE 'mail send|nudge|agent prompt' <<<"$LP_BODY"; } \
+    && pass "the census is 'pogo check-turns' reading the turnlog artifact off disk — no agent is asked anything, so mayor being dark cannot hide the failure that made it dark" \
+    || fail "liveness_probe asks an agent: $LP_BODY"
+# ...and it must not include polecats, whose prompts carry no turn-completion
+# clause. --all-types would make this permanently red, i.e. meaningless.
+grep -q 'all-types' <<<"$LP_BODY" \
+    && fail "liveness_probe passes --all-types; polecat prompts carry no turn-completion clause, so the census would be permanently red" \
+    || pass "and it does NOT pass --all-types — a permanently-red trigger is a trigger nobody can act on"
 
 # ---------------------------------------------------------------------------
 # THE ACCEPTANCE: the sandbox is aimed at POGO_HOME, and the real box is untouched
