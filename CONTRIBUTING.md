@@ -424,6 +424,74 @@ Decide which side is wrong first. A clause rewritten to match the dependency has
 stopped testing anything, and every pogo test behind it is then resting on a
 behaviour nobody checked. See [docs/design/mg-contract.md](docs/design/mg-contract.md).
 
+### `cmd | grep -q` under `set -o pipefail` is a race (`mg-7ce7`)
+
+`grep -q` exits on the FIRST match. If the producer still has bytes to write it
+takes SIGPIPE and exits 141, `pipefail` makes 141 the **pipeline's** status, and
+a capability probe built on `|| continue` reports a WORKING TOOL AS ABSENT —
+silently, and in the safe-looking direction.
+
+This is not hypothetical and it is not rare. It made `scripts/revision-probe.sh
+--mail` undeliverable for 55 consecutive runs, three delivered alerts in and with
+**no code change** between the last delivery and the silence, while the alert
+itself was computed correctly every time.
+
+**The predicate for auditing a call site is:**
+
+> an early-exiting consumer (`grep -q`, `head -1`, `read`)
+> **AND** a producer with more to write than fits the pipe buffer (64KB here)
+> **AND** the pipeline's exit status actually tested (`if`, `||`, `&&`, `set -e`)
+
+All three clauses are load-bearing. Drop the third and you "fix" inert code:
+`pid="$(lsof -ti "tcp:$1" | head -1)"` in `scripts/upgrade-smoke.sh` loses that
+race every time and is harmless, because the assignment discards the status and
+`$pid` still receives the value.
+
+**The producer's class is NOT part of the predicate, and an earlier version of
+this rule said it was.** mg-7ce7 originally triaged on external-vs-builtin — "a
+shell builtin producer is safe at any size, do not rewrite those" — and
+`changelog.d/mg-712e.fixed.md` repeated it. Measured on this box, bash 3.2 and
+zsh alike, match at byte 0, 20 runs each:
+
+```
+printf (builtin)  8KB  | grep -q     0/20 fail
+printf (builtin) 64KB  | grep -q    20/20 fail   exit 141
+printf (builtin) 256KB | grep -q    20/20 fail   exit 141
+git --version (~25B)   | grep -q     0/20 fail
+mg --help (2404B)      | grep -q    10/10 fail   exit 141
+```
+
+A builtin is safe only while its output fits the pipe buffer, which is the same
+rule as for anything else. Triage on the **payload**, not on what produced it.
+
+**Write it without a pipeline.** Capture and match:
+
+```sh
+out="$("$cand" --version 2>/dev/null)"
+case "$out" in *'git version'*) GIT="$cand"; return 0 ;; esac
+```
+
+There is no producer to die and no second binary to invoke. `case` also makes the
+anchoring explicit: `^curl ` becomes `'curl '*` (start of output) or
+`*$'\n''curl '*` (start of a line), and choosing between them is a decision
+rather than an accident.
+
+**A test for this must FORCE THE LOSING SIDE.** One passing run of a race is a
+coin landing the right way. Use a deliberately chatty fixture and assert, FIRST,
+that the old idiom really does return 141 against it — otherwise the case
+certifies timing luck. That is how `revision-probe_test.sh` stayed green over the
+defect for months: its stub `mg` echoed one short line and never lost the race the
+real binary lost every time. Worked examples: section 13 of
+`scripts/revision-probe_test.sh` (all three resolvers), section 8 of
+`scripts/fleet-liveness-probe_test.sh`, and the padded-render controls in both
+`install-*-probe_test.sh` suites.
+
+**And assert SELECTION, not survival, when the caller has fallbacks.** A resolver
+that walks a candidate list does not fail when it wrongly rejects one — it falls
+through to the next and the run succeeds anyway. Asserting "the probe reached its
+verdict" passes against the defect 100% of the time. Assert that the candidate you
+handed it did the WORK.
+
 ### Code Style
 
 - All Go code must be formatted with `gofmt`. The CI pipeline checks this.
