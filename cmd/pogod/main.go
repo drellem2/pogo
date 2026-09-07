@@ -58,6 +58,7 @@ import (
 	"github.com/drellem2/pogo/internal/reaper"
 	"github.com/drellem2/pogo/internal/reconcile"
 	"github.com/drellem2/pogo/internal/refinery"
+	"github.com/drellem2/pogo/internal/refusalwatch"
 	"github.com/drellem2/pogo/internal/reviewdecl"
 	"github.com/drellem2/pogo/internal/scheduler"
 	"github.com/drellem2/pogo/internal/search"
@@ -1961,6 +1962,32 @@ Flags:
 	// diagnose reports the verdict, and ShouldRespawnAgent consults it before
 	// any restart_on_crash respawn.
 	agentRegistry.SetTranscriptScanner(synthScanner{w: synthWatcher})
+
+	// Build the consecutive-refusal alarm (mg-6f3d, from mg-6616's one
+	// actionable output). It reads the same transcripts as the detector above
+	// and asks a different question: not "how many turns failed in the last
+	// half hour" but "how many in a row, with no work between them".
+	//
+	// It exists because the fleet is not short of DETECTION. On 2026-09-07 the
+	// wedge detector fired correctly in 14m30s, named all six agents and the
+	// cause, and then emitted sixteen more findings over 3h55m — every one
+	// carrying "routed_to": "nobody". The outage ran 5h30m and ended when a
+	// human noticed a dead fleet. So the load-bearing part of this watcher is
+	// the DELIVERY: every sink is a filesystem write pogod performs itself, an
+	// alarm counts as delivered only once the artefact has been observed on
+	// disk, and one that reached nobody is retried on every scan under its own
+	// event type rather than logged inside the success path.
+	//
+	// Armed unconditionally, like the detector above: it nudges nobody, starts
+	// nothing, and where a harness declares no transcript path every reading is
+	// StateUnavailable, which is not a health claim and produces no alarm.
+	refusalWatcher := refusalwatch.New(refusalwatch.Options{
+		Home:    homeDir(),
+		Targets: func() []refusalwatch.Target { return refusalTargets(agentRegistry) },
+		Globs:   providers.SessionTranscriptGlobs,
+		Sinks:   refusalSinks(),
+	})
+	log.Printf("pogod: consecutive-refusal alarm enabled (%s)", refusalWatcher.Describe())
 	// The hold and the floor are stated because they are the only two knobs that
 	// can make this channel say LESS than it did, and a reader diagnosing "why
 	// did I not get paged" must be able to read their values off the daemon
@@ -3574,6 +3601,13 @@ Flags:
 		// transcript files off disk and shells out to `mg mail send` on a hit —
 		// neither must delay the next tick. Page-only.
 		go synthWatcher.Check(now)
+		// The consecutive-refusal alarm rides the same tick and throttles itself
+		// to refusalwatch.DefaultInterval. In a goroutine because it reads
+		// transcripts off disk and shells out to `mg mail send` on a hit —
+		// neither must delay the next tick. Alarm-only: it never restarts and
+		// never nudges, because every nudge path runs through an agent and the
+		// agents are the population that has stopped.
+		go refusalWatcher.Check(now)
 		// The credential-expiry warner rides the same tick and throttles itself
 		// to a COARSE interval. In a goroutine because it shells out to
 		// `security` (which can block on a keychain authorization prompt, hence

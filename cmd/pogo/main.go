@@ -4523,6 +4523,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// that backstop covered, and the fix for verdict delivery was being measured by
 	// an instrument unable to register it working.
 	rootCmd.AddCommand(newCheckVerdictsCmd(&jsonOutput))
+	rootCmd.AddCommand(newCheckRefusalsCmd(&jsonOutput))
 	// check-review-decl (mg-253e): the tenth sibling — a review ticket filed
 	// without the `reviews:` line mg-aaf6 introduced, whose builder is therefore
 	// as reapable mid-review as it was before that guard existed. The guard's own
