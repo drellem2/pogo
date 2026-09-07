@@ -145,6 +145,11 @@ that plainly, because a narrowed-down list reads like a conclusion:
 - **darwin gives a shell no way to learn a sending pid.** It is available only
   to a handler installed with `SA_SIGINFO`, which a shell cannot install and
   Go's `os/signal` does not expose. Without root there is no `dtrace`.
+  **CORRECTED 2026-09-07 by mg-cbc3 — see §8.** Every clause of that is true
+  and the conclusion drawn from it was not: a shell cannot install `SA_SIGINFO`
+  and Go does not expose `siginfo_t`, but a compiled helper installs it in one
+  call, needs no privilege, and `/usr/bin/cc` is on this box. The sending pid
+  was recoverable for all three occurrences and nothing was recording it.
 - The repo ships exactly one leaves-first SIGTERM subtree walk — `kill_tree` in
   `scripts/launchd/pogo-deploy.sh`, whose default signal is TERM and whose
   shape matches §3. **This is a shape match and nothing more.** No evidence
@@ -199,3 +204,130 @@ was **reused** after it died, which reads as ALIVE and biases the reading toward
   test step: still open. All three occurrences are refinery-gate runs, but the
   gate is also where nearly all long `go test` runs on this host happen, so the
   population is not a control.
+
+---
+
+# Second pass, 2026-09-07 evening — mg-cbc3
+
+mg-3bd1 merged and was archived with its open question — the sender — in
+neither a live item nor a successor. mg-cbc3 is that successor. **The sender is
+still not identified.** What changed is below.
+
+## 8. The sending pid IS recoverable on darwin, without root
+
+The dead end recorded in §5 is not one. `si_pid` in a handler installed with
+`SA_SIGINFO` names the sending process, and installing that handler needs a
+compiled program rather than a privilege. Measured on this host (darwin 24.6.0,
+arm64) with the sender's pid known in advance and read out of the *sending*
+process rather than assumed:
+
+| sender | its pid | recorded `si_pid` |
+|---|---|---|
+| the calling shell | 52601 | **52601** (uid 501, si_code 0) |
+| a distinct subshell, neither the target's parent nor the caller | 52656 | **52656** (uid 501, si_code 0) |
+
+The second row is the one that discriminates. In the natural arrangement the
+sender *is* the target's parent, so a program that printed `getppid()` would
+pass the first row and every other test; it fails the second. That pairing is
+Test 3 of `scripts/signal-sender_test.sh` and is the control the claim rests on.
+
+Also checked, so the next person does not re-derive them: python3 on macOS has
+neither `sigwaitinfo` nor `sigtimedwait` (measured: both `hasattr` false), and
+Go's `os/signal` delivers the signal number and nothing else. C is the only
+route, and it is a short one.
+
+**Shipped:** `scripts/signal-sender.c` and its front-end
+`scripts/signal-sender.sh`, on the Go-test row **inside** `tmpdir-leak-guard.sh`
+— between the guard and `go-test-budget.sh`. The position is the whole reason
+this is a second instrument rather than an edit to `signal-witness.sh`: §3
+bounds the signalled set ABOVE by the guard, and the witness sits OUTSIDE the
+guard, so on all three recorded occurrences it would have taken its AMBIGUOUS
+arm and learned nothing about a sender. The witness still owns the ancestor
+reading, which can only be taken from outside the signalled region.
+
+It compiles itself once per revision of its source into
+`<pogo state root>/signal-witness/bin`, and if it cannot build — no `cc`, a
+failed compile, a cached binary that fails its own no-argument self-check — it
+`exec`s the wrapped command, which leaves the process chain byte-for-byte what
+it was before the instrument existed, and says so on stderr. An instrument must
+not be able to turn this row red, and one that is off quietly has been off for
+months by the time anybody asks.
+
+Its stderr block caps each resolved `ps` line at 200 columns and the record file
+does not. That split is the same reasoning that put §6's process table in a
+file: an agent's argv on this box runs past a kilobyte, the refinery persists
+8 KB of gate output head+tail, and nine ancestors printed in full would evict
+the failure text the block is attached to — the remedy exhibiting the defect it
+remedies. Test 13 exercises the truncation with a 610-character argv and a
+sender that deliberately outlives its own signal, because a sender that exits
+first resolves to nothing and the capped path never runs.
+
+**What it still cannot see:** SIGKILL, as before. And `si_pid` is an integer —
+see §10.
+
+## 9. Four more candidates eliminated, each with its measurement
+
+| candidate | status | the measurement |
+|---|---|---|
+| The nightly deploy's `kill_tree` (§5's shape match) | **RULED OUT for these three, on timing** | `~/Library/Logs/pogo/pogo-deploy.log` records deploy activity on 2026-09-07 only at 02:00:00–02:01:03Z and 05:30:00–05:30:01Z, and on 2026-08-19 only from 02:00:00Z; there is no entry in the 17:00–20:30Z band on either day. Positive control: the same grep DOES return runs, so the file is being read and the absence is an absence. The shape match stands; a caller of it near these three runs does not |
+| pogod doing anything fleet-shaped | **not supported** | every `~/.pogo/events.log` row within ±90s of all three kills, read: no stop, reap, drain, gc or deploy at any of them. Positive control: the same window around the 20:08 kill contains `agent_stopped cat-t9af1 pid=43216 reason=requested` at −87.9s, so a kill-adjacent event IS visible to this instrument when one exists |
+| Anything the macOS unified log would record | **no evidence either way** | the ±10s window around 2026-09-07T20:08:02Z was dumped in full (30,585 lines at `--info`) and contains no SIGTERM, kill or termination record, and no mention of pid 86690. Stated as a null instrument rather than as a negative finding: `kill(2)` is not logged by darwin at all, so this window would look identical whoever sent the signal. The window is otherwise dense and current, which is what makes §10 readable out of it |
+| `internal/agent`'s own SIGTERMs (pm-pogo's lead, appended to the archived mg-3bd1) | **tested, not supported** | three independent legs. (a) Every signal in the package goes through `agent.cmd.Process` — a live `*os.Process` for an unreaped child, whose pid cannot be recycled while the zombie holds it — never a bare integer pid and never a negative one; `grep` for `syscall.Kill`/`killpg`/`Kill(-` finds none in the package. (b) `Registry.StopWithCause` sends `os.Interrupt`, which is **SIGINT**, not SIGTERM (`internal/agent/agent.go:1388`; the comment one line above it says SIGTERM and is wrong — noted, not repaired here). (c) Decisively, and independent of both: the recorded victims include `go test` **and its parents**, the guard and budget shells. A test's signal to a process it spawned cannot reach its own grandparent. To produce §3's shape a test would have to signal a pid outside its own subtree, and no such call site exists |
+
+## 10. THE PID SPACE RECYCLES IN MINUTES ON THIS BOX
+
+New, measured, and it changes what kind of sender to look for.
+
+`tmpdir-leak-guard.sh`'s private directory named its owner: the 20:08 run's
+guard was **pid 86690**. Reading `launchd`'s own spawn records out of the
+unified log for the same minutes gives a pid-versus-time curve across the
+occurrence:
+
+```
+21:06:33.034 BST   86263
+21:06:34.457 BST   86337      <- the guard, 86690, is allocated just after here
+21:07:04.814 BST   95537
+21:07:33.869 BST    9174      <- wrapped past PID_MAX
+21:08:13.001 BST   19024
+```
+
+(BST = UTC+1; the kill is 20:08:02Z = 21:08:02 BST.) Rates: **292 pids/s**
+across 21:06:33→21:07:04, **469/s** across the wrap, **252/s** after it. The
+entire ~100,000-pid space turned over **once inside the 85 seconds** between the
+guard being created and the guard being killed. Measured again on the quiet box
+at 23:32Z, with one polecat working: 1,112 pids in 20 s = **56/s**, still a full
+wrap every ~30 minutes.
+
+Two consequences.
+
+**It dates the guard independently.** Pid 86690 falls between the 21:06:34
+(86337) and 21:07:04 (95537) samples, i.e. ≈20:06:40Z — 82 seconds before the
+kill at 20:08:02Z, against the 85 s the refinery recorded. Two unrelated
+records agree, which is the only reason to trust either.
+
+**Any construction that holds a pid and signals it later is unsafe here, and
+the fault it produces has exactly the recorded shape.** A leaves-first SIGTERM
+walk over a *recycled* pid kills whatever now holds it and everything below it,
+and spares that process's ancestors — §3's shape, with no intent toward the
+gate at all. It also re-explains the invariant position without needing
+`internal/agent` to be causal: nearly every process on this box lives
+milliseconds (that is what 300/s means), so a stale pid overwhelmingly resolves
+to nothing or to something already gone; the rare long-lived victims are
+concentrated in exactly the ten-minute test step. `run_bounded` in
+`scripts/launchd/pogo-deploy.sh` is one such construction — `sleep N`, then
+`kill -0 "$p"`, then `kill_tree "$p" TERM` — and its timing rules it out for
+these three (§9) while its shape stays worth knowing.
+
+**This is a hypothesis with a mechanism and a supporting measurement. It is not
+an identification, and it must not be quoted as one.** What it predicts is
+testable in one occurrence: `si_pid` will name a process with no business
+signalling the gate, and the `ps` block will show what it actually is.
+
+## 11. Still open, so that it is in a live item and not only here
+
+- **The sender.** Unidentified. §8 ships the reading; nothing has been signalled
+  since it was wired.
+- **Whether the three share a cause.** Unchanged from §5.
+- **Whether `internal/agent` is causal or merely the clock.** §10 gives a
+  reading under which it is merely the clock. Not decided.
+

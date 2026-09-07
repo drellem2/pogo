@@ -75,7 +75,19 @@ mkdir -p _testdata/b-service/.git
 # subtree does not), and the process table at the instant of the signal, which
 # is the candidate set for the sender. Silent on every run that is not
 # signalled; see scripts/signal-witness.sh.
-gate_step "Testing Go packages" bash scripts/signal-witness.sh bash scripts/tmpdir-leak-guard.sh bash scripts/go-test-budget.sh ./...
+#
+# AND WRAPPED IN THE SIGNAL SENDER (mg-cbc3), which is a different instrument in
+# a different POSITION, and the position is the point. mg-3bd1 recorded the
+# sending pid as unrecoverable on darwin — true of a shell and of Go's
+# os/signal, and not true of C: si_pid in an SA_SIGINFO handler names the
+# sender, with no privilege, measured on this host with the sender known in
+# advance. The recorded delivery shape bounds the signalled set ABOVE by the
+# tmpdir guard, so the recorder goes INSIDE it: signal-witness.sh sits outside
+# the guard and would have taken its AMBIGUOUS arm on all three occurrences.
+# The wrapper compiles itself once per revision of its source, and if it cannot
+# build it `exec`s the command unchanged and says so — an instrument must not be
+# able to turn this row red. See scripts/signal-sender.sh.
+gate_step "Testing Go packages" bash scripts/signal-witness.sh bash scripts/tmpdir-leak-guard.sh bash scripts/signal-sender.sh bash scripts/go-test-budget.sh ./...
 
 # The $TMPDIR leak guard (mg-de3c). It belongs in the gate rather than on
 # demand because the defect it measures is the one that BROKE the gate: at 255
@@ -103,6 +115,22 @@ gate_step "Testing the \$TMPDIR leak guard" bash scripts/tmpdir-leak_test.sh
 # false fact this whole item exists to stop. ~4s, mostly the two fixtures
 # settling.
 gate_step "Testing the merge gate's signal witness" bash scripts/signal-witness_test.sh
+
+# The signal sender (mg-cbc3). The load-bearing test is Test 3: the sender is a
+# subshell that is neither this suite's shell nor the wrapper's parent, so a
+# program that printed getppid() — which passes every other arrangement — fails
+# there. Test 6 is its opposite number and must not be dropped: a command that
+# runs `exit 143` on purpose has to produce NO report at all, because turning a
+# status into a kill is the same manufactured fact, in the other direction, as
+# the one that made these runs read as branch defects.
+#
+# 4.3s in this profile (rank 17 of 33), 5.5s standalone. It was 33.2s — rank 5
+# of 33, 3.8% of the whole gate — until Test 4's child was changed to
+# wait on a BACKGROUND sleep: a shell runs a trap only once its FOREGROUND
+# command returns, so `trap ...; sleep 30` caught the signal and then sat for
+# the full 30 seconds before acting on it — the test passed the whole time and
+# the cost was invisible until the gate's own step profile named the row.
+gate_step "Testing the merge gate's signal sender" bash scripts/signal-sender_test.sh
 
 gate_step "Testing neovim plugin" bash nvim/test_nvim.sh
 

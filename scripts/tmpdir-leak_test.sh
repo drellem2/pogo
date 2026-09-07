@@ -387,11 +387,24 @@ echo "Test 13: the wrapper is WIRED — test.sh's whole-tree run goes through it
 # The property mg-de3c's slice did not have. Asserted on the file rather than by
 # running the gate: a guard present in the tree and called by nothing is the
 # limiting case of coverage-by-list.
-if grep -q 'tmpdir-leak-guard.sh bash scripts/go-test-budget.sh \./\.\.\.' "$REPO_ROOT/test.sh"; then
-    pass "test.sh runs the whole-tree suite through tmpdir-leak-guard.sh"
-else
-    fail "test.sh's whole-tree suite does not go through tmpdir-leak-guard.sh; the guard covers nothing"
-fi
+#
+# ASSERTED ON ORDER, NOT ON ADJACENCY (mg-cbc3). This used to require the guard
+# and `go-test-budget.sh ./...` to be literally next to each other, which is a
+# stricter claim than the property: what has to hold is that the whole-tree run
+# happens INSIDE the guard, so the guard's $TMPDIR is the one the suites write
+# into. mg-cbc3 inserted scripts/signal-sender.sh between them and this test
+# failed — correctly reporting a break in a property that had not broken. A
+# check that fires on a rearrangement it does not care about teaches the next
+# person to widen it without reading it.
+ROW="$(grep -E '^gate_step "Testing Go packages"' "$REPO_ROOT/test.sh" || true)"
+case "$ROW" in
+    *tmpdir-leak-guard.sh*go-test-budget.sh\ ./...*)
+        pass "test.sh runs the whole-tree suite through tmpdir-leak-guard.sh" ;;
+    "")
+        fail "test.sh has no 'Testing Go packages' row at all" ;;
+    *)
+        fail "test.sh's whole-tree suite does not go through tmpdir-leak-guard.sh; the guard covers nothing: $ROW" ;;
+esac
 
 echo ""
 echo "=== $PASS passed, $FAIL failed ==="
