@@ -358,6 +358,27 @@ const (
 	// sufficient.
 	DefaultGHIntakeEscalateAfter = 4 * time.Hour
 
+	// DefaultCarrierDriftInterval is how often pogod RE-READS every live gh-issue
+	// carrier's issue (mg-5d9d). An hour, matching the teardown detector rather
+	// than intake's fifteen minutes: the cost profile is one `gh issue view` per
+	// live carrier on somebody else's tracker, and the drift it looks for is
+	// measured in days.
+	DefaultCarrierDriftInterval = 1 * time.Hour
+	// DefaultCarrierDriftRenotify is how long an UNCHANGED set of drift findings
+	// stays quiet before being raised again.
+	DefaultCarrierDriftRenotify = 24 * time.Hour
+	// DefaultCarrierDriftNotifyTo is the mailbox drift findings go to: the
+	// COORDINATOR, the one agent that can act on all three kinds — resolve a
+	// carrier against a closed issue, dispatch the triage that acknowledges a
+	// reporter, move a stage.
+	DefaultCarrierDriftNotifyTo = DefaultCoordinator
+	// DefaultCarrierDriftEscalateAfter is how long ONE drift finding may persist,
+	// unbroken, before the notice also goes to `human`. 72h rather than intake's
+	// four: these findings are already measured in days by construction, so a
+	// four-hour escalation would escalate every finding on its first mail, which
+	// is escalation carrying no information.
+	DefaultCarrierDriftEscalateAfter = 72 * time.Hour
+
 	// DefaultReviewDeclInterval is how often pogod's review-declaration detector
 	// sweeps the store for review tickets carrying no usable `reviews:` line
 	// (mg-253e). Half an hour, and the number is set by the SHELF LIFE of the
@@ -797,7 +818,12 @@ type Config struct {
 	CredExpiry CredExpiryConfig
 	GHTeardown GHTeardownConfig
 	GHIntake   GHIntakeConfig
-	ReviewDecl ReviewDeclConfig
+	// CarrierDrift is the gh-issue carrier RE-READ (mg-5d9d), the third member
+	// of the triple whose other two are GHIntake (an open issue with no carrier)
+	// and GHTeardown (a done carrier whose issue stayed open). This one covers
+	// every step between: a LIVE carrier whose issue has moved on without it.
+	CarrierDrift CarrierDriftConfig
+	ReviewDecl   ReviewDeclConfig
 	// PromptEdit is the installed-prompt HAND-EDIT detector (mg-0c96). It sits
 	// beside ReviewDecl rather than inside DriftWatch because it asks a
 	// different question of a different artifact: drift asks whether the
@@ -1301,6 +1327,70 @@ type GHIntakeConfig struct {
 	// next sample with no second edit to forget. With neither, a built-in default
 	// applies. See internal/ghintake.ResolveRepos.
 	Repos []string
+}
+
+// CarrierDriftConfig configures pogod's gh-issue carrier RE-READ (mg-5d9d): the
+// heartbeat-driven runner that asks GitHub what every LIVE carrier's issue looks
+// like NOW, and reports the carriers whose record has drifted away from it.
+//
+// It exists because a carrier records that an issue was noticed ONCE, and
+// nothing re-reads the issue afterwards — so the carrier's existence is evidence
+// about the PAST that reads as evidence about the PRESENT. Three instances
+// surfaced on 2026-09-07, each by an unrelated accident and none by an
+// instrument: two issues carried for days with no acknowledgement on the thread
+// (indistinguishable, from the reporter's side, from having no carrier at all),
+// one carried and untriaged for 17 days, and one carried against an issue that
+// had been closed the same day and then left dispatchable for a month.
+//
+// `pogo check-intake` read "44 carried, 0 uncarried" throughout and was right:
+// it measures whether an issue has a CARRIER, and once one exists the issue
+// leaves its population forever. The gap is the AXIS, not the accuracy.
+//
+// Sibling of GHIntakeConfig and GHTeardownConfig, covering the span between
+// them. REPORT-ONLY: it mails NotifyTo and never comments on an issue, closes
+// one, or edits a work item.
+type CarrierDriftConfig struct {
+	// Enabled turns the runner on. Defaults to true; it is additionally armed
+	// only when the `gh` CLI is available AND a GitHub credential exists, since
+	// without either EVERY re-read fails and the runner would report one
+	// environment gap as a wall of un-re-read carriers.
+	Enabled bool
+	// Interval is the COARSE gap between passes. Zero falls back to
+	// DefaultCarrierDriftInterval.
+	Interval time.Duration
+	// AckWindow is how long a reporter may wait for an acknowledgement, measured
+	// from when THEY filed rather than from when the carrier was created — the
+	// reporter cannot see our carrier. Zero falls back to
+	// carrierdrift.DefaultAckWindow; NEGATIVE disables the check.
+	AckWindow time.Duration
+	// StageWindow is how long a carrier may sit at the stage it was FILED at.
+	// Zero falls back to carrierdrift.DefaultStageWindow; NEGATIVE disables it.
+	StageWindow time.Duration
+	// ClosedGrace is how long a carrier may stay live after its issue closes.
+	// Zero falls back to carrierdrift.DefaultClosedGrace; NEGATIVE reports a
+	// closed issue immediately.
+	ClosedGrace time.Duration
+	// Stages overrides the set of stages the stuck-stage check covers. Empty
+	// means carrierdrift.DefaultStuckStages — exactly the stages a carrier is
+	// FILED at, which is the only set for which the age mg can report (the
+	// carrier's own) IS the age the check needs. Widening it trades an exact
+	// measurement for a lower bound.
+	Stages []string
+	// RenotifyAfter is how long an unchanged set of findings stays quiet before
+	// being mailed again. Zero falls back to DefaultCarrierDriftRenotify.
+	RenotifyAfter time.Duration
+	// NotifyTo is the mailbox findings are reported to. Empty falls back to
+	// DefaultCarrierDriftNotifyTo (the coordinator).
+	NotifyTo string
+	// EscalateAfter is how long ONE finding may persist unbroken before the
+	// notice also goes to `human`. Zero falls back to
+	// DefaultCarrierDriftEscalateAfter; a NEGATIVE value disables escalation.
+	EscalateAfter time.Duration
+	// IncludeShelved widens the scan to shelved carriers. Off by default: a
+	// shelved carrier cannot cause a mis-dispatch, which is the sharpest of the
+	// three harms, and shelving is itself a deliberate human act. It can still
+	// leave a reporter waiting, which is why this is an opt-in rather than a wall.
+	IncludeShelved bool
 }
 
 // AckWatchConfig configures pogod's scheduler-completion DEFICIT detector
@@ -1848,6 +1938,7 @@ type parsedConfig struct {
 	credExpiryEnabledSet     bool
 	ghTeardownEnabledSet     bool
 	ghIntakeEnabledSet       bool
+	carrierDriftEnabledSet   bool
 	reviewDeclEnabledSet     bool
 	promptEditEnabledSet     bool
 	ackWatchEnabledSet       bool
@@ -1960,6 +2051,13 @@ func Load() *Config {
 			RenotifyAfter: DefaultGHIntakeRenotify,
 			NotifyTo:      DefaultGHIntakeNotifyTo,
 			EscalateAfter: DefaultGHIntakeEscalateAfter,
+		},
+		CarrierDrift: CarrierDriftConfig{
+			Enabled:       true,
+			Interval:      DefaultCarrierDriftInterval,
+			RenotifyAfter: DefaultCarrierDriftRenotify,
+			NotifyTo:      DefaultCarrierDriftNotifyTo,
+			EscalateAfter: DefaultCarrierDriftEscalateAfter,
 		},
 		ReviewDecl: ReviewDeclConfig{
 			Enabled:       true,
@@ -2136,6 +2234,41 @@ func Load() *Config {
 		}
 		if fileCfg.reviewDeclEnabledSet {
 			cfg.ReviewDecl.Enabled = fileCfg.ReviewDecl.Enabled
+		}
+		if fileCfg.carrierDriftEnabledSet {
+			cfg.CarrierDrift.Enabled = fileCfg.CarrierDrift.Enabled
+		}
+		if fileCfg.CarrierDrift.Interval > 0 {
+			cfg.CarrierDrift.Interval = fileCfg.CarrierDrift.Interval
+		}
+		// Non-zero, not >0, for all three windows: a NEGATIVE value is the
+		// documented way to turn an individual check off (or, for closed_grace,
+		// to report immediately), so it must survive the merge like any other
+		// override. Merging only positives would silently restore the default and
+		// leave an operator who deliberately disabled a check still receiving it.
+		if fileCfg.CarrierDrift.AckWindow != 0 {
+			cfg.CarrierDrift.AckWindow = fileCfg.CarrierDrift.AckWindow
+		}
+		if fileCfg.CarrierDrift.StageWindow != 0 {
+			cfg.CarrierDrift.StageWindow = fileCfg.CarrierDrift.StageWindow
+		}
+		if fileCfg.CarrierDrift.ClosedGrace != 0 {
+			cfg.CarrierDrift.ClosedGrace = fileCfg.CarrierDrift.ClosedGrace
+		}
+		if len(fileCfg.CarrierDrift.Stages) > 0 {
+			cfg.CarrierDrift.Stages = fileCfg.CarrierDrift.Stages
+		}
+		if fileCfg.CarrierDrift.RenotifyAfter > 0 {
+			cfg.CarrierDrift.RenotifyAfter = fileCfg.CarrierDrift.RenotifyAfter
+		}
+		if fileCfg.CarrierDrift.NotifyTo != "" {
+			cfg.CarrierDrift.NotifyTo = fileCfg.CarrierDrift.NotifyTo
+		}
+		if fileCfg.CarrierDrift.EscalateAfter != 0 {
+			cfg.CarrierDrift.EscalateAfter = fileCfg.CarrierDrift.EscalateAfter
+		}
+		if fileCfg.CarrierDrift.IncludeShelved {
+			cfg.CarrierDrift.IncludeShelved = true
 		}
 		if fileCfg.ReviewDecl.Interval > 0 {
 			cfg.ReviewDecl.Interval = fileCfg.ReviewDecl.Interval
@@ -3324,6 +3457,42 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				}
 			case "repos":
 				cfg.GHIntake.Repos = parseStringArray(val)
+			}
+		case "carrier_drift":
+			switch key {
+			case "enabled":
+				cfg.CarrierDrift.Enabled = val == "true"
+				cfg.carrierDriftEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CarrierDrift.Interval = d
+				}
+			case "ack_window":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CarrierDrift.AckWindow = d
+				}
+			case "stage_window":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CarrierDrift.StageWindow = d
+				}
+			case "closed_grace":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CarrierDrift.ClosedGrace = d
+				}
+			case "stages":
+				cfg.CarrierDrift.Stages = parseStringArray(val)
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CarrierDrift.RenotifyAfter = d
+				}
+			case "notify_to":
+				cfg.CarrierDrift.NotifyTo = unquotedVal
+			case "escalate_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CarrierDrift.EscalateAfter = d
+				}
+			case "include_shelved":
+				cfg.CarrierDrift.IncludeShelved = val == "true"
 			}
 		case "review_decl":
 			switch key {
