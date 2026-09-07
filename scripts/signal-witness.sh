@@ -23,10 +23,15 @@
 # of them carries the one fact that would end the investigation: WHICH PROCESS
 # SENT THE SIGNAL. Nothing on this box was recording it.
 #
-# This file does not name the sender either, and it cannot: on darwin the
-# sending pid is only available to a handler installed with SA_SIGINFO, which
-# a shell cannot install and Go's os/signal does not expose. What it records is
-# the next best thing, which nobody has for any of the three occurrences:
+# This file does not name the sender: on darwin the sending pid is available
+# only to a handler installed with SA_SIGINFO, which a SHELL cannot install and
+# Go's os/signal does not expose. That was recorded here as "and it cannot",
+# which was wrong — a compiled helper installs SA_SIGINFO in one call and needs
+# no privilege, and scripts/signal-sender.sh (mg-cbc3) is that helper, wired
+# INSIDE the tmpdir guard where the three recorded kills actually landed. This
+# file is still the instrument for the reading that has to be taken from
+# OUTSIDE the signalled region, which is the one below and which the sender
+# recorder cannot take:
 #
 #   THE DELIVERY SHAPE   which of this process's ANCESTORS are still alive when
 #                        the signal lands. A signal to the gate's process group
@@ -247,9 +252,10 @@ witness_report() {
         echo "     argv above is what distinguishes a survivor from a stranger.)"
         echo ""
         echo "  PROCESS TABLE at the instant of the signal — pid ppid pgid started command."
-        echo "  Nothing on this host records a SENDING pid, so this is the candidate set,"
-        echo "  and it is only worth having because it was taken NOW rather than after the"
-        echo "  gate failed."
+        echo "  The candidate set for the sender, worth having only because it was taken NOW"
+        echo "  rather than after the gate failed. If scripts/signal-sender.sh was in the"
+        echo "  chain and was itself signalled it will have NAMED the sender outright; this"
+        echo "  table is what remains when the signal did not reach that far."
         echo ""
         if [ -n "$snapfile" ]; then
             echo "    ${snapcount} processes, written to:"
