@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,5 +182,84 @@ func TestSourceWithoutARegistryFails(t *testing.T) {
 	src := fleetProgressSource(nil, nil, time.Now())
 	if _, err := src(time.Now()); err == nil {
 		t.Fatal("a source with no registry returned a snapshot")
+	}
+}
+
+// TestReapedWorktreeIsItsOwnState, not a blindness. A worker that is registered
+// and pid-alive holding a path that is not there is a REAL state with a distinct
+// remedy — nothing it does can land — and WorkerProgressAt records WorktreeDir
+// at spawn and never re-checks it, so this conversion is the only place the
+// fact can be noticed at all.
+func TestReapedWorktreeIsItsOwnState(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "reaped")
+	got := workerReading(agent.WorkerProgress{
+		Name: "p1", Age: time.Hour, WorktreeDir: gone,
+	}, time.Now())
+
+	if !got.WorktreeGone {
+		t.Fatalf("an absent worktree was not recognised as gone: %+v", got)
+	}
+	if got.WritesKnown {
+		t.Errorf("an absent tree is not an unwritten one: %+v", got)
+	}
+	if !strings.Contains(got.WritesError, gone) {
+		t.Errorf("the path must travel with the state, got %q", got.WritesError)
+	}
+}
+
+// TestPresentWorktreeIsNotGone is the positive control for the check above: the
+// flag must discriminate, or "not gone" says nothing about any particular tree.
+func TestPresentWorktreeIsNotGone(t *testing.T) {
+	got := workerReading(agent.WorkerProgress{
+		Name: "p1", Age: time.Hour, WorktreeDir: t.TempDir(),
+	}, time.Now())
+	if got.WorktreeGone {
+		t.Errorf("a tree that is right there read as gone: %+v", got)
+	}
+	if !got.WritesKnown {
+		t.Errorf("a readable tree must be a measurement: %+v", got)
+	}
+}
+
+// TestUnreadableWorktreeIsNotGone. EACCES on the worktree ROOT is "I could not
+// look", which belongs on the blind line — the state this change exists to keep
+// OFF it is "I looked, and it is not there". Absorbing one into the other would
+// undo mg-1d39's fix by another door.
+//
+// Skipped for root, which is not stopped by the mode bits.
+func TestUnreadableWorktreeIsNotGone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: 0o000 does not deny this process")
+	}
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "tree")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	got := workerReading(agent.WorkerProgress{
+		Name: "p1", Age: time.Hour, WorktreeDir: dir,
+	}, time.Now())
+
+	if got.WorktreeGone {
+		t.Errorf("an unreadable-but-present tree was reported as gone: %+v", got)
+	}
+	if got.WritesKnown {
+		t.Errorf("an unreadable tree must stay unmeasurable: %+v", got)
+	}
+}
+
+// TestNoWorktreeIsNotGoneEither. A NoWorktree worker never had a tree to lose,
+// and its work goes somewhere this detector cannot see. That is unmeasurable,
+// which is a blindness — a different answer from a tree that was there and was
+// reaped, and the remedies differ.
+func TestNoWorktreeIsNotGoneEither(t *testing.T) {
+	got := workerReading(agent.WorkerProgress{Name: "p1", Age: time.Hour}, time.Now())
+	if got.WorktreeGone {
+		t.Errorf("a worker spawned without a worktree is not one whose worktree vanished: %+v", got)
 	}
 }

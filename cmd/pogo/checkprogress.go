@@ -74,6 +74,15 @@ is not an unwritten one, and an unresolvable CPU sample reports zeros that mean
 "this host cannot tell". Any such gap suppresses the finding and is printed
 under NOT MEASURED — and exits ` + fmt.Sprint(exitInstrumentFailure) + `, because that run measured nothing.
 
+A REGISTERED WORKER WHOSE WORKTREE IS GONE IS A FOURTH ANSWER, and it is not
+the blind one. Its worktree path is recorded at spawn and never re-checked, so
+a reap — or a tree removed under a live worker — leaves it registered, alive,
+and unable to land anything. It gets its own row and its own remedy (stop or
+respawn it), it is excluded from the judged set because a worker with no tree
+cannot be asked whether it wrote in one, and it does NOT make the reading blind:
+an otherwise-clean fleet still reads clean. An UNREADABLE worktree is the other
+answer and still prints under NOT MEASURED.
+
 WITH --json, SWITCH ON "verdict", NOT ON "stalled". "stalled" is the
 conjunction and is false for a clean reading AND for a blind one, so a consumer
 that checks it alone cannot tell a healthy fleet from a run that measured
@@ -146,9 +155,9 @@ func renderProgressReading(r progresswatch.Reading) string {
 
 	fmt.Fprintf(&b, "  awake+silent  %d of %d judged worker(s) PTY-active and writing nothing\n",
 		r.Blocked, r.Judged)
-	if r.LiveWorkers != r.Judged {
+	if young := r.TooYoung(); young > 0 {
 		fmt.Fprintf(&b, "                %d live, %d too young to judge (under %s)\n",
-			r.LiveWorkers, r.LiveWorkers-r.Judged, r.Thresholds.MinWorkerAge)
+			r.LiveWorkers, young, r.Thresholds.MinWorkerAge)
 	}
 	if len(r.BlockedNames) > 0 {
 		fmt.Fprintf(&b, "                %s\n", strings.Join(r.BlockedNames, ", "))
@@ -173,6 +182,18 @@ func renderProgressReading(r progresswatch.Reading) string {
 	if r.InFlight != "" {
 		fmt.Fprintf(&b, "  in flight     merge %s, holding the refinery slot for %s\n",
 			r.InFlight, r.InFlightFor.Round(time.Second))
+	}
+	// Its own row, never the NOT MEASURED paragraph. A registered worker whose
+	// worktree is gone was MEASURED, and it has its own remedy: it can no longer
+	// produce anything, so it wants stopping or respawning. Folding it into the
+	// blindness is what mg-1d39 was, and a state the JSON names that the human
+	// render cannot is a state the CLI shows a reader it cannot explain.
+	if r.WorktreeGone > 0 {
+		fmt.Fprintf(&b, "  worktree gone %d registered worker(s) whose worktree no longer exists\n",
+			r.WorktreeGone)
+		fmt.Fprintf(&b, "                %s\n", strings.Join(r.WorktreeGoneNames, ", "))
+		fmt.Fprintf(&b, "                not judged, and not a blindness — nothing they do can\n")
+		fmt.Fprintf(&b, "                land, so stop or respawn them\n")
 	}
 
 	b.WriteString("\n")

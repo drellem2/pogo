@@ -217,3 +217,54 @@ func TestUnevaluatedReadingDoesNotRenderAsClean(t *testing.T) {
 		t.Errorf("an unevaluated reading must say so:\n%s", out)
 	}
 }
+
+// TestRenderNamesTheGoneWorktreesOnTheirOwnRow. The Reading is the published
+// surface — GET /health/progress returns one, internal/client decodes one, and
+// this command renders one — so a field the JSON carries that the human render
+// cannot name is a state the CLI shows a reader it cannot explain.
+func TestRenderNamesTheGoneWorktreesOnTheirOwnRow(t *testing.T) {
+	now := time.Date(2026, 8, 14, 5, 18, 0, 0, time.UTC)
+	s := theIncident(now)
+	// A fleet that is otherwise plainly fine.
+	s.LastProgress = now.Add(-1 * time.Minute)
+	s.Workers[0].WritesKnown = false
+	s.Workers[0].HasWrites = false
+	s.Workers[0].WorktreeGone = true
+
+	r := progressReading(t, s)
+	out := renderProgressReading(r)
+
+	if !strings.Contains(out, "worktree gone") {
+		t.Fatalf("render dropped the state entirely:\n%s", out)
+	}
+	if !strings.Contains(out, "p1") {
+		t.Errorf("render named a count without the worker it is about:\n%s", out)
+	}
+	if !strings.Contains(out, "stop or respawn") {
+		t.Errorf("the row must carry the distinct remedy that makes it a distinct state:\n%s", out)
+	}
+	// It must NOT be rendered as a blindness, and it must not stop the clean
+	// paragraph from printing.
+	if strings.Contains(out, "NOT MEASURED") {
+		t.Errorf("a gone worktree rendered as an unmeasured fleet:\n%s", out)
+	}
+	if !strings.Contains(out, "No finding.") {
+		t.Errorf("an otherwise-clean fleet must still render clean:\n%s", out)
+	}
+}
+
+// TestRenderDoesNotCountGoneWorktreesAsTooYoung. Judged now excludes the gone
+// workers as well as the young ones, so the live-minus-judged subtraction the
+// young line used to do reports a reaped worktree as a newborn.
+func TestRenderDoesNotCountGoneWorktreesAsTooYoung(t *testing.T) {
+	now := time.Date(2026, 8, 14, 5, 18, 0, 0, time.UTC)
+	s := theIncident(now)
+	s.Workers[0].WorktreeGone = true
+	s.Workers[0].WritesKnown = false
+
+	out := renderProgressReading(progressReading(t, s))
+
+	if strings.Contains(out, "too young to judge") {
+		t.Errorf("a worker with no worktree was reported as too young:\n%s", out)
+	}
+}
