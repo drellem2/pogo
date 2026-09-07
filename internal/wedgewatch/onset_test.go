@@ -19,7 +19,7 @@ import (
 //	10:49:40Z  wedge_watch_pending  crew-mayor …
 //	11:00:40Z  wedge_watch_fired    agents=[mayor]                cause=poisoned_credential
 //	11:06:10Z  wedge_watch_fired    agents=[all six]              cause=poisoned_credential
-//	11:22:10Z  synthetic_failure_detected  crew-mayor  "Login expired · Please run /login"
+//	11:22:10Z  synthetic_failure_detected  crew-mayor  "Login expired · Please run /login"  (#1 of 23)
 //	  … sixteen more wedge_watch_fired, every one carrying "routed_to": "nobody" …
 //	14:56:10Z  wedge_watch_fired    agents=[all six]              cause=poisoned_credential
 //	16:19:14Z  wedge_watch_cleared  crew-mayor                    cause=poisoned_credential
@@ -32,6 +32,11 @@ import (
 // sample and the cause fell to `unknown`; the word poisoned_credential on that
 // timestamp comes from the CLEARED line, which names the cause of the finding
 // being retired for one agent.
+//
+// The same shape holds for the ticket's second claim, that an upstream signal had
+// the answer 15 minutes early: `synthetic_failure_detected` first fired at
+// 11:22:10Z, 21 minutes BEHIND wedge_watch, and the 16:03:44Z pair the ticket
+// quotes are #22 and #23 of the 23 emitted that day.
 //
 // The detector's actual latency, from mayor's last turn at 10:46:10Z to the
 // first `wedge_watch_fired`, is 14m30s — the marker hold-down (10m) plus the
@@ -178,6 +183,28 @@ func TestThePoisonedCredentialWedgeIsNamedInMinutesNotHours(t *testing.T) {
 	agents, _ := fired[0].Details["agents"].([]string)
 	if len(agents) != 2 {
 		t.Errorf("first emission named %v; both wedged agents should be in it", agents)
+	}
+
+	// cred_readable is the CONTROL for cred_refresh_valid, and an emission
+	// carrying the second without the first is uninterpretable.
+	//
+	// pm-onethird re-derived this incident independently and produced the
+	// objection that nearly broke it: cred_refresh_valid also reads false at
+	// 00:06:09Z, 03:45:39Z and 08:53:40Z on the same day — hours BEFORE the
+	// 10:39:14Z lapse, with cred_expiry_warned at 03:07:09Z (tier=24h,
+	// remaining="7h 32m") proving the grant was good then. Those are
+	// cred_readable=FALSE: unreadable-defaults, not negative readings. Only the
+	// sixteen readable-and-invalid samples from 11:00:40Z to 14:56:10Z are a
+	// measurement. CredentialView.Readable exists so that "I could not look" is
+	// never rendered as "fine", and this pins that both halves reach the log
+	// together — the split a re-deriver has to make first.
+	if got := fired[0].Details["cred_readable"]; got != true {
+		t.Errorf("cred_readable = %v, want true. Without it on the line, cred_refresh_valid=false "+
+			"cannot be told from 'the credential was not inspected', and eight such samples earlier "+
+			"the same day would read as evidence the grant had lapsed before it had", got)
+	}
+	if got := fired[0].Details["cred_refresh_valid"]; got != false {
+		t.Errorf("cred_refresh_valid = %v, want false", got)
 	}
 	findings, _ := w.Latest()
 	for _, f := range findings {

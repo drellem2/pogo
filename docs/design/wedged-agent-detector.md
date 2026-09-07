@@ -361,8 +361,8 @@ exactly, with `synthetic_failure_detected` holding the answer 15 minutes earlier
 verdict fell to `unknown` — and the word `poisoned_credential` at that timestamp
 belongs to the CLEARED line beside it, which names the cause of the finding being
 *retired* for one agent. `synthetic_failure_detected` was likewise early, not late:
-its first fire was `11:22:10Z`; the `16:03:44Z` one the ticket quotes is the
-twenty-first.
+its first fire was `11:22:10Z`; there were 23 in the day, and the `16:03:44Z`
+pair the ticket quotes are the 22nd and 23rd.
 
 **Why a correct instrument was misreadable, and what changed.**
 
@@ -387,7 +387,29 @@ twenty-first.
    roster and says nothing about the underlying condition. Its `why` now says so
    in as many words, and it carries `first_reported_at` / `reported_for` so a
    retirement can be dated without pairing it against an earlier emission by hand.
-4. **The store and the process hold different things, and only the process stops
+4. **`cred_readable` is the control for `cred_refresh_valid`, and reading the
+   second without the first inverts the finding.** pm-onethird set out to break
+   the paragraph above and produced the objection that nearly did: `cred_refresh_valid`
+   also reads `false` at `00:06:09Z`, `03:45:39Z` and `08:53:40Z` — hours before
+   the lapse, and `cred_expiry_warned` at `03:07:09Z` (`tier=24h`,
+   `remaining="7h 32m"`) proves the grant was good then. An indicator that reads
+   false in a known-good period is not evidence of anything. The discriminator is
+   the field beside it, emitted on every line for exactly this reason:
+
+   ```
+   00:06 -> 08:53   cred_readable=FALSE  cred_refresh_valid=false   unreadable: NO information
+   11:00 -> 14:56   cred_readable=TRUE   cred_refresh_valid=false   readable AND invalid (16 samples)
+   16:19 -> 16:24   cred_readable=TRUE   cred_refresh_valid=true
+   ```
+
+   The early falses are unreadable-defaults. `CredentialView.Readable` exists so
+   that "I could not look" is never rendered as a reading, and this is the case
+   that spends it: only the sixteen readable-and-invalid samples are a
+   measurement, and they are what says `pogo credential expiry` would have
+   reported the lapse. Anyone re-deriving this from the log must split on
+   `cred_readable` first.
+
+5. **The store and the process hold different things, and only the process stops
    turns.** `pogo credential expiry` reads the **store**. Once the renewed grant
    reached the keychain it printed HEALTHY while five sessions were still failing
    on the credential they had picked up earlier — the one check a reader is told to
