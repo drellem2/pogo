@@ -61,7 +61,21 @@ mkdir -p _testdata/b-service/.git
 # $TMPDIR reached ~5,000 fixture directories, the volume hit 100%, and this file
 # died with Errno 28 in the refinery gate — failing every merge on the host and
 # presenting as a defect in whichever branch happened to be running.
-gate_step "Testing Go packages" bash scripts/tmpdir-leak-guard.sh bash scripts/go-test-budget.sh ./...
+#
+# ALSO WRAPPED IN THE SIGNAL WITNESS (mg-3bd1). Three gate runs on this host
+# have been ended by a SIGTERM the refinery did not send — 2026-08-19 at 178s,
+# 2026-09-07 at 85s and at 264s — and all three landed on THIS row, inside
+# internal/agent, with the run having printed results through
+# internal/ackwatch. Three different elapsed times rule out a fixed watchdog;
+# the constant POSITION says the elapsed time varies because internal/agent's
+# runtime varies, not because the signal arrives at random. What no record
+# carries is who sent it, and darwin reports a sending pid to no shell. The
+# witness captures the two readings that were being lost: whether this row's
+# ANCESTORS survived (a process-group kill takes them with it; a walk over a
+# subtree does not), and the process table at the instant of the signal, which
+# is the candidate set for the sender. Silent on every run that is not
+# signalled; see scripts/signal-witness.sh.
+gate_step "Testing Go packages" bash scripts/signal-witness.sh bash scripts/tmpdir-leak-guard.sh bash scripts/go-test-budget.sh ./...
 
 # The $TMPDIR leak guard (mg-de3c). It belongs in the gate rather than on
 # demand because the defect it measures is the one that BROKE the gate: at 255
@@ -79,6 +93,16 @@ gate_step "Testing Go packages" bash scripts/tmpdir-leak-guard.sh bash scripts/g
 # invocations over a deliberately small slice that still touches every caller,
 # rather than the ~300s internal/agent costs in full.
 gate_step "Testing the \$TMPDIR leak guard" bash scripts/tmpdir-leak_test.sh
+
+# The signal witness (mg-3bd1). The load-bearing pair is Tests 3 and 4: the
+# witness's verdict is the ANCESTOR reading, and "every ancestor survived"
+# means nothing until the same reading has been shown to report a dead one. The
+# other control that must not be dropped is Test 5 — a command that EXITS 143
+# on purpose has to come back AMBIGUOUS, because a shell cannot separate that
+# from a kill and a witness that called it one would be manufacturing the
+# false fact this whole item exists to stop. ~4s, mostly the two fixtures
+# settling.
+gate_step "Testing the merge gate's signal witness" bash scripts/signal-witness_test.sh
 
 gate_step "Testing neovim plugin" bash nvim/test_nvim.sh
 
