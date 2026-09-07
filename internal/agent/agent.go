@@ -1472,6 +1472,12 @@ const (
 	// StopCauseDoneReap is pogod reaping a polecat whose work item is done and
 	// which has been idle past the grace period.
 	StopCauseDoneReap = "done_reap"
+	// StopCauseGateReap is the same reaper stopping a polecat whose work item is
+	// parked at `stage: gated` — a HUMAN DECISION gate the item is deliberately
+	// held at, and which it never leaves through `done`. Distinct from
+	// StopCauseDoneReap on purpose: the item is NOT closed, so a reader holding
+	// this record must not conclude the work finished (mg-9af1).
+	StopCauseGateReap = "gate_reap"
 )
 
 // StopAll stops all agents and prevents subsequent Respawn() calls, so that

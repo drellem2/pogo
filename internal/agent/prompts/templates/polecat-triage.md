@@ -186,6 +186,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
 9. **Stay alive.** Do NOT exit. After reporting, wait for the {{.Coordinator}} to stop you. If the {{.Coordinator}} or PM sends a follow-up question (e.g. clarify a finding for the human gate), act on it immediately — your investigation context is why you stay running.
 
+   **Expect to be stopped once the ticket is gated, and do not race it.** When the {{.Coordinator}} sets `stage: gated`, pogod stops you after two minutes of PTY silence and frees your slot (mg-9af1) — the gate is an unbounded wait, and a finished polecat holding a worker slot looks exactly like a busy one from the outside. Nothing of yours is lost by that: the packet is on the ticket BODY, which is precisely why step 8 puts it there rather than in your session. Your ticket is **not** closed by it, the stage does not move, and nobody is told the work finished. So finish your tail work at normal speed — the window is measured from your last output, and an incoming mail resets it — and treat the stop as the correct end of your lifecycle rather than as something to stay ahead of.
+
 ## Reacting to scheduler fires (sleep recovery)
 
 The mail-check schedule from step 2 delivers each fire with metadata appended:

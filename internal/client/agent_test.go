@@ -434,6 +434,110 @@ func TestMGWorkItemReviewsFailureIsAnError(t *testing.T) {
 	}
 }
 
+// TestMGWorkItemStage reads the `stage:` carrier line pogod's done-reaper uses
+// for the gate reap (mg-9af1): a triage polecat parked at `stage: gated` has
+// finished, but its item deliberately never reaches `done`, so the terminal
+// probe can never see it.
+//
+// It returns the STAGE, not a verdict — whether a stage gates is
+// config.IsStageGated's question, and it is already the dispatch gate's answer.
+// So these cases pin what the item SAYS, including the stages that do not gate.
+func TestMGWorkItemStage(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "the gated triage ticket — the case the gate reap exists for",
+			body: `\n# triage: gh#135\nworkflow: gh-issue\nstage: gated\ngh: drellem2/pogo#135\n\nThe packet.\n`,
+			want: "gated",
+		},
+		{
+			// The stages a worker is SUPPOSED to be working in. They come back
+			// verbatim; the caller's predicate is what refuses to reap them.
+			name: "a build ticket mid-build",
+			body: `\n# build: gh#135 part 1\nworkflow: gh-issue\nstage: build\ngh: drellem2/pogo#135\n\nBuild it.\n`,
+			want: "build",
+		},
+		{
+			name: "an ordinary item with no carrier at all",
+			body: `\n# fix the thing\n\nIt is broken.\n`,
+			want: "",
+		},
+		{
+			// A body that writes a BARE `stage:` line below its block is
+			// CarrierUnreadable, not "stage: triage" — `stage:` is gate-bearing,
+			// so a stray one below the block is the mg-27d4 third outcome. That
+			// is the right answer here and it is worth pinning: this ticket's own
+			// tree is full of bodies that write the line while explaining it, and
+			// each of them must read as "cannot tell" rather than as a gate.
+			name:    "an unfenced stray stage line below the block is unreadable",
+			body:    `\n# triage polecats hold a slot through the gate\nworkflow: gh-issue\nstage: triage\n\nThe ticket sits at:\n\nstage: gated\n\nuntil a human answers.\n`,
+			wantErr: true,
+		},
+		{
+			// The same prose FENCED is documentation, not a declaration, and the
+			// leading block still answers. This is the shape the mayor prompt's
+			// own example uses, and the shape a ticket about the gate should use.
+			name: "a fenced example does not disturb the leading block",
+			body: "\\n# triage polecats hold a slot through the gate\\nworkflow: gh-issue\\nstage: triage\\n\\nThe ticket sits at:\\n\\n```\\nstage: gated\\n```\\n\\nuntil a human answers.\\n",
+			want: "triage",
+		},
+		{
+			// "Cannot tell", never "declares nothing" (mg-27d4). The reaper reads
+			// this error as a reason to leave the polecat running; collapsing it
+			// to "" would read as "not gated" and be the same silence.
+			name:    "an out-of-reach carrier block is an error, not an absence",
+			body:    `\n# triage: gh#135\n\nIssue: https://github.com/drellem2/pogo/issues/135\n\nworkflow: gh-issue\nstage: gated\n`,
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(strings.ReplaceAll(tc.body, `\n`, "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fakeMGShow(t, `{"id":"mg-9af1","status":"claimed","body":`+string(body)+`}`)
+			got, err := MGWorkItemStage("mg-9af1")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want an error for %s, got %q — an unreadable stage must not read as an absent one", tc.name, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MGWorkItemStage: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("MGWorkItemStage = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMGWorkItemStageFailureIsAnError — a store that will not answer, or an
+// empty id, must return an error rather than "". The caller reads "" as "this
+// item is not at a gate" and leaves the polecat alone, so a swallowed failure
+// here is the mg-9af1 leak returning silently rather than a polecat wrongly
+// stopped; it is still the difference between a guard that did not fire and a
+// guard that could not see.
+func TestMGWorkItemStageFailureIsAnError(t *testing.T) {
+	if _, err := MGWorkItemStage(""); err == nil {
+		t.Error("an empty id must be an error, not an empty stage")
+	}
+	fakeMGShow(t, "") // makes the command fail
+	if _, err := MGWorkItemStage("mg-9af1"); err == nil {
+		t.Error("a failing `mg show` must be an error, not an empty stage")
+	}
+	fakeMGShow(t, "not json")
+	if _, err := MGWorkItemStage("mg-9af1"); err == nil {
+		t.Error("unparseable JSON must be an error, not an empty stage")
+	}
+}
+
 // TestGetAgentOutput_SendsTheRequestedWindow covers mg-8a56 from the client
 // side: the window a caller asks for has to reach pogod as a query param. The
 // endpoint documented ?bytes= and ?lines= for its whole life while the handler

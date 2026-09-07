@@ -3102,8 +3102,14 @@ Flags:
 	if cfg.DoneReap.Enabled && agentRegistry != nil {
 		doneReap = newDoneReaper(agentRegistry, client.MGWorkItemDone, client.MGWorkItemReviews, cfg.DoneReap.IdleGrace)
 		doneReap.SetFilerNotifier(filerNotify)
+		// The gate reap (mg-9af1). Without this probe the reaper cannot see the
+		// one worker whose item is deliberately never allowed to reach done — a
+		// gh-issue triage polecat parked at `stage: gated` — and that polecat
+		// holds a slot for the whole human gate, which is unbounded.
+		doneReap.SetStageProbe(client.MGWorkItemStage)
 		log.Printf("pogod: done-item polecat reaper enabled (idle_grace=%s) — a polecat whose item reaches done is stopped once it goes quiet, merge or no merge (mg-56d1); "+
-			"a builder is exempt while a live polecat's item declares `reviews:` its work item (mg-aaf6)",
+			"a builder is exempt while a live polecat's item declares `reviews:` its work item (mg-aaf6); "+
+			"a polecat whose item is parked at `stage: gated` is stopped too, without closing the item (mg-9af1)",
 			cfg.DoneReap.IdleGrace)
 	} else if cfg.DoneReap.Enabled {
 		log.Printf("pogod: done-item polecat reaper NOT armed — the agent registry did not load, so there is nothing to reap")

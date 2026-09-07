@@ -159,6 +159,7 @@ func TestStopCause_ValuesAreDocumented(t *testing.T) {
 	for _, cause := range []string{
 		StopCauseRequest, StopCauseStopAll, StopCausePark,
 		StopCauseMergeReap, StopCauseMergeBackstop, StopCauseDoneReap,
+		StopCauseGateReap,
 	} {
 		if !strings.Contains(string(doc), `"`+cause+`"`) {
 			t.Errorf("stop_cause %q is emitted but absent from docs/event-log.md", cause)
