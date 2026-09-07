@@ -541,3 +541,200 @@ func mustMarshal(t *testing.T, r Reading) map[string]any {
 	}
 	return m
 }
+
+// goneWorker is the state this file's worktree-gone tests are about: a worker
+// that is REGISTERED and pid-alive, old enough to be judged, whose recorded
+// worktree no longer exists. WritesKnown is false because an absent tree is not
+// an unwritten one — the flag is what separates it from a tree the walk merely
+// failed on.
+func goneWorker(name string) Worker {
+	w := blockedWorker(name)
+	w.HasWrites = false
+	w.WriteIdle = 0
+	w.WritesKnown = false
+	w.WritesError = "worktree no longer exists: /tmp/" + name
+	w.WorktreeGone = true
+	return w
+}
+
+// TestWorktreeGoneIsReportedAndIsNotBlind is the item, stated as one test.
+//
+// A registered worker whose worktree is gone gets its OWN line. Not the Blind
+// line — that line means "I could not take this measurement", and this
+// measurement was taken. And not silence: excluding the state from the judged
+// set without reporting it anywhere is how it becomes invisible.
+func TestWorktreeGoneIsReportedAndIsNotBlind(t *testing.T) {
+	s := incident()
+	s.Workers[0] = goneWorker("p1")
+
+	r := Evaluate(s, Thresholds{})
+
+	if r.WorktreeGone != 1 || len(r.WorktreeGoneNames) != 1 || r.WorktreeGoneNames[0] != "p1" {
+		t.Fatalf("the gone worktree got no line of its own: gone=%d names=%v",
+			r.WorktreeGone, r.WorktreeGoneNames)
+	}
+	if joined := strings.Join(r.Blind, " "); strings.Contains(joined, "p1") {
+		t.Errorf("a gone worktree must not reach the Blind line: %v", r.Blind)
+	}
+	if r.Judged != 6 || r.Blocked != 6 {
+		t.Errorf("judged=%d blocked=%d, want 6/6 — the gone worker is judged on nothing",
+			r.Judged, r.Blocked)
+	}
+	if r.LiveWorkers != 7 {
+		t.Errorf("live = %d, want 7 — it is still part of the population it was seen in", r.LiveWorkers)
+	}
+	// Both renders must carry it, because a state that only the JSON names is a
+	// state the CLI shows a reader it cannot explain.
+	if !strings.Contains(r.Measurements(), "worktree is GONE") ||
+		!strings.Contains(r.Measurements(), "p1") {
+		t.Errorf("Measurements dropped the state: %s", r.Measurements())
+	}
+	if !strings.Contains(r.String(), "registered but worktree gone") {
+		t.Errorf("String dropped the state:\n%s", r.String())
+	}
+}
+
+// TestWorktreeGoneLeavesACleanFleetClean is the constraint inherited from
+// mg-1d39: the new field must not re-blind. Verdict() turns BLIND on
+// len(Blind) > 0, so anything that feeds Blind turns a healthy fleet into a
+// fleet nobody measured — which is the defect, not the fix.
+func TestWorktreeGoneLeavesACleanFleetClean(t *testing.T) {
+	s := incident()
+	// A fleet that is plainly fine: it landed something a minute ago.
+	s.LastProgress = now.Add(-1 * time.Minute)
+	s.Workers = append(s.Workers, goneWorker("p8"))
+
+	r := Evaluate(s, Thresholds{})
+
+	if got := r.Verdict(); got != VerdictClean {
+		t.Fatalf("verdict = %q, want %q — reporting a gone worktree must not blind the reading (blind=%v)",
+			got, VerdictClean, r.Blind)
+	}
+	if len(r.Blind) != 0 {
+		t.Errorf("blind = %v, want empty", r.Blind)
+	}
+	if r.WorktreeGone != 1 {
+		t.Errorf("gone = %d, want 1 — clean is not silent about it", r.WorktreeGone)
+	}
+}
+
+// TestWorktreeGoneManufacturesNoFinding is mg-1d39's measured trap, kept as a
+// test rather than a comment: 7 reaped worktrees routed into the judged set
+// evaluate to verdict="stalled", blocked=7. Reporting the state must not
+// reintroduce that by another door.
+func TestWorktreeGoneManufacturesNoFinding(t *testing.T) {
+	s := incident()
+	s.LastProgress = now.Add(-1 * time.Minute)
+	for i := range s.Workers {
+		s.Workers[i] = goneWorker(s.Workers[i].Name)
+	}
+
+	r := Evaluate(s, Thresholds{})
+
+	if r.Stalled {
+		t.Fatalf("7 reaped worktrees reported a stall: blocked=%d", r.Blocked)
+	}
+	if got := r.Verdict(); got != VerdictClean {
+		t.Errorf("verdict = %q, want %q (blind=%v held=%v)", got, VerdictClean, r.Blind, r.Held)
+	}
+	if r.Blocked != 0 || r.Judged != 0 {
+		t.Errorf("blocked=%d judged=%d, want 0/0", r.Blocked, r.Judged)
+	}
+	if r.WorktreeGone != 7 {
+		t.Errorf("gone = %d, want 7", r.WorktreeGone)
+	}
+}
+
+// TestWorktreeGoneIsNotCountedAsTooYoung. Judged excludes the gone workers as
+// well as the young ones, so the live-minus-judged subtraction that used to
+// mean "too young" now has three terms. Getting that wrong reports a reaped
+// worktree as a newborn — a wrong number in the render, produced by the fix for
+// a wrong number in the render.
+func TestWorktreeGoneIsNotCountedAsTooYoung(t *testing.T) {
+	s := incident()
+	s.Workers[0] = goneWorker("p1")
+	s.Workers[1].Age = 2 * time.Minute // genuinely too young
+
+	r := Evaluate(s, Thresholds{})
+
+	if r.TooYoung() != 1 {
+		t.Fatalf("too_young = %d, want 1 — only p2 is young; p1 has no worktree", r.TooYoung())
+	}
+	m := r.Measurements()
+	if !strings.Contains(m, "7 live worker(s), 1 too young to judge") {
+		t.Errorf("the young count absorbed the gone worker: %s", m)
+	}
+}
+
+// TestWorktreeGoneWithNoPTYOutputIsStillReported. The gone check runs before
+// the aliveness test, so a worker that is registered and pid-alive but has
+// never written to its PTY — the mg-ce61 unsubmitted-paste shape — still
+// appears. It would otherwise drop out of the reading entirely: not judged, not
+// blind, and named nowhere, which is the silence this item was filed about.
+func TestWorktreeGoneWithNoPTYOutputIsStillReported(t *testing.T) {
+	s := incident()
+	w := goneWorker("p1")
+	w.HasOutput = false
+	w.PTYIdle = 0
+	s.Workers[0] = w
+
+	r := Evaluate(s, Thresholds{})
+
+	if r.WorktreeGone != 1 || len(r.WorktreeGoneNames) == 0 || r.WorktreeGoneNames[0] != "p1" {
+		t.Fatalf("a PTY-silent worker with a gone worktree vanished from the reading: %+v", r)
+	}
+}
+
+// TestWorktreeGoneNamesAreSorted, for the same reason BlockedNames are: the
+// names are the argument a coordinator cannot guess from a count, and an
+// unstable order makes two identical readings diff.
+func TestWorktreeGoneNamesAreSorted(t *testing.T) {
+	s := incident()
+	s.Workers = []Worker{goneWorker("p9"), goneWorker("p2"), goneWorker("p5")}
+
+	r := Evaluate(s, Thresholds{})
+
+	want := []string{"p2", "p5", "p9"}
+	if strings.Join(r.WorktreeGoneNames, ",") != strings.Join(want, ",") {
+		t.Errorf("names = %v, want %v", r.WorktreeGoneNames, want)
+	}
+}
+
+// TestUnreadableWorktreeStillBlindsWhenItIsNotGone is the control for the whole
+// change. The new state is carved OUT of the unreadable set, so the test that
+// it left the blind line is worth nothing unless an unreadable-but-present tree
+// still reaches it. EACCES is "I could not see" and belongs there.
+func TestUnreadableWorktreeStillBlindsWhenItIsNotGone(t *testing.T) {
+	s := incident()
+	s.Workers[0].WritesKnown = false
+	s.Workers[0].WritesError = "permission denied"
+	s.Workers[0].WorktreeGone = false
+
+	r := Evaluate(s, Thresholds{})
+
+	if got := r.Verdict(); got != VerdictBlind {
+		t.Fatalf("verdict = %q, want %q — an unreadable tree is still a blindness", got, VerdictBlind)
+	}
+	if !strings.Contains(strings.Join(r.Blind, " "), "p1") {
+		t.Errorf("blind must still name the unreadable worker: %v", r.Blind)
+	}
+	if r.WorktreeGone != 0 {
+		t.Errorf("gone = %d, want 0 — an unreadable tree is not an absent one", r.WorktreeGone)
+	}
+}
+
+// TestWorktreeGoneCountIsAlwaysInTheJSON. The count carries no omitempty: a
+// consumer must be able to check one field and get an answer in every case,
+// and anything omitempty is evidence that vanishes exactly when the reading
+// looks fine. That is the shape of mg-e75b's false green.
+func TestWorktreeGoneCountIsAlwaysInTheJSON(t *testing.T) {
+	s := incident()
+	s.LastProgress = now.Add(-1 * time.Minute)
+	b, err := json.Marshal(Evaluate(s, Thresholds{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"worktree_gone_workers":0`) {
+		t.Errorf("a clean reading omitted the count: %s", b)
+	}
+}

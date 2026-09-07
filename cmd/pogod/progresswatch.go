@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"runtime"
 	"time"
 
@@ -83,6 +85,17 @@ func workerReading(w agent.WorkerProgress, now time.Time) progresswatch.Worker {
 		// not an unwritten tree and must not be counted as one — its work goes
 		// somewhere this detector cannot see, so it is unmeasurable here.
 		out.WritesError = "spawned without a worktree"
+	case worktreeGone(w.WorktreeDir):
+		// A worker that is REGISTERED and pid-alive, holding a path that is not
+		// there. WorkerProgressAt records WorktreeDir at spawn and never
+		// re-checks it, so this is the one place the fact can be noticed.
+		//
+		// It stays WritesKnown==false — an absent tree is not an unwritten one —
+		// but the extra flag is what keeps it OFF the blind line: the detector
+		// reports it as its own state rather than as a measurement it failed to
+		// take. See Reading.WorktreeGone.
+		out.WorktreeGone = true
+		out.WritesError = "worktree no longer exists: " + w.WorktreeDir
 	default:
 		newest, err := gitgc.NewestWrite(w.WorktreeDir)
 		switch {
@@ -102,6 +115,24 @@ func workerReading(w agent.WorkerProgress, now time.Time) progresswatch.Worker {
 		}
 	}
 	return out
+}
+
+// worktreeGone answers whether the recorded worktree ROOT is absent, and only
+// that.
+//
+// It asks the filesystem about the root rather than pattern-matching ENOENT out
+// of gitgc.NewestWrite's error, because those are two different facts that
+// produce the same error value: a file removed three levels down while the walk
+// was in it also yields fs.ErrNotExist, and that is a race against ordinary
+// agent work, not a reaped tree.
+//
+// Every other stat failure — EACCES on the root above all — answers FALSE here
+// and falls through to the walk, which reports it as a blindness. That is
+// correct and is the boundary worth stating: "I could not look" belongs on the
+// blind line, and only "I looked, and it is not there" belongs on the new one.
+func worktreeGone(dir string) bool {
+	_, err := os.Stat(dir)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // readWorkerCPU measures the worker SUBTREES. Subtrees, because a parent

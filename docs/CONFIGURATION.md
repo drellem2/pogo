@@ -2618,6 +2618,26 @@ the zero `Reading` — it exists so that a value nobody evaluated cannot answer
 unchanged and still prints **no verdict token** (mg-c058); the two modes switch
 on one value, so they cannot disagree about which state a run was in.
 
+**A registered worker whose worktree is GONE gets its own line, and it is not
+the `blind` line (mg-17a2).** A polecat that is registered and pid-alive whose
+recorded worktree no longer exists — routine reap, or a tree removed under a
+live worker — is a real state with a distinct remedy: nothing it does can land,
+so it wants stopping or respawning. `WorkerProgressAt` records the worktree path
+at spawn and never re-checks it, so this reading is the only place the fact is
+noticed. It is reported as `worktree_gone_workers` (a count, never `omitempty`,
+so a consumer gets an answer on a healthy reading too) and `worktree_gone_names`,
+with its own row in the human render.
+
+It is deliberately **not** on `blind` and it does **not** feed `verdict`: `blind`
+means "I could not take this measurement", and this measurement was taken. Nor
+is it a finding — those workers are excluded from `judged_workers` and
+`blocked_workers`, because a worker with no tree cannot be asked whether it wrote
+in one, and routing seven reaped trees into the judged set evaluates to
+`verdict="stalled"`, `blocked=7`. An otherwise-clean fleet stays `clean` with
+workers on this line. An *unreadable* worktree — EACCES on the root — is a
+different answer and still blinds the reading, which is the control that makes
+the distinction mean anything.
+
 progress-watch is disjoint from its nearest neighbours:
 
 | | population | question |

@@ -211,6 +211,24 @@ type Worker struct {
 	// false. An unreadable tree is not an unwritten one and must never be
 	// counted as quiet.
 	WritesError string `json:"writes_error,omitempty"`
+
+	// WorktreeGone is true when the worker is REGISTERED and pid-alive and the
+	// worktree it was given NO LONGER EXISTS. It is a strict refinement of
+	// WritesKnown==false: every gone worktree is unreadable, and most
+	// unreadable worktrees are not gone (EACCES on the root is the one this
+	// must never absorb — that is "I could not see", which is the blindness
+	// this field exists to keep a distinct state OUT of).
+	//
+	// The source must decide this by asking the filesystem about the ROOT, not
+	// by matching ENOENT out of the walk's error: a file removed three levels
+	// down mid-walk raises the same fs.ErrNotExist and is a race, not a reaped
+	// tree.
+	//
+	// This field is INTERNAL. Snapshot is serialized nowhere in non-test code —
+	// GET /health/progress returns a Reading, not a Snapshot — so the json tag
+	// here is a convenience for tests and diffs, not a published contract. The
+	// published half of this state is Reading.WorktreeGone/WorktreeGoneNames.
+	WorktreeGone bool `json:"worktree_gone,omitempty"`
 }
 
 // alive reports whether this worker has produced PTY output recently enough to
@@ -332,6 +350,35 @@ type Reading struct {
 	// i.e. the least quiet of them. Reporting the freshest rather than an
 	// average is deliberate: it is the number that could falsify the finding.
 	MinWriteIdle time.Duration `json:"min_write_idle"`
+
+	// WorktreeGone counts the live workers whose recorded worktree no longer
+	// exists, and WorktreeGoneNames identifies them, sorted. They are excluded
+	// from Judged — a worker with no tree cannot be asked whether it wrote in
+	// one, and routing seven reaped trees into the judged set evaluates to
+	// verdict="stalled", blocked=7 (mg-1d39/gh#154).
+	//
+	// # Its own line, and deliberately NOT the Blind line
+	//
+	// A registered, alive worker whose worktree is gone is a REAL STATE with a
+	// distinct remedy: nothing it does can land, and the thing to do is stop or
+	// respawn it, not investigate a stall and not repair an instrument. Blind
+	// means "I could not take this measurement". Putting a state I measured
+	// successfully on the line that means I could not see is what produced
+	// mg-1d39 in the first place, where routine worktree cleanup blinded the
+	// whole fleet reading.
+	//
+	// So it gets its own count, its own names, and its own line in every render
+	// — and it must NEVER feed Verdict(), whose len(Blind) > 0 arm is what makes
+	// a reading BLIND. A fleet that is otherwise clean stays CLEAN with workers
+	// on this line. Reporting a gone worktree is not a finding either: it adds
+	// nothing to Blocked and nothing to Held.
+	//
+	// The count carries no omitempty on purpose. A consumer must be able to
+	// check one field and get an answer in every case, including the healthy
+	// one; anything omitempty is evidence that vanishes exactly when the reading
+	// looks fine.
+	WorktreeGone      int      `json:"worktree_gone_workers"`
+	WorktreeGoneNames []string `json:"worktree_gone_names,omitempty"`
 
 	// WorkerCores and HostCores are the subtree measurement and its
 	// denominator; CoresKnown says whether they are a measurement at all.
@@ -455,6 +502,18 @@ func Evaluate(s Snapshot, t Thresholds) Reading {
 	var blocked []Worker
 	var unknownWrites []string
 	for _, w := range s.Workers {
+		// A worker whose worktree is GONE is routed out before every other
+		// test, age included. It cannot be judged (there is no tree to ask
+		// about), it is not a blindness (the state was measured, not missed),
+		// and it is not a finding — it is reported on its own line and nowhere
+		// else. The check comes before the age guard because the state does not
+		// depend on the worker's age, and before the alive() test because a
+		// gone-worktree worker with no PTY output would otherwise fall out of
+		// the reading silently, which is the outcome this exists to prevent.
+		if w.WorktreeGone {
+			r.WorktreeGoneNames = append(r.WorktreeGoneNames, w.Name)
+			continue
+		}
 		if w.Age < th.MinWorkerAge {
 			continue
 		}
@@ -471,6 +530,8 @@ func Evaluate(s Snapshot, t Thresholds) Reading {
 			blocked = append(blocked, w)
 		}
 	}
+	sort.Strings(r.WorktreeGoneNames)
+	r.WorktreeGone = len(r.WorktreeGoneNames)
 	sort.Slice(blocked, func(i, j int) bool { return blocked[i].Name < blocked[j].Name })
 	r.Blocked = len(blocked)
 	for i, w := range blocked {
@@ -625,7 +686,34 @@ func (r Reading) String() string {
 			b.WriteString("\n    - " + x)
 		}
 	}
+	// Its OWN line, under its own heading, on every reading including a clean
+	// one. Not folded into "could not measure": this state was measured.
+	if len(r.WorktreeGoneNames) > 0 {
+		b.WriteString("\n  registered but worktree gone (not judged, not a blindness):")
+		for _, n := range r.WorktreeGoneNames {
+			b.WriteString("\n    - " + n)
+		}
+		b.WriteString("\n    nothing these workers do can land — stop or respawn them")
+	}
 	return b.String()
+}
+
+// TooYoung is how many LIVE workers this reading declined to judge on AGE.
+//
+// It is a method rather than a subtraction written out at each render because
+// the subtraction has THREE terms, not two: live minus judged minus
+// worktree-gone. The two-term form was correct until gone workers were routed
+// out of Judged, and it then reports every gone worker as "too young to judge"
+// — a wrong number, in the render, produced by the fix for a wrong number in
+// the render. One definition, two callers.
+func (r Reading) TooYoung() int {
+	n := r.LiveWorkers - r.Judged - r.WorktreeGone
+	if n < 0 {
+		// Defensive: a hand-built Reading can carry inconsistent counts, and a
+		// negative population is worse than a clamped one.
+		return 0
+	}
+	return n
 }
 
 // Measurements is the four readings on one line, in the order mayor took them.
@@ -660,9 +748,13 @@ func (r Reading) Measurements() string {
 		parts = append(parts, fmt.Sprintf("merge %s in flight for %s",
 			r.InFlight, round(r.InFlightFor)))
 	}
-	if r.LiveWorkers != r.Judged {
+	if r.WorktreeGone > 0 {
+		parts = append(parts, fmt.Sprintf("%d live worker(s) whose worktree is GONE (%s) — not judged",
+			r.WorktreeGone, strings.Join(r.WorktreeGoneNames, ", ")))
+	}
+	if young := r.TooYoung(); young > 0 {
 		parts = append(parts, fmt.Sprintf("%d live worker(s), %d too young to judge",
-			r.LiveWorkers, r.LiveWorkers-r.Judged))
+			r.LiveWorkers, young))
 	}
 	return strings.Join(parts, ", ")
 }
