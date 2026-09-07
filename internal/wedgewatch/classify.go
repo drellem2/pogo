@@ -124,13 +124,21 @@ func Classify(ev Evidence, th Thresholds) Verdict {
 			Cause:    CauseUnknown,
 			Response: ResponseInvestigate,
 			Why: fmt.Sprintf(
-				"a 401/login prompt with NO connectivity failure in the last %s — but the credential is "+
-					"READABLE AND IN DATE (refresh grant good until %s), which REFUTES revocation. "+
-					"The likeliest remaining explanation is a connectivity event that aged out of the "+
-					"window, so treat this as UNKNOWN. Do NOT page for a re-login: on the only two "+
-					"occasions this fleet has seen the symptom, nothing was revoked and no login was "+
-					"performed.",
-				th.CoincidenceWindow, ev.Cred.RefreshExpiry.UTC().Format(time.RFC3339)),
+				"a 401/login prompt with NO connectivity failure in the last %s — but the credential "+
+					"STORE is readable and in date (refresh grant good until %s), which refutes "+
+					"revocation OF THE STORED GRANT and says nothing about what a running session is "+
+					"holding. A process that picked up a credential before a renewal keeps failing "+
+					"against the old one while every store-reading instrument prints healthy; that is "+
+					"what this fleet saw for the last hour and a half of 2026-09-07, and it is the "+
+					"same shape as a patched file beside an unpatched running process. So treat this "+
+					"as UNKNOWN — the other live candidate is a connectivity event that aged out of "+
+					"the window. Do NOT page for a re-login on this verdict: it is the verdict for "+
+					"'the credential has refuted the accusation', and on two of the three occasions "+
+					"this fleet has seen the symptom nothing was revoked and no login was performed. "+
+					"When the grant HAS lapsed the detector says so under %s instead, from the "+
+					"credential's own evidence.",
+				th.CoincidenceWindow, ev.Cred.RefreshExpiry.UTC().Format(time.RFC3339),
+				CausePoisonedCredential),
 		}
 
 	case auth:

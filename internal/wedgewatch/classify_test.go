@@ -17,8 +17,12 @@ var validCred = CredentialView{
 	RefreshExpiry: classifyNow.Add(395 * time.Hour),
 }
 
-// lapsedCred is the case that has never actually been observed on this box: a
-// credential that says of itself that it is unusable.
+// lapsedCred is a credential that says of itself that it is unusable. It was
+// hypothetical when this file was written and is not any more: on 2026-09-07 the
+// refresh grant lapsed at 10:39:14Z (`cred_expiry_warned`, tier=lapsed, 10:43:40Z)
+// and pogod read exactly this shape on every sample from 11:00:40Z to at least
+// 14:56:10Z, correctly naming CausePoisonedCredential across all six crew agents.
+// See onset_test.go.
 var lapsedCred = CredentialView{
 	Readable:      true,
 	RefreshValid:  false,
@@ -175,8 +179,12 @@ func TestUnknownRatherThanGuess(t *testing.T) {
 }
 
 // TestUnknownNeverRecommendsARelogin guards the specific wrong action. UNKNOWN
-// must not quietly mean "page Daniel to re-login": on both occasions this fleet
-// has seen the symptom, nothing was revoked and no login was performed.
+// must not quietly mean "page Daniel to re-login": on two of the three occasions
+// this fleet has seen the symptom, nothing was revoked and no login was
+// performed. The third — 2026-09-07 — is not a counter-example to this guard,
+// because the grant had genuinely lapsed and the classifier therefore never
+// reached UNKNOWN while it held: it named CausePoisonedCredential from the
+// credential's own evidence, which is the branch that exists for that case.
 func TestUnknownNeverRecommendsARelogin(t *testing.T) {
 	v := Classify(Evidence{
 		Signatures: []Signature{SigAPI401, SigLoginPrompt},

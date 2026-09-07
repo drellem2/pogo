@@ -324,6 +324,94 @@ Whoever rules on item (3) will need to decide at least:
   often enough to be filtered, which is how stall-watch's thirteen hours of
   correct alarms became background noise.
 
+## 5a. Reading the log backwards: 2026-09-07 (mg-3222)
+
+Section 5 says that a detector nothing consumes reproduces the fault it was built
+for. On 2026-09-07 that bill came due in a form nobody had anticipated: the
+detector was **read**, five hours later, and read backwards.
+
+**What happened.** The refresh grant lapsed at `10:39:14Z` — observed, not
+inferred: `cred_expiry_warned` at `10:43:40Z` carries `tier=lapsed`,
+`remaining="already lapsed"`, `expires_at=2026-09-07T10:39:14Z`. All six crew
+agents took their last real turns between `10:46:10Z` and `10:53:49Z` and resumed
+between `16:22:23Z` and `16:34:15Z`. Uptime 149h throughout, no process died,
+`pogo agent list` green for the whole window.
+
+The detector's part of `~/.pogo/events.log`:
+
+```
+11:00:40Z  wedge_watch_fired  agents=[mayor]     cause=poisoned_credential  cred_refresh_valid=false
+11:06:10Z  wedge_watch_fired  agents=[all six]   cause=poisoned_credential  cred_refresh_valid=false
+11:22:10Z  synthetic_failure_detected  crew-mayor  "Login expired · Please run /login"
+  … sixteen more wedge_watch_fired, every one carrying "routed_to": "nobody" …
+14:56:10Z  wedge_watch_fired  agents=[all six]   cause=poisoned_credential  cred_refresh_valid=false
+16:19:14Z  wedge_watch_cleared  crew-mayor       cause=poisoned_credential
+16:19:14Z  wedge_watch_fired    five agents      cause=unknown              cred_refresh_valid=TRUE
+```
+
+**The reading that was taken.** mg-3222 read the last two lines as one event —
+"`wedge_watch_fired cause=poisoned_credential` + `wedge_watch_cleared` at the same
+instant" — and concluded the detector took **~5h20m** to fire on a wedge it names
+exactly, with `synthetic_failure_detected` holding the answer 15 minutes earlier.
+
+**What the log actually says.** It took **14m30s**: mayor's last turn at
+`10:46:10Z`, first finding at `11:00:40Z`, which is `MarkerHoldDown` (10m) plus one
+`Interval` (5m) and nothing else. The `16:19:14Z` FIRED line is a
+**de-escalation** — `cred_refresh_valid` flipped false→true in that sample and the
+verdict fell to `unknown` — and the word `poisoned_credential` at that timestamp
+belongs to the CLEARED line beside it, which names the cause of the finding being
+*retired* for one agent. `synthetic_failure_detected` was likewise early, not late:
+its first fire was `11:22:10Z`; the `16:03:44Z` one the ticket quotes is the
+twenty-first.
+
+**Why a correct instrument was misreadable, and what changed.**
+
+1. **Nothing on an emission said when the condition started.** Every field on a
+   finding advances with the sample, and `record()` re-emits only on a roster
+   **change** — so reading backwards from a recovery lands on the *last*
+   transition, which looks exactly like a first one. Findings now carry
+   `first_reported_at`; emissions carry `cause_since` (per cause), plus
+   `reported_since` / `reported_for` and an `onset_caveat` stating that both
+   clocks are in-memory floors that reset on a pogod restart and on any sample
+   carrying no finding under that cause. They can understate an age and cannot
+   overstate one.
+2. **Two clocks, because they fail in opposite directions.** A session that
+   cannot authenticate does not hang — it **completes** turns, in about ten
+   milliseconds, each ending `Login expired · Please run /login` — and a completed
+   turn moves the declared counter it is being judged by. The live roster bounced
+   sixteen times between 11:00Z and 14:56Z for that reason. `first_reported_at` is
+   exact per agent and resets on a clear; `cause_since` survives one agent dropping
+   out, because the fleet held at least one `poisoned_credential` finding in every
+   sample across the whole window.
+3. **`wedge_watch_cleared` read as an all-clear.** It is one agent leaving the
+   roster and says nothing about the underlying condition. Its `why` now says so
+   in as many words, and it carries `first_reported_at` / `reported_for` so a
+   retirement can be dated without pairing it against an earlier emission by hand.
+4. **The store and the process hold different things, and only the process stops
+   turns.** `pogo credential expiry` reads the **store**. Once the renewed grant
+   reached the keychain it printed HEALTHY while five sessions were still failing
+   on the credential they had picked up earlier — the one check a reader is told to
+   run, returning green about the thing that is wrong. `classify.go`'s UNKNOWN
+   verdict no longer claims that a readable, in-date credential refutes anything
+   beyond revocation of the **stored** grant.
+
+**What was genuinely missing is still section 5's item.** `"routed_to": "nobody"`
+was printed on all eighteen emissions. The lesson is not that this detector is
+slow — it is that an alarm nothing consumes is indistinguishable from an alarm
+that never fired, and after five hours somebody reconstructs which of the two it
+was from the log. The log now has to be written so that reconstruction lands on
+the onset. `internal/wedgewatch/onset_test.go` pins each of the four points above,
+and each was confirmed to fail against the pre-fix code.
+
+**Two evidence-hygiene notes carried out of this, both cheap and both load-bearing.**
+
+- **Anchor a date to the start of the timestamp field.** `grep 2026-09-07` over
+  whole JSON lines matches nested date fields and returns rows stamped hours in
+  the future. Use `grep '^{"schema_version":1,"timestamp":"2026-09-07T'`.
+- **Read the FIRST matching event, not the last.** Every watcher in this tree
+  re-emits on recurrence. `grep <type> | tail -1` answers "when did this last
+  recur", and it is one keystroke from the question you meant.
+
 ## 6. Relationship to neighbouring detectors
 
 - **The modal watcher (mg-4421, `internal/claude/modal_hook.go`)** *dismisses*
