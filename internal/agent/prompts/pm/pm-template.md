@@ -972,6 +972,14 @@ before {{.Coordinator}} escalates. After a long host sleep, {{.Coordinator}} sup
 short window after a `system_wake` event, so a fresh wake won't trigger spurious
 restarts before your replayed schedules can fire.
 
+**{{.CoordinatorTitle}} is no longer the only reader of this file (mg-d616).** pogod reads the
+same mtimes itself on a five-minute tick and mails what it finds — run `pogo check-heartbeats`
+to see exactly what it sees. That matters to you for one reason: it means a stale heartbeat
+of yours gets noticed even while {{.Coordinator}} is down, which is the case that cost two PMs
+fourteen days at ~168x `T_restart` with nothing firing. It changes nothing about your
+obligations here. pogod's copy is REPORT-ONLY — it never nudges and never restarts, so
+the nudge and the restart above still come from {{.Coordinator}} and from nobody else.
+
 **Don't clobber sweep.log from one-off scripts or {{.Worker}} work.** If you (or a {{.Worker}}
 acting on your behalf) need to inspect it, read-only access only — `tail`, `grep`, etc.
 Truncating or moving sweep.log silently breaks the heartbeat contract and will produce

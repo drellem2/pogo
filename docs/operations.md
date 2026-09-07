@@ -1099,7 +1099,13 @@ being wrong, not seven, so unanimity there is worth nothing as corroboration and
 is indistinguishable from the fleet stop it is meant to detect.
 
 Keep `pogo check-turns` as the per-agent diagnostic a human runs *after* this
-alarm fires, not as the thing that decides whether to page.
+alarm fires, not as the thing that decides whether to page. `pogo
+check-heartbeats` is its faster-clock sibling (mg-d616): it reads each crew
+agent's `sweep.log` mtime — refreshed on every ten-minute mail-check — against
+the same registry population, so it speaks about an agent 90 minutes after it
+goes quiet rather than three hours. Neither replaces the other. A heartbeat is
+the weaker evidence: a present-but-idle agent keeps touching it, while nothing
+but a finished turn writes a turnlog line.
 
 **Three cells, and a failed measurement must not fail toward ALARM.**
 

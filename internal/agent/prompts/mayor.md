@@ -605,15 +605,45 @@ still shows it running. mg-60ca is the canonical example: a crew agent's session
 doesn't catch this because nothing has crashed.
 
 To detect it, each PM appends a heartbeat line to its sweep.log every mail-check (10 min
-cadence) plus on every sweep. The file's mtime is the liveness signal. Watch each crew
-agent that publishes one:
+cadence) plus on every sweep. The file's mtime is the liveness signal. Read the whole
+census in one command:
+
+```bash
+pogo check-heartbeats
+```
+
+It joins pogod's registry against the sweep.log mtimes and prints one row per present
+crew agent — `fresh`, `stale`, `restart_due`, `missing`, `unreadable` — plus the
+population count, because zero agents examined produces zero findings and that is the
+same green as a healthy fleet. `pogo check-heartbeats --probe` is its positive control.
+
+The underlying files, if you want them by hand:
 
 ```bash
 ls -1 ~/.pogo/agents/pm/*/sweep.log 2>/dev/null
 ```
 
 For each `sweep.log`, read its mtime. The agent name is the parent directory's basename
-(e.g. `~/.pogo/agents/pm/pm-<project>/sweep.log` → agent `pm-<project>`).
+(e.g. `~/.pogo/agents/pm/pm-<project>/sweep.log` → agent `pm-<project>`). Your own
+heartbeat lives in your home dir instead: `~/.pogo/agents/{{.Coordinator}}/sweep.log`.
+
+**YOU ARE NO LONGER THE ONLY EXECUTOR OF THIS CHECK, and that is the point (mg-d616).**
+pogod now reads the same mtimes on its own five-minute tick (`internal/heartwatch`) and
+mails what it finds. Until it did, this section had exactly one executor — you — so it
+did not degrade when you stopped: it stopped. Two PMs sat 14 days at ~168x T_restart and
+nothing nudged or restarted either of them; both then asked, independently and in the
+same hour, whether they had been classified as expected-quiet. They had not. The reader
+was down.
+
+Two consequences for how you read this section:
+
+- **A finding about YOU goes to the escalation box, never to you** — the same routing
+  turn-watch uses, and for the same reason: a message saying "your heartbeat is stale"
+  arrives only when the claim is false. So do not expect to be told about your own row,
+  and do keep reading it here.
+- **pogod's copy is REPORT-ONLY.** It never nudges and never restarts. The thresholds
+  below are still yours to act on. Do not read "pogod is watching" as "pogod will fix
+  it".
 
 **Suppression:** before nudging or restarting, check for a recent `system_wake` event:
 
@@ -714,9 +744,14 @@ was caught by Daniel at ~14min, but a 90-min threshold avoids false positives fr
 short network blips, long tool calls, or clock-skew weirdness. Tighten only if a real
 wedge slips through for hours.
 
-**Scope:** the thresholds above read PM sweep.log mtimes, which only the PM tier
-publishes. For the whole crew — including yourself — read the turn-completion log
-instead (next section). **Don't act on your own row** — pogod / launchd is
+**Scope:** the thresholds above read sweep.log mtimes. `pogo check-heartbeats` searches
+both shapes the tree grew — `~/.pogo/agents/pm/<name>/sweep.log` for a PM and
+`~/.pogo/agents/<name>/sweep.log` for everyone else, yourself included — so a crew agent
+that publishes one is covered whichever tier it sits in, and one that publishes none
+reads `missing`, which is a finding and not a pass. For turn COMPLETION rather than
+liveness, read the turn-completion log as well (next section): a heartbeat is the weaker
+evidence on the faster clock, and keeping both means an agent that stops writing turnlog
+lines while still refreshing a heartbeat stays visible, and the converse. **Don't act on your own row** — pogod / launchd is
 {{.Coordinator}}'s watchdog (KeepAlive=true on the launchd plist) — but do read it,
 because a stale row of your own is the one finding nobody else on this machine can
 surface to you.

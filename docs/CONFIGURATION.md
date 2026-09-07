@@ -2350,6 +2350,170 @@ the top of this section.
 
 Source of truth: `internal/absentwatch/`, `internal/agent/roster.go`.
 
+## Who reads the crew heartbeat when the coordinator is dark? (heart-watch)
+
+Every crew agent refreshes a heartbeat line in its `sweep.log` on every
+mail-check — a ten-minute cadence — and the file's mtime is this fleet's
+tightest liveness signal, ten times tighter than the turnlog. Reading those
+mtimes has been written down since mg-60ca, in `mayor.md` §3a: list the sweep
+logs, nudge at 90 minutes, restart at 120.
+
+**It had exactly one executor, and that executor was a step in the
+coordinator's own coordination loop.** So it did not degrade when the
+coordinator stopped: it stopped. Measured (mg-d616):
+
+```
+pm-onethird sweep.log   mtime stale 14d      (~168x past T_restart=120m)
+pm-riemann  sweep.log   mtime stale 14d      (~168x past T_restart=120m)
+neither was nudged or restarted by anything
+```
+
+Both PMs asked, independently and in the same hour, whether they had been
+classified as expected-quiet alongside the two dormant PMs. **That hypothesis is
+refuted and is recorded as refuted**, because it is the natural one and it sends
+the fix at the classifier. They were not misclassified. The reader was down.
+
+Raising `T_stall`/`T_restart` is explicitly *not* the fix, and neither is a
+fourth detector that also reports to the coordinator. `internal/heartwatch` is a
+POGOD-RESIDENT second executor with the routing split turn-watch already had:
+
+- **Population is pogod's registry, evidence is the mtimes.** It iterates the
+  population and looks up the file, never the other way round. This box carries
+  three `sweep.log` files whose agents have not existed for months; a tree-first
+  scan reports those forever, and a permanently red detector is one nobody
+  reads.
+- **Two path shapes are searched per agent** — `agents/pm/<name>/sweep.log` and
+  `agents/<name>/sweep.log` — and the newest that exists wins. A fresh heartbeat
+  anywhere under an agent's name means that agent is alive.
+- **`missing` is never folded into `fresh`.** An agent that is present and
+  publishes no heartbeat gets its own verdict, and the row carries the paths that
+  were searched so a reader can check the claim rather than take it.
+- **Zero examined is an instrument failure, not a clear.** It emits
+  `heart_watch_error` and, importantly, does **not** close an open episode.
+- **A finding about the coordinator goes to the escalation box, never to the
+  coordinator.** That message arrives only when the claim is false.
+- **REPORT-ONLY, unlike the prompt it mirrors.** A stale heartbeat has two causes
+  that look identical from outside and take opposite responses — a wedged session
+  (restart is right) and an agent failing every turn in ~10ms on an expired
+  credential (restart destroys the transcript that diagnoses it, and the
+  replacement inherits the credential). On 2026-07-22 that distinction cost
+  23h30m.
+- **A recent `system_wake` holds the announcement, not the reading.** Post-sleep
+  schedule replay makes a stale heartbeat expected; the verdicts are still
+  computed, still in the report, and a `heart_watch_skipped` event carries the
+  finding count. A detector that goes blank after a host sleep goes blank at
+  exactly the moment the fleet is most likely to be stuck.
+
+```toml
+[heart_watch]
+enabled = true             # default true
+interval = "5m"            # sample cadence (default 5m)
+stall_after = "90m"        # mayor.md §3a's T_stall (default 90m)
+restart_after = "2h"       # mayor.md §3a's T_restart (default 2h). Clamped up to
+                           # stall_after if set lower — a misconfiguration must
+                           # not remove a verdict from the answer space.
+grace = "30m"              # post-start window in which an agent owes no
+                           # heartbeat yet (default 30m; negative disables, which
+                           # makes every spawn a finding)
+hold_down = "10m"          # a late reading must persist this long before it is
+                           # announced (default 10m; negative disables)
+renotify_after = "6h"      # an unchanged roster re-mails after this (default 6h)
+```
+
+`pogo check-heartbeats` is the pull surface for the same reading, with
+`--probe` as its positive control: it builds a throwaway tree holding a fresh
+agent, one past `T_stall`, one past `T_restart` and one that publishes nothing,
+and requires this same check to report the last three and leave the first alone.
+The probe runs in `go test ./...`, so every merge exercises the failing arm —
+this check spent its whole life never having been observed firing, and when it
+was finally measured it had not fired for two agents across fourteen days.
+
+`heart-watch` and `turn-watch` are **two witnesses on one question**, not a
+duplicate:
+
+| | evidence | clock | what its silence means |
+|---|---|---|---|
+| heart-watch | `sweep.log` mtime, refreshed by a mail-check | 90m / 2h | the agent has stopped taking mail-check turns |
+| turn-watch | `turnlog/<name>.log`, one line per completed turn | 3h | the agent has completed nothing |
+
+A heartbeat is the weaker evidence on the faster clock — a present-but-idle
+agent keeps touching it. Keeping both means an agent that stops writing turnlog
+lines while still refreshing a heartbeat stays visible, and the converse.
+
+Source of truth: `internal/heartwatch/`, `cmd/pogo/checkheartbeats.go`.
+
+## Who reads a detector that says it cannot answer? (blind-watch)
+
+`wedge-watch` is careful about its own blindness. An agent whose declared-work
+counter it cannot parse is never folded into healthy: it becomes `stateBlind`
+and a `wedge_watch_error` event whose message ends *"The agent could NOT be
+judged, which is not the same as healthy."*
+
+**What it did not have was a reader.** Measured in `~/.pogo/events.log`
+(mg-d616):
+
+```
+2609  wedge_watch_error  identity=crew-pm-riemann
+first 2026-08-16T22:10:37   — 18 days before the ticket
+```
+
+Eighteen days of an instrument declining to answer, out loud, 2609 times, into a
+channel with no consumer — while the crew heartbeat check above had stopped
+entirely. Nothing was watching either.
+
+**Why the source is not the event log.** "Give `wedge_watch_error` a consumer"
+reads like a job for a log reader, and a log reader is the wrong instrument:
+wedge-watch emits nothing on a clean pass, so *no rows* is the same reading
+whether it judged everyone healthy or stopped sampling. That is this ticket's own
+defect one level out. `internal/blindwatch` reads
+`wedgewatch.Watcher.Judgement()` instead, which carries the blind set **and** the
+last completed sample time **and** the population size, so three conditions are
+worded apart:
+
+| kind | condition |
+|---|---|
+| `blind` | the detector ran and could not judge N agents |
+| `stopped` | it has produced no verdict at all since `stale_after` |
+| `empty` | its last sample examined a population of zero |
+
+`stopped` subsumes the other two — a detector that is not sampling has an empty
+blind set and a zero population *for the same reason*, and reporting all three
+would be one fault wearing three labels. The blind clocks are not advanced while
+it is stopped either: an agent it stopped looking at is unlooked-at, not
+unjudgeable, and merging the two would date the wrong fault.
+
+A finding **about the detector** (`stopped`, `empty`) escalates rather than going
+to the coordinator: a broken instrument is not the coordinator's task, and it is
+one of the few things that could have reported the coordinator's own liveness. A
+finding naming the coordinator escalates for the usual reason.
+
+```toml
+[blind_watch]
+enabled = true             # default true
+interval = "15m"           # sample cadence (default 15m)
+hold_down = "2h"           # a blindness must persist this long before it is
+                           # announced (default 2h; negative disables). Blindness
+                           # flickers; the standing condition is the one worth a
+                           # notice, and mg-d616's ran 18 days.
+stale_after = "1h"         # the detector may go this long without completing a
+                           # sample before its SILENCE is the finding (default
+                           # 1h; negative disables that arm — which is the arm
+                           # that keeps "nothing blind" from meaning "no
+                           # detector")
+renotify_after = "24h"     # an unchanged finding re-mails after this (default
+                           # 24h). 2609 notices is the failure mode on the other
+                           # side.
+```
+
+**It is REPORT-ONLY and it does NOT route wedge-watch's findings.** Escalating a
+confirmed fleet-level wedge outside the wedged party is mg-fc8d item (3), an
+alerting-policy decision reserved to Daniel and deliberately still not built.
+This reports on the *instrument*, not on the fleet: nothing in a blind-watch
+notice says any agent is wedged.
+
+Source of truth: `internal/blindwatch/`, `internal/wedgewatch/watcher.go`
+(`Judgement`).
+
 ## Is the fleet getting anything done? (progress-watch)
 
 **Every other instrument on this box answers "is it dead?" or "is it

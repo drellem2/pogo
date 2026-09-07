@@ -31,6 +31,7 @@ import (
 	"github.com/drellem2/pogo/internal/ackwatch"
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/apimount"
+	"github.com/drellem2/pogo/internal/blindwatch"
 	"github.com/drellem2/pogo/internal/carrierdrift"
 	"github.com/drellem2/pogo/internal/claude"
 	"github.com/drellem2/pogo/internal/client"
@@ -47,6 +48,7 @@ import (
 	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/heartbeat"
+	"github.com/drellem2/pogo/internal/heartwatch"
 	"github.com/drellem2/pogo/internal/pathenv"
 	"github.com/drellem2/pogo/internal/platform/sleep"
 	"github.com/drellem2/pogo/internal/progresswatch"
@@ -3131,6 +3133,113 @@ Flags:
 			"read turn-completion artifacts against. Nothing is watching whether crew agents complete turns")
 	}
 
+	// The CREW HEARTBEAT reader (mg-d616). Every crew agent refreshes a
+	// heartbeat line in its sweep.log on every mail-check, and the file's mtime
+	// is this fleet's tightest liveness signal — ten times tighter than the
+	// turnlog above.
+	//
+	// IT LIVES HERE FOR THE SAME REASON turnwatch does, and the bill is sharper.
+	// Reading those mtimes was a STEP IN THE COORDINATOR'S OWN LOOP — mayor.md
+	// §3a, list the sweep logs, nudge at 90m, restart at 120m — with no other
+	// executor. So it did not degrade when the coordinator stopped: it stopped.
+	// pm-onethird and pm-riemann then sat 14 days at ~168x T_restart with
+	// nothing nudging or restarting them, and both asked, independently and in
+	// the same hour, whether they had been classified as expected-quiet. They
+	// had not. The reader was down.
+	//
+	// This is a SECOND EXECUTOR, not a second signal, and it does not replace
+	// the prompt's own rules. It is deliberately NOT merged with turnwatch: a
+	// heartbeat is the weaker evidence on the faster clock, and an agent that
+	// stops writing turnlog lines while still refreshing a heartbeat stays
+	// visible through the other witness, and the converse.
+	//
+	// REPORT-ONLY, unlike the prompt it mirrors. A stale heartbeat has two
+	// causes that look identical and take OPPOSITE responses — a wedged session
+	// (restart is right) and an agent failing every turn in ~10ms on an expired
+	// credential (restart destroys the transcript that diagnoses it). pogod
+	// distinguishes those elsewhere; this makes the condition visible at all.
+	//
+	// The routing rule is in heartwatch.recipients — a finding about the
+	// coordinator goes to the escalation box, never to the coordinator.
+	var heartWatcher *heartwatch.Watcher
+	if cfg.HeartWatch.Enabled && agentRegistry != nil {
+		// The same log ackwatch reads for its own disruption suppression, and
+		// the one `pogo events list --type=system_wake` greps: EventLogPath
+		// resolves beside schedules.json, which is $POGO_HOME/events.log.
+		heartWatchWakeLog := scheduler.EventLogPath(schedPath)
+		heartWatcher = heartwatch.New(heartwatch.Options{
+			Enabled: true,
+			Scan: func(now time.Time) (heartwatch.Report, error) {
+				// The wake suppression mayor.md §3a already applies by hand,
+				// read from the same event the prompt greps for. It gates the
+				// ANNOUNCEMENT only; the reading is still taken and still
+				// reported (see heartwatch.Report.WakeSuppressed).
+				wokeAt, _ := ackwatch.LastDisruption(heartWatchWakeLog, now)
+				return heartwatch.Scan(heartwatch.ScanOptions{
+					Now:          now,
+					StallAfter:   cfg.HeartWatch.StallAfter,
+					RestartAfter: cfg.HeartWatch.RestartAfter,
+					Grace:        cfg.HeartWatch.Grace,
+					WokeAt:       wokeAt,
+					Population: func() ([]heartwatch.Present, error) {
+						// Crew only. Polecat prompts carry no heartbeat clause
+						// — a polecat's work is evidenced by its claim
+						// re-stamp, its branch and its merge — so including
+						// them would produce a permanent red that means
+						// nothing, which is how a detector becomes ignorable.
+						var out []heartwatch.Present
+						for _, a := range agentRegistry.List() {
+							if a.Type != agent.TypeCrew {
+								continue
+							}
+							if a.Status != agent.StatusRunning && a.Status != agent.StatusRestarting {
+								continue
+							}
+							out = append(out, heartwatch.Present{
+								Name: a.Name, Type: string(a.Type), StartedAt: a.StartTime,
+							})
+						}
+						return out, nil
+					},
+				})
+			},
+			Mail:          client.SendMGMail,
+			Interval:      cfg.HeartWatch.Interval,
+			HoldDown:      cfg.HeartWatch.HoldDown,
+			RenotifyAfter: cfg.HeartWatch.RenotifyAfter,
+			Coordinator:   coordinator,
+			HumanBox:      escalationBox,
+			StartedAt:     time.Now(),
+		})
+		log.Printf("pogod: heart-watch enabled (interval=%s stall_after=%s restart_after=%s grace=%s "+
+			"hold_down=%s renotify=%s; coordinator findings route to %s, never to %s — report-only)",
+			cfg.HeartWatch.Interval, cfg.HeartWatch.StallAfter, cfg.HeartWatch.RestartAfter,
+			cfg.HeartWatch.Grace, cfg.HeartWatch.HoldDown, cfg.HeartWatch.RenotifyAfter,
+			escalationBox, coordinator)
+	} else if cfg.HeartWatch.Enabled {
+		const reason = "no agent registry, so there is no population to read sweep.log heartbeats against"
+		log.Printf("pogod: heart-watch NOT armed — %s. The crew heartbeat check is back to having one "+
+			"executor, and it is the coordinator's own loop", reason)
+		// And on the EVENT SPINE, not only on stderr. A runner that was never
+		// armed emits nothing, finds nothing, and is indistinguishable from one
+		// running over a fleet of fresh heartbeats — which is exactly the shape
+		// of green this package exists to end. pogod's stderr is not a reliable
+		// second channel either: it is inherited, and mg-a19a is four months of
+		// pogod.log holding zero lines for events that were in the running
+		// binary the whole time.
+		events.Emit(context.Background(), events.Event{
+			EventType: heartwatch.EventError,
+			Agent:     "pogod",
+			Details: map[string]any{
+				"error": reason,
+				"phase": "arm",
+				"why": "heart-watch could not be armed at startup; no late heartbeat will be reported " +
+					"until pogod is restarted with an agent registry, and the only remaining executor of " +
+					"this check is the coordinator's own coordination loop (mg-d616)",
+			},
+		})
+	}
+
 	var wedgeWatcher *wedgewatch.Watcher
 	if cfg.WedgeWatch.Enabled && agentRegistry != nil {
 		wedgeWatcher = wedgewatch.New(wedgewatch.Options{
@@ -3153,6 +3262,52 @@ Flags:
 			cfg.WedgeWatch.MinUptime, cfg.WedgeWatch.Ratio, cfg.WedgeWatch.CoincidenceWindow)
 	} else if cfg.WedgeWatch.Enabled {
 		log.Printf("pogod: wedge-watch NOT armed — the agent registry did not load, so there are no PTYs to read")
+	}
+
+	// The CONSUMER for a detector that declines to answer (mg-d616).
+	//
+	// wedge-watch is careful about its own blindness: an agent whose work
+	// counter it cannot parse becomes stateBlind and a `wedge_watch_error`
+	// event ending "The agent could NOT be judged, which is not the same as
+	// healthy." What it had was no reader. pm-riemann measured 2609 of them
+	// over 18 days, first at 2026-08-16T22:10:37 — an instrument saying so, out
+	// loud, into a channel with no consumer, while the OTHER instrument (the
+	// crew heartbeat above) had stopped entirely. Nothing was watching either.
+	//
+	// WHY THE SOURCE IS THE DETECTOR'S OWN STATE AND NOT THE EVENT LOG:
+	// wedge-watch emits nothing on a clean pass, so "no wedge_watch_error" is
+	// the same reading whether it judged everyone healthy or stopped sampling.
+	// A log reader would rebuild this ticket's own defect one level out. The
+	// source is wedgewatch.Watcher.Judgement(), which carries the blind set AND
+	// the last completed sample time AND the population size — so STOPPED and
+	// EMPTY are findings in their own right rather than silence.
+	//
+	// It armed even when wedgeWatcher is nil, and that is deliberate: from a
+	// consumer's seat "not armed" and "armed and stopped" are the same fact —
+	// nothing is judging the fleet — and both must produce a finding rather
+	// than a quiet pass. REPORT-ONLY, and it does NOT route wedge-watch's
+	// FINDINGS: escalating a confirmed fleet-level wedge outside the wedged
+	// party is mg-fc8d item (3) and remains reserved to Daniel. This reports on
+	// the instrument, not on the fleet.
+	var blindWatcher *blindwatch.Watcher
+	if cfg.BlindWatch.Enabled {
+		blindWatcher = blindwatch.New(blindwatch.Options{
+			Enabled:       true,
+			Source:        blindwatch.WedgeSource(wedgeWatcher),
+			Mail:          client.SendMGMail,
+			Interval:      cfg.BlindWatch.Interval,
+			HoldDown:      cfg.BlindWatch.HoldDown,
+			StaleAfter:    cfg.BlindWatch.StaleAfter,
+			RenotifyAfter: cfg.BlindWatch.RenotifyAfter,
+			Coordinator:   coordinator,
+			HumanBox:      escalationBox,
+			StartedAt:     time.Now(),
+		})
+		log.Printf("pogod: blind-watch enabled (interval=%s hold_down=%s stale_after=%s renotify=%s) — "+
+			"wedge_watch_error finally has a consumer (mg-d616); a finding about the DETECTOR routes to %s, "+
+			"report-only, and wedge-watch's own findings stay unrouted (mg-fc8d item 3)",
+			cfg.BlindWatch.Interval, cfg.BlindWatch.HoldDown, cfg.BlindWatch.StaleAfter,
+			cfg.BlindWatch.RenotifyAfter, escalationBox)
 	}
 
 	// The done-item polecat reaper (mg-56d1): completion frees a slot, however
@@ -3394,6 +3549,19 @@ Flags:
 				wedgeWatcher.Check(now)
 				logWedgeFindings(wedgeWatcher, now)
 			}(now)
+		}
+		// The crew-heartbeat reader rides the same tick and throttles itself to
+		// a coarse interval. In a goroutine because a finding shells out to
+		// `mg mail send`, which must never delay a tick. Report-only, and the
+		// only reader of those mtimes that is not the coordinator's own loop.
+		if heartWatcher != nil {
+			go heartWatcher.Check(now)
+		}
+		// The detector-blindness consumer rides the same tick. It reads
+		// wedge-watch's in-process judgement state — cheap — but mails on a
+		// finding, so it goes in a goroutine like the rest. Report-only.
+		if blindWatcher != nil {
+			go blindWatcher.Check(now)
 		}
 		// The synthetic-failure-turn detector rides the same tick and throttles
 		// itself to synthwatch.DefaultInterval. In a goroutine because it reads
