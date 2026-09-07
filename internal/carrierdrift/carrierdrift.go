@@ -82,6 +82,84 @@
 //     own defect aimed at itself, so it is guarded by a test that reads the
 //     shipped prompt corpus and fails when the two diverge, rather than by a
 //     comment asking the next editor to remember.
+//
+// # No GitHub-side actor identity separates THE FLEET from DANIEL (mg-a981)
+//
+// AckMarkers matches on the TEXT of a comment rather than on who posted it, and
+// the note there explains that choice for acknowledgements. The constraint is
+// wider than acknowledgements and it is stated here, at package level, because
+// this package is where the next person looks for prior art on "did anyone
+// respond to this".
+//
+// Every write this fleet makes to GitHub goes through the repo owner's
+// credential. So does every write Daniel makes by hand. **Any predicate whose
+// discriminating power rests on WHICH ACCOUNT ACTED cannot tell the two apart
+// here** — and it does not fail loudly when it can't. It returns a clean,
+// well-formed answer computed over a distinction that does not exist.
+//
+// Measured 2026-09-07 by mg-a981 across drellem2/pogo and drellem2/macguffin,
+// every issue and PR in every state. The identity fields do NOT all fail the
+// same way; they fail in three shapes, and the shapes are worth telling apart
+// because only the first is the one people expect:
+//
+//   - CONSTANT — comment authorship. 421 of 425 comments on issues and PRs are
+//     `drellem2`, and all 383 on pogo carry one single tuple: `user.type=User`,
+//     `author_association=OWNER`, `performed_via_github_app=null`. A triage
+//     worker's acknowledgement and Daniel's own reply are identical on every
+//     identity-adjacent field GitHub exposes. `drellem2/pogo#161` is a worked
+//     example: its only comment is the fleet's ack, and it reads OWNER.
+//
+//   - EMPTY — assignees, requested reviewers, reviews, reactions. 2 of 149
+//     issues carry any assignee; across 49 PRs there are ZERO assignees, ZERO
+//     review requests and ZERO reviews; across 198 issues+PRs and 425 comments
+//     there are ZERO reactions. A predicate over an empty field is constant in
+//     BOTH directions: "nobody reviewed this" is true of every PR forever, and
+//     its complement — "PRs with no reviewer" — matches 100% and reads as a
+//     catastrophe. Silent and cry-wolf are the same defect here, picked by
+//     which way the predicate was phrased.
+//
+//   - NON-CONSTANT BUT WRONG-AXIS — issue authorship, and this is the dangerous
+//     one, because a spot check makes it look like it works. It DOES
+//     discriminate: 57 of pogo's 127 issues and 18 of macguffin's 22 were filed
+//     by logins that are not `drellem2` (`bath-tub`, `CloverRoss`,
+//     `Redjive2`). What it separates is OUTSIDE-vs-THIS-BOX, which is a
+//     different question from FLEET-vs-DANIEL. internal/ghintake leans on
+//     exactly this and is sound for exactly this reason; see Issue.Author
+//     there.
+//
+// So a future check for "has a human responded", "was this reviewed by someone
+// else", or "did anyone other than the filer touch it" reads as obviously
+// correct, passes review, and measures nothing. A check that genuinely needs to
+// distinguish fleet from human must key on something OTHER than GitHub
+// identity — a marker in the body (what AckMarkers does), an `mg` field, or a
+// dispatch record. The dispatch record lives in pogod, not on GitHub, so a
+// GitHub-only checker cannot answer the fleet-vs-human question at all.
+//
+// # This section is itself a fact captured once
+//
+// Which is this package's founding defect, so it is stated with the same
+// discipline the detector applies to a carrier. The numbers above are a snapshot
+// of ONE deployment on ONE day, not a property of GitHub, and they are
+// re-derivable rather than trusted:
+//
+//	gh api --paginate 'repos/drellem2/pogo/issues/comments?per_page=100' \
+//	  -q '.[] | "\(.user.login)|\(.user.type)|\(.author_association)|\(.performed_via_github_app // "null")"' \
+//	  | sort | uniq -c
+//
+// The zero counts are NEGATIVE results, so they were taken with a positive
+// control: the same reaction reader run against `cli/cli` reports non-zero
+// totals, so the zeros here are absence and not a broken query. What is NOT
+// claimed is that no GitHub field anywhere could ever separate the two — only
+// that none of the fields GitHub exposes on a comment, an issue or a PR did, on
+// this deployment, on that date.
+//
+// The prose has a detector under it, for the same reason AckMarkers does.
+// Snapshot is the ONLY channel through which GitHub's answer about an issue
+// reaches Detect, and Detect is pure — so an author-identity predicate cannot
+// be written in this package without first adding an identity field to
+// Snapshot, and today Snapshot carries none. actoridentity_test.go refuses that
+// addition and prints this constraint when it fires, so the next editor reads
+// it at the moment it is worth knowing rather than being asked to remember.
 package carrierdrift
 
 import (

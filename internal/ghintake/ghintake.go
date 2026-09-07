@@ -92,6 +92,31 @@
 // an item a carrier. This is not pedantry — this very ticket's body quotes the
 // marker syntax and cites #99 several times, and a loose parse would have let
 // mg-039b suppress the finding it exists to produce.
+//
+// # A constraint on predicate design here: identity separates OUTSIDE, not FLEET
+//
+// This detector keys on the `gh:` marker, and Issue.Author is carried for triage
+// priority rather than used as a predicate. That is the right side of a line
+// worth stating explicitly, because the next detector on this surface will be
+// tempted across it (mg-a981).
+//
+// Every write this fleet makes to GitHub goes through the repo owner's
+// credential, and so does every write Daniel makes by hand. Measured 2026-09-07
+// across drellem2/pogo and drellem2/macguffin, all states: 421 of 425 comments on
+// issues and PRs are `drellem2`, and all 383 on pogo carry one identical tuple
+// (`user.type=User`, `author_association=OWNER`, `performed_via_github_app=null`).
+// Assignees, requested reviewers, reviews and reactions are not constant but
+// EMPTY — 0 reviewers and 0 reviews across 49 PRs, 0 reactions across 198
+// issues+PRs. So a predicate resting on WHICH ACCOUNT ACTED cannot separate a
+// fleet action from Daniel's here, and does not fail loudly when it can't: it
+// returns a clean answer computed over a distinction that does not exist.
+//
+// Author identity is the ONE identity field on this surface that still carries
+// information, because it is answering a different question — see Issue.Author.
+// A future intake-side check for "has a human responded" or "did anyone other
+// than the filer touch it" is NOT covered by that exception and would measure
+// nothing. internal/carrierdrift states the general form and the full
+// measurement, including how to re-derive it.
 package ghintake
 
 import (
@@ -115,6 +140,16 @@ type Issue struct {
 	// Author is the GitHub login that filed it. Load-bearing for triage
 	// priority: an uncarried issue from an outside reporter is a stranger left
 	// waiting, which is a materially worse failure than one of Daniel's own.
+	//
+	// This is the one identity field on this surface that still carries
+	// information, and it is worth being precise about WHY, because the reason
+	// does not generalise (mg-a981). It separates OUTSIDE from THIS BOX: 57 of
+	// pogo's 127 issues and 18 of macguffin's 22 were filed by logins that are
+	// not the owner's (measured 2026-09-07). It does NOT separate the FLEET from
+	// DANIEL — both act under the owner's credential and are identical on every
+	// identity field GitHub exposes. Anyone reaching for this field as prior art
+	// for a fleet-vs-human predicate is reading the wrong axis off a field that
+	// looks like it works.
 	Author string
 	// CreatedAt is when the issue was filed, used for the grace window.
 	CreatedAt time.Time
