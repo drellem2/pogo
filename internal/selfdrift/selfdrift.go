@@ -116,6 +116,14 @@ type Report struct {
 
 	Axes []Axis `json:"axes"`
 
+	// Shadowed is every copy of a pogo binary on $PATH that is NOT the copy
+	// that would run — including the benign ones, so a reader can see that a
+	// second entry was looked at and found harmless rather than not looked at.
+	Shadowed []Shadow `json:"shadowed,omitempty"`
+	// ShadowHazard is true when at least one of those is a different build
+	// from the copy that wins. Kept OFF Status on purpose; see noteShadows.
+	ShadowHazard bool `json:"shadow_hazard"`
+
 	Status       Status `json:"status"`
 	NeedsBuild   bool   `json:"needs_build"`
 	NeedsRestart bool   `json:"needs_restart"`
@@ -158,6 +166,11 @@ type Deps struct {
 	// foreign-stamp test and it is re-derivable by hand:
 	// `git -C <repo> cat-file -e <rev>^{commit}`.
 	RevInRepo func(repo, rev string) bool
+	// Shadows enumerates the copies of our binaries that are on $PATH and lose
+	// resolution to an earlier one. Nil is tolerated and means "not observed":
+	// the axes are a complete report on their own, and a caller that cannot
+	// read $PATH must not have an empty slice read back as "no shadows found".
+	Shadows func() []Shadow
 }
 
 // DefaultRef is the deploy ref whose HEAD the installed binaries are compared
@@ -215,8 +228,13 @@ func Check(deps Deps, ref string) Report {
 		r.Axes = append(r.Axes, Axis{Name: installedAxis(name), Revision: deps.BinaryRev(path), Path: path})
 	}
 
+	if deps.Shadows != nil {
+		r.Shadowed = deps.Shadows()
+	}
+
 	annotate(&r, deps)
 	classify(&r)
+	noteShadows(&r)
 	return r
 }
 
@@ -431,6 +449,17 @@ func (r *Report) Text() string {
 			rev += "  (" + a.Path + ")"
 		}
 		rows = append(rows, [2]string{a.Name, rev})
+	}
+	for _, s := range r.Shadowed {
+		label := "shadowed " + s.Name
+		if !s.Benign {
+			label = "SHADOWED " + s.Name
+		}
+		val := s.Path
+		if s.Revision != "" {
+			val += "  " + Short(s.Revision)
+		}
+		rows = append(rows, [2]string{label, val + "  <" + s.Note + ">"})
 	}
 	main := r.Main
 	if main == "" {

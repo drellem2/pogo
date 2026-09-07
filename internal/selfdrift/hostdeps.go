@@ -46,6 +46,7 @@ func HostDeps(repoOverride string) Deps {
 		ResolveRepo:  func() (string, string) { return ResolveRepo(repoOverride) },
 		MainRev:      MainRev,
 		RevInRepo:    RevInRepo,
+		Shadows:      HostShadows,
 	}
 }
 

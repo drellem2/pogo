@@ -512,6 +512,57 @@ pogo --json service status | jq -r .drift.status    # clean | drift | unknown
 pogo service status --no-drift                      # skip the check entirely
 ```
 
+**The report also names the copies that do NOT win $PATH.** The three axes
+above read the binary that `exec.LookPath` resolves — "what would actually run
+if you typed the name" — which is the right answer to the drift question and
+the reason a box can carry a five-month-old build of every binary and still be
+called clean. On 2026-03-20 an `install.sh` run left frozen copies of `pogod`,
+`lsp` and `pose` in `/usr/local/bin`; `~/.zprofile` prepends `~/go/bin` ahead of
+it, so every instrument on that box looked past them until 2026-09-07
+(mg-dabf).
+
+That protection was never a property of the machine — it was a property of how
+a shell happens to be invoked. Measured on the same host, `zsh -c -l` resolved
+`~/go/bin/pogod` while `bash -lc` — which gets `/etc/profile`'s `path_helper`
+ordering and no pogo prepend — resolved `/usr/local/bin/pogod`, for all three
+names, to the March build. A missing binary errors loudly; a wrong binary of
+the right name starts, serves, and is simply wrong.
+
+So every extra copy on `$PATH` is listed, benign ones included, because "we
+looked and it is fine" and "we never looked" must not render identically:
+
+```
+  shadowed pogod  : /usr/local/bin/pogod  <resolves to the same file as /Users/daniel/go/bin/pogod — cannot go stale>
+  SHADOWED pogo   : /Users/daniel/.pogo/bin/pogo  976c288c6757  <SHADOWED STALE COPY — a different build from /Users/daniel/go/bin/pogo>
+```
+
+A copy is **benign** when it resolves to the same file as the winner (a
+symlink — this is the fix) or carries the same revision. It is a **hazard**
+when it is a different build, or when it carries no vcs stamp at all: unknown
+provenance is not a reason to stop looking at it.
+
+The scan covers `install.sh`'s whole `BINARIES` list — `pogo pogod lsp pose` —
+which is wider than the two binaries the axes compare, because `lsp` and `pose`
+are exactly the copies the two answers differ on. `TestInstallSetMatchesInstallScript`
+holds the two lists together.
+
+**The fix is one symlink**, and it is PATH-order-independent in a way that
+reordering `$PATH` is not:
+
+```bash
+ln -sfn /Users/daniel/go/bin/pogod /usr/local/bin/pogod
+```
+
+**This does not move `status`.** `.drift.status` answers "are the three axes in
+agreement", and widening it here would silently change what every existing
+caller of that field is asking. The finding has its own field, and it is
+appended to `action` so it cannot be skimmed past:
+
+```bash
+pogo --json service status | jq -r .drift.shadow_hazard   # true | false
+pogo --json service status | jq -r '.drift.shadowed[] | select(.benign|not) | .path'
+```
+
 **Fleet-side, `scripts/pogo-self-deploy check` prints the same three-way** and
 the two agree by construction (verified against a live drifted daemon on
 2026-07-29: both reported `023fab5` running/installed against `e4a406c` on
