@@ -135,6 +135,7 @@ An agent process exited cleanly (received stop signal, completed task, or `pogo 
     - `"merge_reap"` — pogod reaping a polecat whose branch merged
     - `"merge_backstop"` — the defer-done backstop reaping a polecat that merged but lingered past its deadline
     - `"done_reap"` — pogod reaping a polecat whose work item is done and which has gone idle
+    - `"gate_reap"` — the same reaper stopping a polecat whose work item is parked at `stage: gated`, the gh-issue workflow's human decision gate. The item is **not** closed: this record says the worker was released, never that the work finished (mg-9af1)
   - `duration_seconds` (number, optional): wall-clock seconds since `agent_spawned`
 
 ```json

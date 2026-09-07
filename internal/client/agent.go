@@ -1102,6 +1102,54 @@ func MGWorkItemReviews(id string) (string, error) {
 	return c.Reviews, nil
 }
 
+// MGWorkItemStage returns the `stage:` line of a work item's state carrier
+// block — the gh-issue playbook's state-machine position — or "" when the item
+// declares none, which is the ordinary case for every item that is not on that
+// track.
+//
+// pogod's done-reaper uses it for the gate reap (mg-9af1): a triage polecat
+// parked at `stage: gated` has finished, but its item deliberately never
+// reaches `done`, so the terminal-state probe above can never see it and the
+// polecat holds a worker slot for the whole human gate.
+//
+// IT RETURNS THE STAGE, NOT A VERDICT, and that is deliberate. Whether a stage
+// gates is config.IsStageGated's question, and it is already the dispatch gate's
+// answer (internal/agent/dispatchgate.go). A second predicate here — "is it
+// gated?" — is how one rule becomes two that can disagree about the same word;
+// this probe reports what the item says and the caller applies the shared
+// predicate. It is the mg-4798 shape: one predicate, two enforcement sites.
+//
+// It reuses the SAME `mg show --json` shape as MGWorkItemDone and the SAME
+// parser that reads the file on disk (workitem.ParseCarrier), so it cannot
+// disagree with the dispatch gate about where a carrier block is.
+//
+// AN UNREACHABLE CARRIER BLOCK IS AN ERROR, NOT AN ABSENT STAGE (mg-27d4), for
+// the same reason it is in MGWorkItemReviews — but note the two callers read the
+// error in OPPOSITE directions, and both are right. The dispatch gate treats an
+// unreadable carrier as gated and REFUSES, because it may say `gated`. The
+// reaper treats it as "cannot tell" and leaves the polecat RUNNING, because the
+// action it would take is a stop. Each fails toward the outcome that is
+// recoverable: a refused dispatch is retried, a held slot is expensive, and a
+// polecat stopped on a guess is neither.
+func MGWorkItemStage(id string) (string, error) {
+	out, err := mgShowJSON(id)
+	if err != nil {
+		return "", err
+	}
+	var item struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(out, &item); err != nil {
+		return "", fmt.Errorf("mg show %s: unparseable JSON: %w", id, err)
+	}
+	c := workitem.ParseCarrier(item.Body)
+	if c.Unreadable {
+		return "", fmt.Errorf("mg show %s: carrier block is out of the parser's reach — "+
+			"cannot tell what stage it declares (mg-27d4)", id)
+	}
+	return c.Stage, nil
+}
+
 // execCommand is a variable for testability.
 var execCommand = execCommandFunc
 

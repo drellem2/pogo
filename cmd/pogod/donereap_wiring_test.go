@@ -25,6 +25,10 @@ func TestDoneReapRegistrySatisfiesInterface(t *testing.T) {
 	if r.itemReviews == nil {
 		t.Fatal("client.MGWorkItemReviews did not fit the review-declaration probe signature (mg-aaf6)")
 	}
+	r.SetStageProbe(client.MGWorkItemStage)
+	if r.itemStage == nil {
+		t.Fatal("client.MGWorkItemStage did not fit the carrier-stage probe signature (mg-9af1)")
+	}
 }
 
 // TestDoneReapIsWiredToTheHeartbeat is the other half. A reaper that is
@@ -44,6 +48,15 @@ func TestDoneReapIsWiredToTheHeartbeat(t *testing.T) {
 	if !strings.Contains(src, "client.MGWorkItemReviews") {
 		t.Error("pogod constructs the done-item reaper with no `reviews:` probe — the review exemption is " +
 			"then absent, not merely unused, and a builder is reaped mid-review exactly as in gh#131 (mg-aaf6)")
+	}
+	// The gate reap is fail-CLOSED when its probe is nil: nothing is reaped that
+	// would not have been, so an unwired daemon is silently the pre-mg-9af1
+	// daemon and every triage polecat goes on holding a slot through the human
+	// gate. That is invisible — the polecat looks healthy the whole time — which
+	// is exactly why it is pinned at the wiring rather than left to be noticed.
+	if !strings.Contains(src, "doneReap.SetStageProbe(client.MGWorkItemStage)") {
+		t.Error("pogod constructs the done-item reaper with no `stage:` probe — the gate reap is then absent, " +
+			"not merely unused, and a gh-issue triage polecat holds a worker slot for the whole human gate (mg-9af1)")
 	}
 	if !strings.Contains(src, "doneReap.Check(now)") {
 		t.Error("pogod constructs the done-item reaper but never calls Check — a detector with no " +
