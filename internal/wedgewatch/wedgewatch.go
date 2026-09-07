@@ -189,6 +189,63 @@
 //     and finds it false stops reading the detector, which costs more than the
 //     blindness did.
 //
+// # 2026-09-07: the detector was 14m30s, and it was read as 5h20m (mg-3222)
+//
+// The whole of this package is about instruments that read healthy because they
+// could not see. The one below is the mirror image: an instrument that saw
+// perfectly, said so eighteen times, and was read backwards.
+//
+// Six crew agents stopped completing turns between 10:46:10Z and 10:53:49Z and
+// resumed between 16:22:23Z and 16:34:15Z. Uptime 149h throughout, no process
+// died, `pogo agent list` green for the whole 5.5 hours — the 2026-08-04
+// signature exactly. What the event log holds:
+//
+//	10:39:14Z  the refresh grant LAPSES (cred_expiry_warned, tier=lapsed, 10:43:40Z)
+//	11:00:40Z  wedge_watch_fired  agents=[mayor]     cause=poisoned_credential
+//	11:06:10Z  wedge_watch_fired  agents=[all six]   cause=poisoned_credential
+//	11:22:10Z  synthetic_failure_detected  crew-mayor  "Login expired · Please run /login"
+//	  … sixteen more wedge_watch_fired, each carrying "routed_to": "nobody" …
+//	16:19:14Z  wedge_watch_cleared  crew-mayor  cause=poisoned_credential
+//	16:19:14Z  wedge_watch_fired    five agents cause=unknown  cred_refresh_valid=TRUE
+//
+// mg-3222 was filed on the last two lines read as one event, and concluded the
+// detector took ~5h20m to fire on a wedge it names exactly. It took 14m30s:
+// mayor's last turn at 10:46:10Z, first finding at 11:00:40Z, which is
+// MarkerHoldDown (10m) plus one Interval (5m) and nothing else. The 16:19:14Z
+// FIRED line is a DE-ESCALATION — the credential had just been renewed, so the
+// verdict fell from poisoned_credential to unknown — and the word
+// poisoned_credential at that timestamp belongs to the CLEARED line beside it,
+// which names the cause of the finding being retired for one agent.
+//
+// Three things made a correct instrument misreadable, and all three are fixed
+// above rather than argued about here:
+//
+//  1. NOTHING ON AN EMISSION SAID WHEN THE CONDITION STARTED. Every field
+//     advanced with the sample, and record() re-emits on every roster CHANGE, so
+//     reading backwards from a recovery lands on the LAST transition — which
+//     looks identical to a first one. Findings now carry FirstReportedAt and
+//     emissions carry cause_since / reported_since / reported_for, with the
+//     floor stated on the line.
+//  2. `wedge_watch_cleared` read as an all-clear. It is one agent leaving the
+//     roster, and during this incident agents left it sixteen times: a session
+//     that cannot authenticate does not hang, it COMPLETES turns in about ten
+//     milliseconds, and a completed turn moves the declared counter it is being
+//     judged by. The event now says that, and carries the retired finding's age.
+//  3. The store and the process hold different things, and only the process
+//     stops turns. `pogo credential expiry` reads the STORE. From the moment the
+//     renewed grant appeared in the keychain it printed HEALTHY while five
+//     sessions were still failing on the credential they had picked up earlier —
+//     so the one check a reader is told to run returns green about the thing
+//     that is wrong. classify.go's UNKNOWN verdict no longer claims a readable,
+//     in-date credential refutes anything beyond revocation of the STORED grant.
+//
+// What was genuinely absent is not detection. It is `"routed_to": "nobody"`,
+// printed on every one of those eighteen emissions — mg-fc8d item (3), below.
+// The lesson is not that this detector is slow; it is that an alarm nothing
+// consumes is indistinguishable from an alarm that never fired, and after five
+// hours somebody will reconstruct which of the two it was from the log, and get
+// it wrong unless the log is written to be read backwards.
+//
 // # Report-only, and deliberately unrouted
 //
 // mg-fc8d lists a third item — escalate a fleet-level wedge OUTSIDE the wedged
@@ -625,6 +682,25 @@ type Finding struct {
 	HostUsedCores float64 `json:"host_used_cores"`
 	HostCores     int     `json:"host_cores"`
 
+	// FirstReportedAt dates the finding to the START of the agent's current
+	// unbroken run of confirmations, not to the sample that happens to be
+	// emitting it.
+	//
+	// Every field above advances with the sample. Without this one a reader who
+	// finds an emission has no way to tell a condition that began ninety seconds
+	// ago from one that began five hours ago — and since the roster is re-emitted
+	// on every CHANGE, the emission a reader is most likely to land on is the LAST
+	// one, not the first. That is not hypothetical. On 2026-09-07 the fleet-wide
+	// poisoned-credential wedge was reported here at 11:00:40Z and seventeen times
+	// after; the reading taken from the log named 16:19:14Z — the final emission,
+	// by then a DE-ESCALATION to cause=unknown — and concluded the detector had
+	// taken 5h20m to fire. It had taken 14m30s. See the package doc.
+	//
+	// A clear resets it: the run it dates is the reported one, and an agent whose
+	// counter advances leaves the roster. Cross-check it against cause_since on
+	// the emission, which survives one agent dropping out.
+	FirstReportedAt time.Time `json:"first_reported_at"`
+
 	// Signatures are the observable states, sorted. Not a diagnosis.
 	Signatures []Signature `json:"signatures"`
 	// Cause and Response are classify.go's verdict; Why is its reasoning in one
@@ -670,8 +746,12 @@ func (f Finding) String() string {
 	for _, s := range f.Signatures {
 		sigs = append(sigs, string(s))
 	}
-	return fmt.Sprintf("%s (%s): uptime=%s declared=%s stalled=%s(%s) animating=%t signatures=[%s] cause=%s response=%s",
-		f.Name, f.Type, f.Uptime.Round(time.Second), declared,
+	since := "UNDATED"
+	if !f.FirstReportedAt.IsZero() {
+		since = f.FirstReportedAt.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("%s (%s): reported-since=%s uptime=%s declared=%s stalled=%s(%s) animating=%t signatures=[%s] cause=%s response=%s",
+		f.Name, f.Type, since, f.Uptime.Round(time.Second), declared,
 		f.StalledFor.Round(time.Second), f.StallSource, f.Animating,
 		strings.Join(sigs, " "), f.Cause, f.Response)
 }

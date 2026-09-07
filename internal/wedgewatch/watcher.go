@@ -73,6 +73,12 @@ type Watcher struct {
 	// once rather than a silence that leaves the reader holding an open
 	// incident forever.
 	fired map[string]Finding
+	// causeSince dates each CAUSE currently on the roster, and is the field that
+	// survives one agent dropping out of it. A cause is removed the first time a
+	// sample produces no confirmed finding carrying it, so the age it yields is a
+	// FLOOR — it can understate an incident that briefly went quiet, and can never
+	// overstate one. See stampOnset.
+	causeSince map[Cause]time.Time
 	// lastConnFailure is the fleet's memory of the most recent connectivity
 	// failure seen on ANY agent. It is what merges an outage with a 401 that
 	// surfaces afterwards — the single most important piece of state here, and
@@ -119,6 +125,7 @@ func New(opts Options) *Watcher {
 		counters:      map[string]counterMemory{},
 		pending:       map[string]bool{},
 		fired:         map[string]Finding{},
+		causeSince:    map[Cause]time.Time{},
 	}
 }
 
@@ -211,6 +218,8 @@ func (w *Watcher) sample(now time.Time) {
 
 	sort.Slice(confirmed, func(i, j int) bool { return confirmed[i].Name < confirmed[j].Name })
 
+	// BEFORE recordCleared, which is what overwrites the memory stampOnset reads.
+	w.stampOnset(confirmed, now)
 	w.emitBlind(blind, now)
 	w.emitPending(pendingNow, confirmed, now)
 	w.recordCleared(confirmed, now)
@@ -480,6 +489,77 @@ func (w *Watcher) emitPending(pendingNow []pendingNote, confirmed []Finding, now
 	}
 }
 
+// stampOnset dates each confirmed finding, and each CAUSE on the roster, to the
+// first sample of its current unbroken run.
+//
+// It is the answer to mg-3222, whose whole content is a number derived from the
+// wrong emission. Every other field on a finding advances with the sample, and
+// record() re-emits the roster on every CHANGE — so the emissions a reader can
+// find are the transitions, and the one nearest a recovery is the LAST
+// transition before it. On 2026-09-07 that emission was 16:19:14Z, at which
+// point the fleet-wide finding had already been standing for 5h18m and was in
+// the act of de-escalating from poisoned_credential to unknown because the
+// credential had just been renewed. Read as an onset it says the detector took
+// 5h20m. The detector took 14m30s.
+//
+// Two clocks are kept rather than one, because they fail in opposite
+// directions:
+//
+//   - PER AGENT (Finding.FirstReportedAt) is exact for that agent and RESETS on
+//     a clear. During the 2026-09-07 wedge every agent's own counter kept
+//     twitching — a session failing authentication completes turns, in ~10ms,
+//     and a completed turn moves the counter it is being judged by — so agents
+//     bounced out of the roster and back sixteen times between 11:00Z and
+//     14:56Z. Alone, this clock would have dated that incident to the most
+//     recent bounce.
+//   - PER CAUSE (causeSince) survives a single agent dropping out, because the
+//     fleet held at least one poisoned_credential finding in every sample across
+//     that whole window. It is dropped only when a sample carries NO finding
+//     under that cause, which makes it a FLOOR on the age: understating is
+//     possible, overstating is not.
+//
+// Neither survives a pogod restart, and neither pretends to: an in-memory clock
+// reports the age of the current process's knowledge. That is stated on the
+// emission rather than left for a reader to discover, because a detector whose
+// output can be checked and found false stops being read (mg-20eb).
+func (w *Watcher) stampOnset(confirmed []Finding, now time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	live := map[Cause]bool{}
+	for i := range confirmed {
+		// The memory is last sample's w.fired, which recordCleared has not yet
+		// overwritten. An agent absent from it is newly reported.
+		if prev, ok := w.fired[confirmed[i].Name]; ok && !prev.FirstReportedAt.IsZero() {
+			confirmed[i].FirstReportedAt = prev.FirstReportedAt
+		} else {
+			confirmed[i].FirstReportedAt = now
+		}
+		live[confirmed[i].Cause] = true
+	}
+	for c := range w.causeSince {
+		if !live[c] {
+			delete(w.causeSince, c)
+		}
+	}
+	for c := range live {
+		if _, known := w.causeSince[c]; !known {
+			w.causeSince[c] = now
+		}
+	}
+}
+
+// causeOnsets copies the cause clock for an emission.
+func (w *Watcher) causeOnsets() map[Cause]time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make(map[Cause]time.Time, len(w.causeSince))
+	for c, at := range w.causeSince {
+		out[c] = at
+	}
+	return out
+}
+
 // recordCleared emits once for each agent that was reported and no longer is.
 // An alarm with no all-clear leaves its reader holding an open incident
 // forever, which is how a detector's output stops being read.
@@ -503,16 +583,28 @@ func (w *Watcher) recordCleared(confirmed []Finding, now time.Time) {
 
 	sort.Slice(cleared, func(i, j int) bool { return cleared[i].Name < cleared[j].Name })
 	for _, f := range cleared {
+		details := map[string]any{
+			"target":   f.Name,
+			"identity": f.identity(),
+			"cause":    string(f.Cause),
+			"why": "THIS AGENT no longer meets the reporting bar: its declared work counter advanced " +
+				"again, or the dead-end marker left the screen. That is a fact about the agent, NOT a " +
+				"statement that the underlying condition is over and NOT an all-clear for the fleet — " +
+				"an agent whose session keeps failing authentication completes turns in milliseconds, " +
+				"which moves the very counter it is judged by. `cause` names what is being retired, " +
+				"never what has been fixed. Read the accompanying wedge_watch_fired for who is still in.",
+		}
+		// The onset is carried on the retirement too, so an all-clear can be
+		// dated without pairing it against an earlier emission by hand.
+		if !f.FirstReportedAt.IsZero() {
+			details["first_reported_at"] = f.FirstReportedAt.UTC().Format(time.RFC3339Nano)
+			details["reported_for"] = now.Sub(f.FirstReportedAt).Round(time.Second).String()
+		}
 		w.emit(events.Event{
 			EventType: EventCleared,
 			Agent:     "pogod",
 			Timestamp: now.UTC().Format(time.RFC3339Nano),
-			Details: map[string]any{
-				"target":   f.Name,
-				"identity": f.identity(),
-				"cause":    string(f.Cause),
-				"why":      "the agent's declared work counter advanced again, or the dead-end marker left the screen",
-			},
+			Details:   details,
 		})
 	}
 }
@@ -542,9 +634,10 @@ func (w *Watcher) record(snap Snapshot, confirmed []Finding, now time.Time) {
 		return
 	}
 
+	onsets := w.causeOnsets()
 	rendered := make([]map[string]any, 0, len(confirmed))
 	for _, f := range confirmed {
-		rendered = append(rendered, map[string]any{
+		row := map[string]any{
 			"name":           f.Name,
 			"identity":       f.identity(),
 			"type":           f.Type,
@@ -560,7 +653,20 @@ func (w *Watcher) record(snap Snapshot, confirmed []Finding, now time.Time) {
 			"cause":          string(f.Cause),
 			"response":       string(f.Response),
 			"why":            f.Why,
-		})
+		}
+		if !f.FirstReportedAt.IsZero() {
+			row["first_reported_at"] = f.FirstReportedAt.UTC().Format(time.RFC3339Nano)
+			row["reported_for"] = now.Sub(f.FirstReportedAt).Round(time.Second).String()
+		}
+		rendered = append(rendered, row)
+	}
+	causeSince := make(map[string]string, len(onsets))
+	oldest := time.Time{}
+	for c, at := range onsets {
+		causeSince[string(c)] = at.UTC().Format(time.RFC3339Nano)
+		if oldest.IsZero() || at.Before(oldest) {
+			oldest = at
+		}
 	}
 	details := map[string]any{
 		"count":    len(confirmed),
@@ -582,6 +688,24 @@ func (w *Watcher) record(snap Snapshot, confirmed []Finding, now time.Time) {
 		"host_cores":      snap.Host.Cores,
 		"routed_to": "nobody — mg-fc8d item (3), escalation outside the wedged party, is an " +
 			"alerting-policy decision reserved to Daniel and is deliberately NOT built here",
+		// The onset. Every other number here advances with the sample, and the
+		// roster is re-emitted on every CHANGE — so an emission found by reading
+		// backwards from a recovery is the LAST transition, not the first, and
+		// mg-3222 is the bill for reading one as the other: a 14m30s detection
+		// was reported as a 5h20m one, off the 16:19:14Z emission of a wedge this
+		// detector had first named at 11:00:40Z.
+		//
+		// cause_since is per CAUSE and survives one agent dropping out of the
+		// roster; a finding's own first_reported_at resets when that agent leaves.
+		// Both are a FLOOR: dropped on the first sample with no finding under the
+		// cause, and reset by a pogod restart, so they can understate the age of a
+		// condition and cannot overstate it.
+		"cause_since":  causeSince,
+		"onset_caveat": onsetCaveat,
+	}
+	if !oldest.IsZero() {
+		details["reported_since"] = oldest.UTC().Format(time.RFC3339Nano)
+		details["reported_for"] = now.Sub(oldest).Round(time.Second).String()
 	}
 	if !connAt.IsZero() {
 		details["last_connectivity_failure"] = connAt.UTC().Format(time.RFC3339Nano)
@@ -608,3 +732,17 @@ func (o Observation) identity() string {
 	}
 	return o.Name
 }
+
+// onsetCaveat states the limit of the onset clocks ON the emission that carries
+// them, rather than leaving it in a package doc a log reader will not open.
+//
+// Both are in-memory and both are floors. What they answer is "how long has THIS
+// pogod been reporting it", which is the honest question a process-local clock
+// can answer — and saying so is the mg-20eb rule applied to a field rather than
+// to an error message: a number a reader can check and find wrong takes the rest
+// of the detector's output down with it.
+const onsetCaveat = "reported_since/cause_since are when THIS pogod first reported the condition in " +
+	"its current unbroken run — a FLOOR on the age, not the onset of the fault. They reset on a " +
+	"pogod restart and on any single sample carrying no finding under that cause, so they can " +
+	"understate and cannot overstate. They are the field to read for 'how long has this been " +
+	"standing'; the emission timestamp is NOT, because the roster is re-emitted on every change."
