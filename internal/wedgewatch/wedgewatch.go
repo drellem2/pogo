@@ -203,7 +203,7 @@
 //	10:39:14Z  the refresh grant LAPSES (cred_expiry_warned, tier=lapsed, 10:43:40Z)
 //	11:00:40Z  wedge_watch_fired  agents=[mayor]     cause=poisoned_credential
 //	11:06:10Z  wedge_watch_fired  agents=[all six]   cause=poisoned_credential
-//	11:22:10Z  synthetic_failure_detected  crew-mayor  "Login expired · Please run /login"
+//	11:22:10Z  synthetic_failure_detected  crew-mayor  "Login expired · Please run /login"  (#1 of 23)
 //	  … sixteen more wedge_watch_fired, each carrying "routed_to": "nobody" …
 //	16:19:14Z  wedge_watch_cleared  crew-mayor  cause=poisoned_credential
 //	16:19:14Z  wedge_watch_fired    five agents cause=unknown  cred_refresh_valid=TRUE
@@ -231,7 +231,14 @@
 //     that cannot authenticate does not hang, it COMPLETES turns in about ten
 //     milliseconds, and a completed turn moves the declared counter it is being
 //     judged by. The event now says that, and carries the retired finding's age.
-//  3. The store and the process hold different things, and only the process
+//  3. cred_readable is the CONTROL for cred_refresh_valid. The same field reads
+//     false at 00:06:09Z, 03:45:39Z and 08:53:40Z that day — before the lapse,
+//     with cred_expiry_warned at 03:07:09Z proving the grant was then good — and
+//     those samples are cred_readable=FALSE, i.e. unreadable-defaults rather than
+//     negative readings. Only the sixteen readable-and-invalid samples from
+//     11:00:40Z to 14:56:10Z are a measurement. Split on cred_readable before
+//     reading cred_refresh_valid, or this finding inverts.
+//  4. The store and the process hold different things, and only the process
 //     stops turns. `pogo credential expiry` reads the STORE. From the moment the
 //     renewed grant appeared in the keychain it printed HEALTHY while five
 //     sessions were still failing on the credential they had picked up earlier —
