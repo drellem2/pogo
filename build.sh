@@ -133,18 +133,45 @@ trap 'gate_profile_report' EXIT
 # The step labels below are the profile's row names, and fmt.sh/test.sh print
 # their own "Step N:" banners — so these are named for what the row IS rather
 # than restating a banner the reader is about to see anyway.
+#
+# `|| exit $?` AND NOT `|| exit 1` (mg-b1df). The old form flattened EVERY
+# step's status to 1, and one of the statuses it flattened carries the only
+# evidence that a step was killed rather than red: a POSIX shell reports a
+# child that died of signal N as 128+N, so a SIGTERM'd `go test` reaches this
+# file as 143.
+#
+# Measured, on mr-dafhg22tjv1hjkm2144g / polecat-t2127 / 2026-09-07T20:06Z:
+# bash printed `Terminated: 15`, scripts/tmpdir-leak-guard.sh captured status
+# 143 and said so in its own report ("the wrapped command ALSO failed with
+# status 143"), test.sh's `set -e` propagated 143 — and then the line below
+# turned it into 1. The refinery received `./build.sh failed: exit status 1`
+# and classified the merge DEFECT, "a fix is warranted", against a run that
+# was never allowed to finish asserting anything.
+#
+# Every frame BELOW this one preserved the kill. This is the frame that
+# destroyed it, so no classifier downstream could have done better — it was
+# handed a 1 and a 1 is what a failing test looks like.
+#
+# WHAT THIS DOES NOT FIX, stated here so nobody reads the incident as closed.
+# The refinery still classifies a gate that exits 143 as a DEFECT, deliberately:
+# mg-0502 ruled that the exit NUMBER cannot distinguish a kill a shell relayed
+# from a status a program chose, and pm-pogo upheld that ruling against this
+# ticket. So the change here is not "the DEFECT goes away" — it is that the
+# status stops being destroyed on the way out. What any consumer does with an
+# accurate 143 is a separate question from build.sh reporting one, and this
+# fix is correct on its own terms either way.
 echo "Starting build"
-gate_step "fmt.sh (go fmt ./...)" ./fmt.sh || exit 1
+gate_step "fmt.sh (go fmt ./...)" ./fmt.sh || exit $?
 
 if [ "$skip_tests" = false ]; then
-  gate_step "test.sh (its own per-step profile is nested inside this row)" ./test.sh || exit 1
+  gate_step "test.sh (its own per-step profile is nested inside this row)" ./test.sh || exit $?
 fi
 
 echo "Step 3: Building binaries into ${build_dir}..."
 mkdir -p "$build_dir"
-gate_step "go build ./cmd/..." go build -ldflags "$ldflags" -o "${build_dir%/}/" ./cmd/... || exit 1
+gate_step "go build ./cmd/..." go build -ldflags "$ldflags" -o "${build_dir%/}/" ./cmd/... || exit $?
 
 if [ "$do_install" = true ]; then
   echo "Step 4: Installing binaries into GOBIN..."
-  gate_step "go install ./cmd/..." go install -ldflags "$ldflags" ./cmd/... || exit 1
+  gate_step "go install ./cmd/..." go install -ldflags "$ldflags" ./cmd/... || exit $?
 fi

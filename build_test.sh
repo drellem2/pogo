@@ -220,6 +220,83 @@ else
   fail "POGO_GATE_PROFILE=0 stopped the build from running"
 fi
 
+# --- Test 10: build.sh PRESERVES a step's exit status, and does not flatten it
+#
+# The defect (mg-b1df): every step read `|| exit 1`, so build.sh reported 1 for
+# every failure it ever saw. One of the statuses that flattened carries the only
+# machine-readable evidence a step was KILLED rather than red — a POSIX shell
+# reports a child that died of signal N as 128+N, so a SIGTERM'd `go test`
+# reaches build.sh as 143.
+#
+# Measured, on mr-dafhg22tjv1hjkm2144g / polecat-t2127 / 2026-09-07T20:06Z: bash
+# printed `Terminated: 15`, scripts/tmpdir-leak-guard.sh captured 143 and said
+# so in its own report, test.sh's `set -e` propagated 143, and build.sh turned
+# it into 1. The refinery was handed `exit status 1`, which is what a failing
+# test suite looks like, and recorded the merge DEFECT — "a fix is warranted" —
+# against a run that was never allowed to finish asserting anything. No
+# classifier downstream could have done better; the evidence was already gone.
+#
+# This test pins the STATUS, and nothing about how the refinery reads it. The
+# refinery still classifies a gate that exits 143 as a DEFECT, deliberately —
+# mg-0502 ruled that the exit number cannot distinguish a relayed kill from a
+# chosen status, and pm-pogo upheld that against this ticket. build.sh
+# reporting an accurate status is correct regardless of what any consumer
+# concludes from it, which is why this contract is testable on its own.
+#
+# Test 10b is the load-bearing half. 143 alone passes against a build.sh that
+# hardcodes 143, and 1 alone passes against the DEFECT this replaces, so
+# neither number tests the contract on its own: what is under test is that the
+# status is CARRIED, whatever it is.
+echo ""
+echo "Test 10: build.sh preserves each step's exit status"
+rm -rf "${fixture}/bin"
+printf '%s' "$good_main" > "${fixture}/cmd/hello/main.go"
+
+# 10a: the relayed-kill status the incident produced.
+printf '#!/bin/bash\nexit 143\n' > "${fixture}/test.sh"
+chmod +x "${fixture}/test.sh"
+(cd "$fixture" && ./build.sh >/dev/null 2>&1) && RELAY_RC=0 || RELAY_RC=$?
+if [ "$RELAY_RC" -eq 143 ]; then
+  pass "a step that exits 143 (128+15, SIGTERM relay) reaches the caller as 143"
+else
+  fail "build.sh reported ${RELAY_RC} for a step that exited 143 — the kill evidence is destroyed here, and the refinery cannot classify what it is not told"
+fi
+
+# 10b: an unrelated status, so 10a cannot pass against a hardcoded 143.
+printf '#!/bin/bash\nexit 7\n' > "${fixture}/test.sh"
+chmod +x "${fixture}/test.sh"
+(cd "$fixture" && ./build.sh >/dev/null 2>&1) && OTHER_RC=0 || OTHER_RC=$?
+if [ "$OTHER_RC" -eq 7 ]; then
+  pass "a step that exits 7 reaches the caller as 7 — the status is carried, not special-cased"
+else
+  fail "build.sh reported ${OTHER_RC} for a step that exited 7"
+fi
+
+# 10c: a REAL kill, not a script that types the number. This is the only case
+# that exercises the shell's own relay convention rather than our belief about
+# it, and it is the shape the incident actually had: the step's own child dies
+# of the signal and the step relays it under `set -e`.
+printf '#!/bin/bash\nset -e\nbash -c '"'"'kill -TERM $$'"'"'\necho REACHED-END\n' > "${fixture}/test.sh"
+chmod +x "${fixture}/test.sh"
+(cd "$fixture" && ./build.sh >/dev/null 2>&1) && KILL_RC=0 || KILL_RC=$?
+if [ "$KILL_RC" -eq 143 ]; then
+  pass "a step whose child is REALLY SIGTERMed reaches the caller as 143"
+else
+  fail "a real SIGTERM relay reached the caller as ${KILL_RC}, not 143"
+fi
+
+# 10d: the positive control for 10a-c. A passing step must still be 0 — a
+# build.sh that returned the wrong status for everything would satisfy all
+# three cases above only if they were the only cases.
+printf '#!/bin/bash\ntouch ran-tests\n' > "${fixture}/test.sh"
+chmod +x "${fixture}/test.sh"
+rm -rf "${fixture}/bin"
+if (cd "$fixture" && ./build.sh >/dev/null 2>&1); then
+  pass "control: a build whose steps all pass still exits 0"
+else
+  fail "control: a passing build no longer exits 0"
+fi
+
 echo ""
 echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
 [ "$FAIL" -eq 0 ]
