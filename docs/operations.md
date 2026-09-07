@@ -111,6 +111,53 @@ The detector reads harness session transcripts, which are **harness internals po
 
 **That is not a clean bill of health.** It means the check is off for that agent. Reading an absent transcript as "no failures here" would be the same absence-as-evidence mistake the original incident was made of.
 
+## A run of consecutive failing turns (the alarm that has to REACH you)
+
+Same transcripts as the section above, a different question, and a different job. That detector asks *how many turns failed in the last half hour* and its job is to stop a restart. This one asks *how many failed in a row, with no work between them* — and its job is to reach a person ([mg-6f3d](../internal/refusalwatch/refusalwatch.go), successor to mg-6616).
+
+**Why a run and not a rate.** A window's count is bounded by how busy the agent is. The longest run in this fleet's history — mayor, **661 consecutive failing turns, 2026-08-14T08:25:23Z to 2026-08-19T06:48:35Z**, four days and twenty-two hours — reads out of a 30-minute window as `2 errors in 30m`, which is also what one bad afternoon looks like. A run has no such ceiling: it is a position in the transcript, so it says the same thing about a chatty agent and a quiet one.
+
+**The floor is measured.** Over the 92 crew transcript files holding any failing turn (read 2026-09-07), the longest run per file distributes: **24 files peak at 1 turn, 8 at 2, 6 at 3–9, 18 at 10–99, and 36 at 100+**. Three is where that distribution separates — it excludes every file whose worst moment was a transient and admits every file whose worst moment ran to hundreds.
+
+### The finding this exists against: detection was never the missing piece
+
+On 2026-09-07 the wedge detector fired **correctly, in 14m30s**, and named all six agents and the exact cause. It then emitted sixteen more findings over 3h55m, **every one carrying `"routed_to": "nobody"`**. The outage ran 5h30m and ended when a human noticed a dead fleet.
+
+So the load-bearing part of this alarm is not the detector:
+
+- **Every sink is a filesystem write pogod performs itself.** Nothing routes through an agent turn, because the agents are the population that has stopped. `human` mail (which the out-of-process `com.pogo.deadman` launchd job polls) first, then a plain append to `~/.pogo/alarms/refusal-streak.log`. **All** sinks are tried, never just until one works — two channels that fail independently is the only reason to have two.
+- **An alarm counts as delivered only when the artefact has been observed on disk.** `mg mail send` exiting 0 says the command ran; the file under `~/.macguffin/mail/human/new/` is what the notifier polls, and that is what gets stat'd. On 2026-09-07 sixteen findings reported themselves sent.
+- **An undelivered alarm has its own event type and no floor.** `refusal_streak_undelivered` is emitted on every scan until something takes it, carrying `attempts` and `silent_seconds`. The 60-minute floor between repeat alarms applies **only after** a delivery has actually been confirmed.
+
+### How you find out
+
+- **One coalesced alarm to `human`**, subject `FLEET STOPPED: <N> consecutive failing turns (<reason>) — <agent> +<k> more`. Everything in it is absolute; nothing in it decays if it sits in a mailbox for six hours.
+- `refusal_streak_alarm` / `refusal_streak_undelivered` / `refusal_streak_cleared` in `~/.pogo/events.log`. The first carries `routed_to` as a **list of the sinks that confirmed**; the second carries `routed_to: "nobody"` and is the one to grep for.
+- **`pogo check-refusals`** re-reads every running agent's transcript on demand and prints one line each.
+
+### `pogo check-refusals` has four states and only one is health
+
+| | meaning |
+|---|---|
+| `ok` | the most recent turn is **established work** — a tool call, or tokens spent on a reply that says nothing about failing |
+| `STOP` | 3+ consecutive failing turns with no work between them |
+| `????` | turns were read, the tail is not established work, and the run is below the floor. **Not a claim of health** |
+| `----` | nothing could be judged: no declared transcript path, no readable file, or a file with no assistant turns. **Not a claim of health** |
+
+The last two exist because mg-6616's own classifier defaulted everything it did not recognise to `work`. It scored **386 failures as healthy turns** and turned one entirely dead day (2026-08-21) into "41 work". The error points *toward* health, which makes the surrounding days look like a solid baseline. There is no default bucket here: a failure mode nobody has enumerated is still a failure, named `unrecognised`, and the harness's own words for it travel in the alarm.
+
+The failure **string** is the name, not the predicate. Measured over 76,541 crew assistant turns, **21 turns match a known failure string and are real, token-spending model turns** — agents writing *about* the outage. Those are `ambiguous`: not a failure, and not evidence of health either, so they neither build a run nor break one.
+
+### `pogo check-refusals --probe` — would the alarm reach anybody?
+
+Ask this when the census comes back clean. **A notification mechanism verified against a healthy fleet is verified in the one condition where it is not needed.**
+
+The probe builds a throwaway macguffin store with **no agents in it at all** — the fleet-down condition — delivers the alarm by the same code path pogod uses, driving the same real `mg` binary, and confirms the bytes are in the maildir the notifier polls. Its matched controls send to a mailbox nobody registered (must be **refused**), write a ledger to a path that cannot be created (must **not** confirm), and run `Deliver` with every sink failing (must return `ErrNoRecipient`, not `nil`). A probe that could not be *built* reports `INSTRUMENT FAILURE` and exits 3 — never a pass. The same probe runs in `go test ./...`, so the refinery exercises it on every merge.
+
+### What to do
+
+**Do not restart. Do not nudge.** Identical to the section above and for the same reasons, with one addition: every nudge path runs through an agent, and the agents are what has stopped. The alarm names the mode and what clears it — `entitlement` is an **admin setting that `/login` does not fix**, `spend_limit` needs the cap raised, `login` needs a human in a live session, `timeout` and `api_error` clear with time.
+
 ## The fleet auth expiry warning (`pogo credential expiry`)
 
 The fleet's harness credential holds an OAuth **refresh grant with a hard 30-day

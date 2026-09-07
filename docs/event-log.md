@@ -1661,6 +1661,60 @@ pogod **withheld a restart** it would otherwise have performed, because the agen
 {"schema_version":1,"timestamp":"2026-07-22T04:00:00.000000000Z","event_type":"synthetic_failure_restart_suppressed","agent":"crew-pm-pogo","details":{"target":"pm-pogo","reason":"auth_failed","failing_turns":143,"suppressed_action":"respawn","why":"a restart cannot fix a synthetic zero-token failure turn; it discards the session's context and recovers nothing (mg-18d0)"}}
 ```
 
+#### `refusal_streak_alarm`
+
+pogod's consecutive-refusal alarm ([internal/refusalwatch](../internal/refusalwatch/refusalwatch.go), mg-6f3d) found **N or more consecutive failing assistant turns** with no established work between them, and **something confirmed delivery of the alarm**. Additive — no `schema_version` bump.
+
+It reads the same transcripts as `synthetic_failure_detected` and asks a different question. That one counts failures in a trailing 30-minute window; this one counts a **run**, which has no window and therefore no ceiling — mayor's 661-turn run of 2026-08-14..08-19 reads out of a 30m window as `2 errors in 30m`. Count `synthetic_failure_detected` to decide whether to restart; count this to decide whether the fleet has stopped.
+
+**`routed_to` is a LIST, never a string on this event type.** An alarm that reached nobody is `refusal_streak_undelivered` instead, so this type cannot carry an empty routing.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"` — the finding is about a SET of agents, carried in `details.agents`), `details`
+- **`details` fields:**
+  - `agents` ([]string, required): every agent in the run at this moment, sorted. The class is characteristically fleet-wide — one dead credential is shared — so the alarm is coalesced and this is the roster.
+  - `streak` (int, required): the longest run in the roster
+  - `reason` (string, required): `timeout` | `entitlement` | `spend_limit` | `login` | `api_error` | `unrecognised`. **`unrecognised` is a failure, not an unknown** — a structurally-synthetic turn whose text matches no enumerated string.
+  - `brief` (string, required): the run stated absolutely — `"<N> consecutive failing turns (<reason>), <first>–<last>"`. Nothing in it decays.
+  - `detail` (string): the harness's own text for the most recent failing turn, truncated. The only field that can name a mode the string table has no entry for.
+  - `routed_to` ([]string, required): the sinks that CONFIRMED — e.g. `["ledger","mg-mail:human"]`
+  - `sinks` ([]object, required): every receipt, confirmed or not, each with `sink`, `ref`, `confirmed`, `at`, and `err` on a failure
+  - `why` (string, required): the rationale
+
+```json
+{"schema_version":1,"timestamp":"2026-09-07T11:30:10.000000000Z","event_type":"refusal_streak_alarm","agent":"pogod","details":{"agents":["architect","mayor","pa","pm-onethird","pm-pogo","pm-riemann"],"streak":3,"reason":"login","brief":"3 consecutive failing turns (login), 2026-09-07T11:00:10Z–11:30:10Z","detail":"Please run /login · API Error: 403 The socket connection was closed unexpectedly","routed_to":["ledger","mg-mail:human"],"sinks":[{"sink":"mg-mail:human","ref":"/Users/daniel/.macguffin/mail/human/new/1788...","confirmed":true,"at":"2026-09-07T11:30:10Z"}],"why":"N consecutive assistant turns were answered locally and failed, with no established work between them. Presence instruments read green throughout; nothing restarts this."}}
+```
+
+#### `refusal_streak_undelivered`
+
+The alarm above was **raised and nothing confirmed it**. This is a separate event type rather than a field on the success event, and the reason is measured: on 2026-09-07 the wedge detector emitted sixteen `wedge_watch_fired` events over 3h55m, **every one carrying `"routed_to": "nobody"` inside a normal-looking fired event**, and nobody noticed. A field is read past; a type is grepped for. Additive — no `schema_version` bump.
+
+**It has no floor.** While an episode has never reached anybody it is retried on **every scan**, and each attempt emits one of these. The 60-minute floor between repeat alarms applies only after a delivery has actually been confirmed — a floor on an undelivered alarm is the defect this whole item exists against.
+
+- **`details` fields:**
+  - `agents`, `streak`, `reason`, `brief`: as above
+  - `routed_to` (string, required): always the literal `"nobody"` on this type
+  - `attempts` (int, required): how many delivery attempts have failed for this standing episode
+  - `silent_seconds` (int, required): how long the episode has been raising and reaching nobody. **The duration of a silent alarm must be a number**, not something a reader reconstructs from repeated log lines.
+  - `sinks` ([]object, required): every receipt, each carrying the `err` that explains why it did not confirm
+  - `why` (string, required): the rationale
+
+```json
+{"schema_version":1,"timestamp":"2026-09-07T11:40:10.000000000Z","event_type":"refusal_streak_undelivered","agent":"pogod","details":{"agents":["mayor"],"streak":4,"reason":"login","brief":"4 consecutive failing turns (login), 2026-09-07T11:00:10Z–11:40:10Z","routed_to":"nobody","attempts":3,"silent_seconds":600,"sinks":[{"sink":"mg-mail:human","confirmed":false,"at":"2026-09-07T11:40:10Z","err":"`mg mail send human` failed: exit status 3: no_such_mailbox"}],"why":"the alarm was RAISED and nothing confirmed it. This is the 2026-09-07 state: a correct detection with no path to a person. It will be retried on every scan until something takes it."}}
+```
+
+#### `refusal_streak_cleared`
+
+Every agent in the episode has completed a turn again. Nothing in this watcher restarted or nudged anything, so this cleared on its own or on a human. Additive — no `schema_version` bump.
+
+- **`details` fields:**
+  - `agents` ([]string, required): the roster the episode closed with
+  - `was_delivered` (bool, required): whether the alarm it closes ever reached anybody. An episode that cleared **without** ever being delivered is the whole failure mode, closing quietly — this field is what makes that countable.
+  - `why` (string, required): the rationale
+
+```json
+{"schema_version":1,"timestamp":"2026-09-07T16:30:00.000000000Z","event_type":"refusal_streak_cleared","agent":"pogod","details":{"agents":["architect","mayor"],"was_delivered":true,"why":"every agent in the episode has completed a turn again; nothing here restarted or nudged anything, so this cleared on its own or on a human"}}
+```
+
 #### `usage_limit_hit`
 
 pogod's modal watcher ([modal_hook.go](../internal/claude/modal_hook.go), gh drellem2/pogo #45) declared a **suspected** provider usage-limit hit for an agent: the rate-limit-options modal has been recently visible AND the agent's event log has been stale for longer than the usage-limit staleness gate (~5m, `UsageLimitSuspectStaleness`). This is a heuristic derived entirely from the existing event-staleness tracker — there is no provider quota/API probe. The ~5m gate is deliberately long because the marker text also appears in ordinary transcripts; a shorter gate would false-positive on an agent that merely prints the phrase. Emitted once per wedge; the paired `usage_limit_cleared` fires on recovery. Additive — no `schema_version` bump.

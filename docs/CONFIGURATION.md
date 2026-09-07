@@ -2642,9 +2642,17 @@ progress-watch is disjoint from its nearest neighbours:
 
 | | population | question |
 |---|---|---|
-| synthwatch | agents with transcripts | are its turns ERRORING? (a blocked worker errors nothing — it waits) |
+| synthwatch | agents with transcripts | are its turns ERRORING **in the last 30m**? (a blocked worker errors nothing — it waits) |
+| refusal-watch | agents with transcripts | are its turns erroring **IN A ROW**, and did the alarm REACH anybody? |
 | turn-watch | present crew agents | has it completed a turn in 3h? (the FLEET DOWN floor, deliberately coarse) |
 | progress-watch | live workers | is the FLEET landing anything in the last 30m? |
+
+synthwatch and refusal-watch read the same files and are **not** duplicates. A
+window's count is bounded by how busy the agent is: the longest run in this
+fleet's history — 661 consecutive failing turns over 2026-08-14..08-19 — reads
+out of synthwatch's 30-minute window as `2 errors in 30m`, indistinguishable
+from one bad afternoon. They also do opposite jobs: synthwatch's output is a
+restart SUPPRESSION, refusal-watch's is a delivery to a person.
 
 A 30-minute stall of seven workers sits entirely inside turn-watch's blind spot,
 and mg-c058 could be fixed completely without making it visible.
@@ -2935,6 +2943,59 @@ from `UNDECIDABLE` to `DROPPED` because this version prefers the copy of a
 duplicated item that names a worker rather than whichever the glob yielded last.
 
 Source of truth: `internal/verdictwatch/`, `cmd/pogo/checkverdicts.go`.
+
+### `pogo check-refusals` — agents whose turns are failing IN A ROW, and whether the alarm reaches anybody
+
+A fifth disjoint question, and the only one in this family whose subject is its
+own delivery. It reads each running agent's harness session transcript and
+reports the **trailing run** of consecutive failing assistant turns: turns the
+harness answered locally, spending no tokens, flagged as an API error.
+
+**The predicate is structural; the string is only the name.** A turn is a
+failure when the harness attributed it to a synthetic model, spent nothing in
+either direction, and flagged it an API error. The known refusal strings —
+`Request timed out`, the entitlement refusal, the monthly-spend-limit line,
+`Please run /login`, `API Error:` — then say *which* mode it was. Measured over
+114 crew transcript files and 76,541 assistant turns on 2026-09-07: **12,230
+failing turns, 0 of which matched no string, and 21 turns that matched a string
+and were real, token-spending model turns** — agents writing *about* the outage.
+So string-matching alone is wrong in both directions, and a mode nobody has
+enumerated is still a failure (`unrecognised`), never a healthy turn.
+
+**Four states, one of which is health:**
+
+| | meaning |
+|---|---|
+| `ok` | the most recent turn is **established work** — a tool call, or tokens spent on a reply with no failure string in it |
+| `STOP` | 3+ consecutive failing turns with no work between them |
+| `????` | turns were read, the tail is not established work, and the run is below the floor. **Not health** |
+| `----` | nothing could be judged. **Not health** |
+
+The last two exist because mg-6616's classifier defaulted the unrecognised to
+`work`, scored **386 failures as healthy turns**, and turned one entirely dead
+day into "41 work". The fix was not a better string list; it was removing the
+default bucket when the default is the healthy state.
+
+**`--probe` is the flag to reach for when the census comes back clean.** It
+answers a different question — *would the alarm reach anybody?* — by building a
+throwaway macguffin store with **no agents in it at all**, delivering the alarm
+through the same code path pogod uses, and confirming the bytes are in the
+maildir the out-of-process notifier polls. Matched controls: an unregistered
+recipient must be REFUSED, a ledger path that cannot be created must not
+confirm, and `Deliver` with every sink failing must return `ErrNoRecipient`
+rather than `nil`. A probe that could not be BUILT reports `INSTRUMENT FAILURE`
+and exits 3, never a pass. The same probe runs in `go test ./...`.
+
+Why the flag exists at all: on 2026-09-07 the wedge detector fired correctly in
+14m30s and then emitted sixteen further findings over 3h55m, **every one
+carrying `"routed_to": "nobody"`**. A notification mechanism verified against a
+healthy fleet is verified in the one condition where it is not needed.
+
+Exit status: 0 no runs at or above the floor, 1 at least one, 3 this run
+measured nothing.
+
+Source of truth: `internal/refusalstreak/`, `internal/refusalwatch/`,
+`cmd/pogo/checkrefusals.go`, `cmd/pogod/refusalwatch.go`.
 
 ## The wedged-agent detector (wedge-watch)
 
