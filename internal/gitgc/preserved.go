@@ -226,6 +226,37 @@ type PreservedReport struct {
 	// can see the scan saw them and did not count them — a headline number
 	// that quietly includes live agents' work is a wrong number.
 	InUse []PreservedTree `json:"in_use"`
+	// The counts below are DERIVED from Retained and InUse, and they are
+	// carried in the payload anyway. That redundancy is deliberate and it has
+	// one named consumer: the nightly redeployer (scripts/pogo-self-deploy)
+	// reads JSON with sed and no jq, on purpose — one fewer dependency in the
+	// path that must work when everything else is broken. A single-line regex
+	// cannot count an array of nested objects, so a reader without jq that had
+	// to derive `len(retained)` itself would either grow a fragile counter or,
+	// far more likely, not ask at all. It did not ask at all for 25 nights
+	// (mg-e621): the deploy printed "no polecat holds unpushed work" beside
+	// seven retained trees on this box, three of them holding untracked files
+	// (the mayor's count, 2026-09-06; re-derived 2026-09-07 the seven held and
+	// the untracked half read four), because the instrument that CAN see them
+	// is this one and nothing joined the two populations up.
+	//
+	// Summary() renders from these same fields (applyCounts runs on its own
+	// copy first), so the human listing and the machine listing cannot report
+	// different populations — which is the failure this whole family is about.
+	RetainedCount int `json:"retained_count"`
+	// RetainedUncommitted, RetainedUndetermined and RetainedUnpushed are the
+	// Outcome split, in Summary()'s order and with Summary()'s meanings.
+	RetainedUncommitted  int `json:"retained_uncommitted"`
+	RetainedUndetermined int `json:"retained_undetermined"`
+	RetainedUnpushed     int `json:"retained_unpushed"`
+	// RetainedUntracked is how many retained trees hold at least one UNTRACKED
+	// path — the urgent subset, because such a path is on no branch, in no
+	// stash and on no remote, so the tree is the only copy of its git objects.
+	// It is a count of TREES and not of paths: the question a reader asks of a
+	// headline is "how many of these am I one `rm -rf` away from losing", and
+	// that is a question about trees.
+	RetainedUntracked int `json:"retained_untracked"`
+	InUseCount        int `json:"in_use_count"`
 	// CleanCount and NotWorktreeCount account for everything else under
 	// PolecatsDir, so the listing is a partition of the directory rather than
 	// a selection out of it.
@@ -446,6 +477,7 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 
 	sortPreserved(rep.Retained)
 	sortPreserved(rep.InUse)
+	rep.applyCounts()
 	return rep, nil
 }
 
@@ -557,25 +589,44 @@ func firstLine(s string) string {
 // they have seen the tree.
 const preservedModifiedCap = 20
 
+// applyCounts fills the scalar count fields from Retained and InUse.
+//
+// It is the ONE derivation of those numbers. ScanPreserved calls it before
+// returning and Summary() calls it on its own copy, so a hand-built report
+// still renders correctly and — the part that matters — the human headline and
+// the `--json` payload can never disagree about how many trees are retained.
+// Two components observing different populations and only one of them speaking
+// in universals is precisely the defect mg-e621 records.
+func (r *PreservedReport) applyCounts() {
+	r.RetainedCount = len(r.Retained)
+	r.InUseCount = len(r.InUse)
+	r.RetainedUncommitted, r.RetainedUndetermined, r.RetainedUnpushed, r.RetainedUntracked = 0, 0, 0, 0
+	for _, t := range r.Retained {
+		// Three counts, not two. "unpushed" trees hold no uncommitted work and
+		// are perfectly readable, so folding them into either existing bucket
+		// states a fact about them that nobody established — and the headline
+		// count is the line a reader takes away (mg-8d25).
+		switch t.Outcome {
+		case "undetermined":
+			r.RetainedUndetermined++
+		case "unpushed":
+			r.RetainedUnpushed++
+		default:
+			r.RetainedUncommitted++
+		}
+		if t.Untracked > 0 {
+			r.RetainedUntracked++
+		}
+	}
+}
+
 // Summary renders the report for an operator.
 func (r PreservedReport) Summary() string {
 	var b strings.Builder
 
-	// Three counts, not two. "unpushed" trees hold no uncommitted work and are
-	// perfectly readable, so folding them into either existing bucket states a
-	// fact about them that nobody established — and the headline count is the
-	// line a reader takes away (mg-8d25).
-	preserved, undetermined, unpushed := 0, 0, 0
-	for _, t := range r.Retained {
-		switch t.Outcome {
-		case "undetermined":
-			undetermined++
-		case "unpushed":
-			unpushed++
-		default:
-			preserved++
-		}
-	}
+	// r is a COPY (value receiver), so this recomputes the counts for the
+	// render without touching the caller's report.
+	r.applyCounts()
 
 	fmt.Fprintf(&b, "retained polecat worktrees under %s\n", r.PolecatsDir)
 	if r.RepoFilter != "" {
@@ -585,9 +636,17 @@ func (r PreservedReport) Summary() string {
 	}
 	fmt.Fprintf(&b, "  %d retained: %d holding uncommitted work, %d unreadable, "+
 		"%d clean but holding commits that exist nowhere else\n",
-		len(r.Retained), preserved, undetermined, unpushed)
+		r.RetainedCount, r.RetainedUncommitted, r.RetainedUndetermined, r.RetainedUnpushed)
+	// The untracked subset gets its own headline line rather than living only
+	// in the per-tree rows below. It is the number a reader carries away, and
+	// on 2026-09-06 it was the number that made a deploy's "no polecat holds
+	// unpushed work" false rather than merely narrow: three of seven trees held
+	// content in no branch, no stash and on no remote — the mayor's count that
+	// day, four of seven when re-derived on 2026-09-07 (mg-e621).
+	fmt.Fprintf(&b, "  of those, %d hold UNTRACKED files — on no branch, in no stash, on no remote,\n"+
+		"  so the tree is the only copy of those git objects\n", r.RetainedUntracked)
 	fmt.Fprintf(&b, "  %d dirty tree(s) in use by a live polecat — not retained, listed at the end\n",
-		len(r.InUse))
+		r.InUseCount)
 	fmt.Fprintf(&b, "  %d clean, %d not linked worktrees (no .git — see `pogo gc` orphan dirs)\n",
 		r.CleanCount, r.NotWorktreeCount)
 

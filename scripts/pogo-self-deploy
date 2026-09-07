@@ -265,8 +265,17 @@ deploy_reason_record() {
 # Flat-JSON field extractors — the driver stays jq-free on purpose (one fewer
 # dependency in the path that must work when everything else is broken). Go's
 # json.Encoder emits single-line objects, so these single-line seds suffice.
+#
+# json_num ALSO tolerates `"k": 7` with whitespace round the colon, and that is
+# not cosmetic: pogod's HTTP handlers encode compactly, but the `pogo` CLI
+# prints through json.MarshalIndent, so every field it emits arrives as
+# `  "retained_count": 7,`. A sed written for the daemon's shape reads the CLI's
+# as ABSENT — an empty string, which every caller here is obliged to treat as
+# "unknown". Fail-closed, so nothing would have been believed wrongly; it would
+# simply never have worked, and the caller that needs it (preserved_retained,
+# mg-e621) is on the path that must not go quiet.
 json_str() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
-json_num() { sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p"; }
+json_num() { sed -n "s/.*\"$1\"[ ]*:[ ]*\([0-9][0-9]*\).*/\1/p"; }
 # json_bool — a BARE json bool, echoing "true"/"false" (empty if the field is
 # absent or is not a bool). json_str cannot do this and must not be made to: the
 # value carries no quotes, which is exactly what the unit test pins when it
@@ -1830,6 +1839,125 @@ witness_alive_count() {
 }
 
 # ---------------------------------------------------------------------------
+# THE THIRD POPULATION: TREES LEFT BY POLECATS THAT EXITED BEFORE THIS DRAIN
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS (mg-e621). The drain's clearing line used to read
+#
+#     no polecat holds unpushed work — 0 running, 0 that stopped mid-drain
+#     without reaching origin
+#
+# and every number in it was true. The SENTENCE was a universal over all
+# polecats; the query behind it ranges over two categories only — polecats
+# RUNNING at drain time, and polecats that stopped DURING the drain. A polecat
+# that exited before the drain opened is in neither, so it is correctly
+# invisible to the query and was generalised over anyway.
+#
+# THAT POPULATION IS NOT AN EDGE CASE — THE SURROUNDING PROCEDURE CREATES IT.
+# `predeploy-stop-noncritical-mayor` fires at 01:45 and the drain opens at
+# 02:00. The better the predeploy-stop does its job, the larger the set the
+# drain is defined to exclude, and the more confident its unscoped sentence
+# becomes. On 2026-09-06 the deploy asserted that no polecat held unpushed work
+# while SEVEN retained worktrees sat on this box, three of them holding
+# untracked files — content on no branch, in no stash and on no remote. Both
+# figures are the mayor's, from `pogo gc --list-preserved` that day. Re-derived
+# here on 2026-09-07 the population is still seven and the untracked half reads
+# FOUR, so the number moves; the shape does not.
+#
+# TWO FIXES WERE AVAILABLE AND THIS TAKES BOTH. Scoping the sentence to what was
+# measured is necessary — the callers now say "no polecat that was running or
+# that stopped mid-drain" — but on its own it converts a false claim into a
+# caveat, and a caveat is what a reader skims past. Counting the excluded
+# population converts it into a measurement, and the instrument that can see it
+# ALREADY EXISTED: `pogo gc --list-preserved`. The blind spot was never that the
+# state is unobservable. It was that two components observed different
+# populations and only one of them spoke in universals.
+#
+# THIS DOES NOT HOLD THE DEPLOY, AND MUST NOT BE MADE TO. These trees are gc-
+# protected (DirtyWorktreeError) and hold no process; the bounce cannot touch
+# them, so waiting on them would protect nothing and would block every redeploy
+# for as long as one stood — seven have stood for weeks. It is `log`, never
+# `err`, for the same reason: an alert that fires on a standing condition every
+# night is one that is filtered within a week, and this script has paid for that
+# lesson twice already.
+#
+# IT FAILS TO "?", NEVER TO 0. Same rule as witness_alive_count at the same kind
+# of seam: `pogo` is a binary this script DEPLOYS, so the copy on PATH during a
+# drain is the one from the LAST deploy and may predate `--list-preserved`
+# entirely. Every failure — missing binary, unknown flag, unparseable output —
+# must read as "could not look", because "could not look" printed as "there are
+# none" is the exact defect this whole family is about, and it would be rebuilt
+# inside its own remedy.
+#
+# Echoes "<retained> <untracked>" on success. Cost: ~2s (it stats every retained
+# tree), so this is called once per drain at a terminal exit, never on a tick.
+#
+# ITS DIAGNOSTICS ARE `log`, NOT `err`, AND THAT DIFFERS FROM witness_alive_count
+# ON PURPOSE. `err` appends to ERR_LOG, which becomes the reason record and the
+# nightly's RED alert. The witness earns that: its failure REFUSES the bounce,
+# so the run has already gone red and the reason is what names it. This one
+# refuses nothing. An old `pogo` — the expected shape on the first night, since
+# the copy on PATH during a drain predates this very commit — would otherwise
+# page the nightly on every successful deploy until the next one lands. Caught
+# by this suite's own gh#135 negative control, which asserts a clean drain
+# leaves ERR_LOG empty and went red the moment this used `err`.
+preserved_retained() {
+    local out rc n u msg
+    out="$("$POGO_CLI" gc --list-preserved --json 2>&1)"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        msg="$(printf '%s' "$out" | json_str error)"; msg="${msg:-$(printf '%s' "$out" | head -1)}"
+        log "preserved: cannot read the retained-worktree listing (rc=$rc): $msg" >&2
+        echo "? ?"; return 1
+    fi
+    n="$(printf '%s' "$out" | json_num retained_count)"
+    case "$n" in
+        ''|*[!0-9]*)
+            log "preserved: '$POGO_CLI gc --list-preserved --json' returned no readable retained_count" >&2
+            echo "? ?"; return 1 ;;
+    esac
+    u="$(printf '%s' "$out" | json_num retained_untracked)"
+    case "$u" in ''|*[!0-9]*) u="?" ;; esac
+    echo "$n $u"; return 0
+}
+
+# print_preserved_retained — the third population, said out loud at the moment
+# the drain clears. This is the whole reader-facing point of mg-e621: the
+# sentence above it is now scoped to what the drain measured, and this line is
+# what stops that scoping from reading as a shrug.
+#
+# THE BOUND OF THIS INSTRUMENT, STATED RATHER THAN GLOSSED — because a remedy
+# for "a scoped query printing an unscoped claim" that itself printed one would
+# be this ticket rebuilt inside its own fix. "Retained" means a tree gc REFUSED
+# to reclaim: dirty, unreadable, or clean-and-detached holding commits nothing
+# else holds. An earlier polecat whose tree is CLEAN and on a branch holding
+# unpushed commits is NOT in this count and never will be — gc does not refuse
+# such a tree, because removing it keeps the objects alive on the branch ref
+# (internal/gitgc/preserved.go, ScanPreserved's annotation note). So the line
+# below says "retained worktrees", which is what was counted, and says nothing
+# about polecats generally. That is the whole discipline this ticket is about.
+print_preserved_retained() {
+    local res n u
+    res="$(preserved_retained)" || {
+        log "retained worktrees left by polecats that exited BEFORE this drain: COULD NOT BE READ" >&2
+        log "  this is NOT a report that there are none — it is a report that we could not look (\`pogo gc --list-preserved\`)" >&2
+        return 0
+    }
+    n="${res%% *}"; u="${res##* }"
+    if [ "$n" -eq 0 ]; then
+        # Printed even when it is zero, and that is the same rule the second
+        # term of the clearing line already follows: a term that appears only
+        # when it is non-zero is one a reader cannot tell from a term that was
+        # never computed.
+        log "and 0 retained worktrees left by polecats that exited before this drain (\`pogo gc --list-preserved\`) — measured, not assumed" >&2
+        log "  (retained = a tree gc refused to reclaim; a clean tree on a branch holding unpushed commits is not one)" >&2
+        return 0
+    fi
+    log "OUTSIDE THE CHECK ABOVE: $n retained worktree(s) left by polecats that exited BEFORE this drain," >&2
+    log "  $u of them holding UNTRACKED files — on no branch, in no stash, on no remote. They are in neither" >&2
+    log "  category the drain measures, so nothing above is a statement about them. The bounce does not touch" >&2
+    log "  them and this does NOT hold the deploy; read them with \`pogo gc --list-preserved\`." >&2
+}
+
+# ---------------------------------------------------------------------------
 # THE DRAIN PREDICATE: "WOULD STOPPING THIS POLECAT LOSE WORK?" (mg-3a96)
 # ---------------------------------------------------------------------------
 # WHAT THIS REPLACED AND WHY IT HAD TO — TWICE. Read both narrowings; the second
@@ -2599,9 +2727,17 @@ drain_wait() {
                 if [ "$count" -eq 0 ]; then
                     departures="$(drain_departures "$ledger" "$body")"
                     gone="$(drain_departed_holders "$departures")"
-                    log "no polecat holds unpushed work — 0 running, $gone that stopped mid-drain without reaching origin" >&2
+                    # SCOPED TO WHAT WAS MEASURED (mg-e621). The old subject
+                    # was "no polecat", a universal over the whole fleet; the
+                    # two terms after the dash are the only two categories this
+                    # query ranges over, and a polecat that exited BEFORE the
+                    # drain opened is in neither. See print_preserved_retained
+                    # for the population that was being generalised over, and
+                    # for why the surrounding nightly CREATES it.
+                    log "no polecat that was running or that stopped mid-drain holds unpushed work — 0 running, $gone that stopped mid-drain without reaching origin" >&2
                     print_drain_departures "$departures"
                     alert_drain_departures "$gone"
+                    print_preserved_retained
                     echo 0; return 0
                 fi
 
@@ -2632,7 +2768,14 @@ drain_wait() {
                     # (gh#135). The count is printed whether or not it is zero:
                     # a term that appears only when it is non-zero is one a
                     # reader cannot tell from a term that was never computed.
-                    log "no polecat holds unpushed work — $count running, 0 holding commits that exist only locally, $gone that stopped mid-drain without reaching origin" >&2
+                    #
+                    # AND THE SUBJECT IS SCOPED (mg-e621), for the same reason
+                    # the second term exists: the three terms name RUNNING
+                    # polecats and polecats that stopped MID-DRAIN, and a
+                    # universal over "no polecat" is a claim about a population
+                    # neither term samples. print_preserved_retained below
+                    # counts that population rather than leaving it as a caveat.
+                    log "no polecat that was running or that stopped mid-drain holds unpushed work — $count running, 0 holding commits that exist only locally, $gone that stopped mid-drain without reaching origin" >&2
                     # Rule 3's decoupling, said out loud at the moment it acts.
                     # The deploy proceeds over these on purpose; a run that
                     # bounced past pending merges without naming them would be
@@ -2641,6 +2784,7 @@ drain_wait() {
                     print_drain_durability log "$report" >&2
                     print_drain_departures "$departures"
                     alert_drain_departures "$gone"
+                    print_preserved_retained
                     echo 0; return 0
                 fi
 
@@ -2756,6 +2900,14 @@ drain_wait() {
                     fi
                     print_drain_departures "$departures"
                     alert_drain_departures "$gone"
+                    # The third clear gets the third population too (mg-e621).
+                    # Seating this at two of the three exits that PROCEED is the
+                    # mistake gh#135 made and mg-8bb1 had to come back for; the
+                    # ledger is seated at every terminal path and so is this.
+                    # `pogo gc --list-preserved` reads the polecats DIRECTORY,
+                    # so it still answers with pogod wedged — it degrades to a
+                    # note about the unreadable live set and keeps scanning.
+                    print_preserved_retained
                     echo 0; return 0
                 fi
                 err "pogod is not answering, but the witness reports $live live polecat(s)"
@@ -2834,7 +2986,7 @@ report_drain_complete() {
     # unreachable": that is this ticket's own defect (absence of evidence
     # rendered as a positive claim about the world) reproduced inside its fix.
     if [ -z "$body" ]; then
-        log "drain check cleared — no polecat held unpushed work (see the drain's own report above)"
+        log "drain check cleared — no polecat that was running or that stopped mid-drain held unpushed work (see the drain's own report above)"
         err "could not re-read /agents/drain to check for unreachable survivors"
         err "this is NOT a report that there are none — it is a report that we could not look"
         return 0
