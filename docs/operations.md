@@ -174,6 +174,41 @@ arrive with no notice. The likely cause is that the harness moved its credential
 storage or JSON schema — both are harness-internal and pogo is not owed
 stability in them. Check by hand with `pogo credential expiry`.
 
+### Asking the log about grant history
+
+`cred_expiry_warned` answers "when did a warning fire", and **only** that. It
+fires exclusively inside a lead-time tier, so grant ISSUANCE is outside its
+domain by construction — a `/login` happens away from expiry, which is exactly
+where the event does not fire. Measured on 2026-09-07, all 25 rows in
+`~/.pogo/events.log` carried one grant expiry rounded two ways and no transition
+at all, while the live grant was a different date entirely. The series looks
+clean and complete, and its silence about issuance was read as a negative
+finding: a 30-day grant lifetime the log had never measured was inferred from it
+and relayed to a human as fact (mg-3222, since withdrawn; mg-2127).
+
+Grant history lives in `cred_expiry_grant_observed` instead:
+
+```bash
+jq -r 'select(.event_type=="cred_expiry_grant_observed" and .details.transition) |
+       "\(.timestamp) expires=\(.details.expires_at) was=\(.details.previous_expires_at) minted-in=\(.details.issuance_window)"' \
+  ~/.pogo/events.log
+```
+
+Read three things before drawing a conclusion from it:
+
+- **`transition` first.** A row with `transition: false` is a pogod restart
+  seeing the credential for the first time, not a login. Filter on it before
+  differencing consecutive rows, or you will be measuring daemon uptime.
+- **Issuance is a bracket, not a timestamp.** pogod cannot see a `/login`; it
+  sees that the old value held at one sample and the new one at the next, which
+  is what `issuance_after`/`issuance_before` report. `lifetime_at_most` reads
+  the literal string `"unbounded"` when there is no lower bound.
+- **The ledger records pogod's observations.** A grant minted and replaced while
+  pogod was stopped, blind or disarmed leaves no row, and no row exists at all
+  for history before this shipped (2026-09-07). Every event in the family
+  carries a `domain` field saying this in-band. See
+  [event-log.md](event-log.md) §"The credential-expiry family".
+
 ### What this does not cover
 
 It predicts the **scheduled** lapse only. A credential **revoked early** produces

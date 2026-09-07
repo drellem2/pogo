@@ -70,6 +70,46 @@
 // That is why a present item with a missing/zero refreshTokenExpiresAt is
 // UNREADABLE, never ABSENT and never healthy.
 //
+// # What each event's SILENCE means (mg-2127)
+//
+// The absence-as-evidence trap above is about a credential this package cannot
+// read. There is a second version of it, one level out, about the events this
+// package writes — and it bit.
+//
+// `cred_expiry_warned` fires only once a lead-time tier is reached. Grant
+// ISSUANCE is therefore outside its domain by construction: a `/login` happens
+// away from expiry, which is exactly where this event does not fire. Measured
+// on 2026-09-07 across the whole of ~/.pogo/events.log: 25 `cred_expiry_warned`
+// rows spanning 2026-08-31..09-07, carrying ONE grant expiry rounded two ways
+// (2026-09-07T10:39:14Z twenty times, ...:15Z five times) and not one
+// transition, while the live grant was 2026-10-06T10:52:13Z. Nothing in the
+// shape of that series says it cannot answer "when was the grant issued" — it
+// is clean, dense and complete-looking — so its silence read as a negative
+// finding, and a grant lifetime the log has never measured was inferred from it
+// and relayed to a human as fact (mg-3222, since withdrawn).
+//
+// No retention period and no busier week fixes that, because the gap is not a
+// sampling artifact. Two things do, and both are here:
+//
+//   - `cred_expiry_grant_observed` records the grant ledger directly. It fires
+//     when the observed expiry CHANGES, and once when a fresh process first
+//     sees a value. It never claims to know when the grant was minted, because
+//     it cannot: it publishes the BRACKET (`issuance_after`, `issuance_before`)
+//     that its own two samples establish, and the derived life of the grant as
+//     `lifetime_at_least` / `lifetime_at_most`. A point estimate there would be
+//     the withdrawn inference wearing a badge.
+//   - every event this package writes carries a `domain` field saying what it
+//     does and does not cover, so a row read on its own — which is how rows are
+//     read — declares its own limits instead of leaving them to be discovered.
+//
+// The distinction the ledger must not lose is FIRST OBSERVATION versus
+// TRANSITION. On a fresh pogod the remembered expiry is the zero time, so every
+// real value differs from it; a ledger that emitted on difference alone would
+// stamp a grant change on every daemon restart, and consecutive rows would
+// measure pogod's uptime while looking like grant lifetimes. That is the same
+// error again, so `transition` is on every row and a first observation reports
+// `lifetime_at_most: "unbounded"` in the field rather than omitting it.
+//
 // # It warns; it never acts
 //
 // Only a human can run `/login`. This package never attempts to refresh or

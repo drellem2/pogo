@@ -1139,6 +1139,107 @@ It exists so the silence is *declared*. A blind detector and a healthy daemon bo
 {"schema_version":1,"timestamp":"2026-08-07T12:39:00.000000000Z","event_type":"revision_stale_disarmed","agent":"pogod","details":{"reason":"binary carries no vcs.revision/vcs.time stamp"}}
 ```
 
+#### The credential-expiry family: `cred_expiry_*`
+
+Four events from [`internal/credexpiry`](../internal/credexpiry/credexpiry.go) (mg-7024), pogod's predictive warner for the fleet-wide auth outage. They are catalogued together because **their domains do not overlap and reading the wrong one for a question yields a clean, complete-looking series that cannot answer it** (mg-2127).
+
+| Event | Fires | Domain |
+|---|---|---|
+| `cred_expiry_warned` | when a lead-time tier (7d/72h/24h/2h/lapsed) is first reached | warning tiers **only** — never at issuance |
+| `cred_expiry_grant_observed` | when the observed grant expiry CHANGES, plus once per process on first sight | grant history, as pogod observed it |
+| `cred_expiry_blind` | the credential exists but could not be read | a declaration of blindness, not a health or grant record |
+| `cred_expiry_disarmed` | there is no credential on this host | a declaration that no claim can be made |
+
+**Every one of them carries a `domain` string** repeating the middle column in-band, because a row is read on its own far more often than the catalog is.
+
+##### The gap this family was built around
+
+`cred_expiry_warned` fires only inside a warning tier. A `/login` happens *away* from expiry, which is exactly where the event does not fire, so grant issuance is outside its domain **by construction** — not by sampling luck, and no retention period or busier week would ever put a transition in it.
+
+Measured across the whole of `~/.pogo/events.log` on 2026-09-07 (t3222's derivation, re-run for mg-2127): 25 `cred_expiry_warned` rows spanning 2026-08-31..09-07, carrying **one** grant expiry rounded two ways — `2026-09-07T10:39:14Z` ×20 and `...:15Z` ×5 — and no transition at all, while the live grant was `2026-10-06T10:52:13Z`. A control over the same file found `expires_at` in exactly those 25 rows and nowhere else, so nothing else in the log recorded issuance either.
+
+The series looks complete. Its silence about issuance read as a negative finding, and a 30-day grant lifetime the log has never measured was inferred from it and relayed to a human as fact (mg-3222, since withdrawn). To ask about grant history, query the ledger:
+
+```bash
+jq -r 'select(.event_type=="cred_expiry_grant_observed") |
+       "\(.timestamp) expires=\(.details.expires_at) transition=\(.details.transition) window=\(.details.issuance_window)"' \
+  ~/.pogo/events.log
+```
+
+**That query returns nothing for history predating this event's ship (2026-09-07, mg-2127)** — the ledger cannot retro-record grants nobody was watching, and an empty result over an older window measures nothing.
+
+#### `cred_expiry_warned`
+
+A lead-time tier was reached for the first time on this grant, so `human` was mailed to run `/login`. Emitted once per tier per grant, not once per sample: the ratchet only deepens, and it resets when the observed expiry moves. **Report-only** — only a human can re-mint a credential and this package holds no seam through which it could try.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `tier` (string, required): `7d`, `72h`, `24h`, `2h` or `lapsed`
+  - `expires_at` (string, required): the `refreshTokenExpiresAt` this warning is about. **Not a grant record** — see `domain`
+  - `remaining` (string, required) and `remaining_hours` (int, required): grant life left at sample time
+  - `domain` (string, required, mg-2127): the fixed note that this event never fires at issuance, naming `cred_expiry_grant_observed` as the event that does
+  - `mail_error` (string, optional): present when the notice could not be delivered. The event is still emitted, so a warning that reached nobody is not also invisible
+
+```json
+{"schema_version":1,"timestamp":"2026-09-07T10:43:40.880048Z","event_type":"cred_expiry_warned","agent":"pogod","details":{"tier":"lapsed","expires_at":"2026-09-07T10:39:15Z","remaining":"already lapsed","remaining_hours":0,"domain":"warning tiers only — never fires at issuance; grant history is cred_expiry_grant_observed"}}
+```
+
+#### `cred_expiry_grant_observed`
+
+The grant ledger (mg-2127). Emitted when the observed `refreshTokenExpiresAt` **changes** — that is a `/login` — and once when a fresh pogod process first sees a value. Unchanged samples emit nothing, so a 30-day grant produces roughly one row per daemon start plus one per login rather than 2,880 a month.
+
+**It records a bracket, never a timestamp, for when the grant was minted.** The watcher cannot see a `/login`; it can only see that the old value held at one sample and the new one held at the next, which bounds issuance to the gap between them. A point estimate — "expiry minus 30 days" — is precisely the inference mg-3222 made and withdrew, and its measurement-shaped presentation is what made it believable.
+
+`transition` is the field that must be read before any other. On a fresh process the remembered expiry is the zero time, so a naive ledger would stamp a grant change on every daemon restart, and differencing consecutive rows would measure pogod's uptime while looking like grant lifetime — the same error one level down.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (always `"pogod"`), `details`
+- **`details` fields:**
+  - `expires_at` (string, required): the newly observed `refreshTokenExpiresAt`
+  - `observed_at` (string, required): the sample that saw it. **Not the issuance time**
+  - `transition` (bool, required): true = the value CHANGED from one this process had already observed. False = first observation by this process, which is not evidence of anything having happened
+  - `issuance_before` (string, required): upper bound on when the grant was minted (= `observed_at`)
+  - `issuance_after` (string, required): lower bound — the last sample that still saw the previous value. Literal `"unknown"` when `transition` is false
+  - `issuance_window` (string, required): width of the bracket, or literal `"unbounded"` when `transition` is false
+  - `lifetime_at_least` (string, required): `expires_at - observed_at`; the grant was minted with at least this much life
+  - `lifetime_at_most` (string, required): `expires_at - issuance_after`, or literal `"unbounded"` when `transition` is false
+  - `previous_expires_at` / `previous_seen_at` (string, optional): the prior ledger entry. Present only when `transition` is true
+  - `expiry_advance` (string, optional): how much later the new expiry is than the previous one. **Not the grant lifetime** — it is the distance between two expiries, which equals the login-to-login interval only if the lifetime is constant. Negative spans render with a leading `-`; a replacement grant that expires sooner is unusual, not impossible, and a ledger that recorded moves in only one direction would have a silence of exactly the kind this event exists to remove
+  - `domain` (string, required): the fixed note that this ledger records **pogod's observations** — a grant minted and replaced while pogod was down, blind or disarmed leaves no row here either
+
+```json
+{"schema_version":1,"timestamp":"2026-09-07T10:58:12.000000000Z","event_type":"cred_expiry_grant_observed","agent":"pogod","details":{"expires_at":"2026-10-06T10:52:13Z","observed_at":"2026-09-07T10:58:12Z","transition":true,"issuance_after":"2026-09-07T10:43:40Z","issuance_before":"2026-09-07T10:58:12Z","issuance_window":"14m","lifetime_at_least":"28d 23h","lifetime_at_most":"29d 0h","previous_expires_at":"2026-09-07T10:39:15Z","previous_seen_at":"2026-09-07T10:43:40Z","expiry_advance":"29d 0h","domain":"pogod observations only — a grant minted and replaced while pogod was down, blind or disarmed leaves no row; issuance is bracketed, never timestamped"}}
+{"schema_version":1,"timestamp":"2026-09-07T19:00:00.000000000Z","event_type":"cred_expiry_grant_observed","agent":"pogod","details":{"expires_at":"2026-10-06T10:52:13Z","observed_at":"2026-09-07T19:00:00Z","transition":false,"issuance_after":"unknown","issuance_before":"2026-09-07T19:00:00Z","issuance_window":"unbounded","lifetime_at_least":"28d 15h","lifetime_at_most":"unbounded","domain":"pogod observations only — a grant minted and replaced while pogod was down, blind or disarmed leaves no row; issuance is bracketed, never timestamped"}}
+```
+
+The second row is a pogod restart, not a login. Filter with `select(.details.transition)` before differencing anything.
+
+#### `cred_expiry_blind`
+
+The `Claude Code-credentials` keychain item EXISTS but its expiry could not be extracted — a decode failure, a 10s timeout on an authorization prompt, or a harness schema that moved. `human` is mailed, throttled to once per `blind_renotify` (default 24h); the event is emitted on the same throttle.
+
+This is the dangerous state, not the quiet one: something that used to work stopped, and the advance warning is now blind while looking exactly like a healthy silence.
+
+- **`details` fields:**
+  - `reason` (string, required): drawn from a fixed vocabulary in `internal/credexpiry`. Never interpolated from `security`'s output or a decoder error, both of which can quote a credential
+  - `domain` (string, required, mg-2127): the fixed note that this is not a health report and not a grant record
+  - `mail_error` (string, optional)
+
+```json
+{"schema_version":1,"timestamp":"2026-09-07T10:43:40.000000000Z","event_type":"cred_expiry_blind","agent":"pogod","details":{"reason":"the credential decoded but carries no `claudeAiOauth.refreshTokenExpiresAt` — the harness schema has moved","domain":"the credential could not be read — this is not a health report and not a grant record"}}
+```
+
+#### `cred_expiry_disarmed`
+
+There is no credential to inspect on this host: not macOS, no `security` binary, or no such keychain item. The warner disarms and does **not** mail — a sandbox or a Linux box must stay quiet. Emitted once per process alongside a log line, so the silence is *declared* rather than assumed.
+
+A disarmed warner and a healthy fleet both produce zero `cred_expiry_warned` events. This row is what separates them.
+
+- **`details` fields:** `reason` (string, required), `domain` (string, required, mg-2127)
+
+```json
+{"schema_version":1,"timestamp":"2026-09-07T10:00:00.000000000Z","event_type":"cred_expiry_disarmed","agent":"pogod","details":{"reason":"no `Claude Code-credentials` keychain item on this machine","domain":"no credential on this host — no warning and no grant history will be recorded here at all"}}
+```
+
 #### `gh_teardown_watch_fired`
 
 pogod's gh-issue teardown detector (mg-6e57) sampled the `status=done` gh-issue carriers on its coarse interval and found at least one whose GitHub issue is still open, or whose state could not be established, so it mailed `notify_to` (`pm-pogo` by default — a teardown miss is a fleet workflow failure, not a human decision; mg-b586). It exists because the workflow's last step can silently not run: mg-07ba reached `done, stage: merge` while drellem2/pogo#89 stayed OPEN for four days, and a carrier that completed its teardown is outwardly identical to one that skipped it. **Report-only** — it never closes an issue and never comments. Emitted once per sample that mailed; unchanged findings are re-raised only after `renotify_after`, so this event is not one-per-interval. See [CONFIGURATION.md](CONFIGURATION.md) §"The gh-issue teardown detector" and `internal/ghteardown`.
