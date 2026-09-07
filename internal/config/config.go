@@ -518,6 +518,42 @@ const (
 	// itself, and here the reason is stronger: the recipient is not merely
 	// unwakeable, it is not running, so the mail has no reader at all.
 	DefaultAbsentWatchEscalateAfter = 48 * time.Hour
+
+	// DefaultHeartWatchInterval is how often pogod's crew-heartbeat reader
+	// samples. The heartbeat it reads is refreshed every ten minutes, so a
+	// five-minute tick never misses a transition by more than half a cadence.
+	DefaultHeartWatchInterval = 5 * time.Minute
+	// DefaultHeartWatchStallAfter is mayor.md §3a's T_stall, carried over
+	// unchanged so the prompt and the daemon cannot disagree about when an
+	// agent is late.
+	DefaultHeartWatchStallAfter = 90 * time.Minute
+	// DefaultHeartWatchRestartAfter is mayor.md §3a's T_restart. Nothing in
+	// pogod restarts on it — the threshold is kept because it is the line at
+	// which the coordinator's own rules call the reading actionable.
+	DefaultHeartWatchRestartAfter = 120 * time.Minute
+	// DefaultHeartWatchGrace is the post-start window in which an agent with no
+	// heartbeat is not judged. The mail-check that writes one is registered at
+	// spawn and fires on a ten-minute cron.
+	DefaultHeartWatchGrace = 30 * time.Minute
+	// DefaultHeartWatchHoldDown sits on top of the 90-minute staleness
+	// threshold and absorbs a single missed mail-check at the wrong moment.
+	DefaultHeartWatchHoldDown = 10 * time.Minute
+	// DefaultHeartWatchRenotify is how long an unchanged roster stays quiet.
+	DefaultHeartWatchRenotify = 6 * time.Hour
+
+	// DefaultBlindWatchInterval is how often pogod's detector-blindness
+	// consumer samples.
+	DefaultBlindWatchInterval = 15 * time.Minute
+	// DefaultBlindWatchHoldDown is how long a blindness must persist, unbroken,
+	// before it is announced. Blindness flickers; the condition worth reporting
+	// is the standing one, and mg-d616's ran 18 days.
+	DefaultBlindWatchHoldDown = 2 * time.Hour
+	// DefaultBlindWatchStaleAfter is how long the watched detector may go
+	// without completing a sample before its SILENCE becomes the finding.
+	DefaultBlindWatchStaleAfter = time.Hour
+	// DefaultBlindWatchRenotify is how long an unchanged finding stays quiet.
+	// 2609 notices is the failure mode on the other side.
+	DefaultBlindWatchRenotify = 24 * time.Hour
 	// DefaultProgressWatchInterval is how often pogod asks whether the fleet is
 	// producing anything. Each sample costs one process-table pair plus a walk
 	// per live worktree, so it is not free; five minutes matches the other
@@ -833,6 +869,12 @@ type Config struct {
 	PromptEdit PromptEditConfig
 	AckWatch   AckWatchConfig
 	DeafWatch  DeafWatchConfig
+	// HeartWatch is the pogod-resident reader of the crew heartbeat (mg-d616).
+	// See HeartWatchConfig.
+	HeartWatch HeartWatchConfig
+	// BlindWatch is the consumer for a detector that declines to answer
+	// (mg-d616). See BlindWatchConfig.
+	BlindWatch BlindWatchConfig
 	// AbsentWatch is the configured-agent-is-missing announcer. It is the only
 	// detector whose population is the CONFIGURED set rather than the registry;
 	// see AbsentWatchConfig.
@@ -1527,6 +1569,77 @@ type ProgressWatchConfig struct {
 	EscalateAfter time.Duration
 }
 
+// HeartWatchConfig configures pogod's CREW HEARTBEAT reader (mg-d616): the
+// heartbeat-driven runner that reads every crew agent's sweep.log mtime against
+// pogod's registry and mails when one has gone late.
+//
+// It exists because that check already existed and had exactly one executor —
+// a step in the coordinator's own coordination loop (mayor.md §3a). So it did
+// not degrade when the coordinator stopped: it stopped. Two PMs then sat 14 days
+// at ~168x T_restart with nothing nudging or restarting them, and both asked,
+// independently, whether they had been misclassified as expected-quiet. They had
+// not. The reader was down.
+//
+// The detector's mechanics live in internal/heartwatch. REPORT-ONLY: a stale
+// heartbeat has two causes that look identical and take opposite responses, and
+// pogod distinguishes them elsewhere.
+type HeartWatchConfig struct {
+	// Enabled turns the runner on. Defaults to true. It is inert on a daemon
+	// with no agent registry.
+	Enabled bool
+	// Interval is the gap between samples. Zero falls back to
+	// DefaultHeartWatchInterval.
+	Interval time.Duration
+	// StallAfter and RestartAfter are mayor.md §3a's T_stall and T_restart.
+	// Zero falls back to the defaults. Raising them is explicitly NOT the fix
+	// for mg-d616 — the fault there was a missing reader, not a low threshold.
+	StallAfter   time.Duration
+	RestartAfter time.Duration
+	// Grace is the post-start window in which an agent with no heartbeat is
+	// reported fresh. Zero falls back to DefaultHeartWatchGrace; NEGATIVE
+	// disables it, which makes every spawn a finding.
+	Grace time.Duration
+	// HoldDown is how long a late reading must persist before it is announced.
+	// Zero falls back to DefaultHeartWatchHoldDown; NEGATIVE disables it.
+	HoldDown time.Duration
+	// RenotifyAfter is how long an unchanged roster stays quiet. Zero falls
+	// back to DefaultHeartWatchRenotify.
+	RenotifyAfter time.Duration
+}
+
+// BlindWatchConfig configures pogod's DETECTOR-BLINDNESS consumer (mg-d616):
+// the heartbeat-driven runner that watches internal/wedgewatch's own judgement
+// state and reports when it has been declining to answer.
+//
+// It exists because `wedge_watch_error` had no reader. pm-riemann measured 2609
+// of them over 18 days, each ending "The agent could NOT be judged, which is not
+// the same as healthy" — an instrument saying so, out loud, into a channel with
+// no consumer.
+//
+// It does NOT route wedge-watch's findings. Escalating a confirmed fleet-level
+// wedge outside the wedged party is mg-fc8d item (3), an alerting-policy
+// decision reserved to Daniel and deliberately not built. This reports on the
+// instrument, not on the fleet.
+type BlindWatchConfig struct {
+	// Enabled turns the runner on. Defaults to true.
+	Enabled bool
+	// Interval is the gap between samples. Zero falls back to
+	// DefaultBlindWatchInterval.
+	Interval time.Duration
+	// HoldDown is how long a blindness must persist before it is announced.
+	// Zero falls back to DefaultBlindWatchHoldDown; NEGATIVE disables it.
+	HoldDown time.Duration
+	// StaleAfter is how long the watched detector may go without completing a
+	// sample before its silence is the finding. Zero falls back to
+	// DefaultBlindWatchStaleAfter; NEGATIVE disables that arm — which only a
+	// test should do, since it is the arm that keeps "nothing blind" from
+	// meaning "no detector".
+	StaleAfter time.Duration
+	// RenotifyAfter is how long an unchanged finding stays quiet. Zero falls
+	// back to DefaultBlindWatchRenotify.
+	RenotifyAfter time.Duration
+}
+
 // AbsentWatchConfig configures pogod's ABSENT-AGENT announcer (mg-7d20): the
 // heartbeat-driven runner that compares the CONFIGURED crew/mayor set against
 // the registry and mails when a member has been missing for longer than its
@@ -1944,6 +2057,8 @@ type parsedConfig struct {
 	ackWatchEnabledSet       bool
 	deafWatchEnabledSet      bool
 	absentWatchEnabledSet    bool
+	heartWatchEnabledSet     bool
+	blindWatchEnabledSet     bool
 	progressWatchEnabledSet  bool
 	firstTurnEnabledSet      bool
 	wedgeWatchEnabledSet     bool
@@ -2085,6 +2200,22 @@ func Load() *Config {
 			RenotifyAfter: DefaultDeafWatchRenotify,
 			NotifyTo:      DefaultDeafWatchNotifyTo,
 			EscalateAfter: DefaultDeafWatchEscalateAfter,
+		},
+		HeartWatch: HeartWatchConfig{
+			Enabled:       true,
+			Interval:      DefaultHeartWatchInterval,
+			StallAfter:    DefaultHeartWatchStallAfter,
+			RestartAfter:  DefaultHeartWatchRestartAfter,
+			Grace:         DefaultHeartWatchGrace,
+			HoldDown:      DefaultHeartWatchHoldDown,
+			RenotifyAfter: DefaultHeartWatchRenotify,
+		},
+		BlindWatch: BlindWatchConfig{
+			Enabled:       true,
+			Interval:      DefaultBlindWatchInterval,
+			HoldDown:      DefaultBlindWatchHoldDown,
+			StaleAfter:    DefaultBlindWatchStaleAfter,
+			RenotifyAfter: DefaultBlindWatchRenotify,
 		},
 		AbsentWatch: AbsentWatchConfig{
 			Enabled:       true,
@@ -2356,6 +2487,45 @@ func Load() *Config {
 		// override.
 		if fileCfg.DeafWatch.EscalateAfter != 0 {
 			cfg.DeafWatch.EscalateAfter = fileCfg.DeafWatch.EscalateAfter
+		}
+		if fileCfg.heartWatchEnabledSet {
+			cfg.HeartWatch.Enabled = fileCfg.HeartWatch.Enabled
+		}
+		if fileCfg.HeartWatch.Interval > 0 {
+			cfg.HeartWatch.Interval = fileCfg.HeartWatch.Interval
+		}
+		if fileCfg.HeartWatch.StallAfter > 0 {
+			cfg.HeartWatch.StallAfter = fileCfg.HeartWatch.StallAfter
+		}
+		if fileCfg.HeartWatch.RestartAfter > 0 {
+			cfg.HeartWatch.RestartAfter = fileCfg.HeartWatch.RestartAfter
+		}
+		// Zero and negative differ for the two windows a deployment may want
+		// OFF: a file that simply omits the key must keep the default, so only
+		// a non-zero value — including a negative one — overrides.
+		if fileCfg.HeartWatch.Grace != 0 {
+			cfg.HeartWatch.Grace = fileCfg.HeartWatch.Grace
+		}
+		if fileCfg.HeartWatch.HoldDown != 0 {
+			cfg.HeartWatch.HoldDown = fileCfg.HeartWatch.HoldDown
+		}
+		if fileCfg.HeartWatch.RenotifyAfter > 0 {
+			cfg.HeartWatch.RenotifyAfter = fileCfg.HeartWatch.RenotifyAfter
+		}
+		if fileCfg.blindWatchEnabledSet {
+			cfg.BlindWatch.Enabled = fileCfg.BlindWatch.Enabled
+		}
+		if fileCfg.BlindWatch.Interval > 0 {
+			cfg.BlindWatch.Interval = fileCfg.BlindWatch.Interval
+		}
+		if fileCfg.BlindWatch.HoldDown != 0 {
+			cfg.BlindWatch.HoldDown = fileCfg.BlindWatch.HoldDown
+		}
+		if fileCfg.BlindWatch.StaleAfter != 0 {
+			cfg.BlindWatch.StaleAfter = fileCfg.BlindWatch.StaleAfter
+		}
+		if fileCfg.BlindWatch.RenotifyAfter > 0 {
+			cfg.BlindWatch.RenotifyAfter = fileCfg.BlindWatch.RenotifyAfter
 		}
 		if fileCfg.absentWatchEnabledSet {
 			cfg.AbsentWatch.Enabled = fileCfg.AbsentWatch.Enabled
@@ -3284,6 +3454,58 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "escalate_after":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.DeafWatch.EscalateAfter = d
+				}
+			}
+		case "heart_watch":
+			switch key {
+			case "enabled":
+				cfg.HeartWatch.Enabled = val == "true"
+				cfg.heartWatchEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.HeartWatch.Interval = d
+				}
+			case "stall_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.HeartWatch.StallAfter = d
+				}
+			case "restart_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.HeartWatch.RestartAfter = d
+				}
+			case "grace":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.HeartWatch.Grace = d
+				}
+			case "hold_down":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.HeartWatch.HoldDown = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.HeartWatch.RenotifyAfter = d
+				}
+			}
+		case "blind_watch":
+			switch key {
+			case "enabled":
+				cfg.BlindWatch.Enabled = val == "true"
+				cfg.blindWatchEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.BlindWatch.Interval = d
+				}
+			case "hold_down":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.BlindWatch.HoldDown = d
+				}
+			case "stale_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.BlindWatch.StaleAfter = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.BlindWatch.RenotifyAfter = d
 				}
 			}
 		case "absent_watch":

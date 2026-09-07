@@ -86,6 +86,31 @@ type Watcher struct {
 	// when they were split across two observers.
 	lastConnFailure time.Time
 
+	// blindSince is when each agent was FIRST observed unjudgeable in the
+	// current unbroken run. An agent this detector regains sight of is deleted,
+	// so a flap restarts the clock rather than accumulating toward it.
+	//
+	// It exists because `wedge_watch_error` had no consumer. pm-riemann
+	// measured 2609 of them over 18 days, every one ending "The agent could NOT
+	// be judged, which is not the same as healthy" — an instrument declining to
+	// answer, out loud, in a channel nobody read (mg-d616). An event stream is
+	// not a consumer; this field is the state a consumer needs, and Judgement
+	// is where it reads it.
+	blindSince map[string]time.Time
+	// blindWhy is the most recent reason each blind agent could not be judged.
+	blindWhy map[string]string
+	// sampled is when the last sample COMPLETED, whatever it found. It is the
+	// control for a blindness reading: this detector emits nothing on a clean
+	// pass, so "no wedge_watch_error in the log" cannot distinguish a fleet it
+	// judged healthy from a detector that stopped sampling. Reading the event
+	// log alone gives the second answer the shape of the first, which is this
+	// tree's founding bug.
+	sampled time.Time
+	// examined is the size of the last completed sample's population. Zero
+	// agents examined yields zero blind agents, and that is not a fleet this
+	// detector can see.
+	examined int
+
 	lastPrint  string
 	lastEmit   time.Time
 	latest     []Finding
@@ -124,6 +149,8 @@ func New(opts Options) *Watcher {
 		emit:          emit,
 		counters:      map[string]counterMemory{},
 		pending:       map[string]bool{},
+		blindSince:    map[string]time.Time{},
+		blindWhy:      map[string]string{},
 		fired:         map[string]Finding{},
 		causeSince:    map[Cause]time.Time{},
 	}
@@ -431,6 +458,7 @@ func (w *Watcher) connMemory() time.Time {
 }
 
 func (w *Watcher) emitBlind(blind []blindNote, now time.Time) {
+	w.noteBlind(blind, now)
 	for _, b := range blind {
 		w.emit(events.Event{
 			EventType: EventError,
@@ -444,6 +472,68 @@ func (w *Watcher) emitBlind(blind []blindNote, now time.Time) {
 			},
 		})
 	}
+}
+
+// noteBlind folds this sample's unjudgeable agents into the blindness clocks.
+//
+// It runs on every sample, including the ones with nobody blind — an agent this
+// detector regains sight of must LEAVE the state, or a consumer would report a
+// blindness that ended weeks ago.
+func (w *Watcher) noteBlind(blind []blindNote, now time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	live := make(map[string]bool, len(blind))
+	for _, b := range blind {
+		name := b.obs.Name
+		live[name] = true
+		if _, known := w.blindSince[name]; !known {
+			w.blindSince[name] = now
+		}
+		w.blindWhy[name] = b.why
+	}
+	for name := range w.blindSince {
+		if !live[name] {
+			delete(w.blindSince, name)
+			delete(w.blindWhy, name)
+		}
+	}
+}
+
+// BlindTarget is one agent this detector could not judge, and since when.
+type BlindTarget struct {
+	Name  string    `json:"name"`
+	Why   string    `json:"why"`
+	Since time.Time `json:"since"`
+}
+
+// Judgement is the read path for a consumer of this detector's BLINDNESS, as
+// distinct from its findings.
+//
+// It reports two things that must never be collapsed:
+//
+//	Blind      the agents this detector says, out loud, it could not judge
+//	SampledAt  when it last completed a sample AT ALL
+//
+// The second is the control for the first. This detector emits nothing on a
+// clean pass, so an empty Blind set and a dead detector produce the same
+// reading in the event log — and giving an unknown the shape of the healthy
+// answer is the defect this whole tree keeps paying for. A consumer that reads
+// Blind without reading SampledAt has rebuilt it.
+//
+// Examined is the size of the last sample's population, for the same reason:
+// zero agents examined yields zero blind agents, which is not a fleet this
+// detector can see.
+func (w *Watcher) Judgement() (blind []BlindTarget, sampledAt time.Time, examined int) {
+	if w == nil {
+		return nil, time.Time{}, 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for name, since := range w.blindSince {
+		blind = append(blind, BlindTarget{Name: name, Why: w.blindWhy[name], Since: since})
+	}
+	sort.Slice(blind, func(i, j int) bool { return blind[i].Name < blind[j].Name })
+	return blind, w.sampled, w.examined
 }
 
 func (w *Watcher) emitPending(pendingNow []pendingNote, confirmed []Finding, now time.Time) {
@@ -618,6 +708,14 @@ func (w *Watcher) record(snap Snapshot, confirmed []Finding, now time.Time) {
 	w.mu.Lock()
 	w.latest = append([]Finding(nil), confirmed...)
 	w.latestSeen = now
+	// A sample that reached here COMPLETED, whatever it found. This is the
+	// control a blindness consumer needs (see Judgement): the detector emits
+	// nothing on a clean pass, so without it "no errors" and "no samples" are
+	// the same reading. It is deliberately NOT advanced on the source-error
+	// path in sample(), which returns before this — a detector that could not
+	// read its source has not sampled the fleet.
+	w.sampled = now
+	w.examined = len(snap.Agents)
 	print := fingerprint(confirmed)
 	shouldEmit := len(confirmed) > 0 && (print != w.lastPrint || now.Sub(w.lastEmit) >= w.renotifyAfter)
 	if shouldEmit {
