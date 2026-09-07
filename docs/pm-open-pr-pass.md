@@ -441,6 +441,71 @@ The pass degrades the way the rest of the GitHub scan does: if `gh` auth is
 unavailable, record "gh unavailable" under *Gaps I'm watching* in the digest and
 move on. A `gh` failure must not abort the sweep.
 
+## A constraint on any predicate added to this pass
+
+Both questions above are deliberately identity-free — *landed* is decided by
+patch identity (`git cherry`) and *tracked* by `mg` status across all six
+states. Neither asks who did anything. That was confirmed rather than assumed,
+and it is the reason this pass survives the constraint below; a pass that had
+reached for "was this reviewed" or "did anyone else comment" would not have.
+
+**No GitHub-side actor identity separates the fleet from Daniel on this box**
+(mg-a981). Every write the fleet makes goes through the repo owner's credential,
+and so does every write Daniel makes by hand. A predicate whose discriminating
+power rests on *which account acted* therefore has none here — and it does not
+fail loudly. It returns a clean, well-formed answer computed over a distinction
+that does not exist, which is the same shape as the ancestry predicate this doc
+already retracted: correct-looking, reviewed, and measuring the wrong thing.
+
+Measured 2026-09-07 across `drellem2/pogo` and `drellem2/macguffin`, every PR
+and issue in every state. On the PR surface specifically:
+
+| Field | Reading across 49 PRs |
+|---|---|
+| assignees | **0** — no PR has ever had one |
+| requested reviewers | **0** |
+| reviews | **0** |
+| PR comment authors | 155 comments, **all** `drellem2` |
+| PR authors | `drellem2` 45, `bath-tub` 4 |
+
+The empty rows fail differently from the constant one, and the difference
+decides which way a broken predicate embarrasses you:
+
+- **Constant** (comment authorship): the check is silently vacuous. "Someone
+  other than the author commented" is false on every PR, forever.
+- **Empty** (assignees, reviewers, reviews): the check is vacuous in *both*
+  directions. "Reviewed by someone else" never fires; its complement, "open PRs
+  with no reviewer", matches 100% and reads as a catastrophic finding. Whichever
+  way you phrase it, you have written a constant.
+- **Author identity is the exception, and only for a different question.** It
+  does separate an outside contributor from this box — `bath-tub` filed 4 of the
+  49 PRs. It does not separate the fleet from Daniel.
+
+So if you extend this pass, key on content, on `mg` state, or on a marker in the
+body — never on the account. If a check genuinely needs fleet-vs-human, the
+dispatch record that answers it lives in pogod, not on GitHub, and a GitHub-only
+sweep cannot answer the question at all.
+
+These numbers are a snapshot of one deployment on one day, not a property of
+GitHub; re-derive rather than trust them:
+
+```bash
+gh pr list --repo drellem2/pogo --state all --limit 500 \
+    --json number,author,assignees,reviewRequests,reviews \
+  | jq '{prs: length,
+         assignees: [.[].assignees[]?.login] | length,
+         reviewers: [.[].reviewRequests[]?.login] | length,
+         reviews:   [.[].reviews[]?.author.login] | length}'
+```
+
+The zero rows are negative results, so each reader was taken with a positive
+control — a zero from a mis-typed jq path is indistinguishable from a real
+absence, and both exit 0. The same query above reports `reviewers: 23,
+reviews: 45` against `cli/cli`, and the assignee reader (which `cli/cli` does
+not exercise — it reads 0 there too) reports non-zero against
+`kubernetes/kubernetes`. Every reader quoted in the table has been shown to
+fire somewhere.
+
 ## Where this does not reach
 
 `sources` is per-PM config, so this fixes **the PMs that exist**. The baseline

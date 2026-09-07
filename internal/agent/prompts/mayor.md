@@ -1220,6 +1220,54 @@ pogo check-carriers        # re-read every LIVE carrier's issue, longest-driftin
 
 - Your per-dispatch `gh issue view <n> --json state` still earns its place: it catches the closed case at the one moment it does the most harm. It is blind to the other two, because it only ever looks at a carrier somebody is about to dispatch — and every acknowledgement and stage instance was a carrier nobody was about to dispatch. The two are complements.
 
+### No GitHub-side identity separates the fleet from Daniel
+
+Every write this fleet makes to a watched repo goes through Daniel's credential, and so does
+every write Daniel makes by hand. **So any check whose discriminating power rests on WHICH
+ACCOUNT ACTED has none here** — and it will not fail loudly. It returns a clean, well-formed
+answer computed over a distinction that does not exist. This constrains checks you improvise
+mid-cycle, which is why it sits in the playbook rather than in a package doc.
+
+Measured 2026-09-07 across both watched repos, every issue and PR in every state:
+
+- **comment authorship is CONSTANT** — 421 of 425 comments on issues and PRs are `drellem2`,
+  and all 383 on pogo carry one identical tuple: `user.type=User`, `author_association=OWNER`,
+  `performed_via_github_app=null`. A triage {{.Worker}}'s acknowledgement and Daniel's own reply
+  differ in **no** identity field GitHub exposes.
+- **assignees, reviewers, reviews and reactions are EMPTY** — 2 of 149 issues carry any assignee;
+  across 49 PRs there are 0 assignees, 0 review requests and 0 reviews; across 198 issues+PRs and
+  425 comments there are 0 reactions. An empty field makes a predicate constant in BOTH
+  directions: "someone else reviewed it" never fires, and its complement "PRs with no reviewer"
+  matches everything and looks like a catastrophe.
+- **issue authorship is the one exception, and only for a different question** — it separates an
+  OUTSIDE reporter from this box (57 of pogo's 127 issues and 18 of macguffin's 22 came from
+  logins that are not `drellem2`). It does not separate the fleet from Daniel. A field that
+  visibly works on one axis is the easiest one to misread onto the other.
+
+The worked example is your own, as you recorded it: on 2026-09-07 at 16:29Z you checked whether
+the triage {{.Worker}}s had acknowledged their issues, started from comment COUNT, noticed that
+undispatched #169 had more comments than the three dispatched ones, and switched to correlating
+comment timestamps against your dispatch times. That switch is what made the answer right — and
+it is the only thing that could have, because the author-based check you might have reached for
+instead cannot work here at all. Re-derived 2026-09-07 22:04Z: `gh issue view 161 --json
+comments` reports its only comment as `drellem2`, the {{.Worker}}'s own ack, indistinguishable
+from one of Daniel's. #169 now reads 5 comments rather than the 4 you saw, which is the second
+reason not to build on a count: it moves.
+
+**What to key on instead:** a marker in the comment BODY (`pogo check-carriers` does exactly
+this — see AckMarkers), an `mg` field, or the dispatch record. Note the last one is not on
+GitHub: it lives in pogod, so a GitHub-only check cannot answer the fleet-vs-human question at
+all, and timestamp correlation against dispatch time is the only ack predicate that survives.
+
+These numbers are one deployment on one day, not a property of GitHub. Re-derive before leaning
+on them, and remember a zero needs a positive control — a mistyped query reads zero exactly like
+a real absence:
+
+```bash
+gh api --paginate 'repos/drellem2/pogo/issues/comments?per_page=100' \
+  -q '.[] | "\(.user.login)|\(.user.type)|\(.author_association)"' | sort | uniq -c
+```
+
 ### Stage transitions
 
 **1. `[gh]` mail → triage.** On a `[gh]` mail whose issue ref matches no existing ticket, file the triage ticket and dispatch a triage {{.Worker}}:
