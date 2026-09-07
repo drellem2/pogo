@@ -31,6 +31,7 @@ import (
 	"github.com/drellem2/pogo/internal/ackwatch"
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/apimount"
+	"github.com/drellem2/pogo/internal/carrierdrift"
 	"github.com/drellem2/pogo/internal/claude"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
@@ -2565,6 +2566,80 @@ Flags:
 		}
 	}
 
+	// Build the gh-issue carrier RE-READ (mg-5d9d): the third member of the
+	// triple, covering every step between the two above. Intake catches an open
+	// issue with NO carrier; teardown catches a DONE carrier whose issue stayed
+	// open; this one catches a LIVE carrier whose issue has moved on without it.
+	//
+	// It exists because a carrier records that an issue was noticed ONCE, and
+	// nothing re-reads the issue afterwards — so the carrier's existence is
+	// evidence about the PAST that reads as evidence about the PRESENT. Three
+	// instances surfaced on 2026-09-07 by three unrelated accidents and no
+	// instrument: two issues carried for days with nothing on the thread (from
+	// the reporter's side, identical to having no carrier), one carried and
+	// untriaged for 17 days, and one carried against an issue closed the same day
+	// that then sat dispatchable for a month.
+	//
+	// It runs HERE and not only as a CLI, and that is the ticket's own
+	// requirement rather than a convention: a carrier's staleness has to be
+	// visible without anyone having an accident. Everything the fleet ran on a
+	// schedule reported clean throughout all three, accurately — `check-intake`
+	// read "44 carried, 0 uncarried" — because none of them measured this axis.
+	// internal/verdictwatch is the standing reminder of the other failure mode: a
+	// correct, audited detector that NOTHING RAN.
+	//
+	// Armed on the same precondition as its two siblings — `gh` on PATH and a
+	// credential — because without either EVERY re-read fails and the runner
+	// would report one environment gap as a wall of un-re-read carriers.
+	//
+	// Deliberately NO third A13 condition row. The two that exist annunciate this
+	// exact environment fault, from the same cause, to the same reader; a third
+	// saying it again would be three notices for one missing binary, and the
+	// remedy is already named twice. The log line below is the record that this
+	// detector in particular is dark.
+	var carrierDriftWatcher *carrierdrift.Watcher
+	if cfg.CarrierDrift.Enabled {
+		_, ghPathErr := exec.LookPath("gh")
+		switch {
+		case ghPathErr != nil:
+			log.Printf("pogod: gh-issue carrier re-read NOT armed — `gh` not on PATH (%v); "+
+				"live carriers will not be checked against their issues", ghPathErr)
+		case !ghCredential.OK():
+			log.Printf("pogod: gh-issue carrier re-read NOT armed — no GitHub credential (%s); "+
+				"live carriers will not be checked against their issues", ghCredential)
+		default:
+			src := carrierdrift.MGSource{IncludeShelved: cfg.CarrierDrift.IncludeShelved}
+			carrierDriftWatcher = carrierdrift.New(carrierdrift.Options{
+				Enabled: true,
+				Source:  src.Carriers,
+				// RetryingSnapshot, not the bare GHSnapshot: this box's network is
+				// ~50% intermittent (mg-0ffc), and an un-retried re-read turns one
+				// blip into a whole pass of non-answers (mg-dd22). `pogo
+				// check-carriers` binds the same wrapper, so a hand re-run cannot
+				// disagree with this one for want of a retry.
+				Snapshot: carrierdrift.RetryingSnapshot(carrierdrift.GHSnapshot),
+				Statuses: src.Statuses(),
+				Mail:     client.SendMGMail,
+				Interval: cfg.CarrierDrift.Interval,
+				Windows: carrierdrift.Windows{
+					Ack:    cfg.CarrierDrift.AckWindow,
+					Stage:  cfg.CarrierDrift.StageWindow,
+					Closed: cfg.CarrierDrift.ClosedGrace,
+					Stages: cfg.CarrierDrift.Stages,
+				},
+				RenotifyAfter: cfg.CarrierDrift.RenotifyAfter,
+				NotifyTo:      cfg.CarrierDrift.NotifyTo,
+				EscalateAfter: cfg.CarrierDrift.EscalateAfter,
+				EscalateTo:    escalationBox,
+			})
+			w := carrierDriftWatcher.Windows()
+			log.Printf("pogod: gh-issue carrier re-read enabled (interval=%s ack_window=%s stage_window=%s closed_grace=%s stages=%v renotify=%s notify_to=%s escalate_after=%s escalate_to=%s shelved=%t, report-only)",
+				cfg.CarrierDrift.Interval, w.Ack, w.Stage, w.Closed, w.Stages,
+				cfg.CarrierDrift.RenotifyAfter, cfg.CarrierDrift.NotifyTo,
+				cfg.CarrierDrift.EscalateAfter, escalationBox, cfg.CarrierDrift.IncludeShelved)
+		}
+	}
+
 	// Build the REVIEW-DECLARATION detector (mg-253e): the sweep that reports a
 	// review ticket carrying no usable `reviews:` line, and therefore a builder
 	// the mg-aaf6 exemption can never protect.
@@ -3206,6 +3281,15 @@ Flags:
 		// could file a work item or comment on an issue.
 		if intakeWatcher != nil {
 			go intakeWatcher.Check(now)
+		}
+		// The gh-issue carrier RE-READ rides the same tick on its own coarse
+		// interval. In a goroutine because it shells out to `mg show` once per
+		// live work item and then to `gh` once per carrier over the network —
+		// neither must delay the next tick. Report-only: it mails, and it has no
+		// seam through which it could comment on an issue, close one, or edit the
+		// carrier whose staleness it reports.
+		if carrierDriftWatcher != nil {
+			go carrierDriftWatcher.Check(now)
 		}
 		// The review-declaration detector rides the same tick on its own coarse
 		// interval. In a goroutine because it walks four status directories and

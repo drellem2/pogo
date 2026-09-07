@@ -121,6 +121,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```
    This ack is the **only** write to the issue during triage. Your substantive reply is drafted in step 8 (`proposed_public_reply`) and posted by others after the human decision — never by you.
 
+   **Post that line as written.** `pogo check-carriers` (mg-5d9d) decides whether a reporter has heard from us by matching this text on the thread, because author identity cannot: on this fleet the acknowledgements are posted under the same GitHub login as the reports, so 40 of 40 carried issues looked identical by author. Rewording your ack does not fail loudly — it makes the issue read as SILENCE for as long as the carrier lives. If you must say something else, add it *after* the line rather than in place of it.
+
 4. **Investigate the codebase.** This is the core of your job, and the quality bar is explicit — a recommendation that misses any of these does not count:
    - **Ground every claim in code inspection**, never in the issue text alone. Find the subsystem, files, and functions the issue touches; cite `file:line` in your findings.
    - **Keep a `checked` list** of every file you inspected and command you ran — it goes in the structured result verbatim.

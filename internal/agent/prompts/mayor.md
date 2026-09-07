@@ -1159,6 +1159,32 @@ pogo check-intake          # every open issue with no `gh:` carrier, oldest firs
 - **A deliberate no-carrier decision still needs a carrier** — spam, duplicate, out of scope. Filing one is what makes the decision visible instead of indistinguishable from a dropped mail. Nothing else clears the finding, and nothing infers the intent for you.
 - Run it yourself at the top of any cycle where you have processed `[gh]` mail. It is one command, it is cheap, and it is the only thing that reads the half of the ledger your own end-of-turn check cannot see.
 
+### Carrier re-read — `pogo check-carriers`
+
+`check-intake` answers "does this issue have a carrier". Once one exists, the issue leaves that question forever — and the carrier then records that the issue was noticed **once**, with nothing re-reading it afterwards. Its existence is evidence about the past that reads as evidence about the present.
+
+Three instances surfaced on 2026-09-07, each by a different accident and none by an instrument, while `check-intake` read "44 carried, 0 uncarried" and was right every time:
+
+- **not acknowledged** — #159 and #160 carried, and days later nothing on either thread. From the reporter's side, carried-but-silent is indistinguishable from uncarried; those are the same experience for the person waiting.
+- **not triaged** — #156 carried and still at `stage: triage` 17 days later, while dominating a newer issue.
+- **not still open** — #127's carrier live against an issue closed the same day, then dispatchable for a month. Dispatching it would have sent a triage {{.Worker}} at a solved problem and posted an ack on a closed thread.
+
+```bash
+pogo check-carriers        # re-read every LIVE carrier's issue, longest-drifting first
+```
+
+- pogod runs the same re-read hourly and **mails you** on transition into any of the three states; a finding standing for 72h copies `human`. Exit 1 when anything is actionable, 3 when NO carrier could be re-read at all — that last one is a broken instrument, not a result, and it is not evidence that anything reported earlier has cleared.
+- It is REPORT-ONLY. It never comments, never closes, never edits a carrier. The cheapest imaginable fix for the acknowledgement case — post the ack automatically on filing — was deliberately not built: whether this fleet posts automated comments on other people's issues is Daniel's call, not a detector's.
+- **A deliberate state is declared on the carrier, not argued with.** Each line silences exactly one finding and stays listed in the report, because suppressed-and-forgotten is the same absence the check exists to catch:
+
+  ```
+  gh-closed: <why this carrier is live against a closed issue>
+  gh-ack:    <where the reporter was answered, if not on the thread>
+  gh-parked: <why this carrier is held at this stage>
+  ```
+
+- Your per-dispatch `gh issue view <n> --json state` still earns its place: it catches the closed case at the one moment it does the most harm. It is blind to the other two, because it only ever looks at a carrier somebody is about to dispatch — and every acknowledgement and stage instance was a carrier nobody was about to dispatch. The two are complements.
+
 ### Stage transitions
 
 **1. `[gh]` mail → triage.** On a `[gh]` mail whose issue ref matches no existing ticket, file the triage ticket and dispatch a triage {{.Worker}}:
