@@ -1866,6 +1866,15 @@ printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
             *) echo $(( $(cat "$DW135_CLOCK") + secs )) > "$DW135_CLOCK" ;;
         esac
     }
+    # The retained-tree listing is stubbed OUT rather than reached, for the same
+    # reason witness_alive_count is stubbed at the mg-8bb1 block below:
+    # print_preserved_retained shells to the `pogo` binary this script DEPLOYS,
+    # it costs ~2s per call (it stats every retained tree), and it would make
+    # these assertions read the LIVE fleet's worktrees. What is under test here
+    # is drain_wait; that the retained line is seated at each of its clearing
+    # exits, and what it prints, are asserted in the mg-e621 block at the end of
+    # this file against the real function.
+    print_preserved_retained() { :; }
     DW135_STATE="$(mktemp)"
     dw135_probe_seq() {   # $1,$2,... = bodies, one per successive poll
         DW135_BODIES=("$@")
@@ -3509,6 +3518,187 @@ OUT="$(bash -c 'source "'"$HERE/pogo-self-deploy"'"; ASSUME_YES=false; confirm <
 { [ "$RC" -eq 3 ] && grep -q 'refusing to redeploy pogod non-interactively' <<<"$OUT"; } \
     && pass "and the default noun is unchanged for the caller that was there first" \
     || fail "confirm's default refusal changed (rc=$RC): $OUT"
+
+# ===========================================================================
+# mg-e621: THE UNSCOPED UNIVERSAL, AND THE POPULATION THE PREDEPLOY CREATES
+# ===========================================================================
+# THE DEFECT. Two adjacent lines in every nightly for 25 nights:
+#
+#     no polecat holds unpushed work — 0 running, 0 that stopped mid-drain
+#     without reaching origin
+#     drain check cleared — checked 0 polecat(s) for commits that exist only
+#     in their worktree
+#
+# Only the second is supported by what ran. The first is a universal over ALL
+# polecats; the query behind it ranges over two categories — polecats RUNNING at
+# drain time, and polecats that stopped MID-DRAIN. The query is sound. The
+# sentence it printed was a universal the query cannot support.
+#
+# AND THE SURROUNDING PROCEDURE CREATES THE EXCLUDED SET. predeploy-stop fires
+# at 01:45, the drain opens at 02:00: the better the stop does its job, the
+# larger the population the drain is defined to exclude. On 2026-09-06 the claim
+# was FALSE with seven counterexamples on the box, three holding untracked
+# files. On 2026-09-07 it was true — by luck, over the same blind spot. A check
+# that is right by coincidence and wrong by coincidence reports the same thing
+# either way, which is why the assertions below are about the SENTENCE and about
+# the third population's LINE, and never about which way today happens to fall.
+# The drain blocks above stub print_preserved_retained (see the note there), so
+# restore the real definitions before measuring them.
+# shellcheck source=/dev/null
+source "$HERE/pogo-self-deploy"
+E621_STUB="$(mktemp)"; chmod +x "$E621_STUB"
+E621_ERR="$(mktemp)"
+trap 'rm -f "$RESULTS_FILE" "$DW_STATE" "$POGO_CLI_STUB" "$E621_STUB" "$E621_ERR"' EXIT
+
+# --- (1) THE SENTENCE, at every clear that prints it ------------------------
+# Asserted against the source rather than through a run, because what is wrong
+# with the old line is its SUBJECT, and a subject is not something a return code
+# can be interrogated about.
+E621_UNSCOPED="$(grep -c 'log "no polecat holds unpushed work' "$HERE/pogo-self-deploy" || true)"
+[ "$E621_UNSCOPED" = "0" ] \
+    && pass "mg-e621: no clearing line still says 'no polecat holds unpushed work' — the bare universal is gone from the driver" \
+    || fail "mg-e621: $E621_UNSCOPED clearing line(s) still print an unscoped universal over a population the query cannot see"
+E621_SCOPED="$(grep -c 'no polecat that was running or that stopped mid-drain holds unpushed work' "$HERE/pogo-self-deploy" || true)"
+[ "$E621_SCOPED" = "2" ] \
+    && pass "mg-e621: BOTH clears now name the two categories the query actually ranges over — the count-eq-0 early return and the held-eq-0 clear" \
+    || fail "mg-e621: $E621_SCOPED of 2 clearing lines are scoped to what was measured"
+grep -q 'drain check cleared — no polecat that was running or that stopped mid-drain held unpushed work' "$HERE/pogo-self-deploy" \
+    && pass "mg-e621: report_drain_complete's could-not-re-read line is scoped too — it is the same sentence in the one branch that already knows it could not look" \
+    || fail "mg-e621: report_drain_complete still generalises over every polecat when its own re-read failed"
+
+# --- (2) THE THIRD POPULATION IS SEATED AT EVERY EXIT THAT PROCEEDS ---------
+# gh#135 seated its reconciliation at one clear and mg-8bb1 had to come back for
+# the other two. Seating this at two of three would repeat that exactly, and the
+# missed exit is invisible until the night it matters.
+# Anchored to a bare call line: the comments beside each seat name the function
+# too, and a substring count would read 5 for 3 seats — a check that cannot go
+# red for the reason it exists.
+E621_SEATS="$(fn_body drain_wait | grep -c '^ *print_preserved_retained$' || true)"
+[ "$E621_SEATS" = "3" ] \
+    && pass "mg-e621: the retained-tree count is printed at all THREE of drain_wait's clearing exits (count-eq-0, held-eq-0, wedged+idle) — not at the two that were easy to find" \
+    || fail "mg-e621: print_preserved_retained is seated at $E621_SEATS of drain_wait's 3 clearing exits — the unseated one clears silently over the same population"
+
+# --- (3) preserved_retained: EMPTY-never-0 at the new CLI seam --------------
+# Same rule and same hazard as witness_alive_count: `pogo` is a binary this
+# script DEPLOYS, so the copy on PATH during a drain is the one from the LAST
+# deploy. Every way this hop can fail must read as "could not look" — a failure
+# that printed as "there are none" would rebuild this ticket's own defect inside
+# its remedy.
+pr() { POGO_CLI="$E621_STUB" preserved_retained 2>/dev/null; echo "|$?"; }
+
+# The CLI prints through json.MarshalIndent, so the real payload is INDENTED —
+# `  "retained_count": 7,`. A sed written for pogod's compact HTTP JSON reads
+# that as absent. This case is the reason json_num tolerates whitespace, and it
+# is written in the CLI's actual shape rather than a convenient one.
+cat > "$E621_STUB" <<'STUB'
+#!/bin/bash
+cat <<'JSON'
+{
+  "polecats_dir": "/Users/x/.pogo/polecats",
+  "retained": [
+    {
+      "worktree": "/Users/x/.pogo/polecats/p0fc6",
+      "untracked_paths": 11
+    }
+  ],
+  "retained_count": 7,
+  "retained_uncommitted": 7,
+  "retained_undetermined": 0,
+  "retained_unpushed": 0,
+  "retained_untracked": 3,
+  "in_use_count": 0
+}
+JSON
+STUB
+[ "$(pr)" = "7 3
+|0" ] && pass "mg-e621: preserved_retained reads the counts off the CLI's INDENTED json — 7 retained, 3 holding untracked files, which is 2026-09-06's exact fleet" \
+      || fail "mg-e621: the indented payload did not parse ($(pr)) — the deploy would report 'could not look' on every healthy night"
+
+printf '#!/bin/bash\nprintf %%s "{\\"retained_count\\": 0, \\"retained_untracked\\": 0}\\n"\n' > "$E621_STUB"
+[ "$(pr)" = "0 0
+|0" ] && pass "mg-e621: a readable zero is a MEASUREMENT (rc 0) — the honest 'and 0 retained worktrees' line needs a zero it can tell from an absence" \
+      || fail "mg-e621: a readable zero was not reported as a measurement ($(pr))"
+
+# The expected first-night case, exactly as cobra fails it: an old `pogo` that
+# has never heard of --list-preserved.
+printf '#!/bin/bash\necho "Error: unknown flag: --list-preserved" >&2\nexit 1\n' > "$E621_STUB"
+[ "$(pr)" = "? ?
+|1" ] && pass "mg-e621: an OLD pogo that has never heard of --list-preserved yields '?' — fails CLOSED, which is the expected shape on the first night this ships" \
+      || fail "mg-e621: an old CLI did not fail closed ($(pr))"
+
+# A pogo new enough to answer but too old to carry the scalars. rc is 0 and the
+# body parses as JSON; only the field is missing. This is the case a naive
+# reader turns into a confident 0.
+printf '#!/bin/bash\necho %s\n' "'{\"polecats_dir\":\"/p\",\"retained\":[{\"worktree\":\"/p/a\"}]}'" > "$E621_STUB"
+[ "$(pr)" = "? ?
+|1" ] && pass "mg-e621: a SUCCESSFUL pogo whose payload carries no retained_count still yields '?' — an absent field is not a zero one, and this payload has a non-empty retained array" \
+      || fail "mg-e621: an absent retained_count was read as a count ($(pr)) — the fail-open, rebuilt at the new seam"
+
+# Absent binary — launchd hands jobs a minimal PATH.
+E621_SAVE="$E621_STUB"; E621_STUB="/nonexistent/pogo-$$"
+[ "$(pr)" = "? ?
+|1" ] && pass "mg-e621: a MISSING pogo binary yields '?' (minimal-PATH launchd case)" \
+      || fail "mg-e621: missing binary did not yield '?' ($(pr))"
+E621_STUB="$E621_SAVE"
+
+# The exit code decides, not the body: a CLI that fails while printing a
+# zero-shaped payload must never be believed.
+printf '#!/bin/bash\necho %s\nexit 1\n' "'{\"retained_count\": 0, \"retained_untracked\": 0}'" > "$E621_STUB"
+[ "$(pr)" = "? ?
+|1" ] && pass "mg-e621: a FAILING CLI that prints retained_count 0 is still '?' — the exit code decides, not the body" \
+      || fail "mg-e621: believed a zero from a failed CLI ($(pr))"
+
+# --- (4) WHAT THE READER ACTUALLY SEES -------------------------------------
+# The counts are the mechanism; the LINE is the deliverable, because the defect
+# was never in a number. It was in what the log licensed a reader to believe.
+ppr() { POGO_CLI="$E621_STUB" print_preserved_retained 2>&1; }
+
+cat > "$E621_STUB" <<'STUB'
+#!/bin/bash
+echo '{"retained_count": 7, "retained_untracked": 3}'
+STUB
+E621_OUT="$(ppr)"
+grep -q 'OUTSIDE THE CHECK ABOVE: 7 retained worktree(s)' <<<"$E621_OUT" \
+    && pass "mg-e621: the excluded population is COUNTED beside the clear — the caveat became a measurement, which is what makes it a fix rather than a hedge" \
+    || fail "mg-e621: the retained population is not named on the clearing path: $E621_OUT"
+grep -q '3 of them holding UNTRACKED files' <<<"$E621_OUT" \
+    && pass "mg-e621: and the untracked subset is called out — on no branch, in no stash, on no remote, so those trees are the only copy" \
+    || fail "mg-e621: the untracked subset is not distinguished: $E621_OUT"
+grep -q 'does NOT hold the deploy' <<<"$E621_OUT" \
+    && pass "mg-e621: the line says it does not hold the deploy — these trees are gc-protected and hold no process, so waiting on them would block every redeploy while protecting nothing" \
+    || fail "mg-e621: the line does not say whether it blocks: $E621_OUT"
+# It must NOT reach ERR_LOG. Seven trees have stood for weeks; an alert on a
+# standing condition is filtered within a week and takes the real ones with it.
+( DEPLOY_STAGE="drain"; ERR_LOG="$E621_ERR"; : > "$E621_ERR"; POGO_CLI="$E621_STUB" print_preserved_retained >/dev/null 2>&1 )
+[ ! -s "$E621_ERR" ] \
+    && pass "mg-e621: a non-zero retained count writes NOTHING to ERR_LOG — it is a report, not an alert, and it must not page the nightly on a condition that has stood for weeks" \
+    || fail "mg-e621: the retained count reached ERR_LOG ($(cat "$E621_ERR")) — every night would page under a headline nothing can act on"
+
+# THE ZERO CASE, which is where an unscoped remedy would hide. A bare "0
+# retained" invites exactly the reading this ticket is about, so the line has to
+# carry the bound of its own instrument.
+cat > "$E621_STUB" <<'STUB'
+#!/bin/bash
+echo '{"retained_count": 0, "retained_untracked": 0}'
+STUB
+E621_OUT="$(ppr)"
+grep -q 'and 0 retained worktrees' <<<"$E621_OUT" \
+    && pass "mg-e621: the zero is printed rather than omitted — a term that appears only when non-zero cannot be told from one that was never computed" \
+    || fail "mg-e621: the zero case prints nothing: $E621_OUT"
+grep -q 'clean tree on a branch holding unpushed commits is not one' <<<"$E621_OUT" \
+    && pass "mg-e621: THE REMEDY, SUBJECTED TO ITS OWN DEFECT — the zero line states what 'retained' does NOT include, so it is a claim about trees gc refused and not a fresh universal about polecats" \
+    || fail "mg-e621: the zero line names no bound: $E621_OUT — a scoped instrument printing an unscoped claim, rebuilt inside its own fix"
+
+# And the unreadable case: "could not look" must never render as "there are none".
+printf '#!/bin/bash\nexit 1\n' > "$E621_STUB"
+E621_OUT="$(ppr)"
+grep -q 'COULD NOT BE READ' <<<"$E621_OUT" && grep -q 'NOT a report that there are none' <<<"$E621_OUT" \
+    && pass "mg-e621: an unreadable listing prints 'we could not look' — absence of evidence wearing the clothes of evidence of absence is the generator this whole family comes from" \
+    || fail "mg-e621: an unreadable listing did not announce itself as unreadable: $E621_OUT"
+
+# Put the REAL functions back before anything below measures them.
+# shellcheck source=/dev/null
+source "$HERE/pogo-self-deploy"
 
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)

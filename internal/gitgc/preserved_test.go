@@ -700,3 +700,122 @@ func TestSummaryReportsTheStatusMgGaveNotInFlight(t *testing.T) {
 		t.Errorf("the tree's line must carry the status mg reported, got:\n%s", out)
 	}
 }
+
+// TestScanPreservedCountsAreReadableWithoutJq is mg-e621's Go half.
+//
+// # The consumer, and why a derived count is carried in the payload
+//
+// For 25 nights the nightly redeploy printed "no polecat holds unpushed work"
+// — an unscoped universal — beside a query that ranges over two categories
+// only: polecats RUNNING at drain time and polecats that stopped MID-DRAIN. A
+// polecat that exited BEFORE the drain opened is in neither, and the nightly's
+// own predeploy-stop is what creates that population. On 2026-09-06 the claim
+// was false with seven counterexamples on this box, three of them holding
+// untracked files.
+//
+// The instrument that can see them is this scan. What kept the deploy from
+// consulting it was not policy: the deploy driver parses JSON with sed and no
+// jq on purpose, and no single-line regex can count an array of nested
+// objects. So the counts ride in the payload as scalars, and this test pins
+// them to the slices they are derived from — a count that could drift from its
+// own population would be this ticket's defect one layer down.
+func TestScanPreservedCountsAreReadableWithoutJq(t *testing.T) {
+	polecats := sharedPolecats(t)
+	r := newTestRepo(t)
+	for _, b := range []string{"polecat-a1b2", "polecat-c3d4", "polecat-e5f6"} {
+		r.branch(b)
+	}
+	// Two retained trees. One holds an UNTRACKED path — the urgent kind, on no
+	// branch, in no stash and on no remote — and one holds a tracked edit only,
+	// so the untracked count is a real discriminator rather than len(Retained)
+	// wearing a second name.
+	untrackedTree := addWorktree(t, r, polecats, "a1b2", "polecat-a1b2")
+	modifiedTree := addWorktree(t, r, polecats, "c3d4", "polecat-c3d4")
+	liveTree := addWorktree(t, r, polecats, "e5f6", "polecat-e5f6")
+	dirty(t, untrackedTree, "never_committed.go", "package x // the only copy\n")
+	dirty(t, modifiedTree, "README.md", "edited\n")
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-q", "-m", "tracked"}} {
+		if out, err := gitIn(modifiedTree, args...); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, modifiedTree, err, out)
+		}
+	}
+	dirty(t, modifiedTree, "README.md", "edited again\n")
+	dirty(t, liveTree, "wip.go", "package y\n")
+
+	rep, err := ScanPreserved(PreservedScanOptions{
+		PolecatsDir:  polecats,
+		LivePolecats: map[string]bool{"e5f6": true},
+		Tickets: TicketIndex{
+			"mg-a1b2": TicketArchived, "mg-c3d4": TicketArchived, "mg-e5f6": TicketArchived,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rep.RetainedCount != len(rep.Retained) {
+		t.Errorf("retained_count = %d but len(retained) = %d — the scalar the deploy reads "+
+			"disagrees with the population it names", rep.RetainedCount, len(rep.Retained))
+	}
+	if rep.InUseCount != len(rep.InUse) {
+		t.Errorf("in_use_count = %d but len(in_use) = %d", rep.InUseCount, len(rep.InUse))
+	}
+	if rep.RetainedCount != 2 {
+		t.Fatalf("want 2 retained trees (the live owner's is in use, not retained), got %d: %+v",
+			rep.RetainedCount, rep.Retained)
+	}
+	if rep.RetainedUncommitted+rep.RetainedUndetermined+rep.RetainedUnpushed != rep.RetainedCount {
+		t.Errorf("the outcome split (%d uncommitted, %d undetermined, %d unpushed) does not "+
+			"partition the %d retained trees", rep.RetainedUncommitted, rep.RetainedUndetermined,
+			rep.RetainedUnpushed, rep.RetainedCount)
+	}
+	// The discriminator: one of the two, not both and not zero. A count that
+	// tracked len(Retained) would pass a weaker test and tell the deploy
+	// nothing it did not already know.
+	if rep.RetainedUntracked != 1 {
+		t.Errorf("retained_untracked = %d, want 1 — one tree holds an untracked path and one "+
+			"holds a tracked edit only; trees: %+v", rep.RetainedUntracked, rep.Retained)
+	}
+
+	// The human listing renders from the same derivation, so an operator
+	// reading the terminal and a script reading --json cannot be told
+	// different populations. Two components observing different populations
+	// and only one of them speaking in universals is the whole defect.
+	out := rep.Summary()
+	if !strings.Contains(out, "2 retained:") {
+		t.Errorf("Summary must headline the same retained count as the payload, got:\n%s", out)
+	}
+	if !strings.Contains(out, "of those, 1 hold UNTRACKED files") {
+		t.Errorf("Summary must headline the untracked subset — it is the number that made a "+
+			"deploy's clearing line false rather than merely narrow; got:\n%s", out)
+	}
+}
+
+// TestSummaryCountsAHandBuiltReport is the positive control for the derivation
+// living in applyCounts rather than in ScanPreserved's body.
+//
+// Summary() takes a value receiver and recomputes on its own copy. If it read
+// the stored fields instead, every report not built by ScanPreserved would
+// render "0 retained" over a populated slice — a zero printed where nothing was
+// counted, which is the family of bug this file exists to prevent.
+func TestSummaryCountsAHandBuiltReport(t *testing.T) {
+	rep := PreservedReport{
+		PolecatsDir: "/nowhere",
+		Retained: []PreservedTree{
+			{Owner: "a1b2", Outcome: "preserved", Total: 2, Untracked: 1},
+			{Owner: "c3d4", Outcome: "undetermined"},
+			{Owner: "e5f6", Outcome: "unpushed"},
+		},
+	}
+	out := rep.Summary()
+	if !strings.Contains(out, "3 retained: 1 holding uncommitted work, 1 unreadable, 1 clean") {
+		t.Errorf("Summary must derive its counts rather than read unset fields, got:\n%s", out)
+	}
+	if !strings.Contains(out, "of those, 1 hold UNTRACKED files") {
+		t.Errorf("the untracked subset must be derived too, got:\n%s", out)
+	}
+	if rep.RetainedCount != 0 {
+		t.Errorf("Summary must not mutate the caller's report; RetainedCount = %d, want 0 "+
+			"(the copy is what gets counted)", rep.RetainedCount)
+	}
+}
