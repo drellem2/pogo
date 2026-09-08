@@ -411,3 +411,58 @@ func TestOperatorCancellationIsStillReportedAsCancellation(t *testing.T) {
 		t.Errorf("cancellation must stay recognisable as cancellation, got %T: %v", err, err)
 	}
 }
+
+// TestTheStalePidReadingIsReportedWithItsFLOORAndNotWithTheRunsElapsed.
+//
+// mg-cbc3 left "any construction that holds a pid and signals it later" as the
+// standing account of the gate SIGTERM, and as written it admits every watchdog
+// in the tree — a mechanism the reader cannot test a candidate against. mg-baf3
+// gave it a floor that needs no measurement: a pid has one owner at a time, so a
+// STALE pid was captured before its current owner was born and the sender's hold
+// is at least the victim's AGE.
+//
+// The load-bearing assertion is the third one, and it is the reason this test
+// exists rather than a `strings.Contains(report, "stale")`. The victim's age is
+// NOT the run's elapsed — a process spawned late in a run is younger than the
+// run — so a report that quotes Elapsed as the floor states a bound higher than
+// the true one and excludes a real candidate. Elapsed must appear as a CEILING
+// on the age. A report that got this backwards passes every other check here.
+func TestTheStalePidReadingIsReportedWithItsFLOORAndNotWithTheRunsElapsed(t *testing.T) {
+	report := (&gateSignalError{
+		Gate: "./build.sh", Signal: syscall.SIGTERM,
+		Elapsed: 85 * time.Second, Timeout: time.Hour,
+	}).Error()
+
+	if !strings.Contains(report, "BOUNDED    a STALE pid") {
+		t.Fatalf("the stale-pid class must be reported and marked as bounded rather than open, got:\n%s", report)
+	}
+	// The rule itself, in the report, so the reader can apply it to a candidate
+	// this repo has never heard of.
+	if !strings.Contains(report, "one owner at a time") ||
+		!strings.Contains(report, "at least the AGE of the process it killed") {
+		t.Errorf("the report must state WHY the floor holds, so it is checkable rather than asserted, got:\n%s", report)
+	}
+	// The discriminator. "at most 1m25s" is a ceiling on the victim's age;
+	// "shorter than 1m25s" would be the run's elapsed masquerading as the floor.
+	if !strings.Contains(report, "at most 1m25s, this whole run") {
+		t.Errorf("Elapsed must be offered as a CEILING on the killed process's age — quoting it as the "+
+			"floor overstates the bound and discards a real candidate, got:\n%s", report)
+	}
+	// Positive control on that number: it is this run's arithmetic, not a
+	// constant that would read correctly for any run at all.
+	other := (&gateSignalError{
+		Gate: "./build.sh", Signal: syscall.SIGTERM,
+		Elapsed: 264 * time.Second, Timeout: time.Hour,
+	}).Error()
+	if !strings.Contains(other, "at most 4m24s, this whole run") {
+		t.Errorf("the ceiling must track the run it describes; a second run with a different elapsed "+
+			"must report a different ceiling, got:\n%s", other)
+	}
+	// And the floor must never be stated as the run's length.
+	for _, wrong := range []string{"shorter than 1m25s", "no holder shorter than", "at least 1m25s"} {
+		if strings.Contains(report, wrong) {
+			t.Errorf("the report states the floor as the RUN's length (%q), which is higher than the "+
+				"victim's age and excludes real candidates:\n%s", wrong, report)
+		}
+	}
+}

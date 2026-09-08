@@ -191,6 +191,43 @@ func (e *gateSignalError) sourceBlock() string {
 			signalName(e.Signal))
 	}
 
+	// The stale-pid reading, and the bound that makes it a filter rather than a
+	// class that admits everything (mg-baf3).
+	//
+	// mg-cbc3 measured this box recycling its whole pid space in minutes and
+	// put the consequence on the table: "any construction that holds a pid and
+	// signals it later reproduces the recorded shape with no intent toward the
+	// gate". True, and as stated it eliminates nothing — every watchdog in this
+	// tree captures a pid and fires later, so the reader is handed a mechanism
+	// with no way to test a candidate against it.
+	//
+	// It has a bound, and the bound needs no measurement to state: a pid has
+	// ONE owner at a time, so a killer holding a STALE pid necessarily captured
+	// that number while a DIFFERENT process owned it — which is necessarily
+	// before the current owner was born. Its HOLD (capture to signal) is
+	// therefore at least the victim's AGE at the kill. Nothing about
+	// allocation policy is assumed, so this survives off darwin.
+	//
+	// On darwin it is strictly stronger: pids are handed out sequentially and
+	// reused only after the counter wraps (measured for mg-baf3: 40 consecutive
+	// spawns, +1 each, 13487..13526), so a freed number is not reissued until a
+	// full wrap has elapsed and the hold must cover the victim's age PLUS that
+	// wrap. The weak form is the one reported, because it is the one that holds
+	// everywhere.
+	//
+	// The victim's age is what the filter needs and is NOT this struct's
+	// Elapsed — a process spawned late in a run is younger than the run. So the
+	// report gives Elapsed as the CEILING on that age and asks the reader for
+	// the age itself, rather than quietly substituting the number it happens to
+	// have. Substituting it would raise the floor above its true value and
+	// exclude a real candidate, which is the direction that loses a sender.
+	fmt.Fprintf(b, "  BOUNDED    a STALE pid: some watchdog captured a pid, its owner exited, and the number "+
+		"was recycled onto this gate. This class has a floor. A pid has one owner at a time, so a stale pid "+
+		"was captured BEFORE its current owner was born — the sender's HOLD (capture to signal) is at least "+
+		"the AGE of the process it killed. Work out that age (at most %s, this whole run) and discard every "+
+		"candidate whose hold is shorter. That is arithmetic, not inspection. On darwin pids are issued "+
+		"sequentially and reused only after a full wrap, which only raises the floor.\n", roundDur(e.Elapsed))
+
 	// The case that keeps this INDETERMINATE rather than INFRASTRUCTURE.
 	b.WriteString("  OPEN       the gate signalling ITSELF. It runs in its own process group, so a `kill 0` " +
 		"or an unanchored `pkill -f` anywhere in the gate hits the gate's own shell. Grep the gate's " +
