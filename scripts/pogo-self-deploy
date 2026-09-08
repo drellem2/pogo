@@ -2011,8 +2011,73 @@ witness_alive_count() {
 # page the nightly on every successful deploy until the next one lands. Caught
 # by this suite's own gh#135 negative control, which asserts a clean drain
 # leaves ERR_LOG empty and went red the moment this used `err`.
+# derive_retained — count the retained population out of the LISTING ITSELF,
+# for the `pogo` that answers --list-preserved but carries no retained_* scalars
+# (mg-5049).
+#
+# WHY THIS EXISTS. On 2026-09-08 at 02:00:22Z the drain printed "COULD NOT BE
+# READ" over seven retained trees, four of them holding untracked files, and the
+# deploy proceeded past them. The mayor ran the same command by hand at 02:01Z
+# and got exit 0, well-formed JSON, retained_count=7, retained_untracked=4. Both
+# readings are correct and they are not of the same binary:
+#
+#   02:00:22Z  drain reads `pogo` — built at main 3c74587d by an earlier deploy
+#   02:00:48Z  THIS deploy's build stage installs the new /Users/daniel/go/bin/pogo
+#   02:01:00Z  mayor reads `pogo` — the copy installed 12s earlier
+#
+# The scalars were added by mg-e621 at 2026-09-07T23:13Z, three hours before the
+# drain that could not read them. The drain runs BEFORE the build stage, by
+# design and correctly, so the `pogo` it consults is always the one this deploy
+# is about to replace — the scalars cannot be present on the night they ship.
+# It was not a launchd PATH problem, it was not a discarded stderr (the call has
+# captured stderr via 2>&1 since mg-e621), and nothing about it is
+# environmental. It is structural, and it recurs at every future field this
+# check learns to read.
+#
+# WHAT WAS ACTUALLY MISSING. mg-e621 wrote the fail-closed rule and stopped
+# there: an absent retained_count must never print as a zero. That rule is right
+# and is kept below. What it never took was the second step — the population is
+# in this payload TWICE. `retained_count` is `len(r.Retained)` (preserved.go,
+# applyCounts) and `retained_untracked` is the number of retained trees with
+# Untracked > 0, which is exactly the number of elements carrying an
+# `untracked_paths` key, since that field is `omitempty`. Every `pogo` that
+# knows --list-preserved at all emits the `retained` array. So "could not read
+# the scalar" was never the same thing as "could not look".
+#
+# THE ANCHORS ARE THE INDENT, and that is not a shortcut. `pogo` prints through
+# cli.PrintJSON -> json.MarshalIndent(v, "", "  "), so a top-level key sits at
+# two spaces and an element of a top-level array sits at six. Anchoring there is
+# what keeps `in_use` (same element type, same "worktree" key, two spaces) and a
+# per-element `files` array (closes at six) out of the count. Against the live
+# 2026-09-08 payload the anchors return 7 and 4 — the scalars' own values.
+#
+# IT FAILS TO NOTHING, NEVER TO 0. Exit 1 with no output unless the top-level
+# `retained` key was actually seen; a payload of some other shape, a payload
+# whose indentation is not MarshalIndent's, or no payload at all leaves the
+# caller exactly as blind as it was, which is the state it is required to report.
+# `"retained": []` and `"retained": null` ARE seen, and both are a measured zero.
+#
+# Echoes "<trees> <holding-untracked> <status-errors>". The third term is not
+# decoration: a tree whose `git status` could not be read carries `status_error`
+# and no `untracked_paths`, so it is indistinguishable from a tree with none.
+# One of those anywhere in the array makes the untracked term unknowable, and
+# the caller turns it into "?" rather than counting it as clean.
+derive_retained() {
+    awk '
+        BEGIN { seen = 0; inarr = 0; n = 0; u = 0; se = 0 }
+        !inarr && /^  "retained": \[\]/     { seen = 1; next }
+        !inarr && /^  "retained": null/     { seen = 1; next }
+        !inarr && /^  "retained": \[$/      { seen = 1; inarr = 1; next }
+        inarr && /^  \]/                    { inarr = 0; next }
+        inarr && /^      "worktree":/       { n++ }
+        inarr && /^      "untracked_paths":/ { u++ }
+        inarr && /^      "status_error":/   { se++ }
+        END { if (!seen) exit 1; print n, u, se }
+    '
+}
+
 preserved_retained() {
-    local out rc n u msg
+    local out rc n u msg derived dn du dse rest
     out="$("$POGO_CLI" gc --list-preserved --json 2>&1)"; rc=$?
     if [ "$rc" -ne 0 ]; then
         msg="$(printf '%s' "$out" | json_str error)"; msg="${msg:-$(printf '%s' "$out" | head -1)}"
@@ -2020,13 +2085,35 @@ preserved_retained() {
         echo "? ?"; return 1
     fi
     n="$(printf '%s' "$out" | json_num retained_count)"
-    case "$n" in
-        ''|*[!0-9]*)
-            log "preserved: '$POGO_CLI gc --list-preserved --json' returned no readable retained_count" >&2
-            echo "? ?"; return 1 ;;
-    esac
+    case "$n" in ''|*[!0-9]*) n="" ;; esac
     u="$(printf '%s' "$out" | json_num retained_untracked)"
-    case "$u" in ''|*[!0-9]*) u="?" ;; esac
+    case "$u" in ''|*[!0-9]*) u="" ;; esac
+
+    # Only when a scalar is missing — a current `pogo` costs nothing here.
+    if [ -z "$n" ] || [ -z "$u" ]; then
+        derived="$(printf '%s\n' "$out" | derive_retained)"
+        if [ -n "$derived" ]; then
+            dn="${derived%% *}"; rest="${derived#* }"; du="${rest%% *}"; dse="${rest##* }"
+            [ "$dse" = "0" ] || du="?"
+            if [ -z "$n" ]; then
+                log "preserved: this \`$POGO_CLI\` answers --list-preserved but carries no retained_count — it predates" >&2
+                log "  the retained_* scalars (mg-e621), which is the EXPECTED shape here: the drain runs before the build" >&2
+                log "  stage, so the binary it reads is the one this deploy is about to replace. Counting the \`retained\`" >&2
+                log "  array instead — same population, same listing, one field over (mg-5049)." >&2
+                n="$dn"
+            fi
+            [ -n "$u" ] || u="$du"
+        fi
+    fi
+
+    if [ -z "$n" ]; then
+        log "preserved: '$POGO_CLI gc --list-preserved --json' exited 0 but carries neither a readable retained_count" >&2
+        log "  nor a readable \`retained\` array — nothing in this payload counts the population, so this is a real 'could not look'" >&2
+        echo "? ?"; return 1
+    fi
+    # An unreadable untracked subset next to a readable count: say "?" for the
+    # half that is unknown rather than letting a 0 stand in for it.
+    [ -n "$u" ] || u="?"
     echo "$n $u"; return 0
 }
 

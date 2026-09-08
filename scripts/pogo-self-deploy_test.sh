@@ -3726,12 +3726,21 @@ printf '#!/bin/bash\necho "Error: unknown flag: --list-preserved" >&2\nexit 1\n'
 |1" ] && pass "mg-e621: an OLD pogo that has never heard of --list-preserved yields '?' — fails CLOSED, which is the expected shape on the first night this ships" \
       || fail "mg-e621: an old CLI did not fail closed ($(pr))"
 
-# A pogo new enough to answer but too old to carry the scalars. rc is 0 and the
-# body parses as JSON; only the field is missing. This is the case a naive
-# reader turns into a confident 0.
+# A pogo new enough to answer but too old to carry the scalars, in a shape the
+# CLI never emits: COMPACT. rc is 0 and the body parses as JSON; only the field
+# is missing. This is the case a naive reader turns into a confident 0.
+#
+# It still yields '?' after mg-5049, and the reason is worth stating rather than
+# inferring from a green line. mg-5049 recovers this population by counting the
+# `retained` array, and the anchors it counts with are MarshalIndent's — two
+# spaces for a top-level key, six for an element's. That is what keeps `in_use`
+# (same element type, same "worktree" key) out of the count. A payload that is
+# not in that shape is not one `pogo` produces, so it is not derived from; it
+# stays blind and says so. The indented shape — the one the drain actually meets
+# — is measured in block (3b) below.
 printf '#!/bin/bash\necho %s\n' "'{\"polecats_dir\":\"/p\",\"retained\":[{\"worktree\":\"/p/a\"}]}'" > "$E621_STUB"
 [ "$(pr)" = "? ?
-|1" ] && pass "mg-e621: a SUCCESSFUL pogo whose payload carries no retained_count still yields '?' — an absent field is not a zero one, and this payload has a non-empty retained array" \
+|1" ] && pass "mg-e621: a SUCCESSFUL pogo whose COMPACT payload carries no retained_count still yields '?' — an absent field is not a zero one, and an unrecognised shape is not derived from" \
       || fail "mg-e621: an absent retained_count was read as a count ($(pr)) — the fail-open, rebuilt at the new seam"
 
 # Absent binary — launchd hands jobs a minimal PATH.
@@ -3747,6 +3756,202 @@ printf '#!/bin/bash\necho %s\nexit 1\n' "'{\"retained_count\": 0, \"retained_unt
 [ "$(pr)" = "? ?
 |1" ] && pass "mg-e621: a FAILING CLI that prints retained_count 0 is still '?' — the exit code decides, not the body" \
       || fail "mg-e621: believed a zero from a failed CLI ($(pr))"
+
+# --- (3b) THE FIRST-NIGHT SHAPE IS COUNTED, NOT SHRUGGED AT (mg-5049) -------
+# What ran on 2026-09-08 at 02:00:22Z, and what makes it structural rather than
+# environmental:
+#
+#   02:00:22Z  the drain reads `pogo` — built at main 3c74587d by an EARLIER deploy
+#   02:00:48Z  this deploy's build stage installs the new /Users/daniel/go/bin/pogo
+#   02:01:00Z  the mayor reads `pogo` by hand: exit 0, retained_count=7, retained_untracked=4
+#
+# Both readings are correct and they are of different binaries. mg-e621 added
+# the scalars at 2026-09-07T23:13Z, three hours before the drain that could not
+# read them — and the drain runs BEFORE the build stage by design, so the copy
+# it consults is ALWAYS the one this deploy is about to replace. The scalars
+# cannot be present on the night they ship, and the same is true of every field
+# this check learns to read next.
+#
+# mg-e621 got the fail-closed rule right and stopped there. The population is in
+# this payload TWICE: retained_count IS len(Retained) (preserved.go applyCounts)
+# and retained_untracked IS the number of elements carrying `untracked_paths`,
+# which is `omitempty`. "Could not read the scalar" was never the same thing as
+# "could not look" — and while it read as the latter, seven retained trees, four
+# holding untracked files, went past a check that announced it had not looked.
+#
+# Measured against the REAL pre-scalar binary before this was written: `pogo`
+# built at 768efe8^ printed exactly the production line under main's code
+# ("returned no readable retained_count" -> "? ?"), and "7 4" under this one.
+# The payload below is that binary's shape, including the `in_use` array it
+# carried — same element type, same "worktree" key — which is the control that
+# the count is scoped to `retained` and not to the document.
+cat > "$E621_STUB" <<'STUB'
+#!/bin/bash
+echo '{'
+echo '  "polecats_dir": "/Users/x/.pogo/polecats",'
+echo '  "retained": ['
+for i in 1 2 3 4 5 6 7; do
+  echo '    {'
+  echo "      \"worktree\": \"/Users/x/.pogo/polecats/p$i\","
+  echo "      \"owner\": \"p$i\","
+  echo '      "outcome": "preserved",'
+  echo '      "dirty_paths": 2,'
+  echo '      "modified_paths": 1,'
+  [ "$i" -le 4 ] && echo '      "untracked_paths": 1,'
+  echo '      "files": ['
+  echo '        "M scripts/pogo-deploy_test.sh"'
+  echo '      ],'
+  echo '      "live": false'
+  if [ "$i" = 7 ]; then echo '    }'; else echo '    },'; fi
+done
+echo '  ],'
+echo '  "in_use": ['
+echo '    {'
+echo '      "worktree": "/Users/x/.pogo/polecats/live1",'
+echo '      "untracked_paths": 3,'
+echo '      "live": true'
+echo '    }'
+echo '  ],'
+echo '  "clean_count": 34,'
+echo '  "not_worktree_count": 19,'
+echo '  "tickets_loaded": true'
+echo '}'
+STUB
+[ "$(pr)" = "7 4
+|0" ] && pass "mg-5049: a pre-scalar `pogo` — the shape the drain ALWAYS meets on the night a field ships — is now COUNTED off the retained array: 7 trees, 4 holding untracked files, the exact figures the mayor read by hand at 02:01Z" \
+      || fail "mg-5049: the first-night payload still reads as unreadable ($(pr)) — the deploy goes past 7 retained trees announcing it could not look, while the listing in front of it says how many there are"
+
+# The in_use exclusion, stated as its own assertion because it is the whole
+# reason the anchors are indentation and not a bare grep. The payload above
+# holds 8 elements with a "worktree" key; 7 of them are retained.
+E5049_N="$(pr)"; E5049_N="${E5049_N%%|*}"; E5049_N="${E5049_N%% *}"
+[ "$E5049_N" = "7" ] \
+    && pass "mg-5049: the count is scoped to the \`retained\` array — the live tree in \`in_use\` carries the same \"worktree\" key and is NOT counted, which is a document-wide grep's exact failure" \
+    || fail "mg-5049: the derived count is $E5049_N, not 7 — \`in_use\` is being folded into a population it is defined to be outside of"
+
+# THE NEGATIVE CONTROL FOR THAT POSITIVE. Same payload, `retained` key removed:
+# there is now nothing in the document that counts the population, and the
+# answer must go back to "could not look". A derivation that cannot fail is not
+# a measurement.
+cat > "$E621_STUB" <<'STUB'
+#!/bin/bash
+echo '{'
+echo '  "polecats_dir": "/Users/x/.pogo/polecats",'
+echo '  "in_use": ['
+echo '    {'
+echo '      "worktree": "/Users/x/.pogo/polecats/live1",'
+echo '      "untracked_paths": 3'
+echo '    }'
+echo '  ],'
+echo '  "clean_count": 34'
+echo '}'
+STUB
+[ "$(pr)" = "? ?
+|1" ] && pass "mg-5049: a payload with NO retained array is still '?' — the fallback fails closed, so 'we could not look' survives exactly where it is still true" \
+      || fail "mg-5049: a payload that counts nothing produced a count ($(pr)) — the fail-open rebuilt one field over"
+
+# An EMPTY retained array is a measured zero, not an absence: the key is there
+# and it says nothing is retained. Both renderings Go can emit for it.
+cat > "$E621_STUB" <<'STUB'
+#!/bin/bash
+echo '{'
+echo '  "retained": [],'
+echo '  "clean_count": 3'
+echo '}'
+STUB
+[ "$(pr)" = "0 0
+|0" ] && pass "mg-5049: \`\"retained\": []\` derives a measured ZERO — the key is present and it says the population is empty, which is what the 'and 0 retained worktrees' line needs to be able to say honestly" \
+      || fail "mg-5049: an empty retained array did not read as a measured zero ($(pr))"
+cat > "$E621_STUB" <<'STUB'
+#!/bin/bash
+echo '{'
+echo '  "retained": null,'
+echo '  "clean_count": 3'
+echo '}'
+STUB
+[ "$(pr)" = "0 0
+|0" ] && pass "mg-5049: and so does \`\"retained\": null\` — that is what MarshalIndent prints for a nil slice, so the two renderings of 'nothing retained' must not answer differently" \
+      || fail "mg-5049: a null retained array did not read as a measured zero ($(pr))"
+
+# THE UNTRACKED TERM HAS ITS OWN UNKNOWN, and it is not the count's. A tree
+# whose `git status` could not be read carries `status_error` and NO
+# `untracked_paths` — indistinguishable, to this derivation, from a tree with
+# none. So the trees are still counted and the untracked term goes to '?',
+# rather than a clean-looking 0 standing in for a tree nobody could read.
+cat > "$E621_STUB" <<'STUB'
+#!/bin/bash
+echo '{'
+echo '  "retained": ['
+echo '    {'
+echo '      "worktree": "/p/a",'
+echo '      "untracked_paths": 1'
+echo '    },'
+echo '    {'
+echo '      "worktree": "/p/b",'
+echo '      "status_error": "fatal: not a git repository"'
+echo '    }'
+echo '  ],'
+echo '  "clean_count": 0'
+echo '}'
+STUB
+[ "$(pr)" = "2 ?
+|0" ] && pass "mg-5049: a tree whose status could not be read makes the UNTRACKED term '?' while the count stays 2 — the two terms have different evidence and are allowed to fail separately" \
+      || fail "mg-5049: an unreadable status was folded into the untracked count ($(pr)) — a 0 standing in for a tree nobody could read"
+
+# WHAT THE DERIVED PATH SAYS OUT LOUD. A number whose provenance is silent is
+# the thing this ticket's own family is about: the reader has to be able to tell
+# a scalar that was read from a count that was derived, and to know why.
+prv() { POGO_CLI="$E621_STUB" preserved_retained 2>&1 >/dev/null; }
+cat > "$E621_STUB" <<'STUB'
+#!/bin/bash
+echo '{'
+echo '  "retained": ['
+echo '    {'
+echo '      "worktree": "/p/a",'
+echo '      "untracked_paths": 1'
+echo '    }'
+echo '  ],'
+echo '  "clean_count": 0'
+echo '}'
+STUB
+E5049_DIAG="$(prv)"
+grep -q 'carries no retained_count' <<<"$E5049_DIAG" \
+    && pass "mg-5049: the derived path names what was missing — a count whose provenance is silent cannot be told from one that was read off the field it claims" \
+    || fail "mg-5049: the derived path is silent about deriving: $E5049_DIAG"
+grep -q 'the drain runs before the build' <<<"$E5049_DIAG" \
+    && pass "mg-5049: and names WHY it is missing — the drain reads the binary this deploy is about to replace, so this is the expected shape and not an incident to chase" \
+    || fail "mg-5049: the diagnostic does not say why the field was absent: $E5049_DIAG"
+
+# It must not page the nightly. Same rule as the count line itself: this fires
+# on the first night after every scalar this check learns to read, and an alert
+# that fires on a known-benign transition is filtered within a week.
+( DEPLOY_STAGE="drain"; ERR_LOG="$E621_ERR"; : > "$E621_ERR"; POGO_CLI="$E621_STUB" preserved_retained >/dev/null 2>&1 )
+[ ! -s "$E621_ERR" ] \
+    && pass "mg-5049: the derived-path diagnostic writes NOTHING to ERR_LOG — it is a provenance note on a successful measurement, not a failure" \
+    || fail "mg-5049: the derivation notice reached ERR_LOG ($(cat "$E621_ERR")) — a benign first-night transition would page the nightly"
+
+# THE REMEDY, SUBJECTED TO ITS OWN DEFECT. The scalars, when present, must still
+# be what is read — otherwise this fix has quietly replaced the field it was
+# meant to fall back FROM, and the derivation's blind spots become the check's.
+# A current payload whose array disagrees with its scalars proves which one won.
+cat > "$E621_STUB" <<'STUB'
+#!/bin/bash
+echo '{'
+echo '  "retained": ['
+echo '    {'
+echo '      "worktree": "/p/a"'
+echo '    }'
+echo '  ],'
+echo '  "retained_count": 7,'
+echo '  "retained_untracked": 4'
+echo '}'
+STUB
+[ "$(pr)" = "7 4
+|0" ] && pass "mg-5049: with the scalars present they are what is read (7/4), not the 1-element array beside them — the fallback is a fallback and does not become the instrument" \
+      || fail "mg-5049: the derivation overrode present scalars ($(pr)) — the fix replaced the field it exists to fall back from"
+[ -z "$(prv)" ] \
+    && pass "mg-5049: and the scalar path stays SILENT — no provenance note on a night nothing was derived, so the note means what it says when it appears" \
+    || fail "mg-5049: the scalar path emits the derivation notice ($(prv)) — a diagnostic that fires every night is one nobody reads on the night it matters"
 
 # --- (4) WHAT THE READER ACTUALLY SEES -------------------------------------
 # The counts are the mechanism; the LINE is the deliverable, because the defect
