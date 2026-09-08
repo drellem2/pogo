@@ -188,7 +188,24 @@ type Report struct {
 	// Err is set when the comparison could not be made at all. Distinct from
 	// "no findings": a check that could not run has not found the fleet current.
 	Err string `json:"error,omitempty"`
+	// SelfCeiling is what THIS daemon's embedded corpus carries, measured
+	// against the findings above (mg-1e8e).
+	//
+	// pogod is itself the automatic installer — it calls agent.InstallPrompts
+	// at every boot — so this row is the ceiling on the automatic path, and it
+	// decides which of two very different notices the recipient should get:
+	// "an install would fix this" or "an install here is a no-op and a newer
+	// binary has to land AND BE RUN first". Nil when the sweep found nothing,
+	// because a ceiling exists to qualify a remedy and a clean sweep prescribes
+	// none.
+	SelfCeiling *staleness.InstallerCeiling `json:"self_ceiling,omitempty"`
 }
+
+// SelfCeilingName labels pogod's own row wherever it is printed. One constant
+// rather than two matching string literals: the watcher supplies the source and
+// the notice reads it back, and a rename that touched one and not the other
+// would silently produce a report about an installer nobody can identify.
+const SelfCeilingName = "this pogod"
 
 // ReferenceQualified reports whether the verdict is weaker than it looks —
 // the reference has demonstrably not seen everything that shipped.
@@ -230,6 +247,15 @@ func FromStaleness(rep staleness.PromptReport, coordinator string) Report {
 		})
 	}
 	sort.Slice(out.Findings, func(i, j int) bool { return out.Findings[i].Path < out.Findings[j].Path })
+	// The witness returns one row per supplied source; the runner supplies
+	// exactly one, pogod's own embed. Matched BY NAME rather than by index so a
+	// second source added later cannot silently be reported as this one.
+	for i := range rep.Ceilings {
+		if rep.Ceilings[i].Name == SelfCeilingName {
+			out.SelfCeiling = &rep.Ceilings[i]
+			break
+		}
+	}
 	return out
 }
 
@@ -340,11 +366,15 @@ func (rc Recipient) Body(r Report) string {
 		"    pogo check-staleness\n" +
 		"    pogo check-staleness --fetch    # compare against what has shipped SINCE the deploy\n")
 
+	b.WriteString(selfCeilingLines(rc, r))
+
 	b.WriteString("\nWHAT YOU ARE BEING ASKED. Nothing has been repaired and this detector has no\n" +
 		"seam to repair through. The fix is a redeploy, which restarts agents, and when a\n" +
 		"running coordinator is restarted is not a call a sweep gets to make on its own\n" +
 		"schedule. If you need the shipped text before the next nightly:\n\n" +
-		"    pogo agent prompt install     # from a build of the reference above\n\n" +
+		"    pogo agent prompt install     # from a build of the reference above\n" +
+		"                                  # read the CEILING block above FIRST — on a\n" +
+		"                                  # daemon that has not restarted, this is a no-op\n\n" +
 		"DO NOT HAND-EDIT THE DEPLOYED COPY to carry the missing text across. That makes\n" +
 		"the file diverge from source with no expiry and no record: the next legitimate\n" +
 		"update is either clobbered silently or declined into a .dist sidecar that\n" +
@@ -419,4 +449,88 @@ func remoteLine(r Report) string {
 			"               above is 'the fleet matches what was DEPLOYED', not what shipped;\n" +
 			"               `pogo check-staleness --fetch` answers the stronger question.\n"
 	}
+}
+
+// selfCeilingLines states what the daemon that took this reading CARRIES, and
+// it is the difference between a notice a recipient can act on and one that
+// sends them at a command that cannot work (mg-1e8e).
+//
+// A prompt corpus is capped at the revision of the process that installs it.
+// pogod calls agent.InstallPrompts at every boot, so when its own embed already
+// matches what is installed, that boot install is a NO-OP — it will keep
+// reporting `changed=0 ... ok=true` for as long as the daemon runs, which on
+// this box was seven consecutive sweeps over a mayor.md 129 lines behind. The
+// recipient reading "your prompt is stale, run `pogo agent prompt install`"
+// would have run it against the very daemon that had just declined to change
+// anything, and concluded the tool was broken.
+//
+// Only the findings addressed to THIS recipient are judged. A ceiling over
+// files somebody else was mailed about is not a fact this reader can use, and
+// the counts would not match the list printed above it.
+func selfCeilingLines(rc Recipient, r Report) string {
+	c := r.SelfCeiling
+	if c == nil {
+		return ""
+	}
+	mine := map[string]bool{}
+	for _, f := range rc.Findings {
+		mine[f.Path] = true
+	}
+	var frozen, closes, third []string
+	for _, p := range c.Closes {
+		if mine[p] {
+			closes = append(closes, p)
+		}
+	}
+	for _, p := range c.Frozen {
+		if mine[p] {
+			frozen = append(frozen, p)
+		}
+	}
+	for _, p := range c.Third {
+		if mine[p] {
+			third = append(third, p)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("\nWHAT THE DAEMON THAT MAILED YOU CARRIES. pogod installs prompts from its OWN\n" +
+		"embedded copy, at every boot. That caps what any automatic install can produce,\n" +
+		"so it decides whether an install is your remedy or a no-op:\n\n")
+
+	if !c.Known() {
+		fmt.Fprintf(&b, "    UNKNOWN — %s\n"+
+			"    That is not an all-clear. Nothing was established about the automatic path.\n", c.Unknown)
+		return b.String()
+	}
+
+	switch {
+	case len(frozen) > 0 && len(closes) == 0 && len(third) == 0:
+		fmt.Fprintf(&b, "    This pogod carries EXACTLY what is already installed, for all %d file(s)\n"+
+			"    above. Its boot install is a NO-OP and has been reporting ok=true doing it.\n"+
+			"    An install from this daemon cannot close this gap; a NEWER BINARY has to\n"+
+			"    land AND BE RUN first. If the nightly is building but not restarting, that\n"+
+			"    is the failure to chase, not this one.\n", len(frozen))
+	case len(closes) > 0 && len(frozen) == 0 && len(third) == 0:
+		fmt.Fprintf(&b, "    This pogod carries the SHIPPED content for all %d file(s) above, so a\n"+
+			"    restart of this daemon — or `pogo agent prompt install` from a build of it —\n"+
+			"    would install them. That it has not means the install was declined rather\n"+
+			"    than impossible; check for a .dist sidecar (`pogo check-prompt-edits`).\n", len(closes))
+	case len(third) > 0 && len(closes) == 0 && len(frozen) == 0:
+		fmt.Fprintf(&b, "    This pogod carries a THIRD version of all %d file(s) above — neither what\n"+
+			"    is installed nor what the reference ships. That is what a daemon AHEAD of\n"+
+			"    the reference looks like, and the reference here is a lagging mirror. Run\n"+
+			"    `pogo check-staleness --fetch` before acting: the gap may be the\n"+
+			"    reference's, not yours.\n", len(third))
+	default:
+		fmt.Fprintf(&b, "    MIXED over the %d file(s) above: %d it carries as shipped, %d already\n"+
+			"    installed (an install changes nothing there), %d a third version.\n",
+			len(closes)+len(frozen)+len(third), len(closes), len(frozen), len(third))
+		if len(frozen) > 0 {
+			fmt.Fprintf(&b, "    Already installed here, so no install will move them: %s\n", strings.Join(frozen, ", "))
+		}
+	}
+	b.WriteString("    An upper bound, not a forecast: what it does not carry it cannot write, and\n" +
+		"    what it does carry it may still decline to write over a hand-edited copy.\n")
+	return b.String()
 }

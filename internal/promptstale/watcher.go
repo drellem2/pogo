@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/staleness"
 )
@@ -281,6 +282,24 @@ func (w *Watcher) sample(ctx context.Context, now time.Time) Report {
 		Fetch:         false,
 		RemoteTimeout: w.remoteTimeout,
 		Now:           now,
+		// THE ONE CEILING THIS SWEEP CAN TAKE FOR FREE (mg-1e8e), and the one
+		// that matters most here: pogod IS the automatic installer, so its own
+		// embed is the ceiling on the automatic path — read in-process, with no
+		// git call, no HTTP call and no reference lookup.
+		//
+		// Without it the notice prescribed `pogo agent prompt install` over a
+		// state where every install is a no-op. Measured 2026-09-08: the
+		// running pogod (7edd223, built 08-20) carried byte-for-byte what was
+		// already in ~/.pogo/agents, and its boot installer had said so seven
+		// times in the prompt_refresh stream — `changed=0 ... ok=true` — while
+		// mayor.md sat 129 lines behind. An installer that carries what is
+		// already on disk cannot close a gap, and the recipient has to be told
+		// which of those two worlds they are in.
+		Ceilings: []staleness.CeilingSource{
+			staleness.EmbedCeilingSource(SelfCeilingName,
+				"agent.InstallPrompts at every pogod boot — the automatic path, from THIS daemon's own embed",
+				agent.DefaultPromptsFS()),
+		},
 	})
 	rep := FromStaleness(raw, w.coordinator)
 	// Set explicitly rather than threaded through FromStaleness: the witness
