@@ -91,14 +91,26 @@
 #     prints "make sure you have the correct access rights" after ANY ssh
 #     failure including a pure connectivity one, and prose matching stops working
 #     the day the tool rewords it (the trap t55ca refused on gh#113). Instead the
-#     runner MEASURES: it parses host and port out of the remote URL and tries to
-#     open a TCP connection. Reachable and the fetch still failed -> not the
-#     network. Unreachable -> the network. No endpoint to probe -> it says it
-#     could not classify and prints the error verbatim rather than guessing.
+#     runner MEASURES: it parses host, port AND wire protocol out of the remote
+#     URL, opens a TCP connection, and then makes the endpoint prove it is a
+#     server. Refused -> the network. Answered as a server and the fetch still
+#     failed -> not the network. Anything else, including a connect that
+#     completed and a peer that then said nothing -> it says it could not
+#     classify and prints the error verbatim rather than guessing.
 #
-#     The probe is a bash /dev/tcp redirect, deliberately: it is a shell builtin,
-#     so it adds no binary to resolve at 03:00 on the path that has to work when
-#     everything else is broken.
+#     THE SECOND HALF OF THAT IS mg-32b6 AND IT IS NOT OPTIONAL. Until
+#     2026-09-08 a completed connect(2) alone earned `remote`, and on this box a
+#     completed connect(2) is what EVERY address returns on ports 80 and 443 —
+#     240.0.0.1 included, which is routed nowhere on earth. The remedy printed
+#     underneath told the reader connectivity was up and sent them to their SSH
+#     keys, so the instrument was a constant and the diagnosis was confident.
+#     What a server sends unprompted is the discriminator: `SSH-2.0-...` on 22,
+#     an HTTP status line on 443. See section 5a-quater.
+#
+#     The probe was first written as a bash /dev/tcp redirect, on the reasoning
+#     that a shell builtin adds no binary to resolve at 03:00. That is no longer
+#     true of it — see the two sections below for why it is an nc proven by
+#     execution, and why reading a greeting needs one.
 #
 # (2) A network-class abort settled the night. pm-pogo's ruling gives the rule
 #     and the discriminator to encode (see sync_class_retryable):
@@ -414,7 +426,10 @@
 #   POGO_DEPLOY_SYNC_RETRY_BUDGET  ceiling on total blip-tier backoff, seconds (300)
 #   POGO_DEPLOY_SYNC_VIGIL     1 to wait a transport outage out inside the window (1)
 #   POGO_DEPLOY_SYNC_VIGIL_INTERVAL  seconds between vigil probes (300)
-#   POGO_DEPLOY_PROBE_TIMEOUT  seconds to wait for the reachability probe (5)
+#   POGO_DEPLOY_PROBE_TIMEOUT  seconds to wait for the reachability probe (5).
+#                              Bounds BOTH halves: the TCP connect and the read
+#                              of the server's greeting, which is what `remote`
+#                              now rests on (mg-32b6)
 #   POGO_DEPLOY_GIT_TIMEOUT    seconds any ONE git step may take before it is
 #                              killed and classified `timeout` (300; 0 disables)
 #   POGO_DEPLOY_RUN_DEADLINE   seconds the WHOLE run may take before the watchdog
@@ -620,6 +635,13 @@ WATCHDOG_PID=""
 # so the alert can print what was observed instead of what is usually true.
 SYNC_CLASS=""
 SYNC_DETAIL=""
+# What the CONTENT-LEVEL probe saw, in one sentence, set by classify_transport
+# (mg-32b6). It exists because `unclassified` now covers two states a reader must
+# not confuse: nothing answered at all, and the TCP connect COMPLETED and nothing
+# spoke over it. The class is the same for both — neither establishes a cause —
+# but the second one means something local is answering for you, and that belongs
+# in the alert rather than only in the log.
+SYNC_PROBE_NOTE=""
 
 # Where the night's outcome is recorded, so a 04:00 fire knows what the 03:00
 # fire did. Under POGO_HOME, which the plist binds, so the job and an operator
@@ -1261,6 +1283,27 @@ remote_endpoint() {
     printf '%s %s' "$host" "$port"
 }
 
+# remote_protocol URL -> the WIRE PROTOCOL git would speak there, or non-zero.
+#
+# Separate from remote_endpoint on purpose: that function answers "which socket"
+# and this one answers "what would be SAID over it", and only the second can tell
+# a reachable server from something that merely completed the connect (mg-32b6).
+# The two are derived from the same scheme table and must not drift, which is why
+# the test asserts them as pairs.
+remote_protocol() {
+    case "${1:-}" in
+        ssh://*|git+ssh://*)     echo ssh ;;
+        https://*)               echo https ;;
+        http://*)                echo http ;;
+        git://*)                 echo git ;;
+        ''|file://*|/*|./*|../*) return 1 ;;
+        # scp-like: [user@]host:path. This is the form the real deploy remote
+        # uses (git@github.com:drellem2/pogo.git) and it is always SSH.
+        *:*)                     echo ssh ;;
+        *) return 1 ;;
+    esac
+}
+
 # THE PROBE, AND WHY IT IS NOT JUST A /dev/tcp REDIRECT
 # ------------------------------------------------------
 # This was first written as a bare bash /dev/tcp redirect, on the reasoning that
@@ -1363,16 +1406,257 @@ probe_tcp() {
     esac
 }
 
+# ---------------------------------------------------------------------------
+# 5a-quater. A COMPLETED connect(2) IS NOT AN ANSWER (mg-32b6)
+# ---------------------------------------------------------------------------
+# Everything above measures whether a SYN got a SYN-ACK. On this box that is not
+# a measurement of anything, and the numbers are not close. Re-taken 2026-09-08
+# from a polecat worktree with the VPN on `utun4` holding the default route,
+# using the same `nc -G 5 -w 5 -z` primitive `probe_tcp` resolves:
+#
+#     192.0.2.1:443      rc=0 in 0.09s   (RFC 5737 TEST-NET-1)
+#     198.51.100.1:443   rc=0 in 0.09s   (TEST-NET-2)
+#     240.0.0.1:443      rc=0 in 0.09s   (reserved Class E, routed NOWHERE)
+#     1.1.1.1:443        rc=0 in 0.09s   (real)
+#     github.com:22      rc=0 in 0.18s   (real)
+#
+# So for any remote on 80 or 443 — an `https://` deploy remote is one —
+# `SYNC_CLASS=remote` was a CONSTANT, and its remedy told the reader in prose
+# that "connectivity is up" before sending them to `ssh -T git@github.com` and
+# `ssh-add -l`. A false instrument that also prints a confident diagnosis is
+# worse than a silent one.
+#
+# ONE MEASURED REFINEMENT OF THAT PREMISE, recorded because it changes what this
+# fix buys TODAY and nothing else in the tree says it. The interception is
+# PORT-SELECTIVE on this host: on port 22 the fabricated addresses do NOT answer.
+#
+#     192.0.2.1:22   198.51.100.1:22   203.0.113.1:22   240.0.0.1:22
+#         all four: no answer, `nc` gives up at its own -w deadline
+#
+# The real deploy remote is `git@github.com:drellem2/pogo.git`, which is port 22,
+# so on THIS box, TODAY, the rc-0 arm is not yet the constant it is on 443. That
+# is a property of whatever is doing the terminating, observed on one evening —
+# not a guarantee, and not something the runner can check. The defect is in what
+# a completed connect is taken to MEAN, and that is wrong on every box: a captive
+# portal, a transparent proxy, a load balancer that accepts and resets, and this
+# host's own tunnel on 80/443 all produce it.
+#
+# THE DISCRIMINATOR IS CONTENT, and it is protocol-specific because the deploy
+# remote is SSH and SSH is not HTTP — `scripts/lib/net-control.sh`'s curl probe
+# does not reach it. An SSH server sends its identification string ("SSH-2.0-...")
+# the instant the connection is up, before the client says anything, so ONE
+# BOUNDED READ separates a server from a socket that was merely accepted.
+# Measured against github.com:22 from here: 17 bytes, `SSH-2.0-cb4a187`, in 0.2s.
+#
+# Do NOT try to recover the distinction from latency instead. net-control.sh
+# records why: the fabricated addresses come back FASTER than the real ones here.
+#
+# WHAT IS *NOT* WRONG WITH THE OLD CODE, so nobody re-derives it. The asymmetry
+# is deliberate and still right: rc 2 (no answer) yields `unclassified` and never
+# `network`, which was mg-56ac/mg-db96's correction. Only the rc-0 arm changes.
+BANNER_NC_FLAGS=""
+BANNER_PROBE="not tried"
+BANNER_PROBE_TRIED=false
+
+# resolve_banner_probe — prove, by EXECUTION, that this box can read a greeting.
+#
+# `-d` ("detach from stdin") is not cosmetic and it is the whole reason this
+# resolver exists. Measured here, 12 trials each against github.com:22:
+#
+#     nc -G 5 -w 5 host 22 </dev/null     6 of 10 returned the banner
+#     nc -d -G 5 -w 5 host 22            12 of 12 returned the banner
+#
+# With stdin at EOF this nc races its own read of the peer against tearing the
+# connection down, and loses about four times in ten. A primitive that reports
+# "said nothing" 40% of the time against a live SSH server would turn `remote`
+# into `unclassified` at random — a different false instrument, not a fix. But
+# `-d` is not universal (nmap's ncat spells it `--delay`), so it is PROVEN
+# rather than assumed: the resolver stands up a loopback listener that speaks a
+# canned line and requires the flag set to read that line back. A flag set that
+# cannot is dropped, and the un-flagged form is tried next. If neither works
+# there is no greeting probe, and `classify_transport` reports `unclassified`
+# rather than falling back to the connect it just established is meaningless.
+#
+# Loopback is the right substrate because loopback survives the condition being
+# measured — a box off the network still routes 127.0.0.1 — so this proof is
+# independent of the answer it gates. Same argument as net-control.sh's
+# self-test, which is where the shape comes from.
+resolve_banner_probe() {
+    if $BANNER_PROBE_TRIED; then
+        [ "$BANNER_PROBE" = "proven" ] && return 0
+        return 1
+    fi
+    BANNER_PROBE_TRIED=true
+    BANNER_PROBE="none"
+    if [ -z "$NC" ]; then
+        log "greeting probe: no proven nc, so nothing can read a server's greeting — a transport failure will stay 'unclassified' rather than being called the far end"
+        return 1
+    fi
+    local cand port out lp w i base slot tries
+    base=$(( 41000 + ($$ % 18000) ))
+    slot=0
+    for cand in "-d" ""; do
+        # A window per candidate, not a shared one: a port this loop has already
+        # used leaves the accepted connection in TIME_WAIT, and a bind that fails
+        # for that reason would be read as the FLAG failing.
+        i=0
+        tries=0
+        while [ "$i" -lt 8 ] && [ "$tries" -lt 3 ]; do
+            port=$(( base + slot * 100 + i ))
+            i=$(( i + 1 ))
+            # A port that ALREADY answers belongs to someone else; borrowing it
+            # would let this proof pass without our listener ever having bound,
+            # which is a pass about nothing.
+            probe_tcp 127.0.0.1 "$port" 2 && continue
+            # THREE owned ports before a flag set is given up on, and not one.
+            # A single transient bind failure would otherwise demote `-d` to the
+            # un-flagged form, which passes this loopback proof just as reliably
+            # and then reads a live server's banner only about six times in ten
+            # (measured against github.com:22). A downgrade that the proof cannot
+            # see is the failure mode worth spending two extra ports on.
+            tries=$(( tries + 1 ))
+            printf 'GREET-selftest\r\n' | "$NC" -l "$port" >/dev/null 2>&1 &
+            lp=$!
+            out=""
+            w=0
+            # Each attempt before the listener binds is refused and consumes
+            # nothing; the first one after it binds is the one that reads the
+            # line. `nc -l` serves a single connection, so the successful read
+            # and the successful bind are the same event.
+            while [ "$w" -lt 20 ]; do
+                out="$(read_greeting 127.0.0.1 "$port" 2 "$cand")"
+                case "$out" in GREET-selftest*) break ;; esac
+                sleep 0.1
+                w=$(( w + 1 ))
+            done
+            kill "$lp" >/dev/null 2>&1
+            wait "$lp" 2>/dev/null
+            case "$out" in
+                GREET-selftest*)
+                    BANNER_NC_FLAGS="$cand"
+                    BANNER_PROBE="proven"
+                    log "greeting probe: proven by execution — '$NC $NC_FLAGS $cand' read a canned greeting back off a loopback listener, so it can report that a server SPOKE"
+                    return 0 ;;
+            esac
+        done
+        slot=$(( slot + 1 ))
+    done
+    log "greeting probe: NONE usable — no nc flag set could read a canned greeting off a loopback listener, so a completed connect cannot be told from a live server and a transport failure will stay 'unclassified'"
+    return 1
+}
+
+# read_greeting HOST PORT [TIMEOUT] [FLAGS] — the first line the PEER sends,
+# unprompted. Prints it and returns 0; prints nothing and returns 1 if the peer
+# said nothing within the timeout, which includes the case this exists for: the
+# TCP connection completed and nothing was ever spoken over it.
+#
+# Same background-subshell-and-killer shape as probe_tcp, for the same reason — a
+# silently-dropped SYN sits in the kernel for ~75s — with one addition: the wait
+# loop also returns the moment the connection is REFUSED, so the common
+# not-listening case costs milliseconds rather than the full timeout.
+read_greeting() {
+    local host="$1" port="$2" timeout="${3:-5}" flags="${4-$BANNER_NC_FLAGS}"
+    local tmp p k w line=""
+    [ -n "$NC" ] || return 1
+    tmp="$(mktemp "${TMPDIR:-/tmp}/pogo-greet.XXXXXX" 2>/dev/null)" || return 1
+    # shellcheck disable=SC2086
+    ( "$NC" $NC_FLAGS $flags -w "$timeout" "$host" "$port" >"$tmp" 2>/dev/null ) &
+    p=$!
+    ( sleep "$timeout"; kill -9 "$p" ) >/dev/null 2>&1 &
+    k=$!
+    w=0
+    while [ "$w" -lt $(( timeout * 10 )) ]; do
+        [ -s "$tmp" ] && break
+        kill -0 "$p" 2>/dev/null || break
+        sleep 0.1
+        w=$(( w + 1 ))
+    done
+    kill -9 "$p" >/dev/null 2>&1
+    wait "$p" 2>/dev/null
+    kill "$k" >/dev/null 2>&1
+    wait "$k" 2>/dev/null
+    line="$(head -n 1 "$tmp" 2>/dev/null | tr -d '\r\n')"
+    rm -f "$tmp"
+    [ -n "$line" ] || return 1
+    printf '%s' "$line"
+}
+
+# probe_spoke HOST PORT PROTO [TIMEOUT] — did anything actually SPEAK there?
+#
+#   0  it spoke the protocol git would speak: an SSH identification string, or
+#      an HTTP status line. A positive measurement, and the only thing that may
+#      produce `remote`.
+#   1  it did NOT — INCLUDING the case where the TCP connect completed and
+#      nothing was ever said. That is the mg-32b6 case and it is named as such
+#      in SYNC_PROBE_NOTE so the alert can print it.
+#   2  no primitive able to ask the question. NOT a no.
+#
+# The HTTP arm delegates to net-control.sh's netc_probe_http rather than growing
+# a second curl probe here — that function is the one that already knows an
+# answer is a status line and not a handshake, and duplicating its rules is how
+# they drift apart. When the library is absent this arm returns 2, which is the
+# same honest degradation the rest of this file takes when a primitive is gone.
+probe_spoke() {
+    local host="$1" port="$2" proto="${3:-}" timeout="${4:-5}" greet=""
+    case "$proto" in
+        ssh)
+            if ! resolve_banner_probe; then
+                SYNC_PROBE_NOTE="no greeting probe could be proven on this box, so nothing established whether $host:$port is a live SSH server or merely a socket that accepted"
+                return 2
+            fi
+            greet="$(read_greeting "$host" "$port" "$timeout")"
+            case "$greet" in
+                SSH-*)
+                    SYNC_PROBE_NOTE="$host:$port SENT AN SSH IDENTIFICATION STRING ('$greet') — a live SSH server, not a terminated connect"
+                    return 0 ;;
+                "")
+                    SYNC_PROBE_NOTE="$host:$port said NOTHING within ${timeout}s. An SSH server sends 'SSH-2.0-...' the instant the connection is up, before the client speaks, so whatever accepted here is not one"
+                    return 1 ;;
+                *)
+                    SYNC_PROBE_NOTE="$host:$port answered with something that is not an SSH identification string ('$greet')"
+                    return 1 ;;
+            esac ;;
+        https|http)
+            if ! declare -f netc_probe_http >/dev/null 2>&1; then
+                SYNC_PROBE_NOTE="net-control.sh is not loaded, so there is no probe able to establish that $host:$port answered ABOVE the TCP layer. Fix: pogo service install-deploy"
+                return 2
+            fi
+            if [ -z "${NETC_CURL:-}" ] && ! netc_resolve_curl >/dev/null 2>&1; then
+                SYNC_PROBE_NOTE="no usable curl could be proven by execution, so nothing established whether $host:$port answered above the TCP layer"
+                return 2
+            fi
+            if netc_probe_http "$host" "$port" "$timeout" "$proto"; then
+                SYNC_PROBE_NOTE="$host:$port COMPLETED AN HTTP REQUEST (${NETC_LAST_NOTE})"
+                return 0
+            fi
+            SYNC_PROBE_NOTE="$host:$port did not complete an HTTP request (${NETC_LAST_NOTE})"
+            return 1 ;;
+        *)
+            SYNC_PROBE_NOTE="there is no unprompted server greeting to read for a '${proto:-unknown}' remote — the client speaks first — so nothing here can tell a live server from a terminated connect"
+            return 2 ;;
+    esac
+}
+
 # classify_transport URL — sets SYNC_CLASS to `network`, `remote`, or
 # `unclassified` after a clone/fetch has already failed.
 #
-# The asymmetry is deliberate. A REACHABLE endpoint is a positive measurement,
-# and it rules the network out: the fetch failed for some other reason, which is
-# auth, permission, or the repository. An UNREACHABLE one is the network. And
-# when there is no endpoint to probe the answer is `unclassified` — not the most
-# likely cause, which is precisely the guess that produced the 08-05 alert.
+# The asymmetry is deliberate. A DEFINITE REFUSAL is the network. NO ANSWER is
+# `unclassified` — not the most likely cause, which is precisely the guess that
+# produced the 08-05 alert. And when there is no endpoint to probe at all the
+# answer is `unclassified` too.
+#
+# WHAT `remote` NOW REQUIRES (mg-32b6). A completed TCP connection is no longer
+# enough and never should have been: it is what a captive portal, a transparent
+# proxy and this host's own tunnel on 80/443 all produce, and the remedy printed
+# underneath tells the reader in prose that connectivity is up. `remote` now
+# requires the endpoint to have SPOKEN the protocol git would speak there — an
+# SSH identification string, or an HTTP status line. Everything else that
+# completes a connect and says nothing is `unclassified`, with the completed
+# connect recorded rather than hidden, because it is the one fact that separates
+# "off the network" from "something local is answering for you".
 classify_transport() {
-    local url="${1:-}" host port rc
+    local url="${1:-}" host port proto rc src
+    SYNC_PROBE_NOTE=""
     # A step this run KILLED is classified from that observation and not from a
     # probe (mg-56ac). The probe measures a later instant — the transport may
     # well be up by the time it runs — and the direct fact that the call did not
@@ -1389,16 +1673,28 @@ classify_transport() {
         log "sync: no TCP endpoint could be derived from remote '$url' — NOT classifying the failure"
         return 0
     fi
+    proto="$(remote_protocol "$url")" || proto=""
     probe_tcp "$host" "$port" "$PROBE_TIMEOUT"; rc=$?
     case "$rc" in
-        0)  SYNC_CLASS=remote
-            log "sync: $host:$port ANSWERED a TCP connection — connectivity is up, so the failure is at the far end (auth, permission, or the repository)" ;;
+        0)  # The connect completed. That establishes that SOMETHING is on the
+            # other end of the socket and nothing more, so the cause is named
+            # only if the endpoint then speaks.
+            probe_spoke "$host" "$port" "$proto" "$PROBE_TIMEOUT"; src=$?
+            case "$src" in
+                0)  SYNC_CLASS=remote
+                    log "sync: $SYNC_PROBE_NOTE — the far end is reachable and answering, so the failure is at the far end (auth, permission, or the repository)" ;;
+                1)  SYNC_CLASS=unclassified
+                    log "sync: $host:$port ACCEPTED a TCP connection and then did not answer as a ${proto:-remote} server would. $SYNC_PROBE_NOTE. A completed connect(2) is not evidence that anything was reached — on this box it is what a fabricated address produces on 80 and 443 (mg-32b6) — so the failure stays unclassified and the error is reported verbatim" ;;
+                *)  SYNC_CLASS=unclassified
+                    log "sync: $host:$port accepted a TCP connection, but nothing could establish whether a real ${proto:-remote} server answered. $SYNC_PROBE_NOTE. A completed connect(2) on its own is not evidence, so the failure stays unclassified" ;;
+            esac ;;
         1)  SYNC_CLASS=network
             log "sync: $host:$port REFUSED a TCP connection — NETWORK-class failure" ;;
         # The correction that matters: no answer is not a no. Naming the network
         # here on a probe that merely failed to complete would be this ticket's
         # own defect, committed by its own fix.
         *)  SYNC_CLASS=unclassified
+            SYNC_PROBE_NOTE="$host:$port did not answer a TCP connection within ${PROBE_TIMEOUT}s, which is not the same as refusing one"
             log "sync: the reachability probe for $host:$port returned no answer within ${PROBE_TIMEOUT}s — that is NOT evidence the network is down, so the failure stays unclassified and the error is reported verbatim" ;;
     esac
 }
@@ -1809,7 +2105,7 @@ git_q() {
 }
 
 sync_src() {
-    SYNC_CLASS=""; SYNC_DETAIL=""
+    SYNC_CLASS=""; SYNC_DETAIL=""; SYNC_PROBE_NOTE=""
     local remote=""
     if [ ! -d "$SRC/.git" ]; then
         remote="$DEPLOY_REMOTE"
@@ -2084,7 +2380,7 @@ describe_sync_class() {
     case "${1:-}" in
         network)      echo "NETWORK — the remote host could not be reached from this box" ;;
         timeout)      echo "TIMEOUT — a git step did not return within ${GIT_TIMEOUT}s and was killed" ;;
-        remote)       echo "REMOTE — the host answered but the transfer was refused (auth, permission, or the repository)" ;;
+        remote)       echo "REMOTE — the host answered AS A SERVER but the transfer was refused (auth, permission, or the repository)" ;;
         dirty)        echo "DIRTY CHECKOUT — the deploy tree has uncommitted changes" ;;
         diverged)     echo "DIVERGED — the deploy tree has commits that are not on the remote" ;;
         checkout)     echo "CHECKOUT — the deploy ref could not be checked out" ;;
@@ -2156,12 +2452,24 @@ EOF
 This was RETRIED $SYNC_TRIES times over ${SYNC_RETRY_SPENT}s of backoff before the runner gave up,
 so whatever it is outlasted that.
 
-The remote host ANSWERED a TCP connection, measured moments AFTER the transfer
-failed — so the likely cause is authentication, permission, or the repository
-itself rather than connectivity. Two caveats on that, because this is an
-inference and not a proof: a blip that had already ended by the time of the
-probe presents exactly this way, and a middlebox that completes a handshake and
-then resets does too. The probe is a floor on connectivity, not a guarantee.
+The remote host ANSWERED AS A SERVER, measured moments AFTER the transfer failed:
+it sent the greeting its protocol sends unprompted — an SSH identification string
+("SSH-2.0-..."), or an HTTP status line. So the likely cause is authentication,
+permission, or the repository itself rather than connectivity.
+
+THAT IS NOT A COMPLETED connect(2), AND THE DIFFERENCE IS WHY YOU CAN READ THIS
+PARAGRAPH AT ALL (mg-32b6). Until 2026-09-08 this class was awarded for a SYN
+that got a SYN-ACK, which on this box is what every fabricated address returns on
+ports 80 and 443 — 240.0.0.1 included, an address routed nowhere on earth. Any
+`https://` remote therefore landed here unconditionally, and this paragraph told
+you connectivity was up before sending you to your keys. It now takes a peer that
+actually spoke.
+
+One caveat remains, because this is still an inference and not a proof: a blip
+that had already ended by the time of the probe presents exactly this way. The
+probe is a floor on connectivity, not a guarantee. The caveat that is GONE is the
+middlebox one — something that completes a handshake and then resets can no
+longer produce this class, because it never sends the greeting.
 
 Note also that git says "make sure you have the correct access rights" for the
 network case too, so the message above is not by itself evidence of a key
@@ -4523,7 +4831,7 @@ deployed and the running pogod is untouched. Daniel's dev tree was NOT touched.
 WHAT THE UNDERLYING TOOL ACTUALLY SAID, verbatim:
 
 ${SYNC_DETAIL:-(the failing step produced no output)}
-
+$([ -n "$SYNC_PROBE_NOTE" ] && printf '\nWHAT THE ENDPOINT PROBE SAW (mg-32b6 — content, not a completed connect):\n\n  %s\n' "$SYNC_PROBE_NOTE")
 $(net_control_report)
 $(net_control_bridge)
 

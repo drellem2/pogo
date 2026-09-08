@@ -523,6 +523,34 @@ remote_endpoint "" >/dev/null \
 remote_endpoint "file:///srv/pogo.git" >/dev/null \
     && fail "remote_endpoint invented an endpoint for file://" || pass "remote_endpoint: file:// has no endpoint"
 
+# remote_protocol — the SECOND half of the same scheme table (mg-32b6). It says
+# what would be SAID over the socket remote_endpoint picked, which is the only
+# thing that can tell a live server from a connect something terminated. The two
+# are asserted as PAIRS because they are derived from one table and must not
+# drift: a URL that yields port 22 and protocol `https` would send the runner
+# looking for a status line from an sshd.
+[ "$(remote_protocol 'git@github.com:drellem2/pogo.git') $(remote_endpoint 'git@github.com:drellem2/pogo.git')" = "ssh github.com 22" ] \
+    && pass "remote_protocol: the scp-like form the REAL deploy remote uses -> ssh, on the port remote_endpoint picked" || fail "scp-like: $(remote_protocol 'git@github.com:drellem2/pogo.git')"
+[ "$(remote_protocol 'ssh://git@github.com:2222/x.git') $(remote_endpoint 'ssh://git@github.com:2222/x.git')" = "ssh github.com 2222" ] \
+    && pass "remote_protocol: ssh:// -> ssh, and the pair agrees on a non-default port" || fail "ssh://: $(remote_protocol 'ssh://git@github.com:2222/x.git')"
+[ "$(remote_protocol 'git+ssh://git@github.com/x.git')" = "ssh" ] \
+    && pass "remote_protocol: git+ssh:// -> ssh" || fail "git+ssh://: $(remote_protocol 'git+ssh://git@github.com/x.git')"
+[ "$(remote_protocol 'https://github.com/x.git') $(remote_endpoint 'https://github.com/x.git')" = "https github.com 443" ] \
+    && pass "remote_protocol: https:// -> https on 443, which is the port this box's tunnel answers for EVERY address" || fail "https: $(remote_protocol 'https://github.com/x.git')"
+[ "$(remote_protocol 'http://github.com/x.git')" = "http" ] \
+    && pass "remote_protocol: http:// -> http" || fail "http: $(remote_protocol 'http://github.com/x.git')"
+# git:// has no unprompted server greeting — the CLIENT speaks first — so there
+# is nothing to read and classify_transport must say so rather than fall back to
+# the connect. The protocol is still named, so the message can be specific.
+[ "$(remote_protocol 'git://github.com/x.git')" = "git" ] \
+    && pass "remote_protocol: git:// -> git (named, but not content-probeable: the client speaks first)" || fail "git://: $(remote_protocol 'git://github.com/x.git')"
+remote_protocol "/Users/daniel/dev/pogo" >/dev/null \
+    && fail "remote_protocol invented a protocol for a local path" || pass "remote_protocol: a local path has no wire protocol"
+remote_protocol "" >/dev/null \
+    && fail "remote_protocol accepted an empty URL" || pass "remote_protocol: an empty URL has no wire protocol"
+remote_protocol "file:///srv/pogo.git" >/dev/null \
+    && fail "remote_protocol invented a protocol for file://" || pass "remote_protocol: file:// has no wire protocol"
+
 # ---------------------------------------------------------------------------
 # probe_tcp — the measurement the classification rests on
 # ---------------------------------------------------------------------------
@@ -639,20 +667,56 @@ probe_tcp github.com 22 3 >/dev/null 2>&1
 NC="$SAVED_NC"
 
 # ---------------------------------------------------------------------------
-# classify_transport — reachable rules the network OUT
+# classify_transport — a COMPLETED CONNECT is not what rules the network out
 # ---------------------------------------------------------------------------
-# Hermetic: probe_tcp is substituted, so these verdicts do not depend on this
-# host's connectivity. That matters for the same reason the resolve_git fakes do
-# — a suite that only ever ran against a working network could not tell whether
-# the classification existed at all.
+# Hermetic: probe_tcp and probe_spoke are both substituted, so these verdicts do
+# not depend on this host's connectivity. That matters for the same reason the
+# resolve_git fakes do — a suite that only ever ran against a working network
+# could not tell whether the classification existed at all.
+#
+# The `remote` arm now needs BOTH stubs, and that is the mg-32b6 change stated as
+# a test: until 2026-09-08 `probe_tcp() { return 0; }` alone was enough to earn
+# `remote`, which is why this section passed while the classification was wrong.
 REAL_PROBE="$(declare -f probe_tcp)"
+REAL_SPOKE="$(declare -f probe_spoke)"
 
-probe_tcp() { return 0; }        # everything answers
+probe_tcp()   { return 0; }                                   # the connect completes
+probe_spoke() { SYNC_PROBE_NOTE="stub: it spoke"; return 0; } # and a server answers
 SYNC_CLASS=""
 classify_transport "git@github.com:daniel/pogo.git" >/dev/null 2>&1
 [ "$SYNC_CLASS" = "remote" ] \
-    && pass "classify_transport: a REACHABLE endpoint means the failure is at the far end, not the network" \
-    || fail "reachable endpoint classified as '$SYNC_CLASS'"
+    && pass "classify_transport: an endpoint that ANSWERS AS A SERVER means the failure is at the far end, not the network" \
+    || fail "an answering endpoint classified as '$SYNC_CLASS'"
+
+# THE LOAD-BEARING ONE (mg-32b6), and the arm the old suite had no way to state.
+# The connect completes and nothing speaks — a captive portal, a transparent
+# proxy, or this box's own tunnel on ports 80 and 443, where every fabricated
+# address including 240.0.0.1 answers a SYN in 0.09s. That must NOT be `remote`,
+# because the `remote` remedy tells the reader in prose that connectivity is up
+# and sends them to `ssh -T git@github.com` and `ssh-add -l`.
+probe_tcp()   { return 0; }
+probe_spoke() { SYNC_PROBE_NOTE="stub: it said nothing"; return 1; }
+SYNC_CLASS=""
+classify_transport "git@github.com:daniel/pogo.git" >/dev/null 2>&1
+[ "$SYNC_CLASS" != "remote" ] \
+    && pass "classify_transport: a completed connect that SPEAKS NOTHING is not 'remote' (got '$SYNC_CLASS') — a SYN-ACK is not an answer" \
+    || fail "a completed connect with no protocol answer was classified 'remote' — that is the mg-32b6 defect, and its remedy tells the reader connectivity is up"
+[ "$SYNC_CLASS" = "unclassified" ] \
+    && pass "and it is 'unclassified' rather than 'network' — a mute endpoint establishes no cause in EITHER direction" \
+    || fail "a mute endpoint was classified '$SYNC_CLASS'; naming the network there would be this ticket's defect pointed the other way"
+[ -n "$SYNC_PROBE_NOTE" ] \
+    && pass "and SYNC_PROBE_NOTE carries what the probe actually saw, so the alert can say it rather than only the log" \
+    || fail "SYNC_PROBE_NOTE is empty, so the alert cannot tell 'nothing answered' from 'something local answered for you'"
+
+# A probe that could not run is its own outcome, exactly as rc 2 is for the
+# connect: no greeting probe on this box must not silently become `remote`.
+probe_tcp()   { return 0; }
+probe_spoke() { SYNC_PROBE_NOTE="stub: could not ask"; return 2; }
+SYNC_CLASS=""
+classify_transport "git@github.com:daniel/pogo.git" >/dev/null 2>&1
+[ "$SYNC_CLASS" = "unclassified" ] \
+    && pass "classify_transport: when nothing could establish whether a server answered, the class is 'unclassified' — it does not fall back to the connect it just proved meaningless" \
+    || fail "an unaskable content probe yielded '$SYNC_CLASS'"
 
 probe_tcp() { return 1; }        # a DEFINITE refusal
 SYNC_CLASS=""
@@ -682,6 +746,216 @@ classify_transport "/Users/daniel/dev/pogo" >/dev/null 2>&1
     || fail "unprobeable remote classified as '$SYNC_CLASS'"
 
 eval "$REAL_PROBE"
+eval "$REAL_SPOKE"
+
+# ---------------------------------------------------------------------------
+# mg-32b6: THE SAME PAIR, WITH NO STUBS AT ALL
+# ---------------------------------------------------------------------------
+# Everything above substitutes probe_spoke, so it asserts what classify_transport
+# DOES with an answer and nothing about whether the probe can produce two
+# different ones. This section removes the stubs. It is the acceptance bar the
+# ticket set, and it is mg-a932's: assert BOTH arms, with the DOWN arm against an
+# endpoint THIS BOX COMPLETES A CONNECT TO. A test that only asserts the UP arm
+# passes identically against the broken code.
+#
+# The substrate is a python3 accept-and-close loopback listener, copied from
+# scripts/net-control_test.sh section 2c, and it is PROVEN with the runner's own
+# connect primitive before it is used: an endpoint that did not actually accept
+# would let the DOWN arm pass for the wrong reason. Loopback because loopback
+# survives the condition being measured — this holds on a box with no tunnel, no
+# network and no github.
+echo "--- mg-32b6: 'remote' requires the endpoint to SPEAK, not just to accept ---"
+GIT_STEP_TIMED_OUT=false
+load_net_control >/dev/null 2>&1 || true
+resolve_nc >/dev/null 2>&1 || true
+
+# The YES arm, hermetic: a loopback listener that sends an SSH identification
+# string the way a real sshd does — unprompted, the instant the connection is up.
+SSH_PORTFILE="$WORK/sshgreet.port"
+python3 - "$SSH_PORTFILE" >/dev/null 2>&1 <<'PY' &
+import socket, select, sys
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0)); s.listen(16)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+while True:
+    r, _w, _e = select.select([s], [], [], 600)
+    if not r:
+        break
+    try:
+        c, _a = s.accept()
+        c.sendall(b"SSH-2.0-OpenSSH_9.0\r\n")
+        c.close()
+    except OSError:
+        pass
+PY
+SSHGREET_PID=$!
+i=0
+while [ ! -s "$SSH_PORTFILE" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$(( i + 1 )); done
+SSHGREET_PORT="$(cat "$SSH_PORTFILE" 2>/dev/null)"
+
+# The DOWN arm's substrate: two endpoints that ACCEPT a TCP connection and speak
+# nothing. Two, not one, so the ssh and the https arm each get an unconsumed one.
+MUTE_PORTFILE="$WORK/mute.ports"
+python3 - "$MUTE_PORTFILE" 2 >/dev/null 2>&1 <<'PY' &
+import socket, select, sys
+srvs = []
+for _ in range(int(sys.argv[2])):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0)); s.listen(16)
+    srvs.append(s)
+with open(sys.argv[1], "w") as fh:
+    fh.write(" ".join(str(s.getsockname()[1]) for s in srvs))
+# Accept and close, forever. connect(2) completes; nothing is ever spoken.
+while True:
+    ready, _w, _e = select.select(srvs, [], [], 600)
+    for s in ready:
+        try:
+            c, _a = s.accept(); c.close()
+        except OSError:
+            pass
+PY
+MUTE_PID=$!
+i=0
+while [ ! -s "$MUTE_PORTFILE" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$(( i + 1 )); done
+MUTE_PORTS="$(cat "$MUTE_PORTFILE" 2>/dev/null)"
+MUTE_SSH_PORT="$(echo "$MUTE_PORTS" | awk '{print $1}')"
+MUTE_WEB_PORT="$(echo "$MUTE_PORTS" | awk '{print $2}')"
+
+if [ -n "$SSHGREET_PORT" ] && [ -n "$MUTE_SSH_PORT" ] && [ -n "$MUTE_WEB_PORT" ]; then
+    # PROVE THE SUBSTRATE FIRST. Both mute endpoints must complete a connect with
+    # the runner's own probe_tcp — that is what obliges the old connect-only code
+    # to have called them `remote`, and without it the DOWN arm below could be
+    # passing because nothing was listening at all.
+    probe_tcp 127.0.0.1 "$MUTE_SSH_PORT" 3 \
+        && pass "the hermetic substrate is PROVEN before it is used: probe_tcp COMPLETES a connect to the mute ssh endpoint, so the pre-mg-32b6 code was obliged to call it 'remote'" \
+        || fail "the mute ssh endpoint did not accept a TCP connection, so a non-'remote' verdict below would prove nothing"
+    probe_tcp 127.0.0.1 "$MUTE_WEB_PORT" 3 \
+        && pass "and so does the mute https endpoint" \
+        || fail "the mute https endpoint did not accept a TCP connection"
+
+    # ARM 1: an endpoint that SPEAKS SSH => remote.
+    SYNC_CLASS=""; SYNC_PROBE_NOTE=""
+    classify_transport "ssh://git@127.0.0.1:$SSHGREET_PORT/pogo.git" >/dev/null 2>&1
+    [ "$SYNC_CLASS" = "remote" ] \
+        && pass "arm 1: an endpoint that sends an SSH identification string => 'remote' (the class must still be REACHABLE for a live server)" \
+        || fail "an endpoint speaking 'SSH-2.0-OpenSSH_9.0' was classified '$SYNC_CLASS' — the fix has made 'remote' unreachable, which is a false instrument pointed the other way"
+    case "$SYNC_PROBE_NOTE" in
+        *SSH-2.0-OpenSSH_9.0*) pass "and the note quotes the identification string it actually read, so the verdict can be checked rather than trusted" ;;
+        *) fail "the 'remote' verdict did not record what it read: [$SYNC_PROBE_NOTE]" ;;
+    esac
+
+    # ARM 2, AND IT IS THE ONE THAT MATTERS: same code path, same primitives,
+    # against an endpoint that accepts and says nothing.
+    SYNC_CLASS=""; SYNC_PROBE_NOTE=""
+    classify_transport "ssh://git@127.0.0.1:$MUTE_SSH_PORT/pogo.git" >/dev/null 2>&1
+    [ "$SYNC_CLASS" != "remote" ] \
+        && pass "arm 2, the load-bearing one: an endpoint that ACCEPTS a connection and speaks nothing is NOT 'remote' (got '$SYNC_CLASS') — with no stubs anywhere, from the same invocation that just said 'remote'" \
+        || fail "an endpoint that accepted a TCP connection and spoke nothing was classified 'remote'. That is mg-32b6 unfixed: the alert would tell the reader connectivity is up and send them to their SSH keys"
+    [ "$SYNC_CLASS" = "unclassified" ] \
+        && pass "and it lands on 'unclassified', which retries and bumps the transport streak exactly as 'remote' did — the change is to what the reader is TOLD, not to what the runner does" \
+        || fail "the mute endpoint was classified '$SYNC_CLASS' rather than 'unclassified'"
+    case "$SYNC_PROBE_NOTE" in
+        *"said NOTHING"*) pass "and the note names the state precisely — accepted, then silent — which is the difference between 'off the network' and 'something local is answering for you'" ;;
+        *) fail "the mute verdict's note does not say what happened: [$SYNC_PROBE_NOTE]" ;;
+    esac
+
+    # ARM 3: the same defect on the https path, which is the one that IS a
+    # constant on this box today — every fabricated address answers a SYN on 443.
+    SYNC_CLASS=""; SYNC_PROBE_NOTE=""
+    classify_transport "https://127.0.0.1:$MUTE_WEB_PORT/pogo.git" >/dev/null 2>&1
+    [ "$SYNC_CLASS" != "remote" ] \
+        && pass "arm 3: an https:// remote whose endpoint accepts and speaks no HTTP is NOT 'remote' either (got '$SYNC_CLASS') — the https arm delegates to net-control.sh's netc_probe_http rather than growing a second set of rules" \
+        || fail "a mute endpoint behind an https:// remote was classified 'remote'"
+
+    # ARM 4: the HTTP path's YES direction. Arm 3 only shows that arm reporting
+    # NO, and an arm that can only ever report NO is a different false
+    # instrument with the same symptom — every `https://` remote silently
+    # `unclassified`, forever, with a plausible log line under it. The scheme is
+    # `http://` rather than `https://` so the assertion needs no TLS listener;
+    # it is the same probe, the same delegation and the same verdict rule.
+    HTTP_PORTFILE="$WORK/httpgreet.port"
+    python3 - "$HTTP_PORTFILE" >/dev/null 2>&1 <<'PY' &
+import socket, select, sys
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0)); s.listen(16)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+while True:
+    r, _w, _e = select.select([s], [], [], 600)
+    if not r:
+        break
+    try:
+        c, _a = s.accept()
+        c.recv(4096)
+        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        c.close()
+    except OSError:
+        pass
+PY
+    HTTPGREET_PID=$!
+    i=0
+    while [ ! -s "$HTTP_PORTFILE" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$(( i + 1 )); done
+    HTTPGREET_PORT="$(cat "$HTTP_PORTFILE" 2>/dev/null)"
+    if [ -n "$HTTPGREET_PORT" ]; then
+        SYNC_CLASS=""; SYNC_PROBE_NOTE=""
+        classify_transport "http://127.0.0.1:$HTTPGREET_PORT/pogo.git" >/dev/null 2>&1
+        [ "$SYNC_CLASS" = "remote" ] \
+            && pass "arm 4: an endpoint that returns an HTTP status line => 'remote', so the http/https arm is not stuck-negative — it reports BOTH answers, one address apart from arm 3" \
+            || fail "an endpoint answering 'HTTP/1.1 200 OK' was classified '$SYNC_CLASS' — the http arm can only say no, which would make every https:// remote 'unclassified' forever. Note: $SYNC_PROBE_NOTE"
+    else
+        fail "could not stand up the loopback HTTP responder, so the http arm's YES direction is unproven and arm 3's NO carries no information"
+    fi
+    kill "$HTTPGREET_PID" 2>/dev/null; wait "$HTTPGREET_PID" 2>/dev/null
+
+else
+    fail "could not stand up the loopback substrate (needs python3): greeter=[$SSHGREET_PORT] mute=[$MUTE_PORTS] — mg-32b6's pair is UNPROVEN on this host"
+fi
+
+# THE LIVE ARM, and it is guarded rather than asserted unconditionally. The
+# hermetic arms above hold on any box; this one asks whether the probe works
+# against the ACTUAL deploy remote, which needs the internet and a route to
+# github. When that is not available the arm is skipped WITH A LINE SAYING SO —
+# a silently-skipped arm and a passing one are indistinguishable, which is the
+# error this whole ticket is about.
+if probe_tcp github.com 22 5 && read_greeting github.com 22 5 >/dev/null 2>&1; then
+    SYNC_CLASS=""; SYNC_PROBE_NOTE=""
+    classify_transport "git@github.com:drellem2/pogo.git" >/dev/null 2>&1
+    [ "$SYNC_CLASS" = "remote" ] \
+        && pass "the live arm: the REAL deploy remote (git@github.com:drellem2/pogo.git, scp-like form, port 22) still classifies as 'remote'" \
+        || fail "the real deploy remote classified as '$SYNC_CLASS' — the fix has broken the classification it was meant to make honest. Note: $SYNC_PROBE_NOTE"
+else
+    echo "  NOTE: github.com:22 did not answer with a greeting from this box, so the live"
+    echo "        arm is SKIPPED. The hermetic arms above are unaffected — they build both"
+    echo "        halves of the pair on loopback and do not need the network."
+fi
+
+kill "$SSHGREET_PID" 2>/dev/null; wait "$SSHGREET_PID" 2>/dev/null
+kill "$MUTE_PID" 2>/dev/null; wait "$MUTE_PID" 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# resolve_banner_probe — the greeting primitive proves itself, or there isn't one
+# ---------------------------------------------------------------------------
+# The runner's own positive control for the probe the pair above rests on. It is
+# asserted here because a primitive that could only ever say "said nothing" would
+# turn every night into `unclassified` — quietly, and with a plausible log line.
+BANNER_PROBE_TRIED=false; BANNER_PROBE="not tried"; BANNER_NC_FLAGS=""
+if resolve_banner_probe >/dev/null 2>&1; then
+    pass "resolve_banner_probe: PROVEN by execution — it read a canned greeting back off a loopback listener, so it can report that a server SPOKE (flags: '${BANNER_NC_FLAGS:-none}')"
+    read_greeting 127.0.0.1 1 2 >/dev/null 2>&1 \
+        && fail "read_greeting reported a greeting from a CLOSED loopback port — it cannot say no" \
+        || pass "and read_greeting says NO for a closed loopback port, so it is not stuck-positive"
+else
+    fail "resolve_banner_probe could not prove a greeting primitive on this box — with no nc that is expected and honest, but then classify_transport can never say 'remote' and the pair above should have failed too"
+fi
+SAVED_BANNER_NC="$NC"
+NC=""
+BANNER_PROBE_TRIED=false; BANNER_PROBE="not tried"
+resolve_banner_probe >/dev/null 2>&1 \
+    && fail "resolve_banner_probe claimed a proven primitive with no nc at all" \
+    || pass "resolve_banner_probe with no nc: reports NO primitive rather than a verdict it cannot back — so the failure stays 'unclassified' and never becomes 'remote'"
+NC="$SAVED_BANNER_NC"
+BANNER_PROBE_TRIED=false; BANNER_PROBE="not tried"; BANNER_NC_FLAGS=""
+resolve_banner_probe >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # sync_with_retry — the network class retries, everything else settles
@@ -993,8 +1267,20 @@ printf '%s' "$SNET" | grep -qi 'not the place to look' \
     && pass "the NETWORK remedy says explicitly that the deploy tree is not the place to look" || fail "network remedy does not rule the tree out"
 printf '%s' "$SDIRTY" | grep -q 'deploy-src status' \
     && pass "the DIRTY remedy keeps the checkout inspection, where it is the right advice" || fail "dirty remedy lost its inspection step"
-printf '%s' "$SREM" | grep -qi 'ANSWERED a TCP connection' \
-    && pass "the REMOTE remedy states the network was measured UP, so the reader does not chase it" || fail "remote remedy does not report the connectivity measurement"
+# WHAT THIS ASSERTION USED TO REQUIRE, and why it is the ticket in miniature
+# (mg-32b6). Until 2026-09-08 it required the paragraph to contain "ANSWERED a
+# TCP connection" — so the suite was pinning in place the exact sentence that
+# made the alert wrong. A completed connect is what every fabricated address
+# produces on this box's ports 80 and 443, 240.0.0.1 included, so that paragraph
+# told the reader connectivity was up on the strength of a constant and then sent
+# them to `ssh -T git@github.com` and `ssh-add -l`. The remedy must now rest on
+# what was SAID, and must not rest on the connect.
+printf '%s' "$SREM" | grep -qi 'ANSWERED AS A SERVER' \
+    && pass "the REMOTE remedy rests on the endpoint having ANSWERED AS A SERVER — a greeting, not a SYN-ACK — so the reader does not chase connectivity that was never measured" || fail "remote remedy does not report a content-level measurement"
+printf '%s' "$SREM" | grep -qi 'identification string' \
+    && pass "and it names the evidence (an SSH identification string, or an HTTP status line), so a reader can check the claim instead of trusting it" || fail "the REMOTE remedy does not say what the endpoint actually sent"
+printf '%s' "$SREM" | grep -qi 'not a completed connect' \
+    && pass "and it states outright that this is NOT a completed connect(2), which is the sentence the previous version of this very assertion required" || fail "the REMOTE remedy does not distinguish itself from the connect-only claim it replaced"
 # ...and it must not overclaim. The probe runs moments AFTER the failure, so a
 # blip that had already ended reads exactly like an auth problem — the same
 # species of defect as the one being fixed, one size smaller. The remedy has to
