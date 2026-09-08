@@ -98,6 +98,56 @@ Several gate rows are darwin-specific, several stand up live daemons, and one
 drives the live fleet; closing the gap is not the goal, and `ci-coverage.sh`
 does not treat it as one. Knowing the gap is the goal.
 
+#### A test that names a path on the author's box is red on CI forever, and the gate cannot see it (`mg-d64b`)
+
+There is a third case, and it is the one that runs longest before anybody looks.
+A test whose verdict depends on a path that exists only on the dev host is
+**green on the gate on every run, on every commit, forever**, because the gate
+runs on the host where the path is. It is **red on CI on every run, on every
+commit, forever**, for the same reason.
+
+That is not a flake and it is not a red main. It is a constant, and a constant
+is the one reading no amount of re-running can correct:
+
+```
+--- FAIL: TestNewStallCapacityReadsTheLiveRegistry (0.00s)
+    known = false against a live registry: stallwatch.RepoCapacity{
+      Repo:"/Users/daniel/dev/pogo", ...,
+      Unresolved:"/Users/daniel/dev/pogo is not a directory on this host"}
+```
+
+The test passed `/Users/daniel/dev/pogo` to `Registry.RepoOccupancyFor`, which
+**stats** it and correctly reports an absolute path that is not a directory as
+unresolvable. Twenty consecutive CI runs failed on it across five days, one
+package of eighty-five, `(0.00s)` — and the same cold `./build.sh` on the same
+commit exited 0 locally, because the directory is there. Twenty commits merged
+through a CI that was already red before any of them.
+
+**Writing tests.** A path a test asserts *about* may be any string; a path a test
+expects to **resolve** must be one the test creates (`t.TempDir()`), and the
+unresolvable case deserves its own named test rather than being asserted by
+accident on every host but one. If both directions are pinned, a reader can tell
+a genuine UNKNOWN from a test written against somebody's home directory.
+
+**Reading a red CI.** `gh run list` gives you a colour, not a cause. Before
+concluding anything from a red run — including "main is broken" — open it and
+read which test failed:
+
+```bash
+gh run view <run-id> --repo drellem2/pogo --log-failed | grep -E '^--- FAIL|--- FAIL:'
+```
+
+**And for the pre-deploy quiesce's step (0), which reads as a hard gate:** a red
+CI does **not** by itself stop a deploy, and it never should have been able to,
+because CI is a subset of the merge gate and answers a different question. Step
+(1) — a cold `./build.sh` on the commit being deployed — is the authoritative
+check on this box, and it is what decides. What step (0) is *for* is making you
+**name the failing test and say whether it is about the commit being deployed**.
+If it is, stop. If it is a standing environment failure like the one above, say
+so in the report, file it if it is not already filed, and proceed to step (1) —
+a gate nobody can pass is a gate everybody learns to step over, which costs more
+than the red it was guarding.
+
 ### Where state lives: `HOME`, `POGO_HOME`, and what may derive a path (`mg-5082`)
 
 This tree has two notions of "where my state lives". Five defects were filed
