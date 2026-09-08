@@ -479,11 +479,21 @@ func (a *Agent) deliverConfirmed(msg string, timeout time.Duration, corr string)
 		return err
 	}
 	if _, ok := a.awaitSubmit(before, step); ok {
+		// A confirmed submit drains whatever was loaded, including anything a
+		// previous mid-turn delivery left in the composer. Discharge the
+		// obligation here rather than leaving a stale record for the
+		// mid-session watcher to judge a healthy agent against.
+		a.clearQueuedNudge()
 		emitNudgeSent(a, msg, "confirm", corr)
 		return nil
 	}
 
 	if busy {
+		// Record the obligation this branch creates. Returning ErrNudgeQueued
+		// is the right call at delivery time and it leaves a prompt sitting in
+		// a working agent's composer with nothing watching whether the turn's
+		// end ever drains it — mg-5246's mid-session wedge. See queuednudge.go.
+		a.noteQueuedNudge(before)
 		emitNudgeUnconfirmed(a, msg, "queued", corr)
 		return fmt.Errorf("nudge to %q: written to a harness that was mid-turn, which "+
 			"emits no submission receipt for such a prompt (%s); pogod can neither "+
@@ -501,6 +511,7 @@ func (a *Agent) deliverConfirmed(msg string, timeout time.Duration, corr string)
 	}
 	if _, ok := a.awaitSubmit(before, step); ok {
 		log.Printf("agent %s: bare return submitted the loaded message", a.Name)
+		a.clearQueuedNudge()
 		emitNudgeSent(a, msg, "confirm-bare-return", corr)
 		return nil
 	}
@@ -511,6 +522,7 @@ func (a *Agent) deliverConfirmed(msg string, timeout time.Duration, corr string)
 		return fmt.Errorf("resend to %q: %w", a.Name, err)
 	}
 	if _, ok := a.awaitSubmit(before, step); ok {
+		a.clearQueuedNudge()
 		emitNudgeSent(a, msg, "confirm-resend", corr)
 		return nil
 	}
