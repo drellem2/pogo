@@ -6542,6 +6542,23 @@ func TestPromptsDoNotAnchorAKillToAHardcodedBinaryPath(t *testing.T) {
 // daemon. The replacement instrument is pinned too, because a bare prohibition
 // with nothing to do instead gets ignored under time pressure — the same lesson
 // the pkill ban above is written from.
+//
+// A THIRD CLAUSE — THE SIBLINGS — IS PINNED AS OF mg-fb1c, and it is the half
+// that explains why the two above were not enough. The ancestor mechanism was
+// already shipped verbatim in mayor.md and in a crew memory note on the night
+// mg-cbee happened, and mg-cbee happened anyway; mg-cbee itself was archived
+// still asking why pgrep missed pogod at all. The reason a true, shipped, read
+// rule loses is that pgrep's SIBLINGS stay visible. Re-measured 2026-09-08 from
+// a polecat shell: `pgrep -f claude` returned 7 of pogod's 8 `claude` children
+// and omitted exactly one — the caller's own parent — while `pgrep -ax pogod`
+// returned the daemon's pid at the same instant `pgrep -x pogod` returned empty.
+// Same binary, same argv shape, same user, same pattern; ancestry is the only
+// difference. So the instrument passes its own smoke test on plausible non-empty
+// output nearly every time it is used, and the single case it answers wrongly is
+// the case under test. Nothing trains the reader to distrust it, which is why
+// "ancestors are excluded" is a fact a careful reader can hold and still be
+// surprised by. The failure is structural, not intermittent: "it worked when I
+// checked" is guaranteed and worthless.
 func TestShippedPromptsWarnPgrepIsNotALivenessInstrument(t *testing.T) {
 	names := []string{
 		"prompts/templates/polecat.md",
@@ -6580,6 +6597,18 @@ func TestShippedPromptsWarnPgrepIsNotALivenessInstrument(t *testing.T) {
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s: missing pgrep-liveness guidance %q (mg-cbee)", name, want)
+			}
+		}
+		// Half three, pinned separately so its failure names its own ticket:
+		// the siblings clause is what makes halves one and two stick. Two
+		// strings — the claim, and the reason it matters — so a prompt cannot
+		// keep the word and drop the mechanism it names.
+		for _, want := range []string{
+			"SIBLINGS stay visible",
+			"passes its own smoke test",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing the pgrep SIBLINGS clause %q; without it the prompt states the ancestor rule and leaves the reader with no reason to distrust an instrument that answers plausibly every other time — which is the configuration mg-cbee was already shipped into (mg-fb1c)", name, want)
 			}
 		}
 	}
