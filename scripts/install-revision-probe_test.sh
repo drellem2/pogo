@@ -138,6 +138,16 @@ done
 [ -n "${PORT:-}" ] || pogo_sandbox_fail "the stub daemon never reported a port"
 URL="http://127.0.0.1:$PORT"
 
+# The subject registry the probe reads (mg-e2e6). $SRC stands in for deploy-src,
+# and a deploy-src that has synced the probe has synced the registry with it —
+# they arrive in the same commit. Naming the stub daemon as the subject keeps
+# section 4's live execution of the installed argument vector exercising the
+# GENERAL witness end to end, rather than a scope it would never run at in
+# production. It is a real process, started seconds ago, against a checkout whose
+# commits are older, so the honest verdict is NOT-DISPROVEN.
+mkdir -p "$SRC/scripts"
+printf 'stubdaemon %s HEAD %s/stub.py\n' "$SRC" "$SANDBOX" > "$SRC/scripts/revision-subjects.conf"
+
 # A git checkout for the probe's reference read, so section 4 exercises the real
 # two-read path rather than a probe that dies on its repo argument.
 export GIT_AUTHOR_NAME=probe GIT_AUTHOR_EMAIL=probe@example.com
@@ -538,6 +548,175 @@ if [ "$count" = "1" ]; then
     pass "re-installing replaces the job rather than accumulating plists"
 else
     fail "$count com.pogo.revisionprobe* files in $LA_DIR after two installs, want 1"
+fi
+
+
+# ---------------------------------------------------------------------------
+# 8. THE FOURTH LAUNCHD JOB IS NOW AUDITED — on the merge-activated path
+# ---------------------------------------------------------------------------
+# internal/service/launchagentaudit.go's managedLaunchAgents() says in its own
+# comment that a fourth launchd job means a row there, and then gives two
+# reasons com.pogo.revisionprobe is deliberately not one: a row needs a Go copy
+# of the plist to render against (the mirror mg-b201 was filed for), and it would
+# put the auditor for the deploy witness inside the binary the deploy installs.
+# Both are true, and together they still left an audit that does not happen.
+#
+# scripts/check-revisionprobe-install.sh is that audit without either problem —
+# it renders through the tracked installer from the tracked template, and it is a
+# tracked script, so it arrives by merge. These controls are what make it a check
+# rather than a claim: every row is driven to a FINDING against a fixture and
+# then back to clean, because a detector that has only ever produced one of its
+# two answers is a detector of unknown polarity.
+
+CHECKER="$HERE/check-revisionprobe-install.sh"
+[ -x "$CHECKER" ] || pogo_sandbox_fail "scripts/check-revisionprobe-install.sh is not executable"
+
+CHECK_LEDGER="$SANDBOX/check.ledger.log"
+NOWEPOCH="$(date -u +%s)"
+fresh_ledger() {
+    printf '%s exit=0 subject=pogod OK running=x reference=x age=- threshold=24h\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$CHECK_LEDGER"
+}
+
+run_check() {
+    bash "$CHECKER" --src "$SRC" --url "$URL" \
+        --launch-agents-dir "$LA_DIR" --launchctl "$LC_OK" \
+        --ledger "$CHECK_LEDGER" --now "$NOWEPOCH" "$@" 2>&1
+}
+
+# Put the box back in the state the audit should call clean.
+install_probe >/dev/null 2>&1
+fresh_ledger
+
+# 8a. THE POSITIVE CONTROL, and it comes first on purpose. Every FINDING below is
+# worth nothing unless the same instrument can also report clean; an audit that
+# always finds something is one nobody reads twice.
+out="$(run_check)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+    pass "the audit reports CLEAN over a freshly installed, loaded, current, firing job"
+else
+    fail "the audit found something on a box it should call clean (exit $rc) — every red assertion below is unfalsifiable until this passes: $out"
+fi
+for want in PLIST LOADED BODY LEDGER; do
+    if printf '%s' "$out" | grep -q "$want"; then
+        pass "the audit reports a separate $want row"
+    else
+        fail "no $want row — four questions collapsed into one score is a sentence nobody can act on: $out"
+    fi
+done
+
+# 8b. PLIST DRIFT. This is the row the Go registry would have carried, and the
+# defect class is mg-b201's: the shipped plist and the installed one drift, and
+# nothing notices because both parse and both load.
+cp "$PLIST" "$SANDBOX/plist.good"
+printf '\n<!-- hand-edited on the box, months ago -->\n' >> "$PLIST"
+out="$(run_check)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'FINDING   PLIST'; then
+    pass "an installed plist that differs from what this checkout would write is a FINDING"
+else
+    fail "a drifted plist exited $rc without a PLIST finding — this is exactly the row the audit exists to be: $out"
+fi
+cp "$SANDBOX/plist.good" "$PLIST"
+
+# 8c. NOT INSTALLED AT ALL. The limiting case of drift, and the one the whole
+# lineage is about: present by existence is the failure, absent is its parent.
+mv "$PLIST" "$SANDBOX/plist.parked"
+out="$(run_check)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'NOT INSTALLED'; then
+    pass "a missing plist is a FINDING that says the witness is not armed"
+else
+    fail "an uninstalled witness exited $rc without saying so: $out"
+fi
+mv "$SANDBOX/plist.parked" "$PLIST"
+
+# 8d. A PLIST IS A FILE, NOT A JOB. Byte-perfect and never bootstrapped is a
+# witness that fires never, and it is invisible to any check that only compares
+# bytes — which is every check this repo had for this job.
+out="$(bash "$CHECKER" --src "$SRC" --url "$URL" --launch-agents-dir "$LA_DIR" \
+    --launchctl "$LC_NOPRINT" --ledger "$CHECK_LEDGER" --now "$NOWEPOCH" 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'FINDING   LOADED'; then
+    pass "a plist launchd does not know is a FINDING even when its bytes are perfect"
+else
+    fail "an unloaded job passed the audit (exit $rc) — bytes were checked and arming was not: $out"
+fi
+
+# 8e. THE BODY THE JOB EXECUTES. The program is the tracked script at --src,
+# never a copy, so mg-30f8's payload-copy drift cannot happen here — but --src
+# itself is advanced by the deploy runner's sync_src, so a deploy that stops
+# firing freezes the probe's TEXT while the job keeps firing.
+echo two > "$SRC/file"
+git -C "$SRC" add -A && git -C "$SRC" commit --quiet -m two
+git -C "$SRC" push --quiet origin main 2>/dev/null
+git -C "$SRC" reset --quiet --hard HEAD~1
+out="$(run_check)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'FINDING   BODY'; then
+    pass "a --src behind origin/main is a FINDING — the job fires, and what it fires is stale probe text"
+else
+    fail "a stale checkout passed the audit (exit $rc): $out"
+fi
+git -C "$SRC" merge --quiet --ff-only origin/main 2>/dev/null || git -C "$SRC" reset --quiet --hard origin/main
+out="$(run_check)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+    pass "bringing --src forward clears the BODY finding — the row tracks the state, not the first answer it gave"
+else
+    fail "the BODY finding survived the fix (exit $rc): $out"
+fi
+
+# 8f. THE LEDGER IS THE ONLY THING THAT CAN SAY THE WITNESS STOPPED. Nothing
+# scheduled on this box performs this read, which is why it is a row here: a
+# witness that stopped is silent in exactly the way a healthy one is.
+printf '%s exit=0 subject=pogod OK running=x reference=x age=- threshold=24h\n' \
+    "$(date -u -r $(( NOWEPOCH - 4 * 3600 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+       || date -u -d "@$(( NOWEPOCH - 4 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ)" > "$CHECK_LEDGER"
+out="$(run_check)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'FINDING   LEDGER'; then
+    pass "a ledger four hours cold on an hourly job is a FINDING — the witness has stopped"
+else
+    fail "a stopped witness read as healthy (exit $rc): $out"
+fi
+rm -f "$CHECK_LEDGER"
+out="$(run_check)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'LEDGER'; then
+    pass "an absent ledger is a FINDING too — no record and no probe are the same observation"
+else
+    fail "a missing ledger passed the audit (exit $rc): $out"
+fi
+fresh_ledger
+
+# 8g. A ROW THAT COULD NOT BE EVALUATED IS NOT A PASS. Collapsing UNCHECKED into
+# 0 is absence-of-evidence-as-evidence, which this repo has now paid for in
+# mg-de08, mg-6d7b and mg-5049. Exit 2, distinct from both other answers.
+out="$(bash "$CHECKER" --src "$SANDBOX/no-such-src" --url "$URL" \
+    --launch-agents-dir "$LA_DIR" --launchctl "$LC_OK" \
+    --ledger "$CHECK_LEDGER" --now "$NOWEPOCH" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ]; then
+    pass "an audit that could not read its subject does not exit 0"
+else
+    fail "an unreadable --src produced a clean audit: $out"
+fi
+
+# 8h. IT MUST NOT NEED WHAT THE DEPLOY INSTALLS. The whole argument for auditing
+# this job outside the Go registry is that the auditor must work on a box where
+# the deploy has been failing — so it may not reach for go, pogo or pogod, and
+# saying so is not the same as testing it.
+CHECK_POISON="$SANDBOX/checkpoison"
+mkdir -p "$CHECK_POISON"
+CHECK_POISON_MARK="$SANDBOX/checkpoison.used"
+rm -f "$CHECK_POISON_MARK"
+for t in go pogo pogod; do
+    printf '#!/usr/bin/env bash\necho "%s" >> "%s"\nexit 127\n' "$t" "$CHECK_POISON_MARK" > "$CHECK_POISON/$t"
+    chmod +x "$CHECK_POISON/$t"
+done
+out="$(PATH="$CHECK_POISON:$PATH" run_check)"; rc=$?
+if [ ! -f "$CHECK_POISON_MARK" ]; then
+    pass "the audit invoked none of go/pogo/pogod — it can run on the box that needs it"
+else
+    fail "the audit reached for $(tr '\n' ' ' < "$CHECK_POISON_MARK") — it would be dark exactly when the deploy is"
+fi
+if [ "$rc" -eq 0 ]; then
+    pass "and it still completed the audit with all three poisoned on PATH"
+else
+    fail "the audit exited $rc with go/pogo/pogod poisoned: $out"
 fi
 
 printf 'x\n' > "$LEDGER"

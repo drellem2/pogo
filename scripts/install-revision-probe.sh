@@ -68,15 +68,29 @@
 # only informative if its blind spots are written down
 #
 #   - a host powered off at every fire time (above).
-#   - this job being booted out or its plist deleted. Nothing re-arms it.
+#   - this job being booted out or its plist deleted. Nothing re-arms it, and
+#     nothing notices on a schedule — but scripts/check-revisionprobe-install.sh
+#     is the read that finds it, along with plist drift, a stale --src and a
+#     ledger that has gone cold (mg-e2e6).
 #   - pogod running the CORRECT revision in the wrong run mode (index-only
 #     serves /version happily). That is /server/mode and mg-6d2f's subject.
-#   - ANY LONG-LIVED PROCESS THAT IS NOT pogod. The bridget reader, the notifier
-#     pollers and the bridget supervisor have the identical defect — a merged
+#
+# NO LONGER A BLIND SPOT, and the entry is kept rather than deleted because the
+# scope it names is still the one this installer arms:
+#
+#   - LONG-LIVED PROCESSES THAT ARE NOT pogod. The bridget reader, the notifier
+#     pollers and the bridget supervisor had the identical defect — a merged
 #     change sat inert in the bridget reader for two days (mg-c2f5 / mg-8158)
-#     and nothing reported it. This ticket is scoped NARROW to pogod on purpose:
-#     a pogod-only witness that runs beats a general one that does not, and the
-#     general case is filed rather than implied.
+#     and nothing reported it; on 2026-08-14 a running bridget predated two
+#     merged fixes by 2d08h. mg-a03d scoped this NARROW to pogod on purpose —
+#     a pogod-only witness that runs beats a general one that does not — and
+#     filed the general case rather than implying it. mg-e2e6 is that case:
+#     scripts/revision-probe.sh now also reads a tracked subject registry,
+#     scripts/revision-subjects.conf, and dates those processes by `ps` start
+#     time against commit dates. THIS JOB NEEDED NO CHANGE TO GAIN THEM: the
+#     registry lives in the checkout the probe already reads, so a new subject
+#     is armed by a merge and a sync, with no re-install. That is the whole
+#     reason the subject list is not a set of flags in the plist.
 #
 # THE CIRCULARITY, so it is not rediscovered as a bug
 #
@@ -122,7 +136,13 @@ die() {
     exit 2
 }
 
-usage() { sed -n '2,110p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# The header comment IS the help text, and the range is DERIVED: every line from
+# 2 up to the first that is not a comment. It used to say `sed -n '2,110p'`, and
+# mg-e2e6 grew this header by 14 lines and truncated the help text at USAGE
+# without a single test noticing — which is the same defect this file's own guards
+# are about, committed by a change whose subject is that defect. A bound a later
+# edit invalidates is not a bound.
+usage() { awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -409,11 +429,20 @@ install-revision-probe: ARMED — $LABEL is loaded in $DOMAIN.
   alerts   mailed to 'human' by the probe itself, at most once per 12h for the
            same unresolved divergence (revision-probe.sh --renotify)
 
+  subjects $SRC/scripts/revision-subjects.conf
+           The probe watches pogod by the strong reading (GET /version) and every
+           process named in that tracked registry by the weaker one (a \`ps\` start
+           time against commit dates). Adding a subject there needs a merge and a
+           sync — NOT a re-install, and not a change to this job (mg-e2e6).
+
   It reports EITHER WAY. Check that the witness is alive, not just quiet:
 
       tail -5 $LEDGER
       $LAUNCHCTL print $DOMAIN/$LABEL | head -20
 
   A ledger whose newest line is hours old means the witness stopped, which
-  looks identical to health if you only watch for alerts.
+  looks identical to health if you only watch for alerts. That read, plus plist
+  drift and a stale \$SRC, is what this audits in one command:
+
+      $HERE/check-revisionprobe-install.sh
 EOF

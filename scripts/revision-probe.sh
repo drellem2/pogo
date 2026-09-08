@@ -75,20 +75,94 @@
 # line's age answers "is the witness still firing?", which no amount of alert
 # mail can.
 #
+# THE SUBJECT IS NOT ONLY pogod (mg-e2e6)
+#
+# mg-a03d scoped this file to pogod, said so, and filed the general case rather
+# than implying it. This is that case. Apply architect's test to what mg-a03d
+# shipped — "what would this instrument report if the thing it names stopped
+# entirely?" — and the narrow probe answers GREEN for a bridget reader that has
+# been inert for two days, because it is not watching it.
+#
+# Measured twice, by hand, both times by somebody chasing something else:
+#
+#   mg-c2f5 / mg-8158   the running bridget started 2026-08-06 15:13; the
+#                       mg-65d2 commit that changes its behaviour is dated
+#                       2026-08-07 19:14. 69 lines plus a 133-line test file,
+#                       merged, green, and never executed.
+#   2026-08-14 06:16Z   pid 1736 (bridget) had been up 2d08h and predated two
+#                       merged fixes, one of them functional (mg-18bf).
+#
+# Nothing reported either. `~/.pogo/bin/bridget` is a SYMLINK into ~/dev/bridget,
+# so the binary on disk is always current and any check that stats the file
+# reports healthy: only the running PROCESS is stale.
+#
+# TWO AXES, AND THE SECOND IS WEAKER. IT IS REPORTED AS THE WEAKER THING.
+#
+#   axis      reading                                     what it dates
+#   -------   -----------------------------------------   ----------------------
+#   http      GET /version -> revision, vs origin/main     the CODE the process
+#                                                          loaded. Strong.
+#   process   `ps` elapsed time -> start instant, vs the   the PROCESS. Weak,
+#             commit dates in the checkout it runs from     and ONE-SIDED.
+#
+# One-sided, and this is the whole honesty of the process axis:
+#
+#   commits landed AFTER the process started
+#       -> it cannot be executing them; its image was fixed at exec. A FINDING.
+#   no commits since it started
+#       -> proves NOTHING. The binary it exec'd may itself have been built from
+#          an older tree, and for a subject that runs a DEPLOYED COPY the repo
+#          and the copy can differ without any commit at all. The verdict word
+#          for that state is NOT-DISPROVEN, never OK, and the ledger carries the
+#          distinction so a reader cannot mistake one for the other.
+#
+# Dressing the weak reading up as a revision comparison would be this file's own
+# defect one layer along: a green that means less than it looks.
+#
+# WHERE THE SUBJECTS COME FROM — A TRACKED REGISTRY, NOT THE PLIST
+#
+# scripts/revision-subjects.conf, inside --repo. It is tracked, so a new subject
+# is armed by a MERGE plus the deploy runner's sync_src: no plist edit, no
+# re-install, no `pogo`, no build. That is the same activation path this script
+# is on, and it is why the subject list is not a set of flags in
+# com.pogo.revisionprobe.plist — a job's argument vector changes only when
+# somebody re-runs the installer, which is the arming gap one layer down.
+#
+# The existing hourly job therefore needs NO change to gain subjects, which is
+# the point: a second launchd job would be a second thing to notice has stopped.
+#
+# AN ABSENT REGISTRY IS A FINDING, NOT A QUIET FALLBACK. Reverting to pogod-only
+# is precisely the narrow state this ticket exists to end, so it is not reachable
+# by a file going missing without anybody hearing about it: exit 2, with its own
+# ledger line. `--subjects none` is the way to ask for the narrow scope on
+# purpose, and it says so out loud when it does.
+#
 # USAGE
 #
 #   scripts/revision-probe.sh
 #   scripts/revision-probe.sh --stale-after 12h --mail
 #   scripts/revision-probe.sh --url http://127.0.0.1:10000 --repo ~/.pogo/deploy-src
 #   scripts/revision-probe.sh --log ~/Library/Logs/pogo/revision-probe.log --mail
+#   scripts/revision-probe.sh --subjects ~/.pogo/deploy-src/scripts/revision-subjects.conf
+#   scripts/revision-probe.sh --subjects none     # pogod only, the mg-a03d scope
 #
 # EXIT STATUS
 #
-#   0  clean — running == reference, or the divergence is younger than N
-#   1  ALERT — the running revision has differed from the reference for > N
-#   2  the probe could not run (no curl/git, unreadable repo, daemon silent).
-#      A check that could not run has NOT found its subject healthy, so this is
-#      a finding and not a shrug.
+#   The WORST status across every subject checked, because one subject's exit 0
+#   must not soften another's exit 2. A run that reached a verdict for pogod and
+#   could not find bridget at all has NOT found this box healthy.
+#
+#   0  clean — every subject is on its reference, or is within threshold, or (on
+#      the process axis) has no commit newer than its start to be behind
+#   1  ALERT — a subject has been behind its code for longer than N
+#   2  the probe could not run for at least one subject: no curl/git, unreadable
+#      repo, daemon silent, a named process not running at all, or the subject
+#      registry missing. A check that could not run has NOT found its subject
+#      healthy, so this is a finding and not a shrug.
+#
+#   A setup failure that defeats BOTH axes (an unparseable duration, no working
+#   git) still exits 2 immediately and checks nothing: that is a broken host, not
+#   a subject state, and continuing would produce verdicts nothing measured.
 
 set -uo pipefail
 
@@ -120,6 +194,11 @@ MAIL_TO="human"
 # notify rarely. `--renotify 0` mails on every alerting run.
 RENOTIFY_RAW="${POGO_REVISION_PROBE_RENOTIFY:-12h}"
 QUIET=0
+# The subject registry (mg-e2e6). Empty means "the tracked one in --repo",
+# resolved after the command line is parsed because --repo may still change.
+# `none` asks for the mg-a03d pogod-only scope on purpose, and says so.
+SUBJECTS_RAW="${POGO_REVISION_PROBE_SUBJECTS:-}"
+SUBJECTS_FILE=""
 # Retries for the loopback read. pogod is restarted BY the deploy, so a single
 # refused connection during the restart window is not evidence of anything; a
 # refusal that survives three tries seconds apart is.
@@ -127,11 +206,14 @@ PROBE_TRIES=3
 PROBE_GAP=2
 
 usage() {
-    # The header comment IS the help text. The range ends at the last line of
-    # EXIT STATUS; scripts/revision-probe_test.sh asserts that `--help` still
-    # reaches it, because a hard-coded line range silently truncates the moment
-    # the header grows and nothing else would notice.
-    sed -n '2,91p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # The header comment IS the help text, and the range is now DERIVED rather
+    # than written down: every line from 2 up to the first line that is not a
+    # comment. The old form said `sed -n '2,91p'` and warned in place that a
+    # hard-coded range "silently truncates the moment the header grows and
+    # nothing else would notice" — which is exactly what mg-e2e6 did to it. A
+    # bound that a later edit invalidates is not a bound; awk finds the end of
+    # the block by reading it.
+    awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
 }
 
 die_setup() {
@@ -152,6 +234,7 @@ while [ $# -gt 0 ]; do
         --ref-source) REF_SOURCE="${2:-}"; shift 2 ;;
         --stale-after) STALE_AFTER_RAW="${2:-}"; shift 2 ;;
         --stamp) STAMP="${2:-}"; shift 2 ;;
+        --subjects) SUBJECTS_RAW="${2:-}"; shift 2 ;;
         --log) LOG="${2:-}"; shift 2 ;;
         --renotify) RENOTIFY_RAW="${2:-}"; shift 2 ;;
         --now) NOW_RAW="${2:-}"; shift 2 ;;
@@ -185,18 +268,37 @@ VERDICT="INCOMPLETE"        # every terminal path below overwrites this
 VERDICT_NOTE=""
 AGE_LABEL="-"
 
+# ONE LINE PER SUBJECT PER RUN, not one line per run (mg-e2e6). The pogod line
+# is composed from the globals above, exactly as it always was; every other
+# subject appends its own preformatted line here and the trap writes them all.
+#
+# Accumulating rather than appending as we go is deliberate: the trap stays the
+# single writer, so the "either way" property is still STRUCTURAL and not a call
+# somebody can add an exit path without. It also keeps pogod's line first, which
+# is what a reader tailing the ledger is looking for.
+SUBJECT_LINES=()
+
+# POGOD_RC is pogod's OWN status, which stops being the process exit status the
+# moment a second subject can raise it. The ledger must record what each subject
+# found, not what the run as a whole ended up returning.
+POGOD_RC=""
+
 log_verdict() {
-    local rc="$1" dir
+    local rc="$1" dir line
     [ -n "$LOG" ] || return 0
+    rc="${POGOD_RC:-$rc}"
     dir="$(dirname "$LOG")"
     [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null
     {
-        printf '%s exit=%s %-12s running=%.8s reference=%.8s age=%s threshold=%s' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "$VERDICT" \
+        printf '%s exit=%s subject=%-18s %-14s running=%.8s reference=%.8s age=%s threshold=%s' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "pogod" "$VERDICT" \
             "${RUNNING:-<unread>}" "${REFERENCE:-<unread>}" \
             "$AGE_LABEL" "$STALE_AFTER_RAW"
         [ -z "$VERDICT_NOTE" ] || printf ' -- %s' "$VERDICT_NOTE"
         printf '\n'
+        for line in ${SUBJECT_LINES[@]+"${SUBJECT_LINES[@]}"}; do
+            printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line"
+        done
     } >> "$LOG" 2>/dev/null || {
         echo "revision-probe: WARNING — could not append to the ledger $LOG. The run below still happened; nothing recorded that it did, so a reader cannot tell this probe from one that never fired." >&2
         return 0
@@ -268,6 +370,461 @@ format_age() {
     if [ "$d" -gt 0 ]; then echo "${d}d${h}h"
     elif [ "$h" -gt 0 ]; then echo "${h}h${m}m"
     else echo "${m}m"; fi
+}
+
+
+# ---------------------------------------------------------------------------
+# THE PROCESS AXIS — the general subject (mg-e2e6)
+# ---------------------------------------------------------------------------
+# Everything from here to run_process_subjects implements the weaker of the two
+# readings described in the header. Nothing in it is reachable unless a subject
+# registry exists, so a box that has not synced one behaves exactly as mg-a03d
+# shipped — except that it SAYS SO, at exit 2, rather than quietly narrowing.
+
+SUBJECTS_WORST=0            # the worst status any non-pogod subject reached
+
+# subject_record adds one ledger line and raises the aggregate status. The line
+# shares its leading fields with pogod's (timestamp, exit, subject, verdict) so
+# that a reader can grep one ledger for one verdict word; the evidence fields
+# after that differ because the two axes measure different things and pretending
+# otherwise is the "green that means less than it looks" this file rejects.
+subject_record() {
+    local rc="$1" name="$2" verdict="$3" detail="$4" note="${5:-}" line
+    line="$(printf 'exit=%s subject=%-18s %-14s %s' "$rc" "$name" "$verdict" "$detail")"
+    [ -z "$note" ] || line="$line -- $note"
+    SUBJECT_LINES+=("$line")
+    [ "$rc" -le "$SUBJECTS_WORST" ] || SUBJECTS_WORST="$rc"
+}
+
+# --- mail, factored out so both axes deliver through one code path ----------
+# It was inline in the pogod alert before this ticket. Two copies of a delivery
+# path is two places for the mg-7ce7 defect (a `grep -q` capability probe losing
+# a SIGPIPE race and reporting a working tool as absent) to come back into,
+# and only one of them would have a control on it.
+
+MG=""
+resolve_mg() {
+    local cand mg_out
+    [ -z "$MG" ] || return 0
+    # /usr/bin/mg satisfies -x and `command -v mg`; it is the Micro-Emacs
+    # editor. Every candidate must self-identify as macguffin before it is
+    # trusted (mg-015f / mg-dd5f). `go env` is deliberately NOT consulted for
+    # GOBIN/GOPATH here — this probe must run without a toolchain.
+    #
+    # THE IDENTITY CHECK HAS NO PIPE IN IT, and this is the call site that made
+    # that mandatory (mg-7ce7): `mg --help | grep -q macguffin` under pipefail
+    # rejected a working mg 10 times out of 10, so this branch always fell
+    # through to the refusal below and 55 correctly-computed alerts reached
+    # nobody. See the long note above resolve_git.
+    for cand in "${GOBIN:-}/mg" "${GOPATH:-}/bin/mg" "$HOME/go/bin/mg" "$(command -v mg 2>/dev/null)"; do
+        case "$cand" in ""|"/mg"|"/bin/mg") continue ;; esac
+        [ -x "$cand" ] || continue
+        mg_out="$("$cand" --help 2>/dev/null)"
+        case "$mg_out" in *macguffin*) MG="$cand"; return 0 ;; esac
+    done
+    return 1
+}
+
+# send_mail SUBJECT BODY -> 0 delivered, 1 not delivered. A refusal and a failed
+# send are both "not delivered", because the caller's only correct reaction to
+# either is to leave the throttle unset and try again next hour.
+send_mail() {
+    local bf rc
+    if ! resolve_mg; then
+        echo "revision-probe: --mail was asked for but no macguffin 'mg' was found — refusing bare 'mg' (that is /usr/bin/mg, the EDITOR). The alert above is still the exit status." >&2
+        return 1
+    fi
+    bf="$(mktemp)"
+    printf '%s\n' "$2" > "$bf"
+    "$MG" mail send "$MAIL_TO" --from=revision-probe --subject="$1" --body-file "$bf" >/dev/null 2>&1
+    rc=$?
+    rm -f "$bf"
+    if [ "$rc" -ne 0 ]; then
+        echo "revision-probe: could not mail $MAIL_TO — the alert stands, it just did not reach anyone" >&2
+        return 1
+    fi
+    return 0
+}
+
+# --- reading the process table ---------------------------------------------
+# ps, NEVER pgrep. `pgrep` excludes the calling process AND EVERY ONE OF ITS
+# ANCESTORS unless passed -a — that is man pgrep, not a quirk of this box — so a
+# probe run under a supervisor it is watching would report that supervisor
+# ABSENT, which this file then reads as a finding. Measured on this host
+# 2026-08-20: `pgrep -x pogod` returns empty at exit 1 from a worker shell while
+# pogod is serving. An instrument that answers "not running" for a running
+# process is worse here than no instrument, because the whole subject is
+# staleness and ABSENT is one of the verdicts.
+#
+# etime, not lstart. `lstart` renders a LOCALE-DEPENDENT date that then has to be
+# re-parsed by a `date` whose dialect differs between darwin and GNU — two
+# conversions, both of which can fail quietly and neither of which this script
+# can control. `etime` is `[[dd-]hh:]mm:ss` of integers everywhere, and the start
+# instant is one subtraction from a clock we already have.
+#
+# The table is read ONCE per run and shared by every subject, so two subjects
+# cannot disagree about which processes existed.
+PS_BIN=""
+PS_TABLE=""
+resolve_ps() {
+    local cand out
+    for cand in "${POGO_REVISION_PROBE_PS:-}" "$(command -v ps 2>/dev/null)" /bin/ps /usr/bin/ps; do
+        [ -n "$cand" ] || continue
+        [ -x "$cand" ] || continue
+        out="$("$cand" -Ao pid=,etime=,command= 2>/dev/null)"
+        # Identity by EXECUTION, like resolve_git and resolve_curl: a ps that
+        # cannot enumerate a single process on a box running this script is not
+        # a ps, whatever `-x` says about it.
+        [ -n "$out" ] || continue
+        PS_BIN="$cand"; PS_TABLE="$out"; return 0
+    done
+    return 1
+}
+
+# etime_seconds turns [[dd-]hh:]mm:ss into seconds, refusing anything else. It
+# returns non-zero rather than echoing 0 on a parse failure: a zero elapsed time
+# puts the process start at NOW, which makes every commit older than it and
+# every subject read clean. That is the exact arithmetic that made pm-riemann's
+# first per-agent liveness check report UNPROVEN for seven healthy agents
+# (see scripts/fleet-liveness-probe.sh); here it would fail the other way, into
+# silence, which is worse.
+etime_seconds() {
+    local e="$1" days=0 rest a b c f
+    case "$e" in
+        *-*) days="${e%%-*}"; rest="${e#*-}" ;;
+        *)   rest="$e" ;;
+    esac
+    IFS=: read -r a b c <<EOF
+$rest
+EOF
+    if [ -z "${c:-}" ]; then c="${b:-}"; b="${a:-}"; a=0; fi
+    for f in "$days" "$a" "$b" "$c"; do
+        [ -n "$f" ] || return 1
+        [ -z "${f//[0-9]/}" ] || return 1
+    done
+    echo $(( 10#$days * 86400 + 10#$a * 3600 + 10#$b * 60 + 10#$c ))
+}
+
+# match_subject_processes fills MATCH_PIDS / MATCH_STARTS for one pattern.
+#
+# The match is a FIXED SUBSTRING of the full command line, not a regex, so a
+# pattern in the tracked registry can never become a portability question about
+# whose regex dialect ran it. A pattern ending in `$` must match at the END of
+# the command line: `/dev/bridget/bridget` is a prefix of
+# `/dev/bridget/bridget-supervise`, and two subjects silently collapsing into
+# one is a witness that reports the wrong process's age under the right name.
+MATCH_PIDS=""
+MATCH_STARTS=""
+match_subject_processes() {
+    local pattern="$1" now_real="$2" pid etime cmd el start anchored=0
+    MATCH_PIDS=""; MATCH_STARTS=""
+    case "$pattern" in *'$') anchored=1; pattern="${pattern%'$'}" ;; esac
+    while read -r pid etime cmd; do
+        [ -n "${cmd:-}" ] || continue
+        [ "$pid" != "$$" ] || continue
+        if [ "$anchored" -eq 1 ]; then
+            case "$cmd" in *"$pattern") ;; *) continue ;; esac
+        else
+            case "$cmd" in *"$pattern"*) ;; *) continue ;; esac
+        fi
+        el="$(etime_seconds "$etime")" || continue
+        start=$(( now_real - el ))
+        MATCH_PIDS="$MATCH_PIDS $pid"
+        MATCH_STARTS="$MATCH_STARTS $start"
+    done <<EOF
+$PS_TABLE
+EOF
+    [ -n "$MATCH_PIDS" ]
+}
+
+# same_process compares two process identities of the form p<pid>@<start>.
+#
+# NOT string equality, and the difference is a defect the merge gate caught that
+# a standalone suite run could not. The start instant is DERIVED — `date +%s`
+# minus the whole seconds `ps` reports as elapsed — so it is a rounded quantity
+# and consecutive samples of the SAME unrestarted process legitimately differ by
+# a second as the two truncations fall either side of a boundary. Exact equality
+# on it means the throttle randomly decides the subject restarted, and the alert
+# is then re-mailed on every hourly fire: the "alarm nobody reads" the throttle
+# exists to prevent, arriving through the mechanism meant to prevent it.
+#
+# The pid carries the identity; the start is a tie-breaker with slop. A restart
+# gets a new pid, so the common case is decided by the first comparison. A pid
+# RECYCLED onto the same number inside the slop window would be read as the same
+# process and could suppress one notification — that is the deliberate trade,
+# and it is bounded at one notification, against an unbounded re-mail loop. (The
+# box does recycle the whole pid space quickly, mg-cbc3, which is why the start
+# is compared at all rather than the pid trusted alone.)
+IDENTITY_SLOP=120
+
+same_process() {
+    local a="$1" b="$2" a_pid b_pid a_start b_start d
+    [ -n "$a" ] && [ -n "$b" ] || return 1
+    # Each side checked on its own: concatenating them and looking for two '@'
+    # also accepts one well-formed id next to a malformed one carrying both.
+    case "$a" in *@*) ;; *) return 1 ;; esac
+    case "$b" in *@*) ;; *) return 1 ;; esac
+    a_pid="${a%@*}"; a_pid="${a_pid#p}"; a_start="${a##*@}"
+    b_pid="${b%@*}"; b_pid="${b_pid#p}"; b_start="${b##*@}"
+    [ "$a_pid" = "$b_pid" ] || return 1
+    [ -n "$a_start" ] && [ -z "${a_start//[0-9]/}" ] || return 1
+    [ -n "$b_start" ] && [ -z "${b_start//[0-9]/}" ] || return 1
+    d=$(( a_start - b_start ))
+    [ "$d" -ge 0 ] || d=$(( -d ))
+    [ "$d" -le "$IDENTITY_SLOP" ]
+}
+
+# --- one subject ------------------------------------------------------------
+
+check_process_subject() {
+    local name="$1" repo="$2" ref="$3" pattern="$4"
+    local now_real refsha oldest_pid oldest_start nmatched st
+    local newer count oldest_ct age age_label stamp
+    local st_since st_id st_ref st_mailed mailed_at identity
+    local subject body detail
+
+    now_real="$(date +%s)"
+
+    if [ ! -d "$repo/.git" ] && [ ! -f "$repo/.git" ]; then
+        subject_record 2 "$name" NO-CHECKOUT "repo=$repo" \
+            "'$repo' is not a git checkout, so there is no code to date this process against. A subject that cannot be measured has not been found healthy."
+        return 0
+    fi
+    refsha="$("$GIT" -C "$repo" rev-parse --verify "$ref^{commit}" 2>/dev/null)"
+    if [ -z "$refsha" ]; then
+        subject_record 2 "$name" NO-REF "repo=$repo ref=$ref" \
+            "'$ref' does not name a commit in $repo"
+        return 0
+    fi
+
+    if ! match_subject_processes "$pattern" "$now_real"; then
+        # ARCHITECT'S TEST, ANSWERED IN THE INSTRUMENT: "what would this report
+        # if the thing it names stopped entirely?" A staleness check whose only
+        # verdicts are {current, stale} has no cell for {gone}, and the
+        # arithmetic then puts a dead subject in whichever cell it falls into.
+        # Here it is its own verdict, at exit 2.
+        subject_record 2 "$name" ABSENT "pattern=$pattern" \
+            "no process matches — this subject is not running at all, which is not the same as running current code"
+        echo "revision-probe: $name — NO PROCESS matches '$pattern'. Not stale: ABSENT." >&2
+        return 0
+    fi
+
+    # The OLDEST match is the subject, not the first and not the newest. A
+    # supervised program is commonly several processes — four `poll-mail.sh`
+    # bash processes were live on this box when this was written — and the stale
+    # one is the finding. Picking any other would let one restarted child vouch
+    # for its siblings, which is how a population-level check reports the health
+    # of its healthiest member.
+    oldest_pid=""; oldest_start=""; nmatched=0
+    # MATCH_PIDS and MATCH_STARTS are positionally paired; walk them together.
+    # nmatched counts PROCESSES and count counts COMMITS — two different numbers
+    # that both wanted to be called "count", which is how the report came to say
+    # "2 process(es) matched" about a two-commit gap while drafting this.
+    set -- $MATCH_STARTS
+    for st in "$@"; do
+        nmatched=$(( nmatched + 1 ))
+        if [ -z "$oldest_start" ] || [ "$st" -lt "$oldest_start" ]; then
+            oldest_start="$st"
+            oldest_pid="$(printf '%s\n' $MATCH_PIDS | sed -n "${nmatched}p")"
+        fi
+    done
+
+    newer="$("$GIT" -C "$repo" log --format='%ct %h %cs %s' --since="@$oldest_start" "$refsha" 2>/dev/null)"
+    if [ -z "$newer" ]; then
+        # NOT-DISPROVEN, never OK. No commit has landed since this process
+        # started, so nothing here shows it stale — and nothing here shows it
+        # current either: the image it exec'd may have been built from an older
+        # tree, and a subject that runs a deployed COPY can differ from its repo
+        # with no commit involved. The ledger word has to carry that, because a
+        # word that reads as health is the thing a reader acts on.
+        rm -f "${STAMP}.${name}" 2>/dev/null
+        subject_record 0 "$name" NOT-DISPROVEN \
+            "pid=$oldest_pid started=$(fmt_epoch "$oldest_start") ref=$(printf '%.8s' "$refsha") newer=0" \
+            "no commit in $repo is newer than this process — that does NOT establish it is current"
+        say "revision-probe: $name — NOT-DISPROVEN. pid $oldest_pid started $(fmt_epoch "$oldest_start"); no commit in $repo since. This does not prove it is current; the process axis can only disprove."
+        return 0
+    fi
+
+    count="$(printf '%s\n' "$newer" | grep -c '^')"
+    oldest_ct="$(printf '%s\n' "$newer" | tail -1 | awk '{print $1}')"
+    # The clock is DERIVED, not stamped. For the http axis "first seen diverged"
+    # has to be recorded because nothing else dates it; here the moment the
+    # process became provably behind is a durable fact — the commit date of the
+    # OLDEST commit it missed — so it is read from git every run. A stamped
+    # first-seen would also silently restart whenever the stamp was lost, which
+    # is the one direction a staleness clock must not fail in.
+    age=$(( NOW - oldest_ct ))
+    [ "$age" -ge 0 ] || age=0
+    age_label="$(format_age "$age")"
+    identity="p${oldest_pid}@${oldest_start}"
+    stamp="${STAMP}.${name}"
+
+    detail="pid=$oldest_pid started=$(fmt_epoch "$oldest_start") ref=$(printf '%.8s' "$refsha") newer=$count age=$age_label threshold=$STALE_AFTER_RAW"
+
+    build_process_report() {
+        cat <<EOF
+MEASURED — PROCESS AXIS, WHICH IS THE WEAKER OF THE TWO
+  subject            $name
+  process            pid $oldest_pid, started $(fmt_epoch "$oldest_start")
+                     $nmatched process(es) matched '$pattern'; the OLDEST is the subject
+  checkout           $repo at $ref ($refsha)
+  commits since it   $count, the oldest dated $(fmt_epoch "$oldest_ct")
+$(printf '%s\n' "$newer" | head -5 | sed 's/^[0-9]* /                     /')
+  behind for         $age_label  (threshold $(format_age "$STALE_AFTER"))
+
+WHAT THIS PROVES, AND WHAT IT DOES NOT
+  PROVES     the process cannot be executing those commits. Its image was fixed
+             at exec and they did not exist yet.
+  DOES NOT   say what revision it IS running. It dates the PROCESS, not the code
+             the process loaded — a start time later than every commit would not
+             have established currency either. There is no /version to ask here;
+             that reading is available for pogod and for nothing else on this box.
+
+WHAT TO DO
+  ps -o pid,lstart,command -p $oldest_pid
+  git -C $repo log --oneline --since=@$oldest_start $ref
+  # then restart the subject — and check whether it runs the repo directly (a
+  # symlink, as ~/.pogo/bin/bridget is) or a DEPLOYED COPY. For a copy, a
+  # restart alone re-execs the same stale files and the finding survives it.
+EOF
+    }
+
+    if [ "$age" -le "$STALE_AFTER" ]; then
+        subject_record 0 "$name" BEHIND "$detail" \
+            "behind $count commit(s) but only for $age_label, inside the $STALE_AFTER_RAW threshold"
+        say "revision-probe: $name — BEHIND $count commit(s), within threshold ($age_label of $STALE_AFTER_RAW)."
+        [ "$QUIET" -eq 1 ] || { say ""; build_process_report; }
+        return 0
+    fi
+
+    mailed_at=""
+    if [ -r "$stamp" ]; then
+        read -r st_since st_id st_ref st_mailed _ < "$stamp" 2>/dev/null
+        if same_process "${st_id:-}" "$identity" \
+            && [ -n "${st_mailed:-}" ] && [ -z "${st_mailed//[0-9]/}" ]; then
+            mailed_at="$st_mailed"
+        fi
+    fi
+
+    subject="$name has been running $(format_age $(( NOW - oldest_start ))) and predates $count commit(s) in $repo"
+    body="$(printf 'revision-probe: ALERT — %s.\n\nThis is the PROCESS axis (mg-e2e6): a `ps` start time against commit dates. It\nis weaker than the revision comparison used for pogod and is reported as the\nweaker thing — see WHAT THIS PROVES below.\n\n%s\n' \
+        "$subject" "$(build_process_report)")"
+
+    echo "revision-probe: ALERT — $subject"
+    say ""
+    say "$body"
+
+    local suppressed=""
+    if [ "$DO_MAIL" -eq 1 ] && [ -n "$mailed_at" ] && [ "$RENOTIFY" -gt 0 ] \
+        && [ $(( NOW - mailed_at )) -lt "$RENOTIFY" ]; then
+        suppressed="already mailed $(format_age $(( NOW - mailed_at ))) ago; next notification after $(format_age "$RENOTIFY") (--renotify)"
+        echo "revision-probe: mail SUPPRESSED for $name — $suppressed. The alert above and the exit status stand." >&2
+    elif [ "$DO_MAIL" -eq 1 ]; then
+        # A FAILED send is not a notification: leave mailed_at as it was so the
+        # next run tries again rather than buying twelve hours of silence for an
+        # alert that reached nobody.
+        if send_mail "$subject" "$body"; then mailed_at="$NOW"; fi
+    fi
+
+    [ -d "$(dirname "$stamp")" ] || mkdir -p "$(dirname "$stamp")" 2>/dev/null
+    printf '%s %s %s %s\n' "$oldest_ct" "$identity" "$refsha" "${mailed_at:--}" > "$stamp" 2>/dev/null \
+        || echo "revision-probe: WARNING — could not write $stamp, so $name's re-notify throttle cannot be recorded and the same alert will be mailed every run" >&2
+
+    if [ -n "$suppressed" ]; then
+        subject_record 1 "$name" STALE-PROCESS "$detail" "mail suppressed: $suppressed"
+    else
+        subject_record 1 "$name" STALE-PROCESS "$detail" \
+            "predates $count commit(s); the oldest one it missed landed $(fmt_epoch "$oldest_ct")"
+    fi
+    return 0
+}
+
+# --- the registry -----------------------------------------------------------
+
+# expand_home turns a leading ~/ or a literal $HOME into this user's home, so the
+# tracked registry names paths without naming a username. The substitution is
+# deliberately not `eval`: a registry line is data, and a file that arrives by
+# merge into an unattended hourly job is not a place to start executing strings.
+expand_home() {
+    local v="$1"
+    case "$v" in
+        '~/'*)     v="$HOME/${v#\~/}" ;;
+        '$HOME/'*) v="$HOME/${v#\$HOME/}" ;;
+        '$HOME')   v="$HOME" ;;
+    esac
+    echo "$v"
+}
+
+run_process_subjects() {
+    local file name repo ref pattern rest line lineno=0 seen=0
+
+    case "$SUBJECTS_RAW" in
+        none|off|disabled)
+            say "revision-probe: process subjects DISABLED (--subjects $SUBJECTS_RAW) — this run is the mg-a03d pogod-only scope, asked for on purpose."
+            return 0
+            ;;
+        "") file="$REPO/scripts/revision-subjects.conf" ;;
+        *)  file="$SUBJECTS_RAW" ;;
+    esac
+    SUBJECTS_FILE="$file"
+
+    if [ ! -r "$file" ]; then
+        subject_record 2 "(registry)" NO-REGISTRY "path=$file" \
+            "the subject registry is absent or unreadable, so this run watched pogod ONLY — the narrow scope mg-e2e6 exists to end. Use --subjects none to ask for it on purpose."
+        echo "revision-probe: the subject registry '$file' is absent or unreadable, so this run watched pogod ONLY." >&2
+        echo "  That is a FINDING, not a default. A general witness that quietly narrows itself is the failure this ticket is about." >&2
+        echo "  Pass --subjects none if the narrow scope is what you want; otherwise bring $REPO forward." >&2
+        return 0
+    fi
+
+    if ! resolve_ps; then
+        subject_record 2 "(registry)" NO-PS "path=$file" \
+            "no working 'ps' could enumerate this host, so no subject in the registry was measured"
+        return 0
+    fi
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        lineno=$(( lineno + 1 ))
+        case "$line" in ''|'#'*) continue ;; esac
+        # shellcheck disable=SC2086
+        read -r name repo ref pattern rest <<EOF
+$line
+EOF
+        if [ -z "${pattern:-}" ]; then
+            subject_record 2 "(registry)" BAD-LINE "line=$lineno" \
+                "expected 'name repo ref pattern', got: $line"
+            continue
+        fi
+        repo="$(expand_home "$repo")"
+        pattern="$(expand_home "$pattern")"
+        seen=$(( seen + 1 ))
+        check_process_subject "$name" "$repo" "$ref" "$pattern"
+    done < "$file"
+
+    if [ "$seen" -eq 0 ]; then
+        subject_record 2 "(registry)" EMPTY-REGISTRY "path=$file" \
+            "the registry exists but names no subject, which watches nothing while looking configured"
+    else
+        say "revision-probe: $seen process subject(s) checked from $file"
+    fi
+    return 0
+}
+
+# finish is the single exit for the pogod axis. Every `exit` in the pogod path
+# below goes through it, so the process subjects cannot be skipped by a branch
+# somebody adds later — the same argument the ledger's EXIT trap is built on.
+#
+# The status returned is the WORST across all subjects. It is not pogod's,
+# because a run that found pogod current and bridget absent has not found this
+# box healthy, and a caller that reads only the exit code must not be told it
+# has.
+finish() {
+    local rc="$1" worst
+    POGOD_RC="$rc"
+    run_process_subjects
+    worst="$rc"
+    [ "$SUBJECTS_WORST" -le "$worst" ] || worst="$SUBJECTS_WORST"
+    exit "$worst"
 }
 
 STALE_AFTER="$(parse_duration "$STALE_AFTER_RAW")" \
@@ -406,7 +963,7 @@ the alarm below is about a revision, and no revision was read.
   launchctl print gui/\$(id -u)/com.pogo.daemon | head -40
   tail -50 ~/Library/Logs/pogo/pogod.log
 EOF
-    exit 2
+    finish 2
 fi
 
 RUNNING="$(printf '%s' "$VERSION_BODY" \
@@ -424,7 +981,7 @@ investigation (a binary built with no vcs stamp reports an empty revision).
 
 body: $VERSION_BODY
 EOF
-    exit 2
+    finish 2
 fi
 
 # ---------------------------------------------------------------------------
@@ -552,7 +1109,7 @@ if [ "$RUNNING" = "$REFERENCE" ]; then
     say "  running   $RUNNING   ($VERSION_URL)"
     say "  reference $REFERENCE   ($REF_ORIGIN)"
     [ -z "$REF_NOTE" ] || say "  NOTE      $REF_NOTE"
-    exit 0
+    finish 0
 fi
 
 write_stamp
@@ -592,7 +1149,7 @@ if [ "$AGE" -le "$STALE_AFTER" ]; then
     say "revision-probe: DIVERGED, within threshold — pogod is not on $REMOTE/$REF, first seen $(format_age "$AGE") ago (threshold $(format_age "$STALE_AFTER"))."
     say ""
     [ "$QUIET" -eq 1 ] || build_report
-    exit 0
+    finish 0
 fi
 
 VERDICT="ALERT"
@@ -632,39 +1189,14 @@ if [ "$DO_MAIL" -eq 1 ] && [ -n "$MAILED_AT" ] && [ "$RENOTIFY" -gt 0 ] \
     DO_MAIL=0
 fi
 
+# resolve_mg and send_mail live with the process axis above, so that both axes
+# deliver through ONE path. Two copies of a delivery path is two places for the
+# mg-7ce7 defect to come back into, and only one of them would have a control.
 if [ "$DO_MAIL" -eq 1 ]; then
-    # /usr/bin/mg satisfies -x and `command -v mg`; it is the Micro-Emacs
-    # editor. Every candidate must self-identify as macguffin before it is
-    # trusted (mg-015f / mg-dd5f). `go env` is deliberately NOT consulted for
-    # GOBIN/GOPATH here — this probe must run without a toolchain.
-    #
-    # THE IDENTITY CHECK HAS NO PIPE IN IT, and this is the call site that made
-    # that mandatory (mg-7ce7): `mg --help | grep -q macguffin` under pipefail
-    # rejected a working mg 10 times out of 10, so this branch always fell
-    # through to the refusal below and 55 correctly-computed alerts reached
-    # nobody. See the long note above resolve_git.
-    MG=""
-    mg_out=""
-    for cand in "${GOBIN:-}/mg" "${GOPATH:-}/bin/mg" "$HOME/go/bin/mg" "$(command -v mg 2>/dev/null)"; do
-        case "$cand" in ""|"/mg"|"/bin/mg") continue ;; esac
-        [ -x "$cand" ] || continue
-        mg_out="$("$cand" --help 2>/dev/null)"
-        case "$mg_out" in *macguffin*) MG="$cand"; break ;; esac
-    done
-    if [ -z "$MG" ]; then
-        echo "revision-probe: --mail was asked for but no macguffin 'mg' was found — refusing bare 'mg' (that is /usr/bin/mg, the EDITOR). The alert above is still the exit status." >&2
-    else
-        bf="$(mktemp)"
-        printf '%s\n' "$BODY" > "$bf"
-        if ! "$MG" mail send "$MAIL_TO" --from=revision-probe \
-            --subject="$SUBJECT" --body-file "$bf" >/dev/null 2>&1; then
-            echo "revision-probe: could not mail $MAIL_TO — the alert stands, it just did not reach anyone" >&2
-        else
-            MAILED_AT="$NOW"
-            write_stamp
-        fi
-        rm -f "$bf"
+    if send_mail "$SUBJECT" "$BODY"; then
+        MAILED_AT="$NOW"
+        write_stamp
     fi
 fi
 
-exit 1
+finish 1

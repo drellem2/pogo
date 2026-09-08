@@ -230,8 +230,25 @@ type LaunchAgentAudit struct {
 //
 // This comment is the registry's promise kept rather than broken: the omission
 // is a decision with a reason, not a job somebody forgot. Auditing the probe's
-// job on the merge-activated path is filed as its own item, because a deferred
+// job on the merge-activated path was filed as its own item, because a deferred
 // half announced in a comment and never filed is a half that gets dropped.
+//
+// THAT HALF IS NOW SHIPPED (mg-e2e6): scripts/check-revisionprobe-install.sh.
+// The omission here stands unchanged — both reasons above are still true, and a
+// row for com.pogo.revisionprobe would still need a Go mirror of the plist and
+// would still arrive by the deploy it audits. What has changed is that "the
+// omission is commented in place, but it is still an audit that does not happen"
+// no longer holds. That script renders through the tracked installer from the
+// tracked template, invokes no go/pogo/pogod (asserted with all three poisoned
+// on PATH), and audits four separate questions this package's byte comparison
+// cannot ask of that job: plist drift, whether launchd knows the label at all,
+// whether the checkout the job executes is current with origin/main, and how old
+// the probe's own ledger is. Its fixture controls are in
+// scripts/install-revision-probe_test.sh and run on every merge.
+//
+// com.pogo.fleetliveness is the same shape and has no such script yet. If one is
+// written, it belongs next to that job's installer for these same reasons — not
+// as a row here.
 // REMEDY IS A STRING TO PRINT, NEVER A COMMAND TO RUN (mg-de0c). It is the one
 // field here that looks executable, and nothing in this repo executes it. That
 // is a decision with the blast radius measured per job
