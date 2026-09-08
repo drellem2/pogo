@@ -3236,6 +3236,99 @@ progress with, so it reads the whole host.
 
 Source of truth: `internal/wedgewatch/`, `cmd/pogod/wedgelog.go`.
 
+## The mid-session wedge detector (`[midsession_wedge]`)
+
+Source of truth: `internal/midsessionwedge/`, `internal/agent/queuednudge.go`.
+Design and measurement: `docs/design/midsession-wedge-notes.md`.
+
+An agent wedges **after a healthy start**, with its next action sitting
+unsubmitted in the composer, and nothing recovers it. It is not the unstarted
+case — `internal/agent/startverify`'s auto-renudge covers that one, and every
+started-signal it gates on is satisfied long before this failure begins. Every
+other instrument reads green because the agent has produced output, has a fresh
+transcript, and is idle in a way that is indistinguishable from thinking.
+
+**The trap, before anything else.** A spinner *is* PTY output. Claude Code
+redraws an animated status line with an elapsed-second counter in it, so a hash
+of the ring changes on an agent that is animating and doing nothing — and
+mg-fc8d's thirteen-hour login-prompt wedge went undetected for exactly the
+mirror-image reason. Measured on this box (2026-09-08, full 64KB rings): a
+**working** agent's ring changed on 100.0% of 2.19s samples and 99.9% of 0.44s
+samples, longest byte-identical run 0.42s; a **parked** agent's ring is
+byte-identical for 5.5–19.0 minutes. So the hash separates them, and here it may
+only ever **exonerate**.
+
+**Why quiescence alone cannot be the criterion.** A polecat that has finished its
+work and is holding for the coordinator is parked at an empty composer with a
+byte-identical ring indefinitely, by design — measured at 19.0 minutes and
+counting. No threshold excludes it. What separates the wedge from the hold is
+that in the wedge **a submit is owed**: `deliverConfirmed` wrote a nudge into a
+mid-turn agent, got no submission receipt, and returned `ErrNudgeQueued` —
+correctly declining to resend something that probably landed, and leaving an
+obligation nobody carried. The detector is the reader of that obligation.
+
+The finding is a **conjunction**, checked cheapest-first, in which every clause
+can only *clear* the alarm and none can raise it alone:
+
+1. a submit is owed, and the receipt count has not moved since (one file read);
+2. the PTY ring has been byte-identical for `quiescence` (in-process, no syscall);
+3. the worktree has not moved either (a few stats).
+
+Clause 3 is **positive-only**. Movement clears the alarm; stillness proves
+nothing, because an agent thinking hard between commits is byte-identical to one
+wedged between commits and commits are rare events. The exoneration event names
+*which* file carried the newest mtime, so a path that exonerates for reasons
+unrelated to progress reads as the same filename every time rather than as
+silence.
+
+**The action is a bare return and nothing else.** It carries no content, so it
+submits whatever is loaded and cannot duplicate anything — the same reason
+`deliverConfirmed` puts one first in its own escalation. Attempts are bounded per
+owed submit, each emits an event, and a recovery is confirmed by the receipt
+count moving, never by the nudge returning nil (writing to a PTY master succeeds
+whether or not anything is listening). When the budget is spent it mails
+`notify_to` and stops. An agent with no submission-receipt hook cannot own a
+submit and is **declined out loud** (`midsession_wedge_skipped`), because an
+instrument that cannot judge must not read the same as one judging healthy.
+
+```toml
+[midsession_wedge]
+enabled = true          # default true
+report_only = false     # default false. true keeps detection and mail and
+                        # withholds the keystroke
+interval = "30s"        # sample cadence (default 30s). The quiet run is measured
+                        # from the last tick at which the ring CHANGED, so this is
+                        # the resolution of the threshold as well as its cadence,
+                        # and must stay far finer than quiescence
+quiescence = "5m"       # ring must be byte-identical this long, with a submit
+                        # owed (default: midsessionwedge.DefaultQuiescence, which
+                        # is where the measurement lives; negative disables —
+                        # tests only, since without it a bare return goes to every
+                        # agent that owes a submit the instant it owes one, which
+                        # is every healthy mid-turn agent)
+max_attempts = 3        # bare returns per owed submit (default 3)
+notify_to = "mayor"     # exhausted-recovery notice ("-" disables the mail)
+renotify_after = "6h"   # floor on how often ONE agent's exhausted-recovery notice
+                        # is mailed (default 6h; negative removes it — tests only).
+                        # The attempt budget is per owed submit and a new owed
+                        # submit arrives with every nudge, so without this floor a
+                        # single wedged agent mails the coordinator six times an
+                        # hour. The bare returns stay unfloored
+```
+
+**Its own blind spot, stated because it is the same shape as the bug.** It fires
+only on an agent that owes a submit, and a submit becomes owed only via the
+`ErrNudgeQueued` branch. On a box where that branch never runs, the watcher
+samples forever, judges nobody, emits nothing, and is indistinguishable from a
+box with no wedges. `Watcher.Snapshot()` therefore reports `Armed`,
+`LastSample`, `Judged`, `Skipped` and `Owed`: a long run of `Judged > 0, Owed ==
+0` is a detector with nothing to do, and `Judged == 0` is one covering nobody.
+Nothing consumes that yet — it is a seam for a `blindwatch`-shaped reader, not a
+claim that one exists.
+
+Events: `midsession_wedge_fired`, `_recovered`, `_unrecovered`, `_exonerated`,
+`_skipped`, `_error`.
+
 ## The done-item polecat reaper (done-reap)
 
 Every automatic polecat teardown pogod had was keyed on **merge**: the refinery's

@@ -48,6 +48,7 @@ import (
 	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/heartbeat"
 	"github.com/drellem2/pogo/internal/heartwatch"
+	"github.com/drellem2/pogo/internal/midsessionwedge"
 	"github.com/drellem2/pogo/internal/pathenv"
 	"github.com/drellem2/pogo/internal/platform/sleep"
 	"github.com/drellem2/pogo/internal/progresswatch"
@@ -3312,6 +3313,66 @@ Flags:
 		log.Printf("pogod: wedge-watch NOT armed — the agent registry did not load, so there are no PTYs to read")
 	}
 
+	// The MID-SESSION wedge detector (mg-5246). It is the counterpart to the
+	// per-spawn auto-renudge in internal/agent/startverify, and it is here for
+	// the reason that watcher is: every started-signal startverify gates on is
+	// satisfied long before this failure begins.
+	//
+	// ACTING, and the narrowest action in this file. The one payload it sends is
+	// a BARE RETURN — no content, so it submits whatever is loaded and cannot
+	// duplicate anything, which is exactly why deliverConfirmed puts a bare
+	// return FIRST in its own escalation. Attempts are bounded per owed submit;
+	// spent, it mails and stops. It cannot restart, stop, re-dispatch or mark
+	// anything.
+	//
+	// It is armed only alongside a registry, and it says so rather than going
+	// quiet, because "no PTYs to read" and "every PTY read clean" are the two
+	// readings this whole lineage exists to keep apart.
+	var midSessionWatcher *midsessionwedge.Watcher
+	if cfg.MidSessionWedge.Enabled && agentRegistry != nil {
+		notifyTo := cfg.MidSessionWedge.NotifyTo
+		if notifyTo == "-" {
+			notifyTo = ""
+		}
+		opts := midsessionwedge.Options{
+			Enabled:       true,
+			Source:        midsessionwedge.RegistrySource(agentRegistry),
+			Submits:       midsessionwedge.RegistrySubmits(agentRegistry),
+			Worktree:      midsessionwedge.RegistryWorktree(agentRegistry),
+			Mail:          client.SendMGMail,
+			NotifyTo:      notifyTo,
+			From:          "pogod",
+			Interval:      cfg.MidSessionWedge.Interval,
+			Quiescence:    cfg.MidSessionWedge.Quiescence,
+			MaxAttempts:   cfg.MidSessionWedge.MaxAttempts,
+			RenotifyAfter: cfg.MidSessionWedge.RenotifyAfter,
+			StartedAt:     time.Now(),
+		}
+		if !cfg.MidSessionWedge.ReportOnly {
+			opts.Recover = midsessionwedge.RegistryRecover(agentRegistry)
+		}
+		midSessionWatcher = midsessionwedge.New(opts)
+		action := "delivers a bounded bare return"
+		if cfg.MidSessionWedge.ReportOnly {
+			action = "REPORT-ONLY by config — it detects and mails, and types nothing"
+		}
+		log.Printf("pogod: mid-session wedge detector enabled (interval=%s quiescence=%s "+
+			"max_attempts=%d notify_to=%q) — an agent that OWES a submit (a mid-turn "+
+			"delivery pogod could not confirm), whose receipt count has not moved, whose "+
+			"PTY ring has been byte-identical for the quiescence window and whose worktree "+
+			"has not moved either, is holding an unsubmitted instruction; %s (mg-5246)",
+			cfg.MidSessionWedge.Interval, cfg.MidSessionWedge.Quiescence,
+			cfg.MidSessionWedge.MaxAttempts, notifyTo, action)
+	} else if cfg.MidSessionWedge.Enabled {
+		log.Printf("pogod: mid-session wedge detector NOT armed — the agent registry did " +
+			"not load, so there are no composers to read")
+	} else {
+		log.Printf("pogod: mid-session wedge detector DISABLED by config — an agent that " +
+			"parks at a composer holding an unsubmitted instruction stays there until a " +
+			"human notices. Said out loud because a detector that is off and a detector " +
+			"that is finding nothing look identical from every other seat (mg-5246)")
+	}
+
 	// The CONSUMER for a detector that declines to answer (mg-d616).
 	//
 	// wedge-watch is careful about its own blindness: an agent whose work
@@ -3603,6 +3664,13 @@ Flags:
 				wedgeWatcher.Check(now)
 				logWedgeFindings(wedgeWatcher, now)
 			}(now)
+		}
+		// The mid-session wedge detector rides the same tick on its own
+		// interval. In a goroutine because a finding writes to a PTY and can
+		// wait out its settle window for the receipt, and a spent budget shells
+		// out to `mg mail send` — neither must delay the next tick.
+		if midSessionWatcher != nil {
+			go midSessionWatcher.Check(now)
 		}
 		// The crew-heartbeat reader rides the same tick and throttles itself to
 		// a coarse interval. In a goroutine because a finding shells out to

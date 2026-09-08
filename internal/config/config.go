@@ -637,6 +637,14 @@ const (
 	// agents stays quiet before the finding is emitted again.
 	DefaultWedgeWatchRenotify = 6 * time.Hour
 
+	// Mid-session wedge detector (mg-5246). There is deliberately no quiescence
+	// default here: that threshold is midsessionwedge.DefaultQuiescence, which
+	// is where the measurement justifying it is recorded, and a mirrored copy in
+	// this package would be a second number to keep in step with a first — the
+	// drift shape this tree has been bitten by before.
+	DefaultMidSessionWedgeInterval = 30 * time.Second
+	DefaultMidSessionWedgeNotifyTo = "mayor"
+
 	// DefaultDoneReapIdleGrace is how long a polecat whose work item has reached
 	// a terminal state must be quiet on its PTY before pogod stops it (mg-56d1).
 	// See cmd/pogod/donereap.go for why the condition is item-done AND idle
@@ -882,10 +890,11 @@ type Config struct {
 	// ProgressWatch is the fleet-productivity detector (mg-516e): the only
 	// standing instrument that asks whether the fleet is GETTING ANYTHING DONE
 	// rather than whether it is dead or erroring. See ProgressWatchConfig.
-	ProgressWatch ProgressWatchConfig
-	FirstTurn     FirstTurnConfig
-	WedgeWatch    WedgeWatchConfig
-	DoneReap      DoneReapConfig
+	ProgressWatch   ProgressWatchConfig
+	FirstTurn       FirstTurnConfig
+	WedgeWatch      WedgeWatchConfig
+	MidSessionWedge MidSessionWedgeConfig
+	DoneReap        DoneReapConfig
 	// OrchestrationResume holds the deadline on a stopped fleet. See
 	// OrchestrationResumeConfig and cmd/pogod/orchresume.go.
 	OrchestrationResume OrchestrationResumeConfig
@@ -1795,6 +1804,64 @@ type WedgeWatchConfig struct {
 	RenotifyAfter time.Duration
 }
 
+// MidSessionWedgeConfig configures pogod's MID-SESSION wedge detector
+// (mg-5246): the heartbeat-driven runner that finds the agent which wedged
+// AFTER a healthy start, with its next action sitting unsubmitted in the
+// composer, and releases it with a bare return.
+//
+// It is the mid-session counterpart to the per-spawn auto-renudge in
+// internal/agent/startverify, and it exists because every started-signal that
+// watcher gates on is satisfied long before this failure begins: the agent has
+// produced output, has a fresh transcript, and is idle in a way that is
+// indistinguishable from thinking.
+//
+// The mechanics — and in particular why quiescence ALONE cannot be the
+// criterion, why a spinner may only ever exonerate, and where the quiescence
+// threshold's number was measured — live in internal/midsessionwedge.
+//
+// ACTING, and narrowly. The one payload it will send is a BARE RETURN, which
+// carries no content, so it submits whatever is loaded and cannot duplicate
+// anything. Attempts are bounded per owed submit; when they are spent it mails
+// and stops. It cannot restart, stop, re-dispatch or mark anything.
+type MidSessionWedgeConfig struct {
+	// Enabled turns the runner on. Defaults to true; it is inert on a daemon
+	// with no agent registry and reports that case as an error rather than as a
+	// clean fleet, so leaving it on is safe.
+	Enabled bool
+	// Interval is the gap between samples. Zero falls back to
+	// DefaultMidSessionWedgeInterval. It must stay much finer than Quiescence:
+	// the quiet run is measured from the last tick at which the ring was seen to
+	// CHANGE, so the interval is the resolution of the threshold as well as its
+	// sampling rate.
+	Interval time.Duration
+	// Quiescence is how long the PTY ring must be byte-identical, with a submit
+	// owed, before the composer is judged stuck. Zero falls back to the measured
+	// midsessionwedge.DefaultQuiescence; NEGATIVE removes it, which only tests
+	// should do — a watcher with no quiescence requirement types a bare return
+	// into every agent that owes a submit the instant it owes one, which is the
+	// state every healthy mid-turn agent is in.
+	Quiescence time.Duration
+	// MaxAttempts bounds the bare returns sent for ONE owed submit. Zero falls
+	// back to midsessionwedge.DefaultMaxAttempts.
+	MaxAttempts int
+	// ReportOnly withholds the bare return: the detector still samples, judges,
+	// emits and mails, and says in the event that it did nothing. It is the
+	// setting to reach for if this ever needs to be observed before it is
+	// trusted, and it is NOT the default, because a detector nobody wired to an
+	// action is what mg-daf4 declined to ship.
+	ReportOnly bool
+	// NotifyTo receives the notice when the bounded attempts are spent. Empty
+	// falls back to DefaultMidSessionWedgeNotifyTo; "-" disables the mail.
+	NotifyTo string
+	// RenotifyAfter floors how often ONE agent's exhausted-recovery notice is
+	// mailed. Zero falls back to midsessionwedge.DefaultRenotifyAfter; NEGATIVE
+	// removes the floor, which only tests should do. The floor exists because
+	// the attempt budget is per owed submit and a new owed submit arrives with
+	// every nudge — without it one wedged agent mails the coordinator six times
+	// an hour, forever.
+	RenotifyAfter time.Duration
+}
+
 // DoneReapConfig configures pogod's done-item polecat reaper (mg-56d1): the
 // heartbeat-driven runner that stops a polecat whose work item has reached a
 // terminal state and which has gone quiet, regardless of whether that
@@ -2044,26 +2111,28 @@ type parsedConfig struct {
 	// it an explicit `indefinite_hold_report_enabled = false` would be merged
 	// away and the default `true` restored, leaving an operator who deliberately
 	// silenced the digest still receiving it.
-	indefiniteHoldEnabledSet bool
-	agentsAutoStartSet       bool
-	reaperEnabledSet         bool
-	driftWatchEnabledSet     bool
-	credExpiryEnabledSet     bool
-	ghTeardownEnabledSet     bool
-	ghIntakeEnabledSet       bool
-	carrierDriftEnabledSet   bool
-	reviewDeclEnabledSet     bool
-	promptEditEnabledSet     bool
-	ackWatchEnabledSet       bool
-	deafWatchEnabledSet      bool
-	absentWatchEnabledSet    bool
-	heartWatchEnabledSet     bool
-	blindWatchEnabledSet     bool
-	progressWatchEnabledSet  bool
-	firstTurnEnabledSet      bool
-	wedgeWatchEnabledSet     bool
-	doneReapEnabledSet       bool
-	orchResumeEnabledSet     bool
+	indefiniteHoldEnabledSet     bool
+	agentsAutoStartSet           bool
+	reaperEnabledSet             bool
+	driftWatchEnabledSet         bool
+	credExpiryEnabledSet         bool
+	ghTeardownEnabledSet         bool
+	ghIntakeEnabledSet           bool
+	carrierDriftEnabledSet       bool
+	reviewDeclEnabledSet         bool
+	promptEditEnabledSet         bool
+	ackWatchEnabledSet           bool
+	deafWatchEnabledSet          bool
+	absentWatchEnabledSet        bool
+	heartWatchEnabledSet         bool
+	blindWatchEnabledSet         bool
+	progressWatchEnabledSet      bool
+	firstTurnEnabledSet          bool
+	wedgeWatchEnabledSet         bool
+	midSessionWedgeEnabledSet    bool
+	midSessionWedgeReportOnlySet bool
+	doneReapEnabledSet           bool
+	orchResumeEnabledSet         bool
 	// dispatchCapMaxSet / dispatchCapReserveSet exist because ZERO is a
 	// meaningful value for both keys and not merely an absent one:
 	// max_polecats_per_repo = 0 disarms the cap, refinery_reserve = 0 drops the
@@ -2249,6 +2318,11 @@ func Load() *Config {
 			Ratio:             DefaultWedgeWatchRatio,
 			CoincidenceWindow: DefaultWedgeWatchCoincidenceWindow,
 			RenotifyAfter:     DefaultWedgeWatchRenotify,
+		},
+		MidSessionWedge: MidSessionWedgeConfig{
+			Enabled:  true,
+			Interval: DefaultMidSessionWedgeInterval,
+			NotifyTo: DefaultMidSessionWedgeNotifyTo,
 		},
 		DoneReap: DoneReapConfig{
 			Enabled:   true,
@@ -2586,6 +2660,31 @@ func Load() *Config {
 		}
 		if fileCfg.FirstTurn.NotifyTo != "" {
 			cfg.FirstTurn.NotifyTo = fileCfg.FirstTurn.NotifyTo
+		}
+		if fileCfg.midSessionWedgeEnabledSet {
+			cfg.MidSessionWedge.Enabled = fileCfg.MidSessionWedge.Enabled
+		}
+		if fileCfg.midSessionWedgeReportOnlySet {
+			cfg.MidSessionWedge.ReportOnly = fileCfg.MidSessionWedge.ReportOnly
+		}
+		if fileCfg.MidSessionWedge.Interval > 0 {
+			cfg.MidSessionWedge.Interval = fileCfg.MidSessionWedge.Interval
+		}
+		// Non-zero, not >0: a negative quiescence is the documented way to turn
+		// the requirement off, so it must survive the merge like any other
+		// override. Only tests should do it.
+		if fileCfg.MidSessionWedge.Quiescence != 0 {
+			cfg.MidSessionWedge.Quiescence = fileCfg.MidSessionWedge.Quiescence
+		}
+		if fileCfg.MidSessionWedge.MaxAttempts > 0 {
+			cfg.MidSessionWedge.MaxAttempts = fileCfg.MidSessionWedge.MaxAttempts
+		}
+		if fileCfg.MidSessionWedge.NotifyTo != "" {
+			cfg.MidSessionWedge.NotifyTo = fileCfg.MidSessionWedge.NotifyTo
+		}
+		// Non-zero, not >0: a negative floor is the documented way to remove it.
+		if fileCfg.MidSessionWedge.RenotifyAfter != 0 {
+			cfg.MidSessionWedge.RenotifyAfter = fileCfg.MidSessionWedge.RenotifyAfter
 		}
 		if fileCfg.wedgeWatchEnabledSet {
 			cfg.WedgeWatch.Enabled = fileCfg.WedgeWatch.Enabled
@@ -3608,6 +3707,33 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "renotify_after":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.WedgeWatch.RenotifyAfter = d
+				}
+			}
+		case "midsession_wedge":
+			switch key {
+			case "enabled":
+				cfg.MidSessionWedge.Enabled = val == "true"
+				cfg.midSessionWedgeEnabledSet = true
+			case "report_only":
+				cfg.MidSessionWedge.ReportOnly = val == "true"
+				cfg.midSessionWedgeReportOnlySet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.MidSessionWedge.Interval = d
+				}
+			case "quiescence":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.MidSessionWedge.Quiescence = d
+				}
+			case "max_attempts":
+				if n, err := strconv.Atoi(unquotedVal); err == nil {
+					cfg.MidSessionWedge.MaxAttempts = n
+				}
+			case "notify_to":
+				cfg.MidSessionWedge.NotifyTo = unquotedVal
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.MidSessionWedge.RenotifyAfter = d
 				}
 			}
 		case "done_reap":

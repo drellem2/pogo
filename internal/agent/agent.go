@@ -157,6 +157,11 @@ type Agent struct {
 	// Immutable after construction; safe to read without a.mu.
 	receiptFile string
 
+	// queuedNudge records the last delivery pogod wrote to this agent's PTY and
+	// could not prove was submitted, because the harness was mid-turn (see
+	// queuednudge.go). nil means nothing is owed. Guarded by mu.
+	queuedNudge *QueuedNudge
+
 	// outputBuf holds recent output for monitoring.
 	outputBuf *RingBuffer
 
