@@ -78,3 +78,17 @@
   Ceilings are computed only when there are deltas — a ceiling exists to qualify
   a remedy and a clean run prescribes none — and `--skip-ceilings` drops the
   block along with one HTTP call to the daemon and two git reads.
+
+  **The mailed notice carries the same reading, and it is the surface that
+  matters.** `internal/promptstale` sweeps on pogod's heartbeat and mails the
+  agent reading each superseded file — that mail, not the CLI, is what reached
+  the coordinator. It prescribed `pogo agent prompt install` with no statement of
+  what the daemon could produce, which on 2026-09-08 pointed the reader at the
+  very daemon whose boot installer had just declined to change anything, seven
+  times. The sweep now supplies **pogod's own embed** as a ceiling source — free,
+  in-process, no git call, no HTTP call, and the correct ceiling for the
+  automatic path because pogod *is* that installer — and the notice states which
+  of three worlds the recipient is in, judged over that recipient's own files
+  only. The warning sits **beside** the install command rather than three
+  paragraphs from it, which is asserted by a test: a caveat a reader scrolls past
+  before copying the command does not exist.
