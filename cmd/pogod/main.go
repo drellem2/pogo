@@ -2586,11 +2586,9 @@ Flags:
 			src := ghintake.MGSource{}
 			// The credential predicate is fixed at arm time, deliberately: it is
 			// one global fact, and re-deciding it per sample would mean a `gh auth
-			// token` subprocess every fifteen minutes to answer a question whose
-			// answer only changes when pogod restarts anyway. What the report
-			// carries is WHICH SOURCE won, so a reader can check the claim rather
-			// than take it, and the staleness it cannot see — a credential revoked
-			// after startup — is stated in the rendered report rather than implied.
+			// token` subprocess every fifteen minutes on every healthy scan. What
+			// the report carries is WHICH SOURCE won, so a reader can check the
+			// claim rather than take it.
 			//
 			// Derived from the same Result the gate above consulted rather than
 			// restated as a literal `true`: everything reaching this line has
@@ -2598,10 +2596,30 @@ Flags:
 			// without a credential, the report follows it instead of asserting one
 			// that is not there.
 			cred, credSrc := ghintake.CredentialFor(ghCredential.OK(), string(ghCredential.Source))
+			// ...and re-asked per sample ON THE FAILURE PATH ONLY (mg-4d59). The
+			// paragraph above is still right about the happy path and wrong about
+			// one word: "the answer only changes when pogod restarts anyway" was
+			// measured false. This daemon inherited GH_TOKEN at exec from a shell,
+			// the token was rotated in ~/.zshenv 174 hours later, and the snapshot
+			// could not see it while `gh issue list` returned HTTP 401 on BOTH
+			// watched repos for 173 hours — under a report heading that ruled a
+			// credential fault out.
+			//
+			// Reverify runs nothing when no repo failed, so the cost objection the
+			// paragraph above raises is answered rather than overridden: a healthy
+			// scan still spends nothing on this. (And what it spends on a failed
+			// one is a single HTTPS request, not a `gh` subprocess — the probe
+			// talks to the API directly, because an HTTP status is a contract and
+			// gh's stderr is prose.)
+			intakeVerify := ghintake.VerifierFor(ghtoken.RejectionProbe)
 			intakeWatcher = ghintake.New(ghintake.Options{
 				Enabled: true,
 				Source: func() (ghintake.Inventory, error) {
-					return ghintake.Collect(repos, ghintake.GHOpenIssues, src.Carriers, src.Statuses(), cred, credSrc)
+					inv, err := ghintake.Collect(repos, ghintake.GHOpenIssues, src.Carriers, src.Statuses(), cred, credSrc)
+					if err != nil {
+						return inv, err
+					}
+					return ghintake.Reverify(inv, intakeVerify), nil
 				},
 				Mail:          client.SendMGMail,
 				Interval:      cfg.GHIntake.Interval,

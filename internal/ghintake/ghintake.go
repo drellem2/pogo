@@ -222,12 +222,32 @@ type RepoError struct {
 // established up front by internal/ghtoken (whose `gh auth token` source is what
 // makes "no credential" decidable at all) and carried in.
 //
-// # What it does not claim
+// # What it does not claim — and what mg-4d59 did about it
 //
 // CredentialPresent means a credential was established when the scan armed. It
 // does NOT mean the credential is valid right now: it can have expired or been
 // revoked since, and a once-at-startup predicate cannot see that. The rendering
-// says so rather than promising more than was measured.
+// has always said so rather than promising more than was measured.
+//
+// Saying so was not enough. The third measured case on this fleet:
+//
+//   - From 2026-09-01 to 2026-09-08, pogod held a GH_TOKEN inherited at exec
+//     from a shell 174 hours earlier. The token was rotated in `~/.zshenv`
+//     afterwards; every shell and crew agent picked up the new one and the
+//     daemon could not. `gh issue list` returned HTTP 401 on BOTH watched repos
+//     on every sample for 173 hours while the identical command from a crew
+//     agent's shell succeeded, and the report rendered all of it under
+//     CredentialPresent — whose text rules a missing credential OUT and ranks
+//     "EXPIRED or REVOKED" fourth. The detector failed loudly, correctly, and
+//     with its reader pointed away from the only true cause, for a week.
+//
+// The hedge was in the body. The subject line — the part that travels — said "a
+// gh credential WAS configured (source=ambient), so this is not a missing one".
+//
+// So the predicate gained a fourth value, CredentialRejected, and a way to reach
+// it: Reverify re-asks the question on the failure path, where the answer is
+// both needed and cheap. The startup snapshot stays exactly as it was for the
+// happy path, which costs nothing and was never wrong.
 type CredentialState string
 
 const (
@@ -240,6 +260,16 @@ const (
 	// CredentialMissing: no GitHub credential could be established, by any
 	// source ghtoken knows — including the `gh auth login` store.
 	CredentialMissing CredentialState = "missing"
+	// CredentialRejected: a credential WAS established, and GitHub REFUSED it
+	// (HTTP 401) when this scan asked. Existence and validity are different
+	// predicates, and before mg-4d59 only the first was expressible — so this
+	// state's traffic was all rendered as CredentialPresent, under a heading
+	// saying a credential "WAS configured, so this is not a missing one".
+	//
+	// It is reached only by re-verification on the FAILURE path (see Reverify),
+	// never at arm time, so it always describes the same minutes as the repo
+	// errors it explains rather than a startup snapshot.
+	CredentialRejected CredentialState = "rejected"
 )
 
 // CredentialFor maps a caller's credential predicate onto the pair of fields an
@@ -336,6 +366,14 @@ type Inventory struct {
 	// "shell", "gh-auth-token"). Reported so a reader can check the claim rather
 	// than take it, and empty unless Credential is CredentialPresent.
 	CredentialSource string
+	// CredentialDetail is what the scan-time re-verification MEASURED, when one
+	// ran — see Reverify. Empty when no repo failed, so nothing was re-asked.
+	//
+	// It is carried even when the re-check did NOT change the classification,
+	// because "the credential could not be re-checked, the API did not answer"
+	// is the strongest corroboration available for the network cause the
+	// CredentialPresent branch already ranks first.
+	CredentialDetail string
 }
 
 // Report is the outcome of one full reconciliation.
@@ -376,6 +414,8 @@ type Report struct {
 	// NoCredential.
 	Credential       CredentialState
 	CredentialSource string
+	// CredentialDetail echoes the Inventory's scan-time re-verification result.
+	CredentialDetail string
 }
 
 // NoCredential reports the condition this detector used to be unable to name: no
@@ -388,6 +428,16 @@ type Report struct {
 // repo errors that DO exist are reported: as one fault with N consequences,
 // instead of as N faults.
 func (r Report) NoCredential() bool { return r.Credential == CredentialMissing }
+
+// RejectedCredential reports that a credential exists and GitHub REFUSED it —
+// the state mg-4d59 added, measured at scan time rather than at arm time.
+//
+// Like NoCredential it is NOT a term in Actionable(), and for the same reason: a
+// rejected credential with no watched repo blinds nothing. What it changes is
+// how the repo errors that DO exist are reported — as one fault with N
+// consequences and a remedy that is neither `gh auth login` nor a network
+// investigation.
+func (r Report) RejectedCredential() bool { return r.Credential == CredentialRejected }
 
 // Actionable reports whether the scan found something a coordinator must act on.
 //
@@ -426,6 +476,7 @@ func Detect(inv Inventory, now time.Time, grace time.Duration) Report {
 		Repos:            inv.Repos,
 		Credential:       inv.Credential,
 		CredentialSource: inv.CredentialSource,
+		CredentialDetail: inv.CredentialDetail,
 	}
 
 	idx := carriersFor(inv.Carriers)
@@ -587,10 +638,23 @@ func (r Report) Render() string {
 func (r Report) renderRepoErrors(b *strings.Builder) {
 	n := len(r.RepoErrors)
 
+	// Reverify can promote an UNRECORDED arm-time predicate straight to rejected,
+	// and that path has no source name to print. "source=" with nothing after it
+	// reads as a rendering bug and invites the reader to distrust the rest of a
+	// message whose whole job is being believed.
+	credSrc := r.CredentialSource
+	if credSrc == "" {
+		credSrc = "unrecorded"
+	}
+
 	switch r.Credential {
 	case CredentialMissing:
 		fmt.Fprintf(b, "NO GITHUB CREDENTIAL — this host has no GitHub credential, so the %d watched\n"+
 			"repo(s) below could not be listed. That is ONE fault, not %d:\n\n", n, n)
+	case CredentialRejected:
+		fmt.Fprintf(b, "GITHUB REJECTED THIS SCAN'S CREDENTIAL — the %d watched repo(s) below could\n"+
+			"not be listed because the credential this scan is using does not authenticate.\n"+
+			"That is ONE fault, not %d:\n\n", n, n)
 	case CredentialPresent:
 		fmt.Fprintf(b, "UNREADABLE — %d watched repo(s) whose open issues could NOT be listed. "+
 			"A credential WAS configured:\n\n", n)
@@ -611,6 +675,31 @@ func (r Report) renderRepoErrors(b *strings.Builder) {
 			"gh already holds, so a host authenticated by `gh auth login` — with nothing in the\n" +
 			"environment and nothing in any shell profile — reads as CONFIGURED here. Only a\n" +
 			"host where none of those three sources yields anything reaches this message.\n\n")
+	case CredentialRejected:
+		fmt.Fprintf(b, "This was MEASURED at scan time, not inferred from the failures above and not\n"+
+			"read off gh's error prose: GitHub answered a direct request with HTTP 401.\n\n"+
+			"  %s\n\n"+
+			"The per-repo errors above are consequences of that one cause. Network is ruled\n"+
+			"out — the API answered. Rate limiting is ruled out — a throttle is HTTP 403, not\n"+
+			"401. A renamed or deleted repo cannot produce a 401 either, though a credential\n"+
+			"this bad would hide one if it existed; that is a thing to re-check AFTER the\n"+
+			"restart, not a competing explanation for what you are reading now.\n\n"+
+			"The remedy is NOT `gh auth login` alone, and this is the part that cost 173 hours\n"+
+			"the first time (mg-4d59). The credential that failed is the one in the SCANNING\n"+
+			"PROCESS's environment (source=%s), which was copied at exec and is never re-read.\n"+
+			"A shell, a crew agent and this daemon can hold three different tokens, and the\n"+
+			"first two working proves nothing about the third — that contrast is exactly what\n"+
+			"the escalation reported. So:\n\n"+
+			"  gh auth status                  # confirm the shell's credential is good\n"+
+			"  <rotate, or re-login>           # only if it is not\n"+
+			"  launchctl kickstart -k gui/$(id -u)/com.pogo.daemon\n"+
+			"                                  # REQUIRED, and the step that is easy to skip:\n"+
+			"                                  # pogod reads the credential ONCE, at startup,\n"+
+			"                                  # and cannot pick up a rotation without this\n\n"+
+			"Until that restart this message will repeat with a valid token sitting in every\n"+
+			"shell on the box, and NO new GitHub issue is visible to this fleet: it reaches no\n"+
+			"carrier, no triage and no gate for as long as this lasts.\n\n",
+			r.CredentialDetail, credSrc)
 	case CredentialPresent:
 		fmt.Fprintf(b, "A GitHub credential WAS established for this scan (source=%s), so \"no gh\n"+
 			"credential configured\" is RULED OUT — that much was measured, not guessed. Causes\n"+
@@ -621,12 +710,27 @@ func (r Report) renderRepoErrors(b *strings.Builder) {
 			"     the same minutes as ENOTFOUND / `ssh: connect to host github.com` (mg-c058).\n"+
 			"  2. Rate limiting.\n"+
 			"  3. A renamed or deleted repo in the watch list, or one this credential cannot see.\n"+
-			"  4. An EXPIRED or REVOKED credential. Last, not excluded: the predicate above was\n"+
-			"     evaluated when this scan armed and cannot see a revocation since. It is the one\n"+
-			"     cause here that is settled by a single command — `gh auth status`.\n\n"+
+			"  4. An EXPIRED or REVOKED credential. Last, and since mg-4d59 no longer merely\n"+
+			"     unexcluded: this scan RE-ASKS GitHub directly whenever a repo fails, so\n"+
+			"     reaching this message means the re-check did not come back HTTP 401. The line\n"+
+			"     below says what it DID come back with — \"the API could not be reached\" is\n"+
+			"     cause 1 corroborated, not a credential question.\n"+
+			"     The residual still stands and is not talked away: the arm-time predicate\n"+
+			"     cannot see a revocation since, and neither can a point measurement taken one\n"+
+			"     moment ago. A 403 is deliberately left uninterpreted here — it is rate\n"+
+			"     limiting as often as it is a scope problem.\n\n"+
 			"That ORDER is the fix. The four causes used to be listed as equals with auth first,\n"+
 			"which is how one network outage became a nine-day credential question.\n\n",
-			r.CredentialSource)
+			credSrc)
+		if r.CredentialDetail != "" {
+			fmt.Fprintf(b, "scan-time credential re-check: %s\n\n", r.CredentialDetail)
+		} else {
+			// Stated rather than left blank: a missing re-check and a re-check
+			// that found nothing wrong are different facts, and a reader ranking
+			// causes 1-4 needs to know which one they have.
+			b.WriteString("scan-time credential re-check: DID NOT RUN — nothing re-asked GitHub about\n" +
+				"this credential, so cause 4 is unexcluded here rather than ruled out.\n\n")
+		}
 	default:
 		b.WriteString("The credential predicate was NOT evaluated for this scan, so this report cannot\n" +
 			"tell an auth fault from a network one. Common causes: expired or missing gh auth,\n" +
@@ -653,6 +757,10 @@ func (r Report) MailSubject() string {
 		parts = append(parts, fmt.Sprintf("%d open issue(s) with no carrier: %s", n, strings.Join(refs, ", ")))
 	}
 	if n := len(r.RepoErrors); n > 0 {
+		credSrc := r.CredentialSource
+		if credSrc == "" {
+			credSrc = "unrecorded"
+		}
 		repos := make([]string, 0, n)
 		for _, e := range r.RepoErrors {
 			repos = append(repos, e.Repo)
@@ -669,6 +777,18 @@ func (r Report) MailSubject() string {
 			parts = append(parts, fmt.Sprintf(
 				"NO GitHub credential configured — one fault, %d repo(s) unreadable as a result: %s",
 				n, strings.Join(repos, ", ")))
+		case CredentialRejected:
+			// Leads with the cause, in the part that travels. The subject this
+			// replaces said "a gh credential WAS configured (source=%s), so this is
+			// not a missing one" — true, and it is what a reader skimmed, forwarded
+			// and filed a ticket from for 173 hours while GitHub was returning 401
+			// to every call the sentence was about (mg-4d59). A body hedge does not
+			// survive that trip; the subject has to carry it.
+			parts = append(parts, fmt.Sprintf(
+				"GitHub REJECTED this scan's credential (HTTP 401, source=%s) — one fault, %d repo(s) "+
+					"unreadable as a result, NO new issue is visible to the fleet: %s. "+
+					"Fix the credential AND restart pogod, which reads it only at startup",
+				credSrc, n, strings.Join(repos, ", ")))
 		case CredentialPresent:
 			// States the MEASUREMENT, not the conclusion. "not an auth fault" would
 			// be the same over-claim in the other direction: the predicate is a
@@ -678,7 +798,7 @@ func (r Report) MailSubject() string {
 			// remaining causes; the subject says only what was checked.
 			parts = append(parts, fmt.Sprintf(
 				"%d unreadable repo(s) — a gh credential WAS configured (source=%s), so this is not "+
-					"a missing one: %s", n, r.CredentialSource, strings.Join(repos, ", ")))
+					"a missing one: %s", n, credSrc, strings.Join(repos, ", ")))
 		default:
 			parts = append(parts, fmt.Sprintf("%d unreadable repo(s), cause unclassified "+
 				"(no credential check ran): %s", n, strings.Join(repos, ", ")))

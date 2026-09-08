@@ -1397,6 +1397,13 @@ unreadable repo, or blind scan is found (so it can gate a schedule or CI step).`
 				fmt.Fprintf(os.Stderr, "cannot read work-item store: %v\n", err)
 				os.Exit(cli.ExitError)
 			}
+			// Re-ask GitHub about the credential IF AND ONLY IF a watched repo
+			// failed (mg-4d59). A person who typed this command to find out why
+			// intake is blind is owed the one answer the arm-time predicate
+			// cannot give: whether the credential this process holds is still
+			// accepted. Costs one request, on the path where the report would
+			// otherwise hand back a ranked list of four causes.
+			inv = ghintake.Reverify(inv, ghintake.VerifierFor(ghtoken.RejectionProbe))
 
 			// grace <= 0 is the documented "report immediately" setting, and Detect
 			// reads it that way, so the flag value passes through unmassaged.

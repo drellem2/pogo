@@ -528,6 +528,89 @@ func Collect(repos []string, list IssueLister, carriers CarrierLister, statuses 
 	return inv, nil
 }
 
+// Verifier re-asks, at scan time, whether the credential this scan is actually
+// using still authenticates. Production binds an adapter over ghtoken.Verify;
+// tests substitute a table, so every branch is reachable with no network and no
+// real secret.
+//
+// It returns the state it MEASURED and a one-line reason. This package
+// deliberately does not import ghtoken — the same reason it does not import
+// config: Detect and its sources stay testable without a shell, a gh, or a host
+// layout.
+type Verifier func() (CredentialState, string)
+
+// VerifierFor adapts a raw rejection probe onto a Verifier. rejected is "GitHub
+// answered HTTP 401"; detail is the existence-only reason, which is carried
+// whether or not the answer was a rejection.
+//
+// Production binds ghtoken.RejectionProbe. The indirection is the same one
+// CredentialFor uses and exists for the same reason: this package stays
+// testable without a shell, a gh, a network or a real secret.
+func VerifierFor(probe func() (rejected bool, detail string)) Verifier {
+	if probe == nil {
+		return nil
+	}
+	return func() (CredentialState, string) {
+		rejected, detail := probe()
+		if rejected {
+			return CredentialRejected, detail
+		}
+		// Deliberately NOT CredentialPresent: this function does not know
+		// whether a non-rejection was an acceptance or an unanswered request,
+		// and Reverify treats every non-rejection identically anyway. Returning
+		// the arm-time value's name here would be a claim nothing measured.
+		return CredentialUnknown, detail
+	}
+}
+
+// Reverify re-decides the credential predicate ON THE FAILURE PATH, and is the
+// mechanism mg-4d59 adds.
+//
+// # Why it runs here and not at arm time
+//
+// The arm-time predicate was chosen deliberately and its reasoning is still
+// sound for the happy path: the credential is ONE global fact, and asking about
+// it every fifteen minutes would spend a subprocess on a question whose answer
+// almost never changes. What that reasoning got wrong was the "almost". The
+// answer changed on this host without a pogod restart — a token inherited at
+// exec was rotated in the shell profile 174 hours later — and the arm-time
+// snapshot could not see it for 173 hours while every watched repo returned 401.
+//
+// So the shape of the fix is: keep the snapshot, and re-ask ONLY when the scan
+// has something to explain. On a clean scan this costs nothing and runs nothing.
+// On a failed scan the cost is one request, arriving exactly at the moment a
+// reader is about to be handed a ranked list of four causes.
+//
+// # Only a rejection changes anything
+//
+// A verifier that reports UNREACHABLE, or that could not run at all, leaves the
+// arm-time predicate untouched: neither is evidence about the credential, and
+// letting either downgrade the report would rebuild this ticket's defect
+// pointing at the opposite wrong remedy. The detail is still recorded, because
+// "the credential could not be re-checked — the API did not answer" is itself
+// the strongest available corroboration of the network cause the report already
+// ranks first.
+//
+// A nil verifier is a no-op, so a caller that has nothing to bind is honest
+// rather than broken.
+func Reverify(inv Inventory, verify Verifier) Inventory {
+	if verify == nil || len(inv.RepoErrors) == 0 {
+		return inv
+	}
+	// CredentialMissing is not re-asked: there is nothing to verify, ghtoken
+	// already decided it against the `gh auth login` store, and the remedy it
+	// prints is the right one.
+	if inv.Credential != CredentialPresent && inv.Credential != CredentialUnknown {
+		return inv
+	}
+	state, detail := verify()
+	inv.CredentialDetail = detail
+	if state == CredentialRejected {
+		inv.Credential = CredentialRejected
+	}
+	return inv
+}
+
 // DefaultRepos is the fallback watch list, and it is deliberately EMPTY: when
 // nothing on the host names a repo, this detector watches nothing.
 //
