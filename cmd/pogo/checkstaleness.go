@@ -52,6 +52,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -59,8 +60,11 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/revcheck"
+	"github.com/drellem2/pogo/internal/selfdrift"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/staleness"
+	"github.com/drellem2/pogo/internal/version"
 )
 
 // defaultStampPath mirrors pogo-deploy.sh's own resolution order, so the
@@ -92,16 +96,17 @@ func defaultReferenceRepo() string {
 
 func newCheckStalenessCmd(jsonOutput *bool) *cobra.Command {
 	var (
-		refRepo    string
-		ref        string
-		promptsDir string
-		stampPath  string
-		logPath    string
-		nowFlag    string
-		skipDeploy bool
-		skipPrompt bool
-		skipRemote bool
-		doFetch    bool
+		refRepo      string
+		ref          string
+		promptsDir   string
+		stampPath    string
+		logPath      string
+		nowFlag      string
+		skipDeploy   bool
+		skipPrompt   bool
+		skipRemote   bool
+		doFetch      bool
+		skipCeilings bool
 	)
 
 	cmd := &cobra.Command{
@@ -170,6 +175,28 @@ has made itself a participant, and ` + "`ls-remote`" + ` is a query that writes 
 comparison run against what shipped; it also names where the reference stood
 BEFORE the fetch, because that is the deployed revision and the fetch is the
 only thing that erases it. ` + "`--skip-remote`" + ` disarms the query for an offline host.
+
+THE REMEDY NAMES WHAT EACH INSTALLER CARRIES (mg-1e8e). A prompt corpus is
+capped at the revision of the process that installs it, so a stale corpus is not
+on its own evidence that anything is broken — and until this block existed the
+Fix line named two installers without having read either. Measured 2026-09-08 on
+this host, the three rows disagreed three ways: the pogod ON DISK carried the
+reference, the RUNNING pogod carried byte-for-byte what was already installed,
+and the dev build printing the report carried a third version newer than the
+reference. The corpus was 129 lines stale, the installer was healthy, and the
+remedy was a RESTART rather than an install — a distinction no count of stale
+files can make.
+
+That third cell is why the block does not simply say can / cannot. An installer
+carrying neither the reference nor what is installed is usually one that is
+AHEAD of ~/.pogo/deploy-src, itself a lagging snapshot; the report says so and
+sends you to ` + "`" + `--fetch` + "`" + ` rather than to a reinstall that would decide nothing.
+
+It is an UPPER BOUND, not a forecast. Content an installer does not carry it
+cannot write; content it does carry it may still decline to write, because a
+hand-edited canonical takes the conflict cell and gets a .dist sidecar
+(` + "`" + `pogo check-prompt-edits` + "`" + ` owns that half). ` + "`" + `--skip-ceilings` + "`" + ` drops the block, and
+with it one HTTP call to the daemon and two git reads.
 
 WHAT IT DOES NOT JUDGE, and says so every run: files under the corpus
 directories that the ref does not ship. ~/.pogo/agents holds plenty of
@@ -275,6 +302,7 @@ its subject healthy.`,
 					SkipRemote:    skipRemote,
 					Fetch:         doFetch,
 					Now:           now,
+					Ceilings:      promptCeilings(refRepo, skipCeilings),
 				})
 				if !promptRep.Clean() {
 					findings++
@@ -328,6 +356,8 @@ its subject healthy.`,
 	cmd.Flags().StringVar(&nowFlag, "now", "", "RFC3339 instant to judge against instead of the clock — for constructing the positive control")
 	cmd.Flags().BoolVar(&skipDeploy, "skip-redeploy", false, "Do not run the missed-redeploy witness")
 	cmd.Flags().BoolVar(&skipPrompt, "skip-prompts", false, "Do not run the prompt-corpus witness")
+	cmd.Flags().BoolVar(&skipCeilings, "skip-ceilings", false,
+		"Do not measure what each installer carries (skips one HTTP call to the daemon and two git reads)")
 	cmd.Flags().BoolVar(&skipRemote, "skip-remote", false, "Do not ask the remote whether the reference is behind (no network)")
 	cmd.Flags().BoolVar(&doFetch, "fetch", false, "Refresh the reference's remote-tracking ref first, so the comparison is against what SHIPPED rather than what was deployed")
 	return cmd
@@ -517,7 +547,12 @@ func printPromptWitness(r staleness.PromptReport) {
 			fmt.Printf("    %-34s %-14s %s\n", d.Path, d.Kind, d.LineNote())
 		}
 		fmt.Println("  Every agent reading these is running a superseded prompt.")
-		fmt.Println("  Fix: redeploy, or 'pogo agent prompt install' from a build of the reference.")
+		printCeilings(r.Ceilings)
+		if remedy := staleness.CeilingRemedy(r.Ceilings); remedy != "" {
+			fmt.Printf("  %s\n", remedy)
+		} else {
+			fmt.Println("  Fix: redeploy, or 'pogo agent prompt install' from a build of the reference.")
+		}
 	}
 	// The census, clean or not — the same posture check-prompts takes with the
 	// flag values it cannot decide. A report that printed only its findings
@@ -525,6 +560,100 @@ func printPromptWitness(r staleness.PromptReport) {
 	fmt.Printf("  not judged: %d installed file(s) the reference does not ship (locally added)\n", len(r.Unjudged))
 	for _, u := range r.Unjudged {
 		fmt.Printf("    %s\n", u)
+	}
+}
+
+// promptCeilings names the installers that can write ~/.pogo/agents and says
+// where to read what each one carries (mg-1e8e).
+//
+// THREE ROWS, BECAUSE THEY ANSWER THREE DIFFERENT QUESTIONS, and on the box
+// this was written for they gave three different answers on the same morning:
+//
+//	this pogo binary        the remedy a reader can type RIGHT NOW
+//	the running pogod       the installer that has ALREADY been running — why
+//	                        the corpus on disk is what it is
+//	the pogod on disk       what the NEXT boot would install — whether waiting
+//	                        for a restart is a remedy or a no-op
+//
+// Collapsing them would lose the finding. On 2026-09-08 rows one and three were
+// at or past the reference and row two was nineteen days behind (7edd223, still
+// running from a 09-01 boot because the nightly's restart half has been failing
+// since 09-01, mg-bead) — so the corpus was stale, the installer was healthy,
+// and the fix was a restart rather than an install. A single "the installer"
+// row cannot state that.
+//
+// Every reading is best-effort and every failure becomes an UNKNOWN row rather
+// than a missing one: an installer whose contents could not be read has not
+// been shown to be capable OR incapable, and a witness that silently drops the
+// row it could not take reports a narrower gap than it measured.
+func promptCeilings(refRepo string, skip bool) []staleness.CeilingSource {
+	if skip {
+		return nil
+	}
+	// Both readings are taken HERE and handed down, so the seam below is pure.
+	// They are also the only two calls in this command that can hang on
+	// something other than git — one HTTP GET with its own timeout, one file
+	// read — and keeping them at the edge is what lets a test exercise the
+	// naming and the ordering without a daemon on the box (mg-d64b: one test
+	// that named a machine-specific path turned main red for five days).
+	bin := selfdrift.InstalledBin("pogod")
+	return promptCeilingSources(refRepo,
+		version.Get().Commit,
+		revcheck.RunningRevision(config.Load().ServerURL()),
+		bin, revcheck.BinaryRevision(bin))
+}
+
+// promptCeilingSources is promptCeilings with the world already read.
+func promptCeilingSources(refRepo, thisRev, runningRev, pogodBin, pogodBinRev string) []staleness.CeilingSource {
+	embed := staleness.EmbedCeilingSource("this pogo binary",
+		"`pogo agent prompt install` — runs now, from this binary's embed",
+		agent.DefaultPromptsFS())
+	embed.Revision = thisRev
+
+	return []staleness.CeilingSource{
+		embed,
+		staleness.RevisionCeilingSource(
+			"the running pogod",
+			"agent.InstallPrompts, in-process at every pogod boot (already ran; see the prompt_refresh events)",
+			refRepo, runningRev,
+			"pogod did not answer /version, so what its boot installer carries is unknown — NOT that it is current"),
+		staleness.RevisionCeilingSource(
+			"the pogod on disk",
+			"agent.InstallPrompts at the NEXT pogod boot ("+pogodBin+")",
+			refRepo, pogodBinRev,
+			"no VCS stamp could be read from "+pogodBin+", so what the next boot would install is unknown"),
+	}
+}
+
+// printCeilings prints what each installer CARRIES (mg-1e8e).
+//
+// It sits between the deltas and the Fix line on purpose. The remedy is the
+// part a reader acts on, and until this block existed it named installers
+// without saying what any of them held — on 2026-09-08 that line sent readers
+// at a `pogo agent prompt install` while the installer that had actually been
+// running, pogod's in-process boot call, was a 2026-08-20 binary carrying
+// exactly the bytes already on disk, and had reported ok=true doing it seven
+// times.
+func printCeilings(ceilings []staleness.InstallerCeiling) {
+	if len(ceilings) == 0 {
+		return
+	}
+	fmt.Println("  INSTALLER CEILING: what each installer CARRIES, which bounds what it can write.")
+	fmt.Println("  An upper bound, NOT a prediction: content an installer does not carry it cannot")
+	fmt.Println("  write; content it does carry it may still decline to write, because a hand-edited")
+	fmt.Println("  canonical takes the conflict cell and gets a .dist sidecar ('pogo check-prompt-edits').")
+	for _, c := range ceilings {
+		fmt.Printf("    %-24s %-13s %s\n", c.Name, shortSHA(c.Revision), c.Verdict())
+		fmt.Printf("      how:    %s\n", c.How)
+		if c.Source != "" {
+			fmt.Printf("      read:   %s\n", c.Source)
+		}
+		// The paths it cannot close, named. A count is enough to decide and not
+		// enough to act on: a reader whose one stale prompt is in the carried
+		// half needs to know that before reaching for a bigger remedy.
+		if c.Known() && len(c.Closes) > 0 && (len(c.Frozen) > 0 || len(c.Third) > 0) {
+			fmt.Printf("      leaves: %s\n", strings.Join(c.Leaves(), ", "))
+		}
 	}
 }
 

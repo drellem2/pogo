@@ -402,6 +402,10 @@ type PromptReport struct {
 	// to "does the fleet match what shipped", which is the question the command
 	// announces in its first line.
 	Remote RemoteState `json:"remote"`
+	// Ceilings is what each installer CARRIES, which bounds what any of them
+	// can write (mg-1e8e). Present only when there are deltas to judge: a
+	// ceiling exists to qualify a remedy, and a clean corpus prescribes none.
+	Ceilings []InstallerCeiling `json:"ceilings,omitempty"`
 }
 
 // Clean reports whether the fleet is reading what the ref ships.
@@ -431,6 +435,12 @@ type PromptOptions struct {
 	// Now is the instant the fetch age is measured against, so a test can
 	// construct an age without waiting for one.
 	Now time.Time
+	// Ceilings are the installers to measure against the deltas (mg-1e8e).
+	// Supplied by the caller rather than discovered here: reading one costs
+	// anything from nothing (an embed) to an HTTP call that can hang (a live
+	// daemon), and that is the caller's decision to make. Empty is a valid
+	// input and yields a report with no ceiling rows.
+	Ceilings []CeilingSource
 }
 
 // CheckPrompts runs the prompt-corpus comparison end to end, plus the
@@ -495,6 +505,13 @@ func CheckPrompts(ctx context.Context, opts PromptOptions) PromptReport {
 	}
 	rep.Unreadable = unreadable
 	rep.Deltas, rep.Unjudged = ComparePrompts(shipped, installed)
+	// AFTER the deltas, and only when there are some. The ceiling answers "can
+	// this installer close what was just found", so it has nothing to say
+	// before the finding exists — and a clean corpus prescribes no remedy for a
+	// ceiling to qualify.
+	if len(rep.Deltas) > 0 {
+		rep.Ceilings = JudgeCeilings(ctx, shipped, rep.Deltas, opts.Ceilings)
+	}
 	return rep
 }
 
