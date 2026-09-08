@@ -2043,7 +2043,10 @@ Flags:
 			// makes this respawn belong to the fleet it was scheduled in: any
 			// stop or start in between refuses it, however late it fires.
 			gen := agentRegistry.Generation()
-			go func() {
+			// a.GoSafe, not agent.GoSafe: the identity is available here, and
+			// a goroutine_panic naming the agent whose respawn blew up is worth
+			// more than one attributed to the daemon at large.
+			a.GoSafe("pogod.scheduledRespawn", func() {
 				time.Sleep(2 * time.Second)
 				_, rerr := agentRegistry.RespawnFromGeneration(a.Name, gen)
 				// A refusal from the shutdown latch or the generation check is
@@ -2051,7 +2054,7 @@ Flags:
 				// noteRespawnOutcome for why alarming on it made A6 unreadable
 				// (mg-0208).
 				noteRespawnOutcome(conditions, coordinator, a.Name, rerr, time.Now())
-			}()
+			})
 		} else {
 			if a.RestartOnCrash && !a.ShouldRespawn() {
 				// restart_on_crash is set but the agent is parked — the park

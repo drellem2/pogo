@@ -256,10 +256,15 @@ func RunModalHook(ctx context.Context, deps ModalHookDeps, matchers []ModalMatch
 	var wg sync.WaitGroup
 	for i, m := range matchers {
 		wg.Add(1)
-		go func(idx int, mm ModalMatcher) {
+		idx, mm := i, m
+		// Guarded per matcher (mg-38d1): one matcher's panic must not take the
+		// daemon down, and must not hang RunModalHook either — the deferred
+		// wg.Done runs as the panic unwinds, before the guard recovers it, so
+		// the surviving matchers keep watching this agent's PTY.
+		agent.GoSafe("claude.dispatchMatcher:"+mm.Name, func() {
 			defer wg.Done()
 			dispatchMatcher(ctx, idx, mm, scanner, deps)
-		}(i, m)
+		})
 	}
 	wg.Wait()
 }
@@ -778,13 +783,13 @@ func defaultActivityTracker() ActivityTracker {
 func startEventsTracker(path string) *eventsActivityTracker {
 	t := &eventsActivityTracker{lastSeen: make(map[string]time.Time)}
 	stop := make(chan struct{}) // never closed; tracker lives until process exit
-	go func() {
+	agent.GoSafe("claude.eventsActivityTracker", func() {
 		if err := events.Follow(path, time.Second, stop, func(line []byte) {
 			t.ingest(line)
 		}); err != nil {
 			log.Printf("modal_hook: events tracker stopped: %v", err)
 		}
-	}()
+	})
 	return t
 }
 
