@@ -136,7 +136,26 @@ type SpawnPolecatAPIRequest struct {
 	// override.
 	//
 	// It overrides the STRANDED-WORK gate alone. See strandedgate.go.
+	//
+	// IT IS THE "SPENT, DISCARD" EXIT AND ONLY THAT (mg-ba32). The worker it
+	// dispatches starts from the TARGET; the stranded branch is left where it
+	// is and nothing on it is inherited. For the opposite disposition — the
+	// branch is good and somebody has to land it — see StrandedAdopt. Passing
+	// both is refused, because they are two halves of a decision that has to
+	// have been made.
 	StrandedOverride string `json:"stranded_override,omitempty"`
+	// StrandedAdopt dispatches a worker to CONTINUE the stranded branch rather
+	// than to start over, and states why. Same shape as the overrides above —
+	// not a boolean, for the same reason.
+	//
+	// It is the second exit from the stranded-work gate, and unlike an override
+	// it is not an assertion that the gate was wrong: the gate is right, the
+	// branch does hold unmerged work, and a worker is exactly what that work
+	// needs. It changes the MECHANISM as well as the record — the polecat's
+	// worktree is based on the stranded ref, so the branch's commits are in the
+	// tree the worker wakes up in, and the spawn is refused if that did not take.
+	// See strandedadopt.go.
+	StrandedAdopt string `json:"stranded_adopt,omitempty"`
 	// PreservedOverride dispatches an item whose work is already sitting
 	// uncommitted in a retained worktree, and states why. Same shape and same
 	// reasoning as the two above: not a boolean, because what a later reader
@@ -1581,16 +1600,62 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// behind (mg-ef80). Fails OPEN on a repo it cannot scan — see
 	// GitStrandedWorkGate.StrandedFindings.
 	//
-	// Overridable, and it has to be: attribution is heuristic (a branch name or a
-	// commit-subject id), so a false positive is possible and must not become a
-	// wedge with no way out. --stranded-override costs a written reason, recorded
-	// as an event beside the refusal it bypassed.
-	if refusal := r.strandedWorkRefusal(spawnReq.Id, spawnReq.Repo, spawnReq.Branch); refusal != "" {
-		if override := strings.TrimSpace(spawnReq.StrandedOverride); override != "" {
+	// IT HAS TWO EXITS, AND THEY ARE NOT THE SAME DECISION (mg-ba32). The gate
+	// refuses two populations that want opposite handling, and until this split
+	// they shared one flag:
+	//
+	//   --stranded-override  the branch is SPENT. Start over from the target;
+	//                        this branch is left behind. Needed because
+	//                        attribution is heuristic (a branch name or a
+	//                        commit-subject id), so the gate can be wrong, and a
+	//                        gate that can be wrong with no way past it gets
+	//                        disarmed rather than overridden.
+	//   --stranded-adopt     the branch is GOOD and has to be LANDED. The
+	//                        worktree is based on the stranded ref, so the worker
+	//                        continues the work instead of re-deriving it.
+	//
+	// The second one had no cell here at all, and the refusal's only advice —
+	// "get the branch merged" — is not something the gate can do: when the merge
+	// needs a rebase it needs a worker, and that dispatch is the OPPOSITE of a
+	// re-derivation. On 2026-08-14 it had to be typed as --stranded-override,
+	// whose help asserted "if this branch is genuinely spent", which was not true
+	// and not why it was used. Both exits cost a written reason; they emit
+	// different events, so the record distinguishes them afterwards too.
+	//
+	// Passing both is refused rather than resolved by precedence — see
+	// conflictingStrandedExits.
+	var adoption *strandedAdoption
+	if findings, refusal := r.strandedWorkCheck(spawnReq.Id, spawnReq.Repo, spawnReq.Branch); refusal != "" {
+		override := strings.TrimSpace(spawnReq.StrandedOverride)
+		adopt := strings.TrimSpace(spawnReq.StrandedAdopt)
+		switch {
+		case adopt != "" && override != "":
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, conflictingStrandedExits+".\n\n"+refusal)
+			return
+		case adopt != "":
+			f, ok := adoptableFinding(findings)
+			if !ok {
+				failPolecatSpawn(w, spawnReq, http.StatusConflict, unadoptableStranded(spawnReq.Id, findings))
+				return
+			}
+			adoption = &strandedAdoption{
+				Finding: f,
+				Reason:  adopt,
+				Refusal: refusal,
+				Others:  otherBranches(findings, f),
+			}
+			// The EVENT is not emitted here — see the worktree check further down.
+			// An adopt dispatch can still be refused after this point for a reason
+			// specific to adopting, and an event recording a disposition that was
+			// never dispatched is the same unreadable record this split repairs.
+			log.Printf("dispatch stranded-work: ADOPTING %s for %s by explicit request: %s — the worktree "+
+				"will be based on %s, not on the target (refusal was: %s)",
+				f.Branch, spawnReq.Id, adopt, f.Ref, refusal)
+		case override != "":
 			emitPolecatStrandedOverridden(spawnReq, override, refusal)
 			log.Printf("dispatch stranded-work: OVERRIDDEN for %s by explicit request: %s (refusal was: %s)",
 				spawnReq.Id, override, refusal)
-		} else {
+		default:
 			failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
 			return
 		}
@@ -1814,6 +1879,32 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		createWorktree = false
 	}
 
+	// AN ADOPTION WITHOUT A WORKTREE IS NOT AN ADOPTION (mg-ba32). --no-worktree,
+	// or a template declaring `worktree = false`, means no checkout is created at
+	// all — so there is nothing for the stranded branch to be the base OF, and the
+	// worker would get a prompt telling it that commits it cannot see are in its
+	// tree. That is the same false assertion the adopt flag exists to stop, so it
+	// is refused here rather than degraded into an ordinary spawn. It comes after
+	// the gate because only here is the worktree decision actually resolved
+	// (frontmatter beats the request, and both can turn it off).
+	if adoption != nil && !createWorktree {
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, fmt.Sprintf(
+			"--stranded-adopt was given for %s, but this spawn creates NO worktree (--no-worktree, or the "+
+				"template declares worktree = false), so there is nothing for %s to be adopted into. "+
+				"Nothing was dispatched: a worker told it inherited %s while standing in a scratch "+
+				"directory would believe it, which is worse than the refusal it replaced",
+			spawnReq.Id, adoption.Finding.Branch, adoption.Finding.Branch))
+		return
+	}
+	if adoption != nil {
+		// Past every refusal that is specific to adopting, so the record is being
+		// written about a dispatch that is going out. Later failures — a worktree
+		// git would not create, an adoption that did not verify — roll the spawn
+		// back and leave this event standing, exactly as the four override events
+		// beside it do: they record the DECISION, and the decision was taken.
+		emitPolecatStrandedAdopted(spawnReq, *adoption)
+	}
+
 	// Compute worktree path before template expansion so it can be included
 	// in the prompt. gitgc.DefaultPolecatsDir is the single source of truth
 	// for this location — its orphan-dir scan must see the same directory.
@@ -1883,6 +1974,17 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			"successor-required warning to its prompt", spawnReq.Name, spawnReq.Id, DeclaresRemainderTag)
 	}
 
+	// An ADOPT dispatch gets its own block, ABOVE the remainder warning when both
+	// apply (mg-ba32). The ordering is the one thing that matters here: this block
+	// says what tree the worker is standing in, and every other instruction in the
+	// prompt — including the remainder warning's "before you submit" — is read
+	// against that. Concatenated rather than replacing, for the reason Prelude
+	// carries generally: these are additive daemon-derived facts, and dropping one
+	// to make room for another would be silent.
+	if adoption != nil {
+		prelude = strandedAdoptPrelude(spawnReq.Id, *adoption) + prelude
+	}
+
 	// Expand template to a temp file
 	vars := TemplateVars{
 		Task:          spawnReq.Task,
@@ -1929,6 +2031,37 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		// exists (tests, repos without a remote).
 		baseRef := resolvePolecatBaseRef(sourceRepo, spawnReq.Branch)
 
+		// UNLESS THIS IS AN ADOPTION, in which case the whole point is to start
+		// from the stranded branch instead (mg-ba32). Nothing else about the spawn
+		// changes: the worker still gets its OWN polecat-<name> branch, so the
+		// branch it adopts is never rewritten under whoever else may be reading
+		// it, and the inherited commits — a pre-registration commit among them —
+		// arrive as ancestors rather than as something to be amended.
+		if adoption != nil {
+			// UNLESS THE NEW BRANCH IS THE ADOPTED ONE, which would destroy it.
+			// reclaimStalePolecatBranch below asks whether branchName is "spent"
+			// AGAINST baseRef — correctly, since baseRef is what the worktree would
+			// be created from — and a branch compared against itself has nothing
+			// unmerged, so it is judged spent and DELETED. For work that is not on
+			// origin that deletion is the only copy. Naming the new polecat after
+			// the stranded agent is the whole way to reach this, and it is a
+			// plausible thing to type when the intent is "put a worker back on that
+			// branch", so it is refused with the reason rather than left as a trap.
+			if branchName == adoption.Finding.Branch {
+				os.Remove(promptFile)
+				failPolecatSpawn(w, spawnReq, http.StatusConflict, fmt.Sprintf(
+					"--stranded-adopt cannot give this polecat the name %q: its branch would be %s, which "+
+						"IS the branch being adopted, and the spawn would delete that branch to make room "+
+						"for its own. Name the worker something else — it gets its own branch and inherits "+
+						"%s as an ancestor, which is what keeps the original intact",
+					spawnReq.Name, branchName, adoption.Finding.Branch))
+				return
+			}
+			baseRef = adoption.BaseRef()
+			log.Printf("polecat %s: ADOPTING %s — basing the worktree on %s instead of the target",
+				spawnReq.Name, adoption.Finding.Branch, baseRef)
+		}
+
 		// A polecat-<name> branch left over from earlier work would make the
 		// worktree add below fail permanently. Clear it if it is provably
 		// spent; refuse with a cause-naming error if it is not (mg-d22a).
@@ -1967,6 +2100,21 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		log.Printf("polecat %s: created worktree at %s (branch %s, base %q)", spawnReq.Name, worktreeDir, branchName, baseRef)
+
+		// The adoption is MEASURED, never assumed from having passed the argument
+		// — see verifyAdoption. A flag named "adopt" over a worktree that adopted
+		// nothing is the same class of defect mg-ba32 was filed about, so it fails
+		// the spawn rather than logging a note somebody may read.
+		if adoption != nil {
+			if err := verifyAdoption(sourceRepo, adoption.BaseRef(), branchName); err != nil {
+				os.Remove(promptFile)
+				if !branchPreexisted {
+					cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
+				}
+				failPolecatSpawn(w, spawnReq, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
 		// No --add-dir needed: the process CWD is set to worktreeDir via SpawnRequest.Dir,
 		// and --add-dir triggers a directory trust prompt that blocks autonomous execution.
 	}

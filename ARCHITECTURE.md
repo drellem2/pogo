@@ -307,6 +307,20 @@ precondition for stranded work, not evidence against it, because the re-dispatch
 commit-subject id, or the item's id-suffix in the branch name), so the refusal is
 overridable with `--stranded-override="<why>"`, recorded as an event.
 
+**It has two exits, and they are not the same decision** (mg-ba32). The gate
+refuses two populations that want opposite handling: *spent, discard* — start
+over from the target, leave the branch behind, which is `--stranded-override` —
+and *good, adopt* — this branch holds the work and somebody has to land it,
+which is `--stranded-adopt="<why>"`. The second is not a variant of an override:
+it is frequently the **only** route the work has left, because the refusal's own
+remedy ("get the branch merged") is not something a gate can perform, and a merge
+that needs a rebase needs a worker. So it changes the mechanism as well as the
+record — the polecat's worktree is based on the **stranded ref** rather than on
+the target, the adoption is *measured* after the worktree exists (a tree that
+does not carry the branch fails the spawn), and the dispatch emits
+`dispatch_stranded_work_adopted` rather than the override's event. Passing both
+is refused rather than resolved by precedence.
+
 **Why the fourth exists.** It is the third one's mid-flight twin, and the gap
 between them was the *normal* state of every worker. The stranded-work gate is
 defined over **commits**, and a polecat commits at the END of its life — so a

@@ -483,11 +483,20 @@ func (f Finding) Summary() string {
 				"%s's work a second time, under the wrong authorship",
 			f.Branch, len(f.Unmerged), f.Target, f.Carrier, f.WorkItemID, f.Carrier, f.Branch, f.WorkItemID)
 	case DispositionResubmit:
+		// "do NOT dispatch a worker at this item" is what this used to say, and it
+		// was wrong in one direction that mattered (mg-ba32): it treats ANY
+		// dispatch as a re-derivation, when a worker sent to CONTINUE this branch
+		// — the `pogo agent spawn-polecat --stranded-adopt` disposition — is the
+		// opposite of one, and is frequently the only way the work can land at all
+		// (a merge that needs a rebase needs a worker; nothing in this package can
+		// do it). The warning is kept and made true by naming the base ref it is
+		// about: it is starting FROM THE TARGET that re-derives.
 		return fmt.Sprintf(
 			"%s has %d unmerged commit(s) on %s (%s), and they are %s. Get the branch merged (`%s`); "+
-				"do NOT dispatch a worker at this item, it would re-derive work that already exists%s",
+				"a worker dispatched at this item FROM %s would re-derive work that already exists, "+
+				"so send one only to continue %s%s",
 			f.Branch, len(f.Unmerged), f.Target, shortSHA(f.Unmerged[0].SHA), Provenance(f.Pushed),
-			SubmitRemedy(f.Repo, f.Branch, "", f.Pushed), localOnlyNote(f.Pushed))
+			SubmitRemedy(f.Repo, f.Branch, "", f.Pushed), f.Target, f.Branch, localOnlyNote(f.Pushed))
 	default:
 		if !f.Found {
 			return fmt.Sprintf("no branch %s exists in %s", f.Branch, f.Repo)

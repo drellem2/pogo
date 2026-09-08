@@ -2776,6 +2776,7 @@ Example:
 	var spawnPolecatNoWorktree bool
 	var spawnPolecatPairingOverride string
 	var spawnPolecatStrandedOverride string
+	var spawnPolecatStrandedAdopt string
 	var spawnPolecatPreservedOverride string
 	var spawnPolecatMergedOverride string
 	var cmdAgentSpawnPolecat = &cobra.Command{
@@ -2840,6 +2841,7 @@ A --body-file that cannot be read is an error, never an empty body.`,
 
 				PairingOverride:   spawnPolecatPairingOverride,
 				StrandedOverride:  spawnPolecatStrandedOverride,
+				StrandedAdopt:     spawnPolecatStrandedAdopt,
 				PreservedOverride: spawnPolecatPreservedOverride,
 				MergedOverride:    spawnPolecatMergedOverride,
 			})
@@ -2892,7 +2894,22 @@ A --body-file that cannot be read is an error, never an empty body.`,
 	// Also a string, for the same reason. Attribution of a branch to a work item
 	// is heuristic, so this gate can be wrong — and a gate that can be wrong with
 	// no way past it gets disarmed rather than overridden.
-	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatStrandedOverride, "stranded-override", "", "Dispatch over pushed-but-unmerged work already on a polecat branch for this item (mg-b468), stating WHY in the value; the reason and the refusal it bypassed are recorded as a dispatch_stranded_work_overridden event. Overrides that gate only")
+	//
+	// ITS HELP NO LONGER ASSERTS A REASON (mg-ba32). It used to end "if this
+	// branch is genuinely spent", which is a claim about the branch that the
+	// operator using the flag may not hold: the gate refuses a branch that is
+	// GOOD and needs landing just as hard, and until --stranded-adopt existed
+	// that operator had no other way in. So this now says what the flag DOES to
+	// the branch — the worker starts from the target and the branch is left
+	// behind — and names the other exit, and the value stays the place the
+	// operator records what they actually knew.
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatStrandedOverride, "stranded-override", "", "SPENT, DISCARD: dispatch a worker FROM THE TARGET over pushed-but-unmerged work already on a polecat branch for this item (mg-b468) — that branch is left behind and nothing on it is inherited. State WHY in the value; the reason and the refusal it bypassed are recorded as a dispatch_stranded_work_overridden event. If the branch is GOOD and has to be landed, use --stranded-adopt instead — passing both is refused. Overrides that gate only")
+	// The SECOND exit from the same gate, and the one it had no cell for at all
+	// (mg-ba32). It is not an override: the gate is right, and a worker is what
+	// the branch needs. It is a string for the same reason as the four overrides,
+	// plus one of its own — the value is where the operator says what still has
+	// to happen to the branch, which is the first thing the adopting worker reads.
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatStrandedAdopt, "stranded-adopt", "", "GOOD, ADOPT: dispatch a worker to CONTINUE the stranded branch for this item (mg-ba32) — its worktree is based ON that branch's ref, not on the target, so the existing commits are inherited and the job is to land them (rebase, finish, resubmit). State WHY in the value; it reaches the worker as the first block of its prompt and is recorded as a dispatch_stranded_work_adopted event. The spawn is REFUSED if the worktree turns out not to carry the branch. Passing this with --stranded-override is refused")
 	// Also a string, and the reason to insist here is the strongest of the four:
 	// the tree this gate protects is the ONLY copy of the work it holds, and the
 	// reflex remedy — delete the stale worktree, re-dispatch — destroys it. The
