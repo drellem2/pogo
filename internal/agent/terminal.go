@@ -75,7 +75,7 @@ func (r *Registry) HandleTerminal(w http.ResponseWriter, req *http.Request) {
 	}()
 
 	// PTY output → WebSocket (binary frames)
-	go func() {
+	agent.GoSafe("agent.terminalWS.ptyToClient", func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := pr.Read(buf)
@@ -89,7 +89,7 @@ func (r *Registry) HandleTerminal(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 		}
-	}()
+	})
 
 	// WebSocket → PTY master (input + control messages)
 	for {
