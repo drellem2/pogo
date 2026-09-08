@@ -623,6 +623,44 @@ positives**, produced by `merged_sha` and `post_merge_tag`, which are the
 refinery's own bookkeeping and not outcomes. A future fix that wants the durable
 on-item marker has to deal with that predicate first.
 
+#### `work_item_reopen_after_merge_failure`
+
+pogod decided what to do with a failed merge request's work item (mg-4d21).
+Emitted at the decision, by the daemon, on the three outcomes that change
+something or could not be classified.
+
+**The write path this records is the only one that moves a work item OUT of
+`done`.** `mg reopen` is that path, pogod's OnFailed callback has run it on every
+merge failure since mg-06f2, and against the live binary on 2026-09-08 it moves a
+done item into `work/claimed/<id>.md` — **with no pid suffix**, so the item is
+then held by nobody. Every stall check in this repo scans `available/`, so the
+resulting claim is invisible: the one reported occurrence (drellem2/pogo#164,
+2026-09-03) was found and repaired by a human, and nothing else noticed. That is
+what makes this an event rather than a log line — pogod does not always write to
+`pogod.log` (mg-a19a), and the reported flip left no record anywhere else.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **`details` fields:**
+  - `outcome` (string, required): one of
+    - `reopened` — the item moved `done` → `claimed`. This is the flip, and it is now announced in the MERGE FAILED mail as well
+    - `declined_landed_merge` — the reopen was REFUSED because a merge authored by this item had already landed, so the item's `done` state rests on merged work
+    - `error` — `mg reopen` failed for a reason that is neither "still claimed" nor "archived", so the item's state is unknown to this record
+  - `mr`, `branch`, `target` (string, required): the merge request that failed
+  - `landed_mr`, `landed_branch`, `landed_target` (string, on `declined_landed_merge`): the merge that blocked the reopen
+  - `landed_sha` (string, optional): the commit it landed as, so the refusal is checkable with one `git log`
+  - `error` (string, optional): mg's own refusal, verbatim
+
+Two outcomes are deliberately NOT emitted, because they change nothing and are
+the ordinary case: `already claimed` (a live polecat still owns the item — 22 of
+these appear in one 50,603-line pogod log, mg-5d3f) and `archived` (`mg reopen`
+cannot reach `archive/`, which is why an item archived promptly after its merge
+never flips). Both are still stated in the failure mail, where the reader looking
+at this failure sees them. Additive — no `schema_version` bump.
+
+```json
+{"schema_version":1,"timestamp":"2026-09-08T10:42:11.000000000Z","event_type":"work_item_reopen_after_merge_failure","agent":"pogod","work_item_id":"mg-4d21","details":{"outcome":"declined_landed_merge","mr":"mr-2","branch":"polecat-t4d21-docs","target":"main","landed_mr":"mr-1","landed_branch":"polecat-t4d21","landed_target":"main","landed_sha":"45b4421abc"}}
+```
+
 ### Inter-agent communication
 
 #### `mail_sent`

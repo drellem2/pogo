@@ -8,7 +8,6 @@ import _ "net/http/pprof"
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -3812,6 +3811,43 @@ Flags:
 					refineryAttemptSummary(mr), mr.Error, mr.GateOutput, mr.FailureCount,
 					refineryAttemptDetail(mr))
 
+				// The work item's disposition is decided and applied HERE, above
+				// the mails, so the mails can say what happened to it (mg-4d21).
+				// It used to run after them, and the failure notice therefore
+				// described the merge and never its side effect on the item — a
+				// flip to claimed/ that nothing announced and nothing swept.
+				//
+				// The cost of the move, stated because it is a real one: an
+				// `mg` that hangs now delays the failure notice instead of only
+				// the reopen. That is accepted rather than unnoticed — a notice
+				// that cannot say what happened to the item is the defect this
+				// ticket is about, and mg-4d21 found no instance of a hung mg.
+				reopenRes := reopenAfterFailure(mr, refineryHistoryOrNil(mergeQueue), client.ReopenMGWorkItem)
+				switch reopenRes.Outcome {
+				case reopenPerformed:
+					log.Printf("refinery: reopened work item %s after merge failure — it is now in claimed/ with no pid and no worker", mr.Author)
+				case reopenDeclinedLanded:
+					log.Printf("refinery: did NOT reopen work item %s after merge failure: %s (branch=%s) already merged onto %s — the item's status rests on landed work (mg-4d21)",
+						mr.Author, reopenRes.Landed.ID, reopenRes.Landed.Branch, reopenRes.Landed.TargetRef)
+				case reopenNotDone:
+					// The item never left claimed/ — a live polecat still owns
+					// it, which is the state the reopen wanted. All 18 of these
+					// in one 50,603-line log were this outcome (mg-5d3f);
+					// reporting it as a failure taught readers to skip error
+					// lines.
+					log.Printf("refinery: work item %s already claimed (in progress), no reopen needed", mr.Author)
+				case reopenArchived:
+					log.Printf("refinery: work item %s is archived, so no reopen was possible (nothing moved)", mr.Author)
+				case reopenFailed:
+					log.Printf("refinery: failed to reopen work item %s: %v", mr.Author, reopenRes.Err)
+				}
+				if line := reopenMailLine(mr, reopenRes); line != "" {
+					body += "\n" + line
+				}
+				if ev, ok := reopenEvent(mr, reopenRes); ok {
+					events.Emit(context.Background(), ev)
+				}
+
 				// Mail the author so they can fix and resubmit — and address the
 				// AGENT that owns the branch, not only the work-item id
 				// (mg-1fcc). `mr.Author` is "mg-32e3"; the running polecat reads
@@ -3855,26 +3891,6 @@ Flags:
 						mr.Author, mr.FailureCount, mr.ID, mr.Branch, mr.Error)
 					if err := client.SendMGMail(coordinator, "refinery", escSubject, escBody); err != nil {
 						log.Printf("refinery: failed to mail coordinator escalation: %v", err)
-					}
-				}
-
-				// Auto-reopen the work item so it moves back to claimed/ for retry.
-				// This keeps the item assigned to the original polecat.
-				// Polecats use their work item ID as the author field.
-				if mr.Author != "" {
-					if err := client.ReopenMGWorkItem(mr.Author); err != nil {
-						if errors.Is(err, client.ErrMGWorkItemNotDone) {
-							// The item never left claimed/ — a live polecat still
-							// owns it, which is the state the reopen wanted. All 18
-							// of these in one 50,603-line log were this outcome
-							// (mg-5d3f); reporting it as a failure taught readers
-							// to skip error lines.
-							log.Printf("refinery: work item %s already claimed (in progress), no reopen needed", mr.Author)
-						} else {
-							log.Printf("refinery: failed to reopen work item %s: %v", mr.Author, err)
-						}
-					} else {
-						log.Printf("refinery: reopened work item %s after merge failure", mr.Author)
 					}
 				}
 			})
