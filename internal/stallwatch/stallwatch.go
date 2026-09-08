@@ -177,6 +177,12 @@ type Options struct {
 	// advertises such an item as ready, because status is then the only
 	// evidence it has.
 	Preserved Preserved
+	// Stranded, when set, lets every available/ check ask whether an item's work
+	// is already finished and sitting on a branch (mg-4bf1). Left nil the watcher
+	// behaves exactly as it did before that fix — it advertises such an item as
+	// ready while pogod's own [stranded-push] mail says the opposite, and the
+	// recommendation wins because it is the one that repeats.
+	Stranded Stranded
 }
 
 // Watcher samples macguffin state and nudges the watched agent on stall.
@@ -190,6 +196,7 @@ type Watcher struct {
 	capacity  Capacity
 	workers   Workers
 	preserved Preserved
+	stranded  Stranded
 
 	mu sync.Mutex
 	// lastNudge records when each cooldown key last fired and how many times it
@@ -287,6 +294,7 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		capacity:  opts.Capacity,
 		workers:   opts.Workers,
 		preserved: opts.Preserved,
+		stranded:  opts.Stranded,
 		lastNudge: make(map[string]fireRecord),
 	}
 }
@@ -326,6 +334,20 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	// held by one check and free to another within one sample.
 	held := w.probePreserved(items)
 
+	// Which of these items already has its work FINISHED and sitting on a branch
+	// (mg-4bf1). Probed ONCE beside the other two and shared by the same checks,
+	// for the same reason: an item must not read as stranded to one check and
+	// free to another within one sample.
+	strand := w.probeStranded(items)
+
+	// Stranded-push hold (mg-4bf1). Reads the SAME listing over the population
+	// the two dispatch checks below now skip, and says the opposite thing about
+	// it: do NOT dispatch, the work already exists. It runs whether or not the
+	// dispatch checks fire, because this is the state pogod already mailed about
+	// ONCE and the recommendation it contradicts repeats — which is what decided
+	// the arbitration before this check existed.
+	w.checkStrandedPush(now, items, flight, held, strand)
+
 	// Preserved-worktree hold (mg-836c). Reads the SAME listing over the
 	// population the two dispatch checks below now skip, and says the opposite
 	// thing about it: do NOT dispatch, and do NOT clear it by deleting the tree.
@@ -338,7 +360,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	// and is delivered promptly via the same wait-idle nudge, so urgent work no
 	// longer waits out the idle-coordinator polling gap. This scans the same
 	// listing, so it is nearly free.
-	w.checkPriorityWake(now, items, flight, held)
+	w.checkPriorityWake(now, items, flight, held, strand)
 
 	// Worked-but-unclaimed (mg-1a8a). Reads the SAME listing over the population
 	// the two dispatch checks skip because a live worker holds the item, and says
@@ -389,6 +411,13 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 		if _, stuck := held.trees(it.ID); stuck {
 			continue
 		}
+		// Nor is an item whose work is already finished and pushed (mg-4bf1).
+		// Same shape as the two exclusions above and the same disposal:
+		// checkStrandedPush picks it up with the opposite remedy rather than
+		// dropping it.
+		if _, strandedWork := strand.branches(it.ID); strandedWork {
+			continue
+		}
 		if w.cfg.PriorityWakeEnabled && w.isFastPriority(it.Priority) {
 			continue
 		}
@@ -434,6 +463,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	msg += advisory
 	msg += flight.uncertaintyNote()
 	msg += held.uncertaintyNote()
+	msg += strand.uncertaintyNote()
 	msg += sel.repeatNotice()
 
 	details := map[string]any{
@@ -474,7 +504,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 //     cooldown later, then one at twice that, out to RepeatBackoffCap — not one
 //     per heartbeat tick, and not one per cooldown forever. This is the
 //     category mg-1693 was measured on; see selectDue.
-func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, flight WorkInFlight, held PreservedWork) {
+func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, flight WorkInFlight, held PreservedWork, strand StrandedWork) {
 	if !w.cfg.PriorityWakeEnabled {
 		return
 	}
@@ -499,6 +529,17 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, fl
 		// imperative wording this component emits, and it was pointing at work
 		// that already existed.
 		if _, stuck := held.trees(it.ID); stuck {
+			continue
+		}
+		// And this is the surface the stranded-push hold mattered on most
+		// (mg-4bf1). At 00:54Z on 2026-09-08 this check emitted "1 high-priority
+		// work item(s) are ready and unclaimed — claim or dispatch now: mg-a932"
+		// while pogod's own [stranded-push] mail about mg-a932 sat in the same
+		// inbox saying do NOT dispatch, naming polecat-ta932, pushed=true. Both
+		// were pogod's, both were confident, and the reader was left to arbitrate
+		// — which this check won by default, because it repeats and that mail does
+		// not.
+		if _, strandedWork := strand.branches(it.ID); strandedWork {
 			continue
 		}
 		if !w.isFastPriority(it.Priority) {
@@ -547,6 +588,7 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, fl
 	msg += advisory
 	msg += flight.uncertaintyNote()
 	msg += held.uncertaintyNote()
+	msg += strand.uncertaintyNote()
 	msg += sel.repeatNotice()
 
 	details := map[string]any{

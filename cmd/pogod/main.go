@@ -2265,6 +2265,14 @@ Flags:
 			// coordinator to dispatch at an item whose only copy of its work is
 			// in a tree the new polecat will never see.
 			Preserved: newStallPreserved(),
+			// Let every available/ check ask whether an item's work is already
+			// FINISHED and sitting on a branch before advertising it as ready
+			// (mg-4bf1). Without it the priority wake urges a coordinator to
+			// dispatch at an item pogod itself has already mailed a
+			// `[stranded-push] ... do NOT dispatch` about — two of this daemon's
+			// own signals contradicting each other in one inbox, with the
+			// recommendation winning because it is the one that repeats.
+			Stranded: newStallStranded(),
 		})
 		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s fallback_cap=%d priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s indefinite_hold=%t hold_age=%s hold_cooldown=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,
