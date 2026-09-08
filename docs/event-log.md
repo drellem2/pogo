@@ -1109,6 +1109,53 @@ Restart recovery could not carry an in-flight merge request forward (branch dele
 {"schema_version":1,"timestamp":"2026-07-02T09:14:02.000000000Z","event_type":"refinery_mr_lost","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","author":"cat-mg-0241","reason":"branch \"polecat-mg-0241\" not found on origin"}}
 ```
 
+### Daemon robustness
+
+#### `goroutine_panic`
+
+A long-lived pogod goroutine panicked and the panic was **recovered** by the
+guard in `internal/agent/gosafe.go` (`GoSafe` / `Safely`) instead of taking the
+daemon down. Emitted once per recovery, naming the launch site.
+
+This event exists because a recovered panic is still a bug. Go terminates the
+whole process on an unrecovered panic in any goroutine, so before the sweep for
+drellem2/pogo#166 a panic in a provider hook, a PTY reader, an attach handler or
+the modal-dismissal watcher killed pogod — and a crashed pogod cannot re-adopt
+the agents it was running, because each agent's PTY master died with the process
+holding it (`internal/agent/orphan.go`). One panic would therefore strand every
+running agent on the host, not just the one whose goroutine panicked. Recovering removes that blast radius; this event is
+what stops the recovery from also removing the evidence.
+
+Read it as **degraded, not fine**: the guarded goroutine is gone. What that costs
+depends on the site — a panicked `provider.PostSpawnHook` means one agent never
+got its trust dialog dismissed, a panicked `agent.superviseListener` means that
+agent's attach socket is no longer repaired, a panicked
+`claude.dispatchMatcher:<name>` means one modal is no longer watched for. The
+daemon and every other agent keep running.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **`agent`:** the agent the goroutine belonged to (`cat-…` / `crew-…`), or
+  `"pogod"` for guarded goroutines that belong to no particular agent.
+- **`details` fields:**
+  - `site` (string, required): stable label for the launch point, e.g.
+    `"provider.PostSpawnHook"`, `"agent.readOutput"`, `"registry.onExit"`,
+    `"claude.dispatchMatcher:rating-dialog"`, `"pogod.scheduledRespawn"`
+  - `panic` (string, required): the recovered panic value, formatted
+  - `stack` (string, required): the goroutine stack at the panic, truncated to
+    4096 bytes. The **full** stack always goes to pogod's stderr
+    (`pogo service log`) — the truncation bounds this log, not the diagnosis.
+
+```json
+{"schema_version":1,"timestamp":"2026-09-08T15:41:02.100000000Z","event_type":"goroutine_panic","agent":"cat-t38d1","details":{"site":"provider.PostSpawnHook","panic":"runtime error: index out of range [3] with length 2","stack":"goroutine 219 [running]:\n..."}}
+```
+
+Count them per site to find the one that keeps firing:
+
+```bash
+jq -r 'select(.event_type=="goroutine_panic") | .details.site' \
+  ~/.pogo/events.log | sort | uniq -c | sort -rn
+```
+
 ### Daemon watchers
 
 #### `stall_watch_fired`

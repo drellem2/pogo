@@ -208,7 +208,11 @@ type Agent struct {
 	attachMu    sync.Mutex
 
 	// done is closed when the agent process exits and output is drained.
-	done chan struct{}
+	// Closed only through closeDone, which makes the close idempotent so the
+	// panic guard in waitAndHandle can release waiters without racing the
+	// normal path's close (see gosafe.go).
+	done     chan struct{}
+	doneOnce sync.Once
 	// readerAttached is closed by readOutput immediately before its first
 	// Read. waitAndHandle waits for it before releasing the parent's slave fd,
 	// so the tty is never torn down while the reader is still unattached —
@@ -881,11 +885,14 @@ func (r *Registry) invokeSessionHook(a *Agent) {
 	}
 	fn := a.provider.SessionHook
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
+	a.GoSafe("agent.sessionHookCancel", func() {
+		// Deferred so the hook's ctx is cancelled even if this goroutine dies
+		// on a panic — an uncancelled ctx would leak the hook for the life of
+		// the daemon.
+		defer cancel()
 		<-a.done
-		cancel()
-	}()
-	go fn(ctx, a)
+	})
+	a.GoSafe("provider.SessionHook", func() { fn(ctx, a) })
 }
 
 // commandTemplate returns the command template for the given agent type and
@@ -1167,7 +1174,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// an undrained tty loses its output to revocation. startPTY makes that
 	// survivable rather than fatal, but there is no reason to spend the socket
 	// bind inside the window as well.
-	go a.readOutput()
+	a.GoSafe("agent.readOutput", a.readOutput)
 
 	// Bind the attach socket before the agent enters the registry, so a
 	// permanent bind failure can be undone with a kill instead of a partial
@@ -1190,7 +1197,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	}
 
 	// Start process reaper — waits for exit, fires onExit callback
-	go r.waitAndHandle(a)
+	a.GoSafe("agent.waitAndHandle", func() { r.waitAndHandle(a) })
 
 	r.agents[req.Name] = a
 	log.Printf("agent %s: spawned pid=%d type=%s proc=%s", req.Name, a.PID, req.Type, procName)
@@ -1214,7 +1221,8 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// resolved provider declares one. Read off a.provider, not a registry
 	// global, so each agent runs its own provider's hook.
 	if a.provider != nil && a.provider.PostSpawnHook != nil {
-		go a.provider.PostSpawnHook(a)
+		hook := a.provider.PostSpawnHook
+		a.GoSafe("provider.PostSpawnHook", func() { hook(a) })
 	}
 
 	// Run lifetime session hook (e.g. modal-dismissal watcher per mg-4421).
@@ -1234,7 +1242,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// then stays empty, so Respawn re-delivers via re-exec, not re-nudge).
 	if req.InitialNudge != "" && a.nudge.NeedsInitialNudge && !promptViaArgv {
 		a.InitialNudge = req.InitialNudge
-		go func() {
+		a.GoSafe("agent.initialNudge", func() {
 			if err := a.NudgeWithMode(req.InitialNudge, NudgeWaitReady, a.nudge.InitialNudgeTimeout); err != nil {
 				log.Printf("agent %s: initial nudge failed: %v", req.Name, err)
 			}
@@ -1244,7 +1252,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 			// a bare submit terminator. No-op when no start verifier is wired
 			// (bare registry) or the agent carries no work item id.
 			r.verifyStartAndRenudge(a)
-		}()
+		})
 	}
 
 	return a, nil
@@ -1723,8 +1731,8 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		readerAttached: make(chan struct{}),
 	}
 
-	go a.readOutput()
-	go r.waitAndHandle(a)
+	a.GoSafe("agent.readOutput", a.readOutput)
+	a.GoSafe("agent.waitAndHandle", func() { r.waitAndHandle(a) })
 
 	if err := a.startListener(); err != nil {
 		log.Printf("agent %s: attach listener failed on respawn: %v", a.Name, err)
@@ -1766,11 +1774,11 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	// a.InitialNudge is only non-empty when the provider needed it at spawn.
 	// Wait-ready mode for the same reason as the spawn path (mg-ce61).
 	if a.InitialNudge != "" {
-		go func() {
+		a.GoSafe("agent.initialNudge.respawn", func() {
 			if err := a.NudgeWithMode(a.InitialNudge, NudgeWaitReady, a.nudge.InitialNudgeTimeout); err != nil {
 				log.Printf("agent %s: initial nudge on respawn failed: %v", a.Name, err)
 			}
-		}()
+		})
 	}
 
 	return a, nil
@@ -1878,6 +1886,13 @@ func (a *Agent) SendRaw(s string) error {
 // Done returns a channel that closes when the agent process exits.
 func (a *Agent) Done() <-chan struct{} {
 	return a.done
+}
+
+// closeDone closes a.done at most once. waitAndHandle closes it on the normal
+// path (last, after onExit) and again from a deferred call, so that a panic in
+// the exit path cannot leave Done() waiters parked forever.
+func (a *Agent) closeDone() {
+	a.doneOnce.Do(func() { close(a.done) })
 }
 
 // ExitErr returns the process exit error, or nil if still running.
@@ -2022,7 +2037,19 @@ func (a *Agent) closeSlave() {
 }
 
 // waitAndHandle waits for the agent process to exit and fires the onExit callback.
+//
+// This is the one goroutine in the sweep that a top-of-function recover would
+// get WRONG. It carries exit accounting, and its last act — closing a.done — is
+// the postcondition every waiter in the daemon depends on: Stop, StopAll, the
+// session-hook ctx watcher and the attach connections all park on Done(). A
+// guard that merely recovered and returned would convert one panic into a
+// permanent hang of shutdown, which is not an improvement on a crash. So the
+// close is made idempotent (a.closeDone) and deferred as well as called in
+// place: the normal path still closes done LAST, after the onExit callback, and
+// a panic anywhere above still releases the waiters on the way out.
 func (r *Registry) waitAndHandle(a *Agent) {
+	defer a.closeDone()
+
 	a.exitErr = a.cmd.Wait()
 
 	// The child is reaped, so nothing more can be written to this tty. Release
@@ -2084,10 +2111,16 @@ func (r *Registry) waitAndHandle(a *Agent) {
 	cb := r.onExit
 	r.mu.RUnlock()
 	if cb != nil {
-		cb(a, a.exitErr)
+		// Guarded AT THE CALL, not at the top of the goroutine. onExit is
+		// foreign code — in pogod it is the respawn/cleanup hook — and it is by
+		// some distance the most likely thing here to panic. Recovering right
+		// here means a blown-up callback costs that agent its cleanup and
+		// nothing else: the close below still runs on the normal path, in its
+		// documented order.
+		a.Safely("registry.onExit", func() { cb(a, a.exitErr) })
 	}
 
-	close(a.done)
+	a.closeDone()
 }
 
 // emitExit records either agent_stopped (clean / requested exit) or
@@ -2265,7 +2298,7 @@ func (a *Agent) startListener() error {
 	err := a.bindListenerLocked()
 	a.mu.Unlock()
 
-	go a.superviseListener(stop, interval)
+	a.GoSafe("agent.superviseListener", func() { a.superviseListener(stop, interval) })
 	return err
 }
 
@@ -2297,7 +2330,10 @@ func (a *Agent) bindListenerLocked() error {
 	// a.listener, avoiding a nil-pointer race when Cleanup nils it concurrently.
 	dead := make(chan struct{})
 	a.listenerDead = dead
-	go a.acceptLoop(l, dead)
+	// acceptLoop's `defer close(dead)` runs while the panic unwinds, before the
+	// guard recovers it, so a panicking accept loop still tells the supervisor
+	// the socket stopped being served and gets rebound.
+	a.GoSafe("agent.acceptLoop", func() { a.acceptLoop(l, dead) })
 	return nil
 }
 
@@ -2335,7 +2371,7 @@ func (a *Agent) acceptLoop(l net.Listener, dead chan struct{}) {
 		}
 		backoff = 0
 		lastLog = time.Time{}
-		go a.handleAttach(conn)
+		a.GoSafe("agent.handleAttach", func() { a.handleAttach(conn) })
 	}
 }
 
@@ -2573,13 +2609,13 @@ func (a *Agent) handleAttach(conn net.Conn) {
 	// has already been replaced.
 	connDone := make(chan struct{})
 	defer close(connDone)
-	go func() {
+	a.GoSafe("agent.attachCloseOnExit", func() {
 		select {
 		case <-a.done:
 			conn.Close()
 		case <-connDone:
 		}
-	}()
+	})
 
 	// Read input from conn and forward to PTY master.
 	// New clients send a leading FrameTypeResize byte to enter framed mode;
