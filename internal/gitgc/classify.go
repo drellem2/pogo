@@ -255,3 +255,21 @@ func (idx TicketIndex) OwnerState(name string) (id string, state TicketState) {
 func (idx TicketIndex) BranchState(branch string) (id string, state TicketState) {
 	return idx.OwnerState(BranchSuffix(branch))
 }
+
+// ItemIDsForName returns the macguffin work-item IDs a polecat NAME might
+// correspond to, most-specific first — the index-free direction of the same
+// enumeration OwnerState resolves against a TicketIndex.
+//
+// It exists so a caller outside GC can ask "which items could this branch be
+// naming" without either reaching for `mg` (OwnerState needs an index) or
+// keeping a second copy of pogo's polecat-naming history. OwnerMatchesItem
+// already covers "is this tree THIS item's"; this covers the open enumeration,
+// which is what the open-PR pass needs to decide whether a head branch is this
+// fleet's naming at all.
+//
+// The name is lowercased first, for the reason OwnerMatchesItem records: the
+// last-resort 4-hex recovery is a lowercase regex, so a mixed-case name would
+// silently yield no hex candidate rather than failing loudly.
+func ItemIDsForName(name string) []string {
+	return candidateIDs(strings.ToLower(name))
+}

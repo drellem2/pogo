@@ -4555,6 +4555,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// question of every open item on a clock, and reports the merged-but-open row
 	// the guard cannot see at all.
 	rootCmd.AddCommand(newCheckStrandedCmd(&jsonOutput))
+	rootCmd.AddCommand(newCheckPRTrackingCmd(&jsonOutput))
 	// check-memdirs (mg-a9b3): per-agent memory stores holding notes nothing
 	// loads. Sibling of the memory rows in `pogo doctor`, and the complement of
 	// them: those judge a store some session is still using, this one finds a
