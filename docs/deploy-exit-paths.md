@@ -135,7 +135,7 @@ it can reach and what two columns mean there:
 | 8 | yes — but the check is `verify_bounced`, not `verify_running` | it asserts that **a pogod is answering**, not that it reports `main`. A bounce installs nothing and never reads a ref, so there is no `$MAIN` to compare against; asserting one would assert a fact the run never established. For a bounce this code is now nearly unreachable: `verify_bounced` passes on *any* answer, so a bounce that fails it and then finds the port live has to have raced the daemon's boot. |
 | 13 | yes — `verify_or_recover` after the kickstart retry | the state the 2026-08-26 fallback created and had no remedy for. Installed? `no`; Bounced? `yes` — and there is nothing left running. This is the third code (with 5 and 8) that can leave the box worse than it found it, and the only one that says so in the integer. |
 | 11 | yes — `verify_orchestration` | unchanged, and it is the code that closes a bounce: a daemon that came back index-only has replaced a blackout with a quieter one. |
-| 130, 143 | yes | the signal paths. Not scoped to the drain window: a signal arrives wherever the run happens to be, and `stage=` in the record is the only thing that says where (mg-5c4a). |
+| 130, 143 | yes | the signal paths. Not scoped to the drain window: a signal arrives wherever the run happens to be, and `stage=` in the record says where (mg-5c4a). Since mg-769a the handler's own headline says it too — `terminated (SIGTERM) during stage restart (installed=yes; …)`, read when the signal lands rather than baked in when the trap was armed. |
 
 Every row above is `installed=no`, and that is measured rather than defaulted:
 `do_build` is the only thing that moves `installed`, and `bounce` does not call it.

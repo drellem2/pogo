@@ -416,7 +416,12 @@ DR_SIG_RC=$?
 # armed too late, or no longer prints this line. That is a verdict about the code
 # under test, and it is stated as one. (Mutation-checked: deleting the driver's
 # `trap ... INT` lands here and fails, backgrounded, with 0 inconclusive.)
-if grep -q 'interrupted (SIGINT) during the drain window' "$SANDBOX/sigtest.err"; then
+# The headline names the STAGE the signal landed in, not the region the trap was
+# armed in (mg-769a): a handler armed in the drain window is still armed three
+# stages later, so the region it was armed in stopped being evidence about the
+# signal. Here the two coincide — this SIGINT really does land in stage drain —
+# which is what makes it a usable grep rather than a weaker one.
+if grep -q 'interrupted (SIGINT) during stage drain' "$SANDBOX/sigtest.err"; then
     pass "the drain-window SIGINT was DELIVERED to the parent trap (the driver's INT handler ran) — the rc verdict below is about the handler, not about a lost signal"
     case "$DR_SIG_RC" in
         130) pass "SIGINT in the drain window STOPS the real cmd_redeploy at the signal (exit 130) — it does not restore dispatch and then carry on building" ;;

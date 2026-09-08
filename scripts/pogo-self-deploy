@@ -1203,7 +1203,7 @@ disarm_drain_restore() {
     log "drain restore disarmed: dispatch was never touched — $1"
 }
 
-# arm_signal_exits WHERE — install the INT/TERM handlers that turn a signal into
+# arm_signal_exits — install the INT/TERM handlers that turn a signal into
 # an ordinary exit, so that the EXIT trap sees the run's REAL STATUS.
 #
 # WHAT CLEARING THEM ACTUALLY COSTS, MEASURED — because the obvious claim is
@@ -1232,12 +1232,49 @@ disarm_drain_restore() {
 #
 # So the conversion is armed for the WHOLE run rather than for the drain window:
 # a status the EXIT trap can report is owed on every path the trap covers, not
-# only on the paths that have something to restore. WHERE names the region the
-# signal arrived in — the one fact a signal handler knows that the code does not.
+# only on the paths that have something to restore.
+#
+# WHAT THE HEADLINE MAY SAY (mg-769a). This used to take a WHERE argument naming
+# the region the trap was armed in — "during the drain window", "before the drain
+# window" — on the premise that the region is the one fact a signal handler knows
+# that the code does not. The premise is backwards, and widening the window is
+# what exposed it: a handler armed once and never cleared OUTLIVES its region by
+# design, so the baked string is a claim about the past that keeps being printed
+# about the present. The very FIRST firing proved it: 2026-09-08 is the only night
+# in the log that carries this headline at all — the four before it were killed
+# with the handler cleared, which is the mg-5c4a defect — and it died in the
+# RESTART stage while announcing itself as "during the drain window", two lines
+# under its own `deploy exited 143 during stage restart`. One message, two
+# regions, contradicting each other inside the same second, on the first night
+# the widened window let it speak. (Measured: `grep -n 'ERROR: terminated
+# (SIGTERM)' pogo-deploy.log` -> six lines, five of them the RUNNER's own trap,
+# one of them this. The ticket's "five nights of that message" is five nights of
+# the KILL.)
+#
+# The stage is a LIVE variable, so the handler reads it when the signal lands
+# instead of guessing from where it was armed. `installed=` comes from the same
+# place for the same reason: it is what a reader of a killed night actually asks,
+# it is measured at the mutation point rather than inferred from where the script
+# stopped, and getting it wrong is how "nothing was installed" reached a human
+# about a box whose pogod was already at the new revision. Whether a restore is
+# owed replaces the one thing WHERE said that the stage does not carry — the
+# stage is still `restart` on both sides of close_drain_window, and DRAIN_ARMED
+# is the flag that actually decides.
+#
+# Nothing here predicts the OUTCOME of the restore. That is restore_drain's to
+# report, from after the POST, and it does: "dispatch restored: draining=…".
+signal_exit_note() {
+    local restore="no dispatch restore is owed"
+    if $DRAIN_ARMED; then
+        restore="a dispatch restore is armed and runs on the way out"
+    fi
+    printf 'during stage %s (installed=%s; %s)' \
+        "${DEPLOY_STAGE:-?}" "${DEPLOY_INSTALLED:-?}" "$restore"
+}
+
 arm_signal_exits() {
-    local where="$1"
-    trap 'err "interrupted (SIGINT) '"$where"'"; exit 130' INT
-    trap 'err "terminated (SIGTERM) '"$where"'"; exit 143' TERM
+    trap 'err "interrupted (SIGINT) $(signal_exit_note)"; exit 130' INT
+    trap 'err "terminated (SIGTERM) $(signal_exit_note)"; exit 143' TERM
 }
 
 # close_drain_window — the FAR EDGE of the restore window (mg-46a4; moved by
@@ -1258,7 +1295,11 @@ arm_signal_exits() {
 # false, so restore_drain returns immediately and exits 8/11/13 restore nothing.
 close_drain_window() {
     DRAIN_ARMED=false
-    arm_signal_exits "after the kickstart — the old pogod is gone, so there is no dispatch state left to put back"
+    # No argument: what the signal handler says is read at signal time. The
+    # fact this call site used to bake into it — "there is no dispatch state
+    # left to put back" — is the DRAIN_ARMED=false on the line above, and
+    # signal_exit_note reads that flag rather than being told about it.
+    arm_signal_exits
 }
 
 # ---------------------------------------------------------------------------
@@ -4264,11 +4305,14 @@ drain_gate() {
         # whether there is dispatch to put back. Re-installing it would replace a
         # trap that also writes the reason record with one that only restores.
         #
-        # The INT/TERM conversion is already armed by then too (mg-5c4a); this
-        # re-arms the same pair with wording that names THIS region, and nothing
-        # clears them afterwards. Clearing them is what made four killed nights
-        # record themselves as `exit=0` — see arm_signal_exits.
-        arm_signal_exits "during the drain window"
+        # The INT/TERM conversion is already armed by then too (mg-5c4a), and
+        # nothing clears it afterwards — clearing it is what made four killed
+        # nights record themselves as `exit=0`. This re-arm is now a no-op kept
+        # for exactly that reason: it is the line a future edit would have to
+        # delete to leave a region unarmed, so it stays where the tests can see
+        # it. It no longer carries wording, because wording armed here would be
+        # read out three stages later — see arm_signal_exits (mg-769a).
+        arm_signal_exits
         # One hop, both facts (mg-08e9). The status decides which refusal this
         # is; the body is what lets the next morning check that ruling instead
         # of taking it on faith.
@@ -4376,7 +4420,7 @@ cmd_redeploy() {
     # owed to whoever reads the morning's log — and an untrapped TERM does not
     # suppress that record, it falsifies it: the trap runs with $? = 0 and the
     # night is filed as a success. See arm_signal_exits for the measurement.
-    arm_signal_exits "before the drain window"
+    arm_signal_exits
     deploy_stage "startup"
 
     # FIRST, ahead of every other precondition (mg-1bbf). Not because it is the
@@ -4617,7 +4661,7 @@ cmd_bounce() {
     # owed to whoever reads the morning's log — and an untrapped TERM does not
     # suppress that record, it falsifies it: the trap runs with $? = 0 and the
     # night is filed as a success. See arm_signal_exits for the measurement.
-    arm_signal_exits "before the drain window"
+    arm_signal_exits
     deploy_stage "startup"
 
     assert_out_of_band

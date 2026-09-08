@@ -3850,7 +3850,10 @@ source "$HERE/pogo-self-deploy"
 ERR_LOG="$SIGWORK/err"
 : > "\$ERR_LOG"
 REASON_FILE="$SIGWORK/reason"
-DEPLOY_INSTALLED="no"
+# installed=yes and stage=restart: the state of the 2026-09-08 night, and the
+# pair the headline used to describe as "during the drain window ... nothing was
+# installed" (mg-769a).
+DEPLOY_INSTALLED="yes"
 DRAIN_PRIOR=false
 DRAIN_ARMED=true
 DEPLOY_STAGE="drain"
@@ -3858,7 +3861,7 @@ DEPLOY_STAGE="drain"
 # would need a daemon, and what is under test is whether the call HAPPENS.
 drain_post() { printf '%s\n' "\$1" >> "$SIGWORK/posted"; printf '{"draining":%s}\n200' "\$1"; }
 trap on_deploy_exit EXIT
-arm_signal_exits "during the drain window"
+arm_signal_exits
 DEPLOY_STAGE="restart"
 DRIVER
     if [ "$1" = old ]; then
@@ -3963,6 +3966,65 @@ case "$(restore_msg)" in
     *) fail "restore_drain's message names neither: $(restore_msg)" ;;
 esac
 
+# --- mg-769a: and NEITHER may the signal headline ---------------------------
+# The same defect, one function over and one line up in the log. On 2026-09-08 —
+# the only night whose log carries this headline at all, because mg-5c4a is what
+# stopped the handler being cleared before it could speak — the run died in the
+# RESTART stage and the trap announced "terminated (SIGTERM) during the drain
+# window" two lines above the restore's own "deploy exited 143 during stage
+# restart": one message contradicting itself inside the same second, with the
+# false half the one that travels.
+#
+# The GREEN driver above arms in the drain window and is TERMed in `restart`,
+# exactly as the nights were, so its transcript is the direct measurement.
+case "$GREEN_OUT" in
+    *"during the drain window"*)
+        fail "mg-769a: the SIGTERM headline still says 'during the drain window' for a run killed in stage restart: $GREEN_OUT" ;;
+    *"terminated (SIGTERM) during stage restart"*)
+        pass "mg-769a: the SIGTERM headline names the stage the run ACTUALLY died in, read when the signal lands rather than baked in when the trap was armed" ;;
+    *)
+        fail "mg-769a: the SIGTERM headline names no stage at all: $GREEN_OUT" ;;
+esac
+# The install claim is the half that reached a human. It is now the measured
+# flag rather than a constant, so it is right on the path the run is most likely
+# to be killed on — the one where the install has already happened.
+case "$GREEN_OUT" in
+    *"installed=yes"*) pass "mg-769a: and it reports installed=yes from DEPLOY_INSTALLED — the claim that read 'nothing was installed' over a box already carrying the new binary" ;;
+    *"installed="*)    fail "mg-769a: the headline reports the wrong install state for a driver that set DEPLOY_INSTALLED=yes: $GREEN_OUT" ;;
+    *)                 fail "mg-769a: the headline makes no install statement at all, so the reason record's headline still cannot answer the first question a killed night raises: $GREEN_OUT" ;;
+esac
+# And it travels: reason= is the first err line of the ending stage, so what the
+# runner's alert quotes is this same sentence and not a summary of it.
+case "$(term_reason reason)" in
+    *"during stage restart"*"installed=yes"*)
+        pass "mg-769a: the reason record's headline carries the stage and the install state, so the runner's alert quotes them without re-deriving anything" ;;
+    *)  fail "mg-769a: reason='$(term_reason reason)' — the record's headline is not the corrected sentence" ;;
+esac
+
+# The three fields are READ, not remembered: signal_exit_note is exercised
+# directly across the states that differ, because a handler that happened to be
+# right for the driver's state and constant everywhere else is the defect.
+sig_note() ( DRAIN_ARMED="$1"; DEPLOY_STAGE="$2"; DEPLOY_INSTALLED="$3"; signal_exit_note )
+case "$(sig_note false verify no)" in
+    *"during stage verify"*"installed=no"*"no dispatch restore is owed"*)
+        pass "signal_exit_note (mg-769a): past close_drain_window it says the stage, installed=no, and that no restore is owed — the one fact WHERE carried that the stage does not, since stage=restart spans both sides of the disarm" ;;
+    *)  fail "signal_exit_note reads the disarmed state wrongly: $(sig_note false verify no)" ;;
+esac
+case "$(sig_note true drain partial)" in
+    *"during stage drain"*"installed=partial"*"restore is armed"*)
+        pass "signal_exit_note (mg-769a): and in the drain window it says so from DRAIN_ARMED, carrying installed=partial through rather than rounding it to a yes or a no" ;;
+    *)  fail "signal_exit_note reads the armed state wrongly: $(sig_note true drain partial)" ;;
+esac
+
+# No arm site may hand it wording again. That is what went stale: a string baked
+# at arm time is a claim about the past printed about the present, and the window
+# reaches three stages past the point it is armed at (mg-5c4a).
+if grep -n '^[[:space:]]*arm_signal_exits[[:space:]][[:space:]]*[^[:space:]]' "$HERE/pogo-self-deploy" >/dev/null; then
+    fail "mg-769a: an arm_signal_exits call site passes an argument again — $(grep -n '^[[:space:]]*arm_signal_exits[[:space:]][[:space:]]*[^[:space:]]' "$HERE/pogo-self-deploy" | tr '\n' ' ')"
+else
+    pass "mg-769a: every arm_signal_exits call site is argument-free, so no region can bake wording that outlives it"
+fi
+
 # --- close_drain_window: disarms, and does NOT clear the signal handlers ---
 close_window_probe() (
     DRAIN_ARMED=true
@@ -4015,38 +4077,86 @@ for FN in cmd_redeploy cmd_bounce; do
 done
 
 
-# --- every WHERE this file passes must build a trap that PARSES ------------
-# arm_signal_exits builds its handler by string interpolation, so a phrase
-# carrying a quote would install a trap that fails when it fires — silently,
-# because a trap body is not parsed until the signal arrives. The phrases are
-# taken from the file rather than retyped here: a call site added later is
-# covered without anybody remembering to cover it.
-WHERES="$(grep -o 'arm_signal_exits "[^"]*"' "$HERE/pogo-self-deploy" | sed 's/^arm_signal_exits "//; s/"$//' | sort -u)"
-[ -n "$WHERES" ] \
-    && pass "the WHERE phrases were found in the driver ($(printf '%s\n' "$WHERES" | grep -c .) of them) — the loop below has something to check" \
-    || fail "no arm_signal_exits call sites found: the loop below would pass over an empty set"
-# A subshell-bodied function so the arming and the read happen in the SAME
-# shell, and the caller gets the text rather than a verdict computed inside a
-# nested command substitution — bash 3.2 mis-parses a `case` there.
-where_trap() ( arm_signal_exits "$1"; trap -p TERM )
-WHERE_BAD=0
-while IFS= read -r W; do
-    [ -n "$W" ] || continue
-    # Read the trap OUT of the subshell that armed it, and match outside.
-    # `trap -p TERM | grep ...` reads empty for every phrase — bash resets
-    # trapped signals in the subshell a pipeline creates, so the grep sees
-    # nothing and the check fails identically on the good and the bad case.
-    OUT="$(where_trap "$W")"
-    case "$OUT" in
-        *"exit 143"*) : ;;
-        *) WHERE_BAD=$(( WHERE_BAD + 1 )); echo "  bad WHERE: $W -> [$OUT]" ;;
+# --- the handler bodies must PARSE when they FIRE --------------------------
+# This block used to enumerate the WHERE phrases and check that each built a
+# trap which parses: arm_signal_exits interpolated its argument, so a phrase
+# carrying a quote installed a handler that failed at signal time — silently,
+# because a trap body is not parsed until the signal arrives. mg-769a removed
+# the argument, and with it that whole class: the bodies are fixed literals now
+# and the only thing inside them is signal_exit_note's expansion.
+#
+# The REASON the enumeration existed survives its subject, so what replaces it
+# is the check the enumeration was standing in for — both handlers are FIRED,
+# with a real signal, at a real process, and asked for their status and their
+# text. A trap that no longer parses cannot pass this by being read correctly.
+if fn_body arm_signal_exits | grep -q "'\""; then
+    fail "arm_signal_exits interpolates into its trap bodies again — an argument carrying a quote installs a handler that fails silently at signal time, which is the class mg-769a removed by deleting the argument"
+else
+    pass "arm_signal_exits builds its trap bodies from fixed literals, so no call site can install a handler that fails to parse when it fires"
+fi
+
+# `sleep & wait` rather than a foreground sleep: bash defers a trapped signal
+# until the foreground command completes, so a bare `sleep 30` would make each
+# fire below cost the full 30s. `wait` is interruptible, and the handler runs at
+# the signal.
+FIRE_RC=0
+sig_fire() {
+    local sig="$1" pid i
+    rm -f "$SIGWORK/fire.ready" "$SIGWORK/fire.out"
+    cat > "$SIGWORK/fire.sh" <<FIREEOF
+set -u
+# shellcheck source=/dev/null
+source "$HERE/pogo-self-deploy"
+ERR_LOG=""
+DRAIN_ARMED=false
+DEPLOY_STAGE="post-check"
+DEPLOY_INSTALLED="yes"
+arm_signal_exits
+: > "$SIGWORK/fire.ready"
+sleep 30 & wait
+FIREEOF
+    # perl in front of the exec, not a bare `bash ... &`: backgrounding a job
+    # sets SIGINT (and SIGQUIT) to SIG_IGN in the child, the disposition crosses
+    # both fork and exec, and bash will not install a trap over an inherited
+    # SIG_IGN — so the INT case would exit 0 with no line and read as a broken
+    # handler. `$SIG{INT}="DEFAULT"` is a sigaction that resets it; the sigint
+    # suite front-ends its own launcher the same way for the same reason.
+    perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV' bash "$SIGWORK/fire.sh" \
+        >"$SIGWORK/fire.out" 2>&1 &
+    pid=$!
+    for i in $(seq 1 100); do
+        [ -f "$SIGWORK/fire.ready" ] && break
+        sleep 0.1
+    done
+    if [ ! -f "$SIGWORK/fire.ready" ]; then
+        kill "$pid" 2>/dev/null || true
+        FIRE_RC=-1
+        return 0
+    fi
+    kill -"$sig" "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null
+    FIRE_RC=$?
+    return 0
+}
+
+for SIGCASE in "TERM 143 terminated (SIGTERM)" "INT 130 interrupted (SIGINT)"; do
+    set -- $SIGCASE
+    SIG="$1"; WANT_RC="$2"; shift 2; WANT_TXT="$*"
+    sig_fire "$SIG"
+    FIRE_OUT="$(cat "$SIGWORK/fire.out" 2>/dev/null)"
+    if [ "$FIRE_RC" = "-1" ]; then
+        fail "$SIG: the probe never armed, so the fire established nothing"
+        continue
+    fi
+    [ "$FIRE_RC" = "$WANT_RC" ] \
+        && pass "$SIG fires a handler that PARSES and exits $WANT_RC — read off a real signal at a real process, not off the trap's text" \
+        || fail "$SIG: exited $FIRE_RC, not $WANT_RC — the handler did not run, or ran and broke: $FIRE_OUT"
+    case "$FIRE_OUT" in
+        *"$WANT_TXT during stage post-check (installed=yes; no dispatch restore is owed)"*)
+            pass "$SIG: and it prints the live stage, install state and restore state — past close_drain_window it says no restore is owed rather than promising one" ;;
+        *)  fail "$SIG: the handler's line is not the corrected sentence: $FIRE_OUT" ;;
     esac
-done <<WHEREEOF
-$WHERES
-WHEREEOF
-[ "$WHERE_BAD" -eq 0 ] \
-    && pass "every arm_signal_exits call site installs a TERM handler that exits 143 — a trap body is not parsed until it fires, so this is the only thing that catches a phrase that breaks it" \
-    || fail "$WHERE_BAD arm_signal_exits phrase(s) build a broken trap"
+done
 
 rm -rf "$SIGWORK"
 
