@@ -1145,6 +1145,12 @@ of defence: `pogo agent spawn-polecat` refuses an item with a retained tree and
 names it, and the stall-watch / priority-wake surfaces stop advertising it and
 report it with the opposite remedy instead. Three things follow for you:
 
+- **First ask whether anyone is still IN the tree** — `pogo agent list`, and
+  `mg show <id>` for the pid on the claim. A live polecat's tree presents exactly
+  as abandoned residue: dirty, on a branch, holding files that exist nowhere
+  else. None of the dispositions below apply to it, because it is not preserved
+  work to dispose of, it is work in progress, and there is nothing to decide
+  until that worker is stopped (drellem2/pogo#167).
 - **The remedy is not `refinery submit`.** For an uncommitted tree there is
   nothing to submit; for a committed one the refinery merges `origin/<branch>`
   and refuses a branch that is not on origin, so the command still cannot run.
@@ -1156,7 +1162,10 @@ report it with the opposite remedy instead. Three things follow for you:
 - `--preserved-override="<why>"` exists and is the one override whose
   consequence is **not recoverable** — the tree is reaped once its item
   concludes. Read the tree before you use it, and say in the reason what you
-  found.
+  found. It clears a refusal about work that was **left behind**, and it does not
+  and cannot clear the live-owner refusal, which has no flag at all: if a polecat
+  is still running on that name or that item, the answer is `pogo agent stop`,
+  not an override.
 
 **The note you write when you stop a polecat is no longer the mechanism
 (mg-fcba).** It was, and that is what got reported: on the 2026-08-20 pre-deploy

@@ -271,6 +271,7 @@ directions:
 
 | Gate | Question | Answer | Default |
 |---|---|---|---|
+| **Live owner** | Is a polecat **already running** on this name or this item? | **409** — permanent until that worker is stopped; **no override** | enforces, unioning registry + witness |
 | **Assignee** | May this item be executed automatically at all? | **409** — permanent; retrying unchanged is refused forever | enforces `human` / `parked` / `blocked:<agent>` |
 | **Pairing** | Has the obligation this item's repo puts on it been discharged? | **409** — permanent until the pair is filed | inert; one deployment's config |
 | **Stranded work** | Does this item already have pushed work a worker would ignore? | **409** — permanent until the branch is merged or abandoned | enforces, scanning |
@@ -278,10 +279,45 @@ directions:
 | **Merged work** | Has this item's work **already landed** on the target? | **409** — permanent until the item is closed | enforces when a refinery exists |
 | **Host load** | Can this **host** take another worker right now? | **503** — a *later*; the same request succeeds once the host clears | enforces, measuring |
 
-The first five are about the item. The last is about the machine, and nothing
+The first six are about the item. The last is about the machine, and nothing
 before it measured that.
 
-**Why the third exists.** Stopping a wedged polecat releases its claim and
+**Why the first is first, and why it has no override.** Every other gate here
+protects **throughput**: refusing work that is done, already written, not meant
+to run yet, or unaffordable right now. Getting one of those wrong costs a
+re-dispatch, which is why the four that can misfire on a heuristic carry an
+override — a guard that can be wrong with no way past it gets disarmed rather
+than fixed. This one protects a **running worker's tree**, whose uncommitted
+files are on no branch, in no stash and on no remote, so the cost of a wrong
+dispatch is the only copy of somebody's work (drellem2/pogo#167). It is **first**
+because those overrides are reached exactly when a live worker is standing in the
+tree: `--preserved-override` is typed at a message about a retained worktree and
+`--stranded-override` at one about an unmerged branch, and both describe work
+that was **left behind**. Clearing one of those is not permission to dispatch
+over work **in progress**, so the non-overridable answer has to be the one an
+operator meets first.
+
+Liveness is the registry **unioned with the persisted polecat witness** — the
+same answer `gitgc`'s sweep and stall-watch are gated on. The union is the point:
+the in-memory registry is empty after a pogod restart, permanently (it has no
+adopt path, mg-13a3), and a polecat that outlived the pogod that spawned it is
+exactly the worker nobody remembers is running. Alone among these gates it fails
+**closed** on a witness it cannot read, because `gitgc` already skips its whole
+sweep on that same failure and a gate that dispatched over it would be strictly
+less careful than the reaper it exists to cover for.
+
+Two guards sit behind it for the populations liveness cannot see. The spawn path
+stats the worktree directory before `git worktree add` and, on the add-failure
+rollback, **leaks** a directory this spawn did not create rather than
+force-removing it — a leak is visible, recoverable and costs disk, and the
+alternative is unrecoverable and silent (gh #31 is what the `--force` was added
+for). And branch reclamation asks which worktree **owns** a polecat name
+(`gitgc.PolecatNameForWorktree`, gh #94's predicate, called rather than restated)
+instead of which one has the branch checked out: those disagree the moment a
+polecat works a foreign branch, which review and QA polecats are instructed to
+do, and reading the branch is what made a live tree look dead.
+
+**Why the fourth exists.** Stopping a wedged polecat releases its claim and
 returns the item to `available/` without consulting its branch, so an item whose
 worker finished and pushed re-enters the pool describing itself as unstarted
 (mg-b468). On 2026-08-05 a re-dispatch went out three minutes after such a stop
@@ -321,7 +357,7 @@ does not carry the branch fails the spawn), and the dispatch emits
 `dispatch_stranded_work_adopted` rather than the override's event. Passing both
 is refused rather than resolved by precedence.
 
-**Why the fourth exists.** It is the third one's mid-flight twin, and the gap
+**Why the fifth exists.** It is the fourth one's mid-flight twin, and the gap
 between them was the *normal* state of every worker. The stranded-work gate is
 defined over **commits**, and a polecat commits at the END of its life — so a
 crash, a stop or an outage leaves behind exactly the state neither gate covered:
@@ -404,7 +440,7 @@ is not on origin** (mg-586d), so the command cannot run for precisely this
 population. A detached tree gets the remedy that actually applies — give those
 commits a ref (`git -C <tree> switch -c <branch>`) before anything else.
 
-**Why the fifth exists**, given the third. They are complements, not degrees of
+**Why the sixth exists**, given the fourth. They are complements, not degrees of
 the same check: the stranded-work gate covers a branch that is pushed and
 **unmerged**, and the case it stops applying to is the one that opens the moment
 that branch lands. pogod closes a work item at merge, but the close can be
