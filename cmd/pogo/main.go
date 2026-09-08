@@ -2125,7 +2125,9 @@ An absence is not automatically a fault, so each one is reported with what its
 own frontmatter asked for:
 
   auto_start = true   — pogod should have started it at boot and did not.
-  auto_start = false  — on-demand; nothing will bring it back until asked.
+  auto_start = false  — DELIBERATELY ABSENT by declaration: nothing is meant to
+                        start it but an explicit request, so absent-watch says
+                        so once and never escalates it.
   prompt unreadable   — configured, and we cannot say what was wanted.
 
 PARKED is not an absence. Park is the supported way to be down: it is
@@ -2138,10 +2140,13 @@ mail-check firing at an agent pogod will never bring back (mg-8677), and it is
 reported for a RUNNING agent too — that is when it is still cheap to fix.
 
 pogod announces the same findings on a clock without anyone running this
-command — see internal/absentwatch. This is the pull surface for the same
-report; neither is inside 'pogo doctor --check', because doctor is the only
-routine reader of that checklist and an instrument that cannot go red for the
-failure it names is worse than none.`,
+command — see internal/absentwatch. It announces a DELIBERATELY ABSENT
+on-demand agent ONCE and never escalates it, because there is no length of
+time after which auto_start = false becomes a fault (mg-c86d); this command is
+the pull surface that shows it for as long as it is off. Neither is inside
+'pogo doctor --check', because doctor is the only routine reader of that
+checklist and an instrument that cannot go red for the failure it names is
+worse than none.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			rep, err := client.AgentRoster()

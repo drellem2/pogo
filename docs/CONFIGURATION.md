@@ -2274,9 +2274,8 @@ rather than the precondition for being looked at. Report-only.
   - `auto_start = true` (**supervised**) — pogod should be running this. Uses
     `hold_down` (15m), long enough to clear a boot sweep and a respawn's ~2s
     registry gap.
-  - `auto_start = false` (**on-demand**) — nothing brings it back but somebody
-    asking. Uses `dormant_after` (24h). Against mg-7d20's own timeline that is a
-    notice on 08-11, 21 hours before the hand-restart happened.
+  - `auto_start = false` (**on-demand**) — **DELIBERATELY ABSENT**. Uses
+    `dormant_after` (24h) and is then said **once**. See below.
   - **prompt unreadable** — treated as *supervised*. We know the agent was
     configured and cannot read what was wanted; rounding an unknown toward the
     quieter answer is this lineage's founding bug.
@@ -2286,18 +2285,79 @@ rather than the precondition for being looked at. Report-only.
   missing registry, or a machine with zero configured prompts each emit
   `absent_watch_error` and evaluate nothing. `GET /agents/roster` answers **503**
   rather than `200` with an empty list.
-- **Routing.** Findings go to `notify_to` (`mayor`); a standing finding also
+- **Routing.** Fault findings go to `notify_to` (`mayor`); a standing one also
   copies `human` after `escalate_after` (48h). **A finding that names `notify_to`
   itself escalates immediately** — and here that rule is stronger than
   deaf-watch's, because the recipient is not merely unwakeable, it is not
-  running, so the mail has no reader at all.
-- **Episodes.** Same contract as deaf-watch: a changed roster mails at once, an
-  unchanged one waits `renotify_after`, the all-clear reaches everyone who was
-  alarmed, and a generic `incident_episode_cleared{kind:"absent_agent"}` event
-  carries the roster and window (mg-55b2).
+  running, so the mail has no reader at all. It is also the one rule a *declared*
+  absence keeps.
+- **Episodes.** Same contract as deaf-watch, over the **fault** set only: a
+  changed roster mails at once, an unchanged one waits `renotify_after`, the
+  all-clear reaches everyone who was alarmed, and a generic
+  `incident_episode_cleared{kind:"absent_agent"}` event carries the roster and
+  window (mg-55b2).
 - **It never starts the agent for you.** Doing so would paper over *why* it left
   — a requested stop, a crash with no respawn, an auto-start sweep that failed —
   and that is the part worth knowing.
+
+### DELIBERATELY ABSENT: `auto_start = false` is a declaration, not a symptom
+
+The first cut had two dials on one alarm — 15m for supervised, 24h for on-demand
+— and after that they were the **same finding**: renotified every 12h, escalated
+to `human` at 48h, open until the agent came back.
+
+For an on-demand agent that ending does not exist. By 2026-09-07 the detector had
+been escalating `doctor` and `representative` to the mayor for **132 unbroken
+hours**, with the escalation preamble asserting that *"a fleet that has not
+started it in 132h is not going to on its own"* — which is the **definition** of
+an on-demand agent, not a fault in it. Both are `auto_start = false` by design
+(doctor is additionally reaped nightly on purpose), so the finding could clear
+only by starting an agent that is not supposed to be running. mg-c232 recorded
+the cost of that shape in a different detector: **an alarm that cannot clear
+trains its reader to ignore it** — and absent-watch has no redundancy, so a
+reader who learns to skip it leaves the fleet with no sight of absence at all
+(mg-c86d).
+
+`parked` is the shape of the answer one layer over: an intentional absence that
+stays visible without drawing nudges. `auto_start = false` **is** the same
+declaration for an agent — already in the config, already what `pogo agent
+roster` reads — so nobody has to add a suppression flag. The confirmed set is
+partitioned:
+
+| | members | treatment |
+|---|---|---|
+| **fault** | supervised, unclassifiable | an episode: renotified, escalated on age, cleared when the agent returns |
+| **declared** | on-demand (`auto_start = false`) | reported **once** per unbroken absence, then carried as roster **context** in fault mail |
+
+A declared absence opens no episode, is never renotified, and **never ages into
+an escalation at any `escalate_after` setting**. It is announced again only after
+the agent has come back and gone away once more, and it emits
+`absent_watch_declared` rather than `absent_watch_fired`, so a reader counting
+alarms does not count it.
+
+**Quieted, never hidden.** mg-f341 is the opposite failure and one line away — an
+`auto_start = false` agent that is *invisible* while absent, which is the hole
+absent-watch was built to close. So a declared absence is still announced once at
+`dormant_after`, still named in the `ALSO ABSENT, BY DECLARATION` section of every
+fault mail and every all-clear, still counted in the denominator those mails
+print, and still shown by `pogo agent roster`. What changed is that it stopped
+being an *open finding*.
+
+Three edges worth knowing:
+
+- **The absent-coordinator rule survives the partition.** If a declared absence
+  names `notify_to` itself, its single notice still copies `escalate_to` — that is
+  not patience, it is a mail whose reader does not exist.
+- **Reclassifying an absent agent closes its episode without restoring it.**
+  Editing `auto_start = false` onto an agent that is already absent is a plausible
+  response to this alarm; the close then reads *"episode closed by DECLARATION"*
+  and lists the agent under `STILL ABSENT`, never under `Restored`. That check
+  reads the live snapshot, not the confirmed set, so it holds inside the window
+  where the agent is too freshly absent to be confirmed in either.
+- **The one-time ledger is in memory.** A pogod restart re-arms it, so a
+  long-absent on-demand agent is announced once more roughly `dormant_after` after
+  each restart. Bounded and honest — the same property the episode ids and
+  renotify clocks already have.
 
 ```toml
 [absent_watch]
@@ -2306,15 +2366,20 @@ interval = "5m"            # sample cadence (default 5m)
 hold_down = "15m"          # a SUPERVISED absence must persist this long before
                            # it is announced (default 15m; negative disables —
                            # tests only)
-dormant_after = "24h"      # the same threshold for an ON-DEMAND absence
+dormant_after = "24h"      # when an ON-DEMAND absence gets its ONE notice
                            # (default 24h). A separate knob, not a multiple of
                            # hold_down: they answer different questions, and
                            # tying them would make tuning one retune the other.
-renotify_after = "12h"     # an unchanged roster re-mails after this (default 12h)
+renotify_after = "12h"     # an unchanged FAULT roster re-mails after this
+                           # (default 12h). Declared absences are never
+                           # renotified, at any setting.
 notify_to = "mayor"        # mailbox announcements go to (default mayor)
-escalate_after = "48h"     # a standing finding also copies `human` after this
+escalate_after = "48h"     # a standing FAULT also copies `human` after this
                            # (default 48h; negative disables AGE-based escalation
-                           # only — an absent `notify_to` still escalates at once)
+                           # only — an absent `notify_to` still escalates at once).
+                           # A DECLARED absence never ages into an escalation at
+                           # any setting: there is no duration after which
+                           # `auto_start = false` becomes a fault.
 ```
 
 `pogo agent roster` is the pull surface for the same report, and `pogo agent

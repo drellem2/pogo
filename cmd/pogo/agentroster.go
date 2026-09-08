@@ -60,7 +60,7 @@ func absentNote(m agent.RosterMember) string {
 	case agent.RosterSupervised:
 		return "auto_start = true — should have started at boot"
 	case agent.RosterOnDemand:
-		return "auto_start = false — on-demand; nothing will bring it back"
+		return "auto_start = false — on-demand: DELIBERATELY ABSENT by declaration, and only an explicit start brings it back"
 	case agent.RosterUnclassifiable:
 		return "prompt unreadable — cannot say what was wanted"
 	default:
