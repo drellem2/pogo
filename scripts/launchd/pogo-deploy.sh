@@ -259,8 +259,10 @@
 # Retries are the weaker half of this and must not be mistaken for the fix.
 # `draining=true` refuses new polecat dispatch (verified live in the running
 # daemon: internal/agent/api.go handleSpawnPolecat, shipped in 1b1f12d), so a
-# drain is MONOTONE — the count only falls. The moment an attempt gives up,
-# pogo-self-deploy's exit trap restores dispatch and the fleet refills. Three
+# drain is MONOTONE — the count only falls. When an attempt gives up on its own
+# (exit 7, measured), pogo-self-deploy's exit trap restores dispatch and the
+# fleet refills; when it is KILLED, that trap is what mg-5c4a is about and the
+# `dispatch:` line at the end of every run is what checks it happened. Three
 # 30-minute attempts are therefore strictly worse than one 90-minute attempt:
 # each retry starts against a partly-fresh fleet, and the long blockers it was
 # waiting out have been joined by new ones.
@@ -3222,8 +3224,21 @@ describe_exit() {
         # rendered as "unclassified failure" until the mg-0155 enumeration asked
         # for a row per exit path and found two with no story at all — which is
         # how a launchd shutdown mid-deploy would have been reported.
-        130) echo "INTERRUPTED (SIGINT) during the drain window — aborted from a terminal; dispatch was restored on the way out and nothing was installed" ;;
-        143) echo "TERMINATED (SIGTERM) during the drain window — something killed the deploy (a logout or shutdown will do it); dispatch was restored on the way out and nothing was installed" ;;
+        # WHAT THE SIGNAL SAYS, AND NOTHING ELSE (mg-5c4a). These two lines used
+        # to end "dispatch was restored on the way out and nothing was
+        # installed" — a description of the happy path, printed regardless of
+        # which path ran. On 2026-09-05 both clauses were false of the run they
+        # described: drain read `true` 40s after the kill, and 3c74587 had been
+        # installed three and a half hours earlier. An instrument that states
+        # the wrong thing to whoever reads it costs more than one nobody reads.
+        #
+        # 130/143 are the shell's codes for "a signal ended this", and that is
+        # the whole of what they establish. Where the run had got to is in the
+        # reason record's `stage=`, and whether dispatch came back is in
+        # /agents/drain — both are read and reported, so this line points at
+        # them instead of guessing on their behalf.
+        130) echo "INTERRUPTED (SIGINT) — a signal ended the run; the exit code says nothing about how far it had got, so read stage= in the reason record and the dispatch: line at the end of this run" ;;
+        143) echo "TERMINATED (SIGTERM) — something killed the deploy (the run deadline, a logout or a shutdown will do it); the exit code says nothing about how far it had got, so read stage= in the reason record and the dispatch: line at the end of this run" ;;
         *) echo "unclassified failure" ;;
     esac
 }
@@ -3525,14 +3540,32 @@ EOF
             ;;
         130|143)
             cat <<'EOF'
-The deploy was KILLED mid-drain — not by anything it found, but by a signal. It
-had not reached `go install`, so nothing was built, installed or restarted, and
-its exit trap put dispatch back on the way out. There is nothing to repair.
+The deploy was KILLED by a signal — not by anything it found. That is ALL this
+exit code establishes, and this block used to say considerably more than that:
+it told every reader the run had stopped before `go install`, that nothing was
+built or restarted, and that "its exit trap put dispatch back on the way out.
+There is nothing to repair."
 
-What is worth knowing is WHO sent it. A SIGTERM at 03:00 with nobody at the
-keyboard usually means the machine was going down (logout, shutdown, a forced
-restart) — in which case the deploy is the symptom, not the problem. The next
-nightly fire carries the same work.
+Four nights ran that way (2026-09-04..07, mg-5c4a). Each was killed at 05:30 in
+the RESTART stage, not before `go install` — one of them with `installed=yes` —
+and each left dispatch draining fleet-wide, read by hand the next morning
+because nothing reported it.
+
+WHAT TO READ INSTEAD, in this order:
+
+  1. `stage=` and `installed=` in the reason record named above. The deploy
+     writes them itself and they say where the run actually got to; a
+     `stage=restart` means pogod was being replaced when the signal landed, and
+     `installed=yes` means a new binary is already on disk.
+  2. the `dispatch:` line this run writes on its way out. `draining=true` with
+     nothing running means the fleet is not dispatching and needs the POST that
+     line gives you. `did not answer` means the reading was not obtained — it is
+     not a fleet that is fine.
+  3. WHO sent the signal. A SIGTERM at 05:30 is this runner's own deadline
+     watchdog and the DEADLINE EXCEEDED lines above say so. A SIGTERM at 03:00
+     with nobody at the keyboard usually means the machine was going down, in
+     which case the deploy is the symptom and the next nightly fire carries the
+     same work.
 EOF
             ;;
         11)
@@ -4118,6 +4151,84 @@ arm_run_deadline() {
     log "deadline: armed — the WHOLE run is bounded at ${secs}s regardless of which stage is stuck (watchdog pid $WATCHDOG_PID, run pid $target)"
 }
 
+# ---------------------------------------------------------------------------
+# The dispatch read (mg-5c4a) — the one instrument that can see a stuck drain
+# ---------------------------------------------------------------------------
+# `draining=true` refuses ALL new polecat dispatch, fleet-wide, and NOTHING on
+# this box reports it. `pogo server status` reported mode=full (an unrelated
+# field). Stall-watch, the agent roster and every liveness probe read green,
+# because pogod is up and answering — it is simply not dispatching. The only way
+# to see it was to ask /agents/drain directly, and nothing did, on a schedule or
+# otherwise.
+#
+# So it was seen four times by a human happening to look, on four consecutive
+# nights (2026-09-04..07), each time hours after a killed deploy left it set.
+# Twice the clear destroyed the evidence for the mechanism before anyone had it.
+# A safety property that holds because somebody checks by hand is not a
+# mechanism, and it does not improve with repetition.
+#
+# THIS RUN IS THE RIGHT PLACE TO ASK. The deploy is what sets the flag, so the
+# process that just finished is the one that knows a deploy is no longer
+# running — which is exactly what makes `draining=true` unambiguous rather than
+# merely possible. It costs one bounded curl on the way out, on every path the
+# EXIT trap reaches, including the deadline kill (all four of those nights wrote
+# a terminal line, so all four would have carried this one).
+#
+# It reports on BOTH values on purpose. A line that appears only when something
+# is wrong is a line nobody can distinguish from a check that stopped running;
+# `dispatch: draining=false` every night is the positive control that makes the
+# `true` mean something.
+DISPATCH_URL="${POGO_DEPLOY_SERVER_URL:-http://127.0.0.1:10000}"
+DISPATCH_READ_TIMEOUT="${POGO_DEPLOY_DISPATCH_TIMEOUT:-5}"
+
+# dispatch_read — the raw /agents/drain body, or empty. Separate from the
+# reporting so the tests can drive the reporting without a daemon.
+dispatch_read() {
+    curl -sf --max-time "$DISPATCH_READ_TIMEOUT" "$DISPATCH_URL/agents/drain" 2>/dev/null || true
+}
+
+# BRE only, BSD sed — the same two extractors pogo-self-deploy uses, for the
+# same reason (GNU's \| alternation silently matches nothing on macOS).
+dispatch_bool() { sed -n "s/.*\"$1\":\([tf][a-z]*\).*/\1/p"; }
+dispatch_num()  { sed -n "s/.*\"$1\"[ ]*:[ ]*\([0-9][0-9]*\).*/\1/p"; }
+
+# report_dispatch_state RC — read the flag and say what it says. Never asserts:
+# an unreadable endpoint is reported as a reading that was not obtained, which
+# is a different fact from a fleet that is dispatching.
+report_dispatch_state() {
+    local rc="$1" body draining count
+    body="$(dispatch_read)"
+    if [ -z "$body" ]; then
+        log "dispatch: /agents/drain did not answer within ${DISPATCH_READ_TIMEOUT}s — this run cannot say whether dispatch is enabled. That is a reading it did not get, NOT a fleet that is fine; check by hand: curl -s $DISPATCH_URL/agents/drain"
+        return 0
+    fi
+    draining="$(printf '%s' "$body" | dispatch_bool draining)"
+    count="$(printf '%s' "$body" | dispatch_num count)"
+    case "$draining" in
+        false)
+            log "dispatch: draining=false, ${count:-0} polecat(s) — the fleet can dispatch"
+            return 0 ;;
+        true) : ;;
+        *)
+            log "dispatch: /agents/drain answered without a draining flag, so this run establishes nothing about dispatch — it said: $body"
+            return 0 ;;
+    esac
+
+    # The unambiguous case, and the whole reason this exists: the deploy that
+    # sets the flag has ended, so there is no drain in progress for it to belong
+    # to. Reported as an ERROR line so it rides the same channel as every other
+    # thing worth waking up to in this log.
+    err "DISPATCH IS LEFT DRAINING: /agents/drain reports draining=true with count=${count:-0}, and the deploy that could have set it (rc=$rc) has just ended."
+    err "  No polecat will be dispatched until this is cleared, and nothing else on this box will say so: pogod is up, /version answers, \`pogo server status\` reads mode=full and the agent roster looks normal."
+    err "  Clear it — dispatch resumes immediately:"
+    err "    curl -X POST $DISPATCH_URL/agents/drain -H 'Content-Type: application/json' -d '{\"draining\":false}'"
+    if [ -n "$POGO_CLI" ]; then
+        run_bounded 30 "$POGO_CLI" events emit --type=deploy_dispatch_left_draining --agent=pogo-deploy \
+            --details="{\"exit\":$rc,\"count\":${count:-0}}" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
 # on_exit RC — the single EXIT trap: record the night's outcome, then drop the
 # lock. One trap rather than a record call at each of the seven exit points,
 # because the exit point that gets forgotten is exactly the one that leaves the
@@ -4166,6 +4277,18 @@ on_exit() {
     fi
     if $LOCK_HELD; then
         rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
+    # After the lock, so a bounded curl cannot hold it, and before the terminal
+    # line, so the reading is part of the run's own record rather than something
+    # appended after it ended (mg-5c4a).
+    #
+    # ONLY WHEN THIS FIRE ATTEMPTED. A fire that was late, locked out or already
+    # settled did not set any drain flag — and if it was locked out, the drain it
+    # would read belongs to the deploy that IS running, which is a correct drain
+    # in progress. Alarming on that would make the loudest line in this log fire
+    # on the healthy case.
+    if $ATTEMPT_ARMED; then
+        report_dispatch_state "$rc"
     fi
     log "pogo-deploy: end (rc=$rc after ${elapsed}s)"
 }

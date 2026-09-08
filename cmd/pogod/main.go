@@ -657,6 +657,14 @@ func healthFull(w http.ResponseWriter, r *http.Request) {
 		// without `pgrep` — which cannot see it (mg-cbee, see health.Pogod).
 		PID: os.Getpid(),
 	}
+	// The dispatch flag, reported only when there is a registry to read it
+	// from: with no registry there is nothing that could be draining, and
+	// asserting `false` would be a claim about a subsystem that is not running
+	// (mg-5c4a). nil renders as an absence, not as "dispatch is enabled".
+	if agentRegistry != nil {
+		draining := agentRegistry.Draining()
+		pogodHealth.Draining = &draining
+	}
 
 	// Agents health
 	var agentsHealth health.Agents

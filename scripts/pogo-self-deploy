@@ -1058,11 +1058,19 @@ fmt_http_body() {
 # while the fleet quietly stops doing work. Unattended at 03:00 that is a worse
 # outcome than a missed deploy (mg-46a4 §5b).
 #
-# exit 5 (kickstart), exit 8 (verify) and exit 11 (orchestration) LOOK like they
-# are in the window and are not: by then the old process is gone, and a landed
-# kickstart resets draining to its zero value (internal/agent/agent.go). That is
-# luck of zero-value initialisation, not a restore path — do not lean on it, and
-# do not mistake it for coverage of the exits above.
+# exit 8 (verify) and exit 11 (orchestration) LOOK like they are in the window
+# and are not: by then the kickstart has RETURNED, the old process is gone, and
+# a landed kickstart resets draining to its zero value (internal/agent/agent.go).
+# That is luck of zero-value initialisation, not a restore path — do not lean on
+# it, and do not mistake it for coverage of the exits above.
+#
+# exit 5 (kickstart FAILED) used to be listed alongside them and is squarely
+# INSIDE the window (mg-5c4a). "The old process is gone" is a claim about what
+# `launchctl kickstart -k` did, and exit 5 is the code for it not having done
+# it; a kickstart that never returned has killed nothing at all. Four nights of
+# a hung kickstart with the old pogod up and DRAINING — while the run had
+# already declared there was nothing left to put back — is what moved the
+# disarm below do_restart. See close_drain_window.
 #
 # exit 12 (orchestration already stopped) is squarely INSIDE it, and is the one
 # exit in the window where the restore cannot possibly work: the restore POST
@@ -1075,7 +1083,7 @@ fmt_http_body() {
 # that is the same bug wearing a different hat: this deploy would switch
 # dispatch back on underneath whoever turned it off.
 DRAIN_PRIOR=""     # draining as it was BEFORE this run touched it: true|false|?
-DRAIN_ARMED=false  # true only between "we may have enabled drain" and the kickstart
+DRAIN_ARMED=false  # true only between "we may have enabled drain" and the kickstart RETURNING
 
 # drain_state — the live draining flag: "true" | "false" | "?" when unreadable.
 # "?" is the same unreachable sentinel the mail-check set uses, and for the same
@@ -1112,7 +1120,11 @@ restore_drain() {
         err "  (this ASSERTS draining=false rather than restoring a value — verify by hand if drain was intentionally on)"
         want=false
     fi
-    log "restoring dispatch to its pre-deploy state (draining=$want) — deploy exited $code before the kickstart"
+    # "before the kickstart" is what this line used to say, and mg-5c4a moved
+    # the window's far edge past the kickstart itself — so the phrase would now
+    # be false on the one path that motivated the move. The STAGE is the fact
+    # the reader wanted from it anyway: it says where the run actually stopped.
+    log "restoring dispatch to its pre-deploy state (draining=$want) — deploy exited $code during stage ${DEPLOY_STAGE:-?}"
     local raw; raw="$(drain_post "$want")"
     st="$(http_status "$raw")"
     case "$st" in
@@ -1189,6 +1201,64 @@ disarm_drain_restore() {
     $DRAIN_ARMED || return 0
     DRAIN_ARMED=false
     log "drain restore disarmed: dispatch was never touched — $1"
+}
+
+# arm_signal_exits WHERE — install the INT/TERM handlers that turn a signal into
+# an ordinary exit, so that the EXIT trap sees the run's REAL STATUS.
+#
+# WHAT CLEARING THEM ACTUALLY COSTS, MEASURED — because the obvious claim is
+# false and mg-5c4a was filed on it. bash DOES run an EXIT trap when the shell
+# is killed by an untrapped SIGTERM. What it does not do is give the trap the
+# status: measured on this box (/bin/bash 3.2.57, arm64-apple-darwin24), the
+# same script TERMed twice —
+#
+#     TERM cleared:  shell exits 143, EXIT trap runs with $? = 0
+#     TERM armed:    shell exits 143, EXIT trap runs with $? = 143
+#
+# on_deploy_exit opens with `local code=$?`, so with the handlers cleared a run
+# that was KILLED writes `exit=0` into its own reason record — the record the
+# runner reads to describe the night — with an empty `reason=`, because the err
+# line naming the signal is the thing the cleared handler did not emit.
+#
+# That is not hypothetical. All four killed nights (2026-09-04..07) wrote
+# exactly that, timestamped to the second of the kill:
+#
+#     exit=0 / stage=restart / reason=            <- 05:30:0xZ, all four nights
+#     exit=7 / stage=drain   / reason=deadline …  <- 2026-08-16, an ordinary exit
+#
+# deploy_reason_record is called from the EXIT trap and nowhere else, so those
+# four files are the proof that the trap RAN — and the proof that what it
+# recorded about the night was "0", the code for success.
+#
+# So the conversion is armed for the WHOLE run rather than for the drain window:
+# a status the EXIT trap can report is owed on every path the trap covers, not
+# only on the paths that have something to restore. WHERE names the region the
+# signal arrived in — the one fact a signal handler knows that the code does not.
+arm_signal_exits() {
+    local where="$1"
+    trap 'err "interrupted (SIGINT) '"$where"'"; exit 130' INT
+    trap 'err "terminated (SIGTERM) '"$where"'"; exit 143' TERM
+}
+
+# close_drain_window — the FAR EDGE of the restore window (mg-46a4; moved by
+# mg-5c4a). Call it once the kickstart has RETURNED, and never before.
+#
+# The old call site was the line before `do_restart`, and it stated its premise
+# as a fact: the kickstart "kills the pogod whose dispatch flag we mutated, so
+# from here there is no state left to restore and no process to restore it on".
+# That is true of a kickstart that LANDS. It is false of one that does not
+# return — and that is the only shape this has ever failed in: on four
+# consecutive nights `launchctl kickstart -k` hung for three and a half hours
+# with the OLD pogod still up, still answering, and still draining, while the
+# run had already declared there was nothing left to put back.
+#
+# A position in the script is not evidence about another process. The kickstart
+# RETURNING is, so the disarm is keyed on that and on nothing earlier.
+# Everything past this call behaves exactly as it did before: DRAIN_ARMED is
+# false, so restore_drain returns immediately and exits 8/11/13 restore nothing.
+close_drain_window() {
+    DRAIN_ARMED=false
+    arm_signal_exits "after the kickstart — the old pogod is gone, so there is no dispatch state left to put back"
 }
 
 # ---------------------------------------------------------------------------
@@ -4193,8 +4263,12 @@ drain_gate() {
         # here: DRAIN_ARMED, not the trap, is what says
         # whether there is dispatch to put back. Re-installing it would replace a
         # trap that also writes the reason record with one that only restores.
-        trap 'err "interrupted (SIGINT) during the drain window"; exit 130' INT
-        trap 'err "terminated (SIGTERM) during the drain window"; exit 143' TERM
+        #
+        # The INT/TERM conversion is already armed by then too (mg-5c4a); this
+        # re-arms the same pair with wording that names THIS region, and nothing
+        # clears them afterwards. Clearing them is what made four killed nights
+        # record themselves as `exit=0` — see arm_signal_exits.
+        arm_signal_exits "during the drain window"
         # One hop, both facts (mg-08e9). The status decides which refusal this
         # is; the body is what lets the next morning check that ruling instead
         # of taking it on faith.
@@ -4297,6 +4371,12 @@ cmd_redeploy() {
         ERR_LOG="$(mktemp -t pogo-self-deploy-err 2>/dev/null)" || ERR_LOG=""
     fi
     trap on_deploy_exit EXIT
+    # Armed WITH the EXIT trap, not inside the drain branch (mg-5c4a). Before
+    # the drain there is nothing to restore, but there is still a reason record
+    # owed to whoever reads the morning's log — and an untrapped TERM does not
+    # suppress that record, it falsifies it: the trap runs with $? = 0 and the
+    # night is filed as a success. See arm_signal_exits for the measurement.
+    arm_signal_exits "before the drain window"
     deploy_stage "startup"
 
     # FIRST, ahead of every other precondition (mg-1bbf). Not because it is the
@@ -4370,28 +4450,21 @@ cmd_redeploy() {
     else
         mail_pre="?"
     fi
-    # Disarm BEFORE the kickstart: it kills the pogod whose dispatch flag we
-    # mutated, so from here there is no state left to restore and no process to
-    # restore it on. The replacement starts with draining at its zero value.
-    # This is the far edge of the window mg-46a4 identified; past it, a restore
-    # POST would be aimed at a DIFFERENT daemon than the one we changed — and if
-    # drain had been on before, it would re-drain the fresh fleet.
-    #
-    # DRAIN_ARMED is what disarms the restore; the EXIT trap STAYS (mg-0155).
-    # `trap - EXIT` here used to be belt-and-braces over the same flag, and since
-    # the trap also writes the reason record it would now silence the run's
-    # report over exactly the region where an install HAS happened — exit 8, the
-    # one code whose remedy is allowed to talk about a binary on disk. INT/TERM
-    # are still cleared: their only job was to convert a signal into a
-    # restore-able exit, and there is nothing left to restore.
-    DRAIN_ARMED=false
-    trap - INT TERM
+    # THE DISARM IS BELOW do_restart, NOT ABOVE IT (mg-5c4a). It used to sit
+    # here, on the premise that the kickstart kills the pogod whose flag we
+    # mutated — true of a kickstart that lands, false of one that hangs, and a
+    # hang is how this failed on four consecutive nights. close_drain_window
+    # carries the whole argument, including why `trap - INT TERM` went with it.
     deploy_stage "restart"
     # The pre-kickstart half of the spawn accounting (mg-9cc0). Taken as late as
     # possible and unconditionally: `runs` is a lifetime counter, so the delta is
     # only about this restart if nothing else bounced the job in between.
     local spawns_pre; spawns_pre="$(spawn_snapshot)"; spawns_pre="${spawns_pre%%	*}"
     do_restart
+    # The kickstart RETURNED, so the daemon whose flag we set is gone and the
+    # one coming up starts with draining at its zero value. That — and not a
+    # line number — is what makes the restore unnecessary from here on.
+    close_drain_window
     deploy_stage "verify"
     # Report the spawn accounting BEFORE acting on the verify result, not after.
     # A deploy that burned spawns AND failed to come up is the worst case this
@@ -4539,6 +4612,12 @@ cmd_bounce() {
         ERR_LOG="$(mktemp -t pogo-self-deploy-err 2>/dev/null)" || ERR_LOG=""
     fi
     trap on_deploy_exit EXIT
+    # Armed WITH the EXIT trap, not inside the drain branch (mg-5c4a). Before
+    # the drain there is nothing to restore, but there is still a reason record
+    # owed to whoever reads the morning's log — and an untrapped TERM does not
+    # suppress that record, it falsifies it: the trap runs with $? = 0 and the
+    # night is filed as a success. See arm_signal_exits for the measurement.
+    arm_signal_exits "before the drain window"
     deploy_stage "startup"
 
     assert_out_of_band
@@ -4576,15 +4655,14 @@ cmd_bounce() {
         mail_pre="?"
     fi
 
-    # Disarm before the kickstart, for cmd_redeploy's reason: it kills the pogod
-    # whose dispatch flag we mutated, so past this line there is no state left to
-    # restore and no process to restore it on. The EXIT trap STAYS — it still
-    # writes the reason record.
-    DRAIN_ARMED=false
-    trap - INT TERM
+    # Disarmed AFTER the kickstart returns, for cmd_redeploy's reason
+    # (close_drain_window): a kickstart that has not returned has not
+    # necessarily killed anything, and the flag we set is still on a daemon that
+    # is still up. The EXIT trap STAYS — it still writes the reason record.
     deploy_stage "restart"
     local spawns_pre; spawns_pre="$(spawn_snapshot)"; spawns_pre="${spawns_pre%%	*}"
     do_restart
+    close_drain_window
     deploy_stage "verify"
     # verify_or_recover, not verify_bounced directly (mg-a854): a failed verify
     # here means this run has just killed the fleet's only daemon, so it retries

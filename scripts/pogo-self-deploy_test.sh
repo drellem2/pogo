@@ -3800,6 +3800,256 @@ grep -q 'COULD NOT BE READ' <<<"$E621_OUT" && grep -q 'NOT a report that there a
 # shellcheck source=/dev/null
 source "$HERE/pogo-self-deploy"
 
+# ---------------------------------------------------------------------------
+# mg-5c4a — A KILLED RUN MUST RESTORE DISPATCH, AND MUST RECORD ITS OWN CODE
+# ---------------------------------------------------------------------------
+# WHAT HAPPENED. On four consecutive nights (2026-09-04..07) the nightly deploy
+# enabled drain at 02:00, hung in `launchctl kickstart -k`, and was TERMed by its
+# own 12600s run deadline at 05:30. Dispatch was left draining fleet-wide by a
+# run that had already exited; a human read /agents/drain and cleared it by hand
+# each morning, because nothing else on the box reports that flag.
+#
+# WHAT THE MECHANISM IS, AND WHAT IT IS NOT. The ticket was filed on "the EXIT
+# trap never RUNS on the SIGTERM path", from the true observation that all four
+# nights logged zero `restoring dispatch` / `dispatch restored` lines. That
+# observation does not discriminate: a trap that never ran and a trap that ran
+# DISARMED both log nothing. The reason record does discriminate —
+# deploy_reason_record is called from on_deploy_exit and from nowhere else, and
+# all four nights have one, written to the second of the kill:
+#
+#     exit=0 / stage=restart / reason=            <- 05:30:0xZ, all four nights
+#     exit=7 / stage=drain   / reason=deadline …  <- 2026-08-16, an ordinary exit
+#
+# So the trap RAN. Two separate defects produced the symptom and the silence:
+#
+#   1. THE RESTORE WAS DISARMED. `DRAIN_ARMED=false` sat above `do_restart`, on
+#      the premise that the kickstart kills the pogod whose flag we set. A
+#      kickstart that never RETURNS has killed nothing: the old pogod was up,
+#      answering, and draining for three and a half hours after the run had
+#      declared there was nothing left to put back.
+#   2. THE RUN FILED ITSELF AS A SUCCESS. `trap - INT TERM` ran on the same
+#      line, so the shell took an untrapped SIGTERM. Measured on this box
+#      (/bin/bash 3.2.57): bash still runs the EXIT trap, but with $? = 0. The
+#      trap's `local code=$?` therefore recorded `exit=0`, with an empty
+#      `reason=`, for a night that was killed.
+#
+# Both are driven below against a REAL bash process taking a REAL SIGTERM, each
+# with the pre-fix code as its own RED control.
+SIGWORK="$(mktemp -d)"
+
+# term_driver STYLE — a driver armed exactly as cmd_redeploy arms itself, that
+# then blocks where do_restart blocked on all four nights.
+#
+#   old   — the pre-mg-5c4a sequence: disarm and clear the handlers, THEN hang
+#   fixed — today's sequence: stay armed across the kickstart
+term_driver() {
+    cat > "$SIGWORK/driver.sh" <<DRIVER
+set -u
+# shellcheck source=/dev/null
+source "$HERE/pogo-self-deploy"
+ERR_LOG="$SIGWORK/err"
+: > "\$ERR_LOG"
+REASON_FILE="$SIGWORK/reason"
+DEPLOY_INSTALLED="no"
+DRAIN_PRIOR=false
+DRAIN_ARMED=true
+DEPLOY_STAGE="drain"
+# The restore's only side effect, recorded rather than performed: a real POST
+# would need a daemon, and what is under test is whether the call HAPPENS.
+drain_post() { printf '%s\n' "\$1" >> "$SIGWORK/posted"; printf '{"draining":%s}\n200' "\$1"; }
+trap on_deploy_exit EXIT
+arm_signal_exits "during the drain window"
+DEPLOY_STAGE="restart"
+DRIVER
+    if [ "$1" = old ]; then
+        printf 'DRAIN_ARMED=false\ntrap - INT TERM\n' >> "$SIGWORK/driver.sh"
+    fi
+    cat >> "$SIGWORK/driver.sh" <<DRIVER
+: > "$SIGWORK/ready"
+# Where do_restart blocked for three and a half hours on all four nights.
+sleep 60
+DRIVER
+}
+
+# term_run STYLE — run it, TERM it once it says it is armed, and leave the
+# transcript in $SIGWORK/out, the shell's status in $TERM_RC, and whatever the
+# restore POSTed in $SIGWORK/posted. Not a command substitution: the status has
+# to survive into the caller's shell, and a comsub is a subshell.
+TERM_RC=0
+term_run() {
+    local style="$1" pid i
+    rm -f "$SIGWORK/ready" "$SIGWORK/posted" "$SIGWORK/out" "$SIGWORK/reason"
+    term_driver "$style"
+    bash "$SIGWORK/driver.sh" >"$SIGWORK/out" 2>&1 &
+    pid=$!
+    # Wait for the arm, bounded. A TERM that lands before the arming would
+    # produce this ticket's own false negative, so the absence of the marker is
+    # reported rather than tested through.
+    for i in $(seq 1 100); do
+        [ -f "$SIGWORK/ready" ] && break
+        sleep 0.1
+    done
+    if [ ! -f "$SIGWORK/ready" ]; then
+        kill "$pid" 2>/dev/null || true
+        TERM_RC=-1
+        return 0
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null
+    TERM_RC=$?
+    return 0
+}
+term_reason() { sed -n "s/^$1=//p" "$SIGWORK/reason" 2>/dev/null; }
+
+# --- RED 1: the pre-fix path leaves dispatch draining ----------------------
+term_run old
+if [ "$TERM_RC" = "-1" ]; then
+    fail "mg-5c4a RED: the driver never armed, so the TERM established nothing"
+elif [ -s "$SIGWORK/posted" ]; then
+    fail "mg-5c4a RED did NOT reproduce: the pre-fix sequence still restored dispatch ($(cat "$SIGWORK/posted")) — this control is not driving the defect, so the GREEN below would be worthless"
+else
+    pass "mg-5c4a RED reproduced: disarmed above do_restart, a SIGTERM during the kickstart restores NOTHING — the four nights' fleet-wide dispatch block, in one process"
+fi
+# --- RED 2: ...and files the night as a success ----------------------------
+if [ "$(term_reason exit)" = "0" ]; then
+    pass "mg-5c4a RED reproduced: the killed run records exit=0 — the trap RAN and wrote the record, which is why zero restore lines never meant what the ticket read into them"
+else
+    fail "mg-5c4a RED: expected the pre-fix record to say exit=0, got '$(term_reason exit)' — the reason-record reading this whole diagnosis rests on has changed"
+fi
+
+# --- GREEN: today's path ---------------------------------------------------
+term_run fixed
+GREEN_OUT="$(cat "$SIGWORK/out" 2>/dev/null)"
+if [ "$TERM_RC" = "-1" ]; then
+    fail "mg-5c4a GREEN: the driver never armed"
+else
+    grep -q '^false$' "$SIGWORK/posted" 2>/dev/null \
+        && pass "mg-5c4a GREEN: a SIGTERM in the region the four nights died in now POSTs dispatch back to its pre-deploy value" \
+        || fail "mg-5c4a GREEN: no restore POST after SIGTERM (posted='$(cat "$SIGWORK/posted" 2>/dev/null)') — output: $GREEN_OUT"
+    # The two lines the log-side control greps for. They are the only evidence a
+    # later reader has that the restore ran, so they are pinned by name.
+    case "$GREEN_OUT" in
+        *"restoring dispatch"*) pass "mg-5c4a: 'restoring dispatch' is emitted on the SIGTERM path — the string four nights of grep came back empty on" ;;
+        *) fail "mg-5c4a: no 'restoring dispatch' line on the SIGTERM path: $GREEN_OUT" ;;
+    esac
+    case "$GREEN_OUT" in
+        *"dispatch restored"*) pass "mg-5c4a: and 'dispatch restored', which is what separates a restore that ran from one that was merely attempted" ;;
+        *) fail "mg-5c4a: no 'dispatch restored' line on the SIGTERM path: $GREEN_OUT" ;;
+    esac
+    [ "$TERM_RC" = 143 ] \
+        && pass "mg-5c4a: the shell still exits 143, so the runner's classifier reads this night as a SIGTERM exactly as before" \
+        || fail "mg-5c4a: exit status was $TERM_RC, not 143 — the wrapper would misclassify this night"
+    [ "$(term_reason exit)" = "143" ] \
+        && pass "mg-5c4a: and the run's OWN record now says exit=143 — a killed night no longer files itself as exit=0 with no reason" \
+        || fail "mg-5c4a: the reason record says exit=$(term_reason exit), not 143 — the record still describes a killed run as a clean one"
+    case "$(term_reason reason)" in
+        *"terminated (SIGTERM)"*) pass "mg-5c4a: the record's headline names the signal, so the runner's alert says what ended the run instead of leaving reason= empty" ;;
+        *) fail "mg-5c4a: the record's reason is '$(term_reason reason)' — the signal is unnamed, which is what an empty reason= cost on four nights" ;;
+    esac
+fi
+
+# --- the restore's message must not claim a place it no longer knows -------
+# It used to end "before the kickstart". The window now reaches PAST the
+# kickstart, so on the one path that motivated the move the phrase would be
+# false — the same defect this ticket is about, rebuilt inside its own fix.
+restore_msg() (
+    ERR_LOG=""; DRAIN_ARMED=true; DRAIN_PRIOR="false"; DEPLOY_STAGE="restart"
+    drain_post() { printf '{"draining":false}\n200'; }
+    restore_drain 143 2>&1
+)
+case "$(restore_msg)" in
+    *"before the kickstart"*) fail "restore_drain still claims the exit was 'before the kickstart' — false for every exit past do_restart, which is where this defect lived" ;;
+    *"during stage restart"*) pass "restore_drain names the STAGE it restored from, rather than asserting a position it can no longer know" ;;
+    *) fail "restore_drain's message names neither: $(restore_msg)" ;;
+esac
+
+# --- close_drain_window: disarms, and does NOT clear the signal handlers ---
+close_window_probe() (
+    DRAIN_ARMED=true
+    close_drain_window
+    printf 'armed=%s term=%s int=%s\n' "$DRAIN_ARMED" \
+        "$( [ -n "$(trap -p TERM)" ] && echo yes || echo no )" \
+        "$( [ -n "$(trap -p INT)" ] && echo yes || echo no )"
+)
+case "$(close_window_probe)" in
+    "armed=false term=yes int=yes")
+        pass "close_drain_window disarms the restore AND leaves INT/TERM converted to exits — a signal past the kickstart still reaches the EXIT trap with a real status" ;;
+    *)  fail "close_drain_window left the wrong state: $(close_window_probe)" ;;
+esac
+
+# --- and the placement, which is the half no message can assert ------------
+# CODE lines only: this file's own prose names `trap - INT TERM` several times
+# in explaining why it is gone, and a grep that cannot tell a comment from a
+# statement would report the explanation as the defect.
+if fn_body cmd_redeploy | grep -q '^[[:space:]]*trap - INT TERM' || \
+   fn_body cmd_bounce   | grep -q '^[[:space:]]*trap - INT TERM'; then
+    fail "\`trap - INT TERM\` is back in a deploy path — that line is what made four killed nights record themselves as exit=0"
+else
+    pass "no executable \`trap - INT TERM\` in either deploy path: a signal converts to an exit for the whole run, so the EXIT trap always sees the run's real status"
+fi
+
+for FN in cmd_redeploy cmd_bounce; do
+    KS="$(fn_line "$FN" '^[[:space:]]*do_restart$')"
+    CW="$(fn_line "$FN" '^[[:space:]]*close_drain_window$')"
+    if [ -z "$KS" ] || [ -z "$CW" ]; then
+        fail "$FN: could not locate the do_restart call (${KS:-none}) or the close_drain_window call (${CW:-none}) — the ordering below asserts nothing"
+    elif [ "$CW" -gt "$KS" ]; then
+        pass "$FN: the drain window closes AFTER do_restart returns — a kickstart that hangs still has a restore armed behind it"
+    else
+        fail "$FN: close_drain_window (line $CW) runs BEFORE do_restart (line $KS) — that is the mg-5c4a defect, restored"
+    fi
+done
+
+# The conversion is armed with the EXIT trap rather than inside the drain
+# branch: a status the trap can report is owed on every path the trap covers.
+for FN in cmd_redeploy cmd_bounce; do
+    ET="$(fn_line "$FN" '^[[:space:]]*trap on_deploy_exit EXIT$')"
+    AS="$(fn_line "$FN" '^[[:space:]]*arm_signal_exits')"
+    if [ -z "$ET" ] || [ -z "$AS" ]; then
+        fail "$FN: could not locate the EXIT trap (${ET:-none}) or arm_signal_exits (${AS:-none})"
+    elif [ "$AS" -gt "$ET" ]; then
+        pass "$FN: the INT/TERM conversion is armed alongside the EXIT trap, so no exit the trap covers is reached with a status of 0 it did not earn"
+    else
+        fail "$FN: arm_signal_exits (line $AS) does not follow the EXIT trap (line $ET)"
+    fi
+done
+
+
+# --- every WHERE this file passes must build a trap that PARSES ------------
+# arm_signal_exits builds its handler by string interpolation, so a phrase
+# carrying a quote would install a trap that fails when it fires — silently,
+# because a trap body is not parsed until the signal arrives. The phrases are
+# taken from the file rather than retyped here: a call site added later is
+# covered without anybody remembering to cover it.
+WHERES="$(grep -o 'arm_signal_exits "[^"]*"' "$HERE/pogo-self-deploy" | sed 's/^arm_signal_exits "//; s/"$//' | sort -u)"
+[ -n "$WHERES" ] \
+    && pass "the WHERE phrases were found in the driver ($(printf '%s\n' "$WHERES" | grep -c .) of them) — the loop below has something to check" \
+    || fail "no arm_signal_exits call sites found: the loop below would pass over an empty set"
+# A subshell-bodied function so the arming and the read happen in the SAME
+# shell, and the caller gets the text rather than a verdict computed inside a
+# nested command substitution — bash 3.2 mis-parses a `case` there.
+where_trap() ( arm_signal_exits "$1"; trap -p TERM )
+WHERE_BAD=0
+while IFS= read -r W; do
+    [ -n "$W" ] || continue
+    # Read the trap OUT of the subshell that armed it, and match outside.
+    # `trap -p TERM | grep ...` reads empty for every phrase — bash resets
+    # trapped signals in the subshell a pipeline creates, so the grep sees
+    # nothing and the check fails identically on the good and the bad case.
+    OUT="$(where_trap "$W")"
+    case "$OUT" in
+        *"exit 143"*) : ;;
+        *) WHERE_BAD=$(( WHERE_BAD + 1 )); echo "  bad WHERE: $W -> [$OUT]" ;;
+    esac
+done <<WHEREEOF
+$WHERES
+WHEREEOF
+[ "$WHERE_BAD" -eq 0 ] \
+    && pass "every arm_signal_exits call site installs a TERM handler that exits 143 — a trap body is not parsed until it fires, so this is the only thing that catches a phrase that breaks it" \
+    || fail "$WHERE_BAD arm_signal_exits phrase(s) build a broken trap"
+
+rm -rf "$SIGWORK"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)

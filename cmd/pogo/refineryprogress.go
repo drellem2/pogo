@@ -412,10 +412,42 @@ func plural(n int, unit string) string {
 // absence rather than `pid=0`, because `pid=0` is a number a reader will carry
 // into `kill`/`ps` and a whole `pid=` token going missing is what the caller of
 // a `$(...)` capture cannot see (mg-cbee is a ticket about exactly that shape).
+// DISPATCH IS ON THIS LINE BECAUSE NOTHING ELSE REPORTED IT (mg-5c4a). A deploy
+// killed mid-flight can leave `draining=true` on a pogod that is otherwise
+// perfectly healthy — /version answers, mode is `full`, the agent roster looks
+// normal — and no polecat is dispatched, fleet-wide, until somebody curls
+// /agents/drain. Four consecutive nights ended that way (2026-09-04..07) and a
+// human caught every one of them by happening to look.
+//
+// It prints on BOTH values. A token that appears only when something is wrong
+// cannot be told from a field that was dropped, which is the failure this whole
+// family keeps taking; `draining=false` every day is what makes the `true` mean
+// something. And the `true` carries its own remedy, because the reader who
+// needs this line is by construction someone who did not know the flag existed.
 func formatHealthPogod(p health.Pogod) string {
 	pid := fmt.Sprintf("pid=%d", p.PID)
 	if p.PID <= 0 {
 		pid = "pid=unreported (this pogod predates the field; `lsof -iTCP:<port> -sTCP:LISTEN -n -P` names it)"
 	}
-	return fmt.Sprintf("pogod:    %s  (mode=%s, uptime=%s, %s)\n", p.Status, p.Mode, p.Uptime, pid)
+	line := fmt.Sprintf("pogod:    %s  (mode=%s, uptime=%s, %s, %s)\n", p.Status, p.Mode, p.Uptime, pid, formatDraining(p.Draining))
+	if p.Draining != nil && *p.Draining {
+		line += "          DISPATCH IS OFF: pogod is draining, so no polecat will be dispatched. If no deploy is running, this is left over from one that was killed — clear it:\n" +
+			"            curl -X POST http://127.0.0.1:10000/agents/drain -H 'Content-Type: application/json' -d '{\"draining\":false}'\n"
+	}
+	return line
+}
+
+// formatDraining renders the dispatch flag, keeping "not reported" distinct
+// from "not draining". A daemon built before the field sends nothing, and a nil
+// rendered as `draining=false` would be this ticket's own defect — a confident
+// answer over a question nobody asked the daemon — in the instrument built to
+// fix it.
+func formatDraining(d *bool) string {
+	if d == nil {
+		return "draining=unreported (this pogod predates the field; `curl -s http://127.0.0.1:10000/agents/drain` answers it)"
+	}
+	if *d {
+		return "draining=TRUE"
+	}
+	return "draining=false"
 }

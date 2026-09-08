@@ -323,8 +323,32 @@ pogo agent diagnose <name> --json | jq .process_alive   # false ⇒ that process
 
 ```
 $ pogo server status
-pogod:    ok  (mode=full, uptime=57m49s, pid=11579)
+pogod:    ok  (mode=full, uptime=57m49s, pid=11579, draining=false)
 ```
+
+### `draining` — the field that reports a fleet-wide dispatch block
+
+`draining=true` makes pogod refuse **all** new polecat dispatch. Everything else
+on the box reads green while it is set: `/version` answers, `mode` stays `full`,
+the agent roster looks normal, and the fleet quietly does no work.
+
+It is set by a deploy, which clears it on the way out. A deploy that is KILLED
+mid-flight cannot always do that, and on four consecutive nights (2026-09-04..07,
+mg-5c4a) the nightly run hung in `launchctl kickstart -k`, was TERMed by its own
+12600s deadline, and left the flag set — caught each morning only because a human
+thought to `curl /agents/drain`. It is on this line so that stops being the
+mechanism.
+
+- `draining=false` — the fleet can dispatch. Printed every time, on purpose: a
+  token that appears only when something is wrong cannot be told from one that
+  was dropped.
+- `draining=TRUE` — nothing is being dispatched. If no deploy is running, clear
+  it; the status line carries the exact POST.
+- `draining=unreported` — this pogod predates the field. Not the same as
+  `false`; ask the daemon directly with `curl -s http://127.0.0.1:10000/agents/drain`.
+
+The nightly runner reads the same flag on its way out and writes a `dispatch:`
+line into `~/Library/Logs/pogo/pogo-deploy.log` for every attempt it makes.
 
 Use that, not a pattern match. `pgrep`/`pkill` exclude the calling process **and
 every one of its ancestors** unless passed `-a` (`man pgrep`), and pogod is the

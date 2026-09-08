@@ -4146,6 +4146,123 @@ canary_run "$CANARY" "$CANARY_HOME"
     && pass "and NOT to \$HOME/.pogo — \${POGO_HOME:-\$HOME/.pogo} consults HOME only when POGO_HOME is unset, which is why isolating this runner by HOME alone does nothing (mg-0af3)" \
     || fail "the write landed under HOME, not POGO_HOME — the two lines this ticket is about have changed and the isolation strategy needs rereading"
 
+# ---------------------------------------------------------------------------
+# mg-5c4a — THE DISPATCH READ, AND THE TWO MESSAGES THAT USED TO GUESS
+# ---------------------------------------------------------------------------
+# `draining=true` refuses ALL new polecat dispatch, fleet-wide, and NOTHING on
+# this box reported it: `pogo server status` shows mode=full (an unrelated
+# field), the agent roster and every liveness probe read green, because pogod is
+# up and answering — it is simply not dispatching. On four consecutive nights
+# (2026-09-04..07) a killed deploy left the flag set and a human happened to
+# read /agents/drain the next morning. A safety property that holds because
+# somebody checks by hand is not a mechanism.
+#
+# So the run reads the flag on its way out and says what it found. The two
+# assertions that matter are the two failure directions: an unreadable endpoint
+# must not read as healthy, and a `true` must be loud enough to act on.
+
+# The reporting is driven through a stubbed dispatch_read, because what is under
+# test is what the run SAYS about a body, not curl.
+DISPATCH_BODY=""
+dispatch_case() (
+    DISPATCH_BODY="$1"
+    ATTEMPT_ARMED=true
+    POGO_CLI=""
+    # The body is closed over, not taken from the stub's own $1 — a stub that
+    # reads $1 sees dispatch_read's arguments (none), and every case would have
+    # exercised the empty-body branch while reading green on the one assertion
+    # that expects it.
+    dispatch_read() { printf '%s' "$DISPATCH_BODY"; }
+    report_dispatch_state 143 2>&1
+)
+
+D_TRUE="$(dispatch_case '{"draining":true,"count":0,"polecats":null}')"
+case "$D_TRUE" in
+    *"DISPATCH IS LEFT DRAINING"*) pass "mg-5c4a: draining=true after the run ends is announced as an ERROR, not left for whoever thinks to curl the endpoint" ;;
+    *) fail "mg-5c4a: draining=true was not reported: $D_TRUE" ;;
+esac
+case "$D_TRUE" in
+    *'-d '*'draining'*'false'*) pass "mg-5c4a: and the line carries the POST that clears it — the remedy travels with the finding" ;;
+    *) fail "mg-5c4a: the draining=true report offers no remedy: $D_TRUE" ;;
+esac
+case "$D_TRUE" in
+    *"count=0"*) pass "mg-5c4a: the count rides along — draining=true with count=0 and no deploy running is the unambiguous case, and the number is what makes it unambiguous" ;;
+    *) fail "mg-5c4a: the count was dropped: $D_TRUE" ;;
+esac
+
+D_FALSE="$(dispatch_case '{"draining":false,"count":0,"polecats":null}')"
+case "$D_FALSE" in
+    *"ERROR"*) fail "mg-5c4a: a healthy dispatch state raised an ERROR line: $D_FALSE" ;;
+    *"dispatch: draining=false"*) pass "mg-5c4a: the healthy reading is printed too — a line that appears only on failure cannot be told from a check that stopped running" ;;
+    *) fail "mg-5c4a: draining=false was not reported at all: $D_FALSE" ;;
+esac
+
+# THE FAILURE DIRECTION THIS FAMILY KEEPS TAKING. "Could not look" must never
+# render as "there is nothing there".
+D_SILENT="$(dispatch_case '')"
+case "$D_SILENT" in
+    *"draining=false"*) fail "mg-5c4a: an unreadable endpoint was rendered as draining=false — absence of evidence wearing the clothes of evidence of absence: $D_SILENT" ;;
+    *"did not answer"*) pass "mg-5c4a: an unreadable /agents/drain is reported as a reading that was NOT obtained, which is a different fact from a fleet that is dispatching" ;;
+    *) fail "mg-5c4a: the unreadable case said neither: $D_SILENT" ;;
+esac
+
+# An answer with no draining field is a third state, and guessing either way
+# about it is the same defect as the one above.
+D_NOFLAG="$(dispatch_case '{"count":0}')"
+case "$D_NOFLAG" in
+    *"establishes nothing about dispatch"*) pass "mg-5c4a: a body with no draining flag establishes nothing, and says so rather than defaulting to either value" ;;
+    *) fail "mg-5c4a: a flagless body was not handled: $D_NOFLAG" ;;
+esac
+
+# --- the gate: a fire that did not attempt must not alarm on a peer's drain -
+# A locked-out fire reads the drain of the deploy that IS running. That is a
+# correct drain in progress, and alarming on it would fire the loudest line in
+# this log on the healthy case.
+ON_EXIT_BODY="$(sed -n '/^on_exit() {/,/^}/p' "$RUNNER")"
+printf '%s' "$ON_EXIT_BODY" | grep -q 'report_dispatch_state' \
+    && pass "mg-5c4a: on_exit reads the dispatch flag on its way out — every path the terminal line covers, including the deadline kill that wrote one on all four nights" \
+    || fail "mg-5c4a: on_exit does not read the dispatch flag, so nothing routine sees a stuck drain"
+printf '%s' "$ON_EXIT_BODY" | grep -B2 'report_dispatch_state' | grep -q 'ATTEMPT_ARMED' \
+    && pass "mg-5c4a: and it is gated on ATTEMPT_ARMED — a late, locked-out or already-settled fire does not alarm on the running deploy's legitimate drain" \
+    || fail "mg-5c4a: the dispatch read is not gated on ATTEMPT_ARMED, so a locked-out fire would page on a healthy drain"
+# The terminal line stays LAST: `end` means every other thing this run had to do
+# is already done, and a reading printed after it would not be part of the run.
+printf '%s' "$ON_EXIT_BODY" | grep -n 'report_dispatch_state\|pogo-deploy: end' | tr '\n' ' ' | grep -q '.*report_dispatch_state.*pogo-deploy: end' \
+    && pass "mg-5c4a: the reading is written BEFORE the terminal line, so it is part of the run's own record rather than something appended after it ended" \
+    || fail "mg-5c4a: the dispatch read does not precede the terminal line in on_exit"
+
+# --- the two messages that used to describe the happy path regardless ------
+# describe_outcome's 130/143 arm asserted "dispatch was restored on the way out
+# and nothing was installed". Both clauses were false of the runs it described:
+# the four killed nights each stopped in stage=restart with dispatch still
+# draining, and one of them had already installed.
+for RC in 130 143; do
+    OUT="$(describe_exit "$RC")"
+    case "$OUT" in
+        *"dispatch was restored"*|*"nothing was installed"*)
+            fail "describe_exit $RC still asserts an outcome it did not verify: $OUT" ;;
+        *"says nothing about how far it had got"*)
+            pass "describe_exit $RC reports the signal and points at the record and the dispatch line, instead of describing the happy path with an rc number attached" ;;
+        *) fail "describe_exit $RC says neither: $OUT" ;;
+    esac
+done
+
+REM="$(remedy_for_exit 143)"
+case "$REM" in
+    *"WHAT TO READ INSTEAD"*) pass "the 143 remedy hands the reader the three things that are actually knowable (stage=/installed=, the dispatch line, who sent the signal) rather than a claim about a restore it did not observe" ;;
+    *) fail "the 143 remedy no longer points the reader at what is knowable: $REM" ;;
+esac
+# The old sentence is still in there, and must stay ATTRIBUTED — it is quoted as
+# what this block used to claim, which is the part a reader needs in order to
+# distrust a morning they already read it on. A bare `grep "nothing to repair"`
+# cannot tell a quotation from an assertion, so the attribution is what is
+# pinned.
+case "$REM" in
+    *"used to say"*"There is nothing to repair"*) pass "and where it still contains the old claim, it is quoted as the old claim — a reader who acted on it before can see that it was withdrawn" ;;
+    *"There is nothing to repair"*) fail "the 143 remedy asserts 'There is nothing to repair' unattributed — on four nights there was a fleet-wide dispatch block" ;;
+    *) fail "the 143 remedy dropped the withdrawal entirely: a reader who acted on the old sentence has nothing telling them it was wrong" ;;
+esac
+
 # THE LEAK CHECK. REAL_STATE_DIR and REAL_STATE_BEFORE were both captured at the
 # top of this file, BEFORE `export POGO_HOME="$WORK"` — reading them now would
 # resolve to $WORK and assert nothing, which is this ticket's own defect
