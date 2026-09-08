@@ -37,11 +37,25 @@ type FullResponse struct {
 // instrument that construction was standing in for: it is served by pogod
 // itself, so it cannot report a pid for a daemon that is not answering — the
 // request fails instead.
+//
+// Draining is the dispatch flag, and it is a POINTER for the same reason the
+// pid is rendered as a named absence: a daemon built before the field decodes
+// to the zero value, and `false` is the answer a reader acts on. nil means the
+// daemon did not report it — a different fact from "dispatch is enabled".
+//
+// It is here at all because nothing on this box reported it (mg-5c4a). A deploy
+// killed mid-flight can leave `draining=true` set on a pogod that is otherwise
+// perfectly healthy: /version answers, Mode stays `full`, the agent roster looks
+// normal, and NO polecat is dispatched, fleet-wide, until somebody thinks to
+// curl /agents/drain. That happened on four consecutive nights (2026-09-04..07)
+// and was caught each time by a human happening to look. `pogo server status`
+// is the instrument that is actually read, so it is where the flag belongs.
 type Pogod struct {
-	Status string `json:"status"`
-	Uptime string `json:"uptime"`
-	Mode   string `json:"mode"`
-	PID    int    `json:"pid"`
+	Status   string `json:"status"`
+	Uptime   string `json:"uptime"`
+	Mode     string `json:"mode"`
+	PID      int    `json:"pid"`
+	Draining *bool  `json:"draining,omitempty"`
 }
 
 // AgentDetail is a summary of one agent.

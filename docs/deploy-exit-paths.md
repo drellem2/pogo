@@ -95,8 +95,8 @@ come apart on a restart-only deploy, which installs nothing and still bounces.
 | 8 | `verify_running`: a pogod IS answering, and it is not main | verify | yes/no¹ | yes | the revision it did report. Since mg-a854 this code no longer covers an unreachable daemon — that is 13. The kickstart has already been retried once (`RESTART_RETRIES`) before either code is returned. |
 | 13 | `verify_or_recover`: nothing is answering `/version` after the retry | verify | yes/no¹ | yes | **THIS BOX HAS NO POGOD.** The distinct condition mg-a854 added: on 2026-08-26 the fallback bounce killed pogod, failed to replace it, mailed under exit 8's "the bounce did not complete" heading, and took no action. 8 and 13 need opposite reactions — 8 leaves a live fleet on stale code, 13 leaves nothing running — and every automatic recovery path on this box is downstream of pogod, so 13 is the one that needs a human. |
 | 11 | `verify_orchestration`: pogod came back, but not in `full` mode | verify | yes/no¹ | yes | **FLEET DOWN.** The mode it did report. `/version` is deliberately unguarded, so an index-only daemon answers it at main's revision and passes `verify_running` — this is the half that check cannot see (mg-6d2f). |
-| 130 | SIGINT during the drain window | drain | no | no | "interrupted (SIGINT) during the drain window"; the trap restores dispatch. |
-| 143 | SIGTERM during the drain window | drain | no | no | "terminated (SIGTERM) during the drain window"; the trap restores dispatch. |
+| 130 | SIGINT — **any stage**, not only the drain | wherever it landed | maybe | maybe | The stage the run was in when the signal arrived, from the record's own `stage=`. |
+| 143 | SIGTERM — **any stage**, not only the drain | wherever it landed | maybe | maybe | Same. Four nights (2026-09-04..07) landed in `stage=restart`, one of them with `installed=yes` (mg-5c4a). |
 
 ¹ `yes` on a normal deploy, `no` on a restart-only one — `do_build` is skipped
 when the installed binaries already match main. This is exactly the column an
@@ -135,7 +135,7 @@ it can reach and what two columns mean there:
 | 8 | yes — but the check is `verify_bounced`, not `verify_running` | it asserts that **a pogod is answering**, not that it reports `main`. A bounce installs nothing and never reads a ref, so there is no `$MAIN` to compare against; asserting one would assert a fact the run never established. For a bounce this code is now nearly unreachable: `verify_bounced` passes on *any* answer, so a bounce that fails it and then finds the port live has to have raced the daemon's boot. |
 | 13 | yes — `verify_or_recover` after the kickstart retry | the state the 2026-08-26 fallback created and had no remedy for. Installed? `no`; Bounced? `yes` — and there is nothing left running. This is the third code (with 5 and 8) that can leave the box worse than it found it, and the only one that says so in the integer. |
 | 11 | yes — `verify_orchestration` | unchanged, and it is the code that closes a bounce: a daemon that came back index-only has replaced a blackout with a quieter one. |
-| 130, 143 | yes | the drain window's signal paths, unchanged. |
+| 130, 143 | yes | the signal paths. Not scoped to the drain window: a signal arrives wherever the run happens to be, and `stage=` in the record is the only thing that says where (mg-5c4a). |
 
 Every row above is `installed=no`, and that is measured rather than defaulted:
 `do_build` is the only thing that moves `installed`, and `bounce` does not call it.
@@ -143,8 +143,11 @@ Every row above is `installed=no`, and that is measured rather than defaulted:
 ## Two observations the table makes visible
 
 **Every exit up to and including 9 leaves the running pogod alone.** Codes 1, 2,
-3, 4, 6, 7, 9, 130 and 143 — every refusal — stop before the kickstart. Only 5,
-8 and 13 can leave the box worse than they found it, and 5 and 13 are the two
+3, 4, 6, 7 and 9 — every refusal — stop before the kickstart. **130 and 143 do
+not belong in that list and used to be in it** (mg-5c4a): they are signals, not
+refusals, and a signal arrives wherever the run is. All four nights of
+2026-09-04..07 took 143 in `stage=restart`, past the kickstart, with dispatch
+left draining fleet-wide. Only 5, 8 and 13 can leave the box worse than they found it, and 5 and 13 are the two
 that can leave it without a daemon — 13 asserts it, having measured the port
 after retrying the kickstart, where 5 only reports that `launchctl` refused. An
 alert that describes any other code as an outage is wrong, and that was the
