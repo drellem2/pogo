@@ -365,3 +365,55 @@ func TestCheckPromptsSkipRemoteLeavesTheCorpusVerdictIntact(t *testing.T) {
 		t.Errorf("fetch state is self-contradictory: %+v", rep.Reference.Fetch)
 	}
 }
+
+// TestDeployReferenceRepoArmsOnlyOnARealCheckout. The second return is the
+// arming signal, and the whole reason it exists is that an ABSENT deploy-src
+// must not read the way an empty corpus reads: a host with no reference is one
+// nothing looked at, and a witness that treated the two alike would report a
+// clean fleet from a machine it never judged.
+func TestDeployReferenceRepoArmsOnlyOnARealCheckout(t *testing.T) {
+	t.Setenv("POGO_DEPLOY_SRC", "")
+
+	home := t.TempDir()
+	src := filepath.Join(home, "deploy-src")
+
+	if got, armed := DeployReferenceRepo(home); armed {
+		t.Errorf("armed on a home with no deploy-src at all (got %s)", got)
+	} else if got != src {
+		t.Errorf("named %s, want %s — the path is reported even when disarmed, so the log "+
+			"can say WHICH directory is missing", got, src)
+	}
+
+	// A directory that exists but is not a checkout is still not a reference.
+	if err := os.MkdirAll(src, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, armed := DeployReferenceRepo(home); armed {
+		t.Error("armed on a deploy-src with no .git — a git-less directory resolves no ref")
+	}
+
+	git(t, src, "init", "-q", "-b", "main")
+	if got, armed := DeployReferenceRepo(home); !armed || got != src {
+		t.Errorf("DeployReferenceRepo = (%s, %v), want (%s, true) on a real checkout", got, armed, src)
+	}
+
+	// POGO_DEPLOY_SRC wins, so an operator can point the witness at another
+	// checkout without moving the default one.
+	other := t.TempDir()
+	git(t, other, "init", "-q", "-b", "main")
+	t.Setenv("POGO_DEPLOY_SRC", other)
+	if got, armed := DeployReferenceRepo(home); !armed || got != other {
+		t.Errorf("DeployReferenceRepo = (%s, %v) with POGO_DEPLOY_SRC=%s, want that path armed", got, armed, other)
+	}
+
+	// A .git FILE — a worktree or submodule — is just as usable a reference as
+	// a directory, and refusing it would disarm the witness on a good checkout.
+	linked := t.TempDir()
+	if err := os.WriteFile(filepath.Join(linked, ".git"), []byte("gitdir: "+filepath.Join(other, ".git")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POGO_DEPLOY_SRC", linked)
+	if _, armed := DeployReferenceRepo(home); !armed {
+		t.Error("disarmed on a checkout whose .git is a file (worktree/submodule)")
+	}
+}

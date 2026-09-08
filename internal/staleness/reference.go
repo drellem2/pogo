@@ -399,3 +399,33 @@ func FetchReference(ctx context.Context, repo string, t RemoteTarget, timeout ti
 	}
 	return true, nil
 }
+
+// DeployReferenceRepo resolves the dedicated deploy checkout — the tree the
+// nightly builds from — and reports whether it is actually a git repository.
+//
+// It lives here rather than in either caller because there are now two, and a
+// second hand-written copy of "where does deploy-src live" is a second chance
+// to point a witness at a directory that does not exist and read its silence as
+// health. `pogo check-staleness` layers a working-directory fallback on top of
+// this (a developer running the command from a checkout wants the checkout);
+// pogod's standing runner deliberately does NOT, because a daemon whose cwd
+// happens to be a pogo checkout would silently start judging the fleet against
+// somebody's uncommitted work.
+//
+// The second return is the arming signal and callers must branch on it. An
+// absent deploy-src is not an empty corpus: it is a host with no reference at
+// all, and a witness that treated the two alike would report a clean fleet from
+// a machine it never looked at.
+func DeployReferenceRepo(pogoHome string) (string, bool) {
+	src := os.Getenv("POGO_DEPLOY_SRC")
+	if src == "" {
+		src = filepath.Join(pogoHome, "deploy-src")
+	}
+	// A .git that is a FILE is a worktree or a submodule and is just as usable
+	// a reference as a directory; refusing it would disarm the witness on a
+	// perfectly good checkout.
+	if fi, err := os.Stat(filepath.Join(src, ".git")); err == nil && (fi.IsDir() || fi.Mode().IsRegular()) {
+		return src, true
+	}
+	return src, false
+}

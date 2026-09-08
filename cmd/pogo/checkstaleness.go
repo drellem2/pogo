@@ -79,11 +79,8 @@ func defaultStampPath() string {
 // Falling back to the working directory keeps the command usable from a
 // checkout, which is where its own tests and a developer run it.
 func defaultReferenceRepo() string {
-	src := os.Getenv("POGO_DEPLOY_SRC")
-	if src == "" {
-		src = filepath.Join(config.PogoHome(), "deploy-src")
-	}
-	if fi, err := os.Stat(filepath.Join(src, ".git")); err == nil && (fi.IsDir() || fi.Mode().IsRegular()) {
+	src, ok := staleness.DeployReferenceRepo(config.PogoHome())
+	if ok {
 		return src
 	}
 	cwd, err := os.Getwd()

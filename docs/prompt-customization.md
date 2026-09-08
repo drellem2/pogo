@@ -384,13 +384,86 @@ false "verified". You have two safe options:
 - **Drop the edit.** `pogo install` restores the shipped text; `--force` writes
   a `.bak` sidecar first.
 
-### This is a different notice from a declined sync
+### Three notices, three conditions
 
-Mail from `pogod-promptsync` is about a **shipped update that could not be
-applied** because of your edits — there is a `.dist` sidecar waiting.
-Reconciling that resolves both. Mail from `pogod-promptedit` on its own means
-the edits exist and no shipped update has collided with them yet, which is the
-case nothing used to report.
+| sender | condition | remedy |
+|---|---|---|
+| `pogod-promptsync` | a **shipped update could not be applied** because of your edits — there is a `.dist` sidecar waiting | reconcile the canonical against its `.dist` |
+| `pogod-promptedit` | the edits exist and **no shipped update has collided with them yet** | keep the edit, or `pogo install` to drop it |
+| `pogod-promptstale` | the installed file **is not the version the repo ships** — see below | redeploy, or `pogo agent prompt install` |
+
+Reconciling a declined sync resolves the first two together.
+
+## Detecting a superseded prompt
+
+A prompt can be perfectly unedited and still be the wrong text. The hand-edit
+detector above compares each file against **its own stamp**, so a prompt
+installed cleanly in August and never touched since reads as clean — while being
+129 lines behind what the repo ships. Those are two different facts about one
+file.
+
+The comparison that catches it is against a **git ref**, never against the
+running binary's embedded copy: a missed redeploy stales the binary and the
+prompts together, so `pogo doctor --check`'s drift row passes truthfully while
+the fleet drifts. pogod sweeps for this on a coarse interval (6h by default) and
+mails the agent reading each superseded file. The on-demand half is:
+
+```bash
+pogo check-staleness            # both witnesses; exit 1 on a finding
+pogo check-staleness --fetch    # compare against what has shipped SINCE the deploy
+```
+
+### What it compares against, and why that qualifier matters
+
+The reference is the deploy checkout (`~/.pogo/deploy-src`, or `POGO_DEPLOY_SRC`)
+at `origin/main`. **The sweep never fetches.** A detector that mutates the tree
+it judges has made itself a participant, and a fetch would overwrite the
+`FETCH_HEAD` timestamp the reference's own age is read from.
+
+So the plain verdict is *"the fleet matches what was **deployed**"*, which is a
+weaker claim than *"matches what shipped"* — and every notice says which one it
+is making, naming the reference repo, its resolved commit, how long ago it
+fetched, and whether the live remote has moved past it. If the reference is
+itself behind, the findings may understate the drift; `--fetch` answers the
+stronger question.
+
+A reference that is frozen because the nightly stopped running is the **deploy**
+witness's finding, not this one's — `pogo check-staleness` reports both, and
+duplicating it here would mail two agents about one outage.
+
+### It reports; it never repairs
+
+The fix is a redeploy, a redeploy restarts agents, and when a running
+coordinator gets restarted is not a decision a sweep makes on its own schedule.
+If you need the shipped text before the next nightly, `pogo agent prompt
+install` from a build of the reference.
+
+**Do not hand-edit the deployed copy to carry the missing text across.** That
+makes the file diverge from source with no expiry and no record: the next
+legitimate update is either clobbered silently or declined into a `.dist`
+sidecar somebody discovers days later. It trades a known gap for an invisible
+one — and it converts a `pogod-promptstale` notice into a `pogod-promptedit` one
+that never clears.
+
+Until it is installed, treat the affected file as a prompt you cannot fully
+trust. The expensive shape of this defect is not a missing paragraph — it is a
+live prompt that *asserts something no longer true*, with the agent reading it
+having no way to know its copy is superseded.
+
+### Turning it off
+
+```toml
+[prompt_stale]
+enabled = false        # an agent reading a superseded prompt will not be told
+interval = "6h"
+renotify_after = "24h"
+ref = "origin/main"
+skip_remote = false    # true drops the live-remote qualifier (no network calls)
+```
+
+On a host with no deploy checkout the runner **disarms itself and says so in
+pogod's log**. An absent reference is a fleet nothing looked at, never a clean
+one.
 
 
 ## Backup hygiene
@@ -474,3 +547,6 @@ next run.
 - `pogo agent prompt --help` — `list`, `show`, `init`, `install`, `create`.
 - `pogo check-prompt-edits --help` — the hand-edit detector's on-demand half,
   and the fullest written statement of the domain constraint it applies.
+- `pogo check-staleness --help` — the staleness witness's on-demand half, and
+  the fullest written statement of why the reference is a git ref rather than
+  the running binary's own embed.

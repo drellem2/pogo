@@ -54,6 +54,7 @@ import (
 	"github.com/drellem2/pogo/internal/progresswatch"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/promptedit"
+	"github.com/drellem2/pogo/internal/promptstale"
 	"github.com/drellem2/pogo/internal/providers"
 	"github.com/drellem2/pogo/internal/reaper"
 	"github.com/drellem2/pogo/internal/reconcile"
@@ -2789,6 +2790,63 @@ Flags:
 			"place after install will be reported only if a shipped update later collides with it (mg-0c96)")
 	}
 
+	// Build the prompt-corpus STALENESS detector (mg-385f): the RUNNER the
+	// staleness witness never had.
+	//
+	// internal/staleness has answered this question correctly since mg-dd49 —
+	// hash each installed prompt body against the same path at a git ref, both
+	// directions, never against this binary's own embed — and `pogo
+	// check-staleness` prints the answer to whoever types it. Nobody typed it.
+	// On 2026-09-06 the coordinator found by hand that its own mayor.md was 15
+	// days behind and that the missing section warned against an instrument it
+	// had run that morning; two days later the same three files were still
+	// stale. A correct detector at a surface with no read cadence is mg-10e3,
+	// and having it be THIS detector is mg-385f's own thesis one level down.
+	//
+	// IT IS THE THIRD PROMPT ALARM AND OVERLAPS NEITHER NEIGHBOUR. The declined-
+	// sync notifier above needs InstallPrompts to have RUN, which on a host
+	// whose daemon has not restarted since the last deploy it has not. The
+	// hand-edit detector compares each file to ITS OWN stamp, so a prompt
+	// installed cleanly in August and untouched since reads as clean while being
+	// 129 lines behind the repo. Both are right about their own question.
+	//
+	// ARMED ON THE DEPLOY CHECKOUT, and disarmed LOUDLY without one: an absent
+	// reference is a host nothing looked at, and a witness that let that read as
+	// a clean fleet would be the defect it exists to remove. It never fetches —
+	// see internal/promptstale for why — so the notice carries the reference's
+	// commit, its fetch age and its position against the live remote, and a
+	// verdict against a frozen mirror is not offered as a verdict against what
+	// shipped.
+	var promptStaleWatcher *promptstale.Watcher
+	if cfg.PromptStale.Enabled {
+		refRepo, armed := staleness.DeployReferenceRepo(config.PogoHome())
+		if armed {
+			promptStaleWatcher = promptstale.New(promptstale.Options{
+				Enabled:       true,
+				Repo:          refRepo,
+				Ref:           cfg.PromptStale.Ref,
+				Root:          agent.PromptDir(),
+				Coordinator:   coordinator,
+				Mail:          client.SendMGMail,
+				Interval:      cfg.PromptStale.Interval,
+				RenotifyAfter: cfg.PromptStale.RenotifyAfter,
+				SkipRemote:    cfg.PromptStale.SkipRemote,
+				StatePath:     promptstale.NoticesPath(config.PogoHome()),
+			})
+			log.Printf("pogod: prompt staleness detector enabled (%s)", promptStaleWatcher.Summary())
+		} else {
+			log.Printf("pogod: prompt staleness detector NOT ARMED — %s is not a git checkout, so "+
+				"there is no reference to compare the installed corpus against. This is not a clean "+
+				"fleet, it is an unjudged one (mg-385f)", refRepo)
+		}
+	} else {
+		// Logged rather than left silent, for the same reason as its neighbours:
+		// `[prompt_stale] enabled = false` is otherwise indistinguishable from a
+		// build that never had the detector in it.
+		log.Printf("pogod: prompt staleness detector DISABLED by config — an agent reading a prompt " +
+			"the repo has moved past will not be told (mg-385f)")
+	}
+
 	// Build the scheduler-completion deficit detector (mg-1935): the READER the
 	// ack counters never had. mg-a754 gave every fire a completion signal and
 	// `pogo schedule list` even renders `⚠ N unacked`, but nothing consumed it —
@@ -3583,6 +3641,13 @@ Flags:
 		// mg-0c96 names.
 		if promptEditWatcher != nil {
 			go promptEditWatcher.Check(now)
+		}
+		if promptStaleWatcher != nil {
+			// Its own context, not the tick's: the sweep shells out to git and
+			// makes one bounded network call, and a heartbeat-scoped context
+			// would cancel it mid-comparison and report the cancellation as a
+			// sweep that could not run.
+			go promptStaleWatcher.Check(context.Background(), now)
 		}
 		// The completion-deficit detector rides the same tick and throttles
 		// itself to a COARSE interval. In a goroutine because a finding shells

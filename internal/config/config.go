@@ -419,6 +419,27 @@ const (
 	// failure mode this detector exists to catch, one level up.
 	DefaultPromptEditRenotify = 72 * time.Hour
 
+	// DefaultPromptStaleInterval is how often pogod's prompt-corpus STALENESS
+	// detector compares the installed prompt tree against the corpus a git ref
+	// ships (mg-385f). Coarse for the reason its hand-edit sibling is, plus one
+	// particular to this condition: staleness has exactly one clearing event —
+	// the nightly redeploy — so sampling faster cannot report anything sooner
+	// than the condition can change.
+	DefaultPromptStaleInterval = 6 * time.Hour
+	// DefaultPromptStaleRenotify is how long an UNCHANGED stale prompt stays
+	// quiet. Deliberately SHORTER than DefaultPromptEditRenotify's three days: a
+	// hand-edit is somebody's own local state and nagging trains them to filter,
+	// whereas a stale prompt is an agent running superseded instructions right
+	// now, is nobody's decision, and clears on the next successful nightly with
+	// no work at all. A notice that outlives more than one nightly is reporting
+	// a nightly that is not fixing it, which is news.
+	DefaultPromptStaleRenotify = 24 * time.Hour
+	// DefaultPromptStaleRef is the ref the installed corpus is judged against.
+	// The reference REPO is not a config key: it is the deploy checkout, resolved
+	// by staleness.DeployReferenceRepo, because a configurable path is a path
+	// somebody points at a working tree they are mid-edit in.
+	DefaultPromptStaleRef = "origin/main"
+
 	// DefaultAckWatchInterval is how often pogod's completion-deficit detector
 	// samples the scheduler's ack counters (mg-1935). Coarse: the condition is a
 	// RATE over hundreds of fires, so it moves by fractions of a point per tick
@@ -875,8 +896,15 @@ type Config struct {
 	// deployed file has been changed since the installer wrote it. The two come
 	// apart in both directions.
 	PromptEdit PromptEditConfig
-	AckWatch   AckWatchConfig
-	DeafWatch  DeafWatchConfig
+	// PromptStale is the prompt-corpus STALENESS detector (mg-385f), and it is
+	// the third prompt alarm rather than a duplicate of either neighbour.
+	// PromptEdit asks whether a deployed file changed since the installer wrote
+	// it; this asks whether the installer ever wrote the CURRENT text. A prompt
+	// installed cleanly in August and untouched since reads as clean to
+	// PromptEdit and is 129 lines behind the repo.
+	PromptStale PromptStaleConfig
+	AckWatch    AckWatchConfig
+	DeafWatch   DeafWatchConfig
 	// HeartWatch is the pogod-resident reader of the crew heartbeat (mg-d616).
 	// See HeartWatchConfig.
 	HeartWatch HeartWatchConfig
@@ -1317,6 +1345,53 @@ type PromptEditConfig struct {
 	// RenotifyAfter is how long an unchanged finding stays quiet before being
 	// mailed again. Zero falls back to DefaultPromptEditRenotify.
 	RenotifyAfter time.Duration
+}
+
+// PromptStaleConfig configures pogod's prompt-corpus STALENESS detector
+// (mg-385f): the heartbeat-driven sweep that compares the installed prompt tree
+// against the corpus a git ref ships and mails the agent reading each superseded
+// file.
+//
+// It exists because the detector was built and nothing ran it. internal/staleness
+// has answered this question correctly since mg-dd49 and `pogo check-staleness`
+// prints the answer — to whoever types it. On 2026-09-06 the coordinator found by
+// hand that its own mayor.md was 15 days behind and that the missing section
+// warned against an instrument it had used that morning; on 2026-09-08 the same
+// three files were still stale. That is mg-10e3's shape (a correct detector at an
+// unread surface) applied to mg-385f's own subject.
+//
+// There is deliberately NO notify_to. Findings are addressed per-file through
+// agent.PromptAddressee — the same routing table promptsyncnotify and promptedit
+// use — because the agent reading a superseded prompt is the party harmed and the
+// only one that can weigh it against what it is doing. A single fleet-wide
+// destination would recreate the ~800-unread pile that made mg-c3f0 necessary.
+//
+// REPORT-ONLY, with a reason particular to this condition: the fix is a redeploy,
+// a redeploy restarts agents, and when a running coordinator is restarted is not
+// a judgement a sweep gets to make on its own schedule. There is no repair seam
+// in internal/promptstale, and it never fetches — the reference's own age and
+// remote position are reported instead, so a verdict against a frozen mirror is
+// not read as a verdict against what shipped.
+type PromptStaleConfig struct {
+	// Enabled turns the runner on. Defaults to true. It disarms ITSELF, loudly,
+	// on a host with no deploy checkout to compare against — that is an arming
+	// precondition and not a config decision, because an absent reference is a
+	// host nothing looked at, never a clean one.
+	Enabled bool
+	// Interval is the COARSE gap between sweeps. Zero falls back to
+	// DefaultPromptStaleInterval.
+	Interval time.Duration
+	// RenotifyAfter is how long an unchanged finding stays quiet before being
+	// mailed again. Zero falls back to DefaultPromptStaleRenotify.
+	RenotifyAfter time.Duration
+	// Ref is the git ref holding the shipped corpus. Zero falls back to
+	// DefaultPromptStaleRef.
+	Ref string
+	// SkipRemote disarms the read-only live-remote query that qualifies the
+	// reference. The corpus verdict is unaffected; what is lost is the ability
+	// to say whether the reference has itself seen what shipped. For a host that
+	// must make no network calls at all.
+	SkipRemote bool
 }
 
 // GHIntakeConfig configures pogod's gh-issue INTAKE detector (mg-039b): the
@@ -2111,16 +2186,22 @@ type parsedConfig struct {
 	// it an explicit `indefinite_hold_report_enabled = false` would be merged
 	// away and the default `true` restored, leaving an operator who deliberately
 	// silenced the digest still receiving it.
-	indefiniteHoldEnabledSet     bool
-	agentsAutoStartSet           bool
-	reaperEnabledSet             bool
-	driftWatchEnabledSet         bool
-	credExpiryEnabledSet         bool
-	ghTeardownEnabledSet         bool
-	ghIntakeEnabledSet           bool
-	carrierDriftEnabledSet       bool
-	reviewDeclEnabledSet         bool
-	promptEditEnabledSet         bool
+	indefiniteHoldEnabledSet bool
+	agentsAutoStartSet       bool
+	reaperEnabledSet         bool
+	driftWatchEnabledSet     bool
+	credExpiryEnabledSet     bool
+	ghTeardownEnabledSet     bool
+	ghIntakeEnabledSet       bool
+	carrierDriftEnabledSet   bool
+	reviewDeclEnabledSet     bool
+	promptEditEnabledSet     bool
+	promptStaleEnabledSet    bool
+	// promptStaleSkipRemoteSet exists because FALSE is the shipped default here:
+	// merging skip_remote on truthiness alone would make `skip_remote = false`
+	// indistinguishable from an absent key, which is harmless today and would
+	// stop being so the moment the default flips.
+	promptStaleSkipRemoteSet     bool
 	ackWatchEnabledSet           bool
 	deafWatchEnabledSet          bool
 	absentWatchEnabledSet        bool
@@ -2253,6 +2334,12 @@ func Load() *Config {
 			Enabled:       true,
 			Interval:      DefaultPromptEditInterval,
 			RenotifyAfter: DefaultPromptEditRenotify,
+		},
+		PromptStale: PromptStaleConfig{
+			Enabled:       true,
+			Interval:      DefaultPromptStaleInterval,
+			RenotifyAfter: DefaultPromptStaleRenotify,
+			Ref:           DefaultPromptStaleRef,
 		},
 		AckWatch: AckWatchConfig{
 			Enabled:          true,
@@ -2492,6 +2579,21 @@ func Load() *Config {
 		}
 		if fileCfg.PromptEdit.RenotifyAfter > 0 {
 			cfg.PromptEdit.RenotifyAfter = fileCfg.PromptEdit.RenotifyAfter
+		}
+		if fileCfg.promptStaleEnabledSet {
+			cfg.PromptStale.Enabled = fileCfg.PromptStale.Enabled
+		}
+		if fileCfg.PromptStale.Interval > 0 {
+			cfg.PromptStale.Interval = fileCfg.PromptStale.Interval
+		}
+		if fileCfg.PromptStale.RenotifyAfter > 0 {
+			cfg.PromptStale.RenotifyAfter = fileCfg.PromptStale.RenotifyAfter
+		}
+		if fileCfg.PromptStale.Ref != "" {
+			cfg.PromptStale.Ref = fileCfg.PromptStale.Ref
+		}
+		if fileCfg.promptStaleSkipRemoteSet {
+			cfg.PromptStale.SkipRemote = fileCfg.PromptStale.SkipRemote
 		}
 		if fileCfg.ghIntakeEnabledSet {
 			cfg.GHIntake.Enabled = fileCfg.GHIntake.Enabled
@@ -3871,6 +3973,25 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.PromptEdit.RenotifyAfter = d
 				}
+			}
+		case "prompt_stale":
+			switch key {
+			case "enabled":
+				cfg.PromptStale.Enabled = val == "true"
+				cfg.promptStaleEnabledSet = true
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.PromptStale.Interval = d
+				}
+			case "renotify_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.PromptStale.RenotifyAfter = d
+				}
+			case "ref":
+				cfg.PromptStale.Ref = unquotedVal
+			case "skip_remote":
+				cfg.PromptStale.SkipRemote = val == "true"
+				cfg.promptStaleSkipRemoteSet = true
 			}
 		case "agents":
 			switch key {
