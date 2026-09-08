@@ -164,7 +164,7 @@ detector -> alarm -> maildir -> notifier -> ?
 
 The box the alarm lands in, `~/.macguffin/mail/human/new`, held **3,286 unread** files against **43** in `cur/` when mg-d788 was filed, and **3,288** against the same 43 when this work re-counted it at 2026-09-08 00:00Z — a 76:1 unread-to-read ratio either way. Whether one more file is distinguishable in that volume is a property of the notifier, which lives in another repo (`pogo-reminders`), so `--probe` now drives the real thing: it copies the deployed `poll-mail.sh` — the script `com.pogo.deadman` executes — next to a **stubbed `notify.sh`**, points it at a throwaway maildir holding the real alarm bytes, and reads back what it decided. Nothing reaches a screen.
 
-Four arms, two of them controls:
+Six arms, three of them controls:
 
 | arm | construction | must |
 |---|---|---|
@@ -172,20 +172,55 @@ Four arms, two of them controls:
 | B | **CONTROL** — the same alarm *younger* than the gate | raise nothing **and not be marked seen**: a gate that consumes a too-young message drops it instead of holding it (mg-65d2) |
 | C | the alarm arriving in the same cycle as a 12-message watcher burst the notifier coalesces | keep its **own** banner beside the one group banner |
 | D | **CONTROL** — the same alarm sent *from inside* that burst's roster | be **swallowed** by the grouping, so C cannot be green merely because coalescing is dead |
-| E | **CONTROL** — an episode record whose fractional second the reader cannot parse | drop the grouping and page **every** message, the alarm among them |
+| E | **CONTROL** — an episode boundary that is not a timestamp at all (`not-a-timestamp`) | drop the grouping and page **every** message, the alarm among them — the degrade *direction*, toward noise and never silence |
+| F | the fractional-second width Go's `RFC3339Nano` really emits (`.1234`) | keep the alarm's own banner under **either** reading — 1 group banner if the reader normalises the width, 13 individual ones if it drops the record — and **report** which it did |
 
 `POGO_NOTIFIER_SCRIPT` overrides which script is driven. A box with no notifier deployed reports `INSTRUMENT FAILURE` for this half — unknown, never fine.
 
-#### One episode record in ten is silently unparseable, and it was this probe's own flake
+#### An arm here may depend on what the notifier DOES, never on what it gets WRONG (mg-c51f)
 
-Arm E is not hypothetical. It was found because arms C and D failed in the merge gate about one run in ten while passing in isolation, and the cause is a **cross-repo format mismatch nothing enforces**:
+**This rule was paid for by a repo-wide merge-queue outage.** Arm E originally constructed a
+**four-digit fractional second** — a width Python 3.9's `fromisoformat` rejected — and asserted the
+drop that followed. On **2026-09-08 at 06:08Z** that reader defect was correctly repaired in
+`pogo-reminders` (**mg-3ba8**) and deployed to `~/.pogo/pogo-reminders/bin/poll-mail.sh`, which is the
+copy `NotifierScript` *prefers*. The arm went red on pogo commits that had not changed:
+
+```
+01:45Z  cold ./build.sh on origin/main 499eb8a — 85 packages, BUILD EXIT=0, GREEN
+06:08Z  the deployed poll-mail.sh gains the parse fix
+06:28Z  polecat-t3ba8 FAILED    06:35Z  polecat-tbaf3 FAILED
+06:38Z  main alone, 5 runs, 5 FAILED — deterministic, not a flake
+```
+
+Same commit, green before 06:08Z and red after. **The code did not change; a file in another repo
+that a test depends on did**, and every branch entering the gate failed until arm E was rewritten.
+
+The generalisation, for the next arm added here: **a bug is the one property of a dependency that
+somebody is actively commissioned to remove.** Gate on the invariants the notifier's maintainers are
+trying to *hold* — the alarm is raised; an unreadable record costs grouping and nothing else — and
+merely **record** the version-dependent facts. Arm E now builds a boundary (`not-a-timestamp`) that no
+parser turns into an instant; arm F drives the real emitted width and passes under either reading,
+naming which one it saw in its `got` line.
+
+`TestTheLastHopProbeDoesNotDependOnWHICHNotifierIsDeployed` is the instrument that would have caught
+it: it runs the whole probe again against **every other** `poll-mail.sh` on the box. The deployed
+`~/.pogo` copy and the `~/dev/pogo-reminders` checkout are routinely different versions, and that
+difference is the test. A probe green against both is measuring the notifier's invariants; one green
+against only the deployed copy is measuring a release. With fewer than two copies present it skips
+and says so.
+
+#### The parse defect the old arm was built on — fixed in `pogo-reminders`, recorded here
+
+Arm E's original construction was not hypothetical. It was found because arms C and D failed in the
+merge gate about one run in ten while passing in isolation, and the cause was a **cross-repo format
+mismatch nothing enforces**:
 
 - pogod stamps `opened_at` / `closed_at` with Go's **`time.RFC3339Nano`**, which trims trailing zeros and therefore emits every fractional width from 0 to 6 digits;
-- the notifier's `parse_ts` hands them to **Python 3.9's `datetime.fromisoformat`**, which accepts a fractional second of **3 or 6 digits and nothing else** (7+ are clamped to 6 by `parse_ts`'s own regex, so those are fine).
+- the notifier's `parse_ts` handed them to **Python 3.9's `datetime.fromisoformat`**, which accepts a fractional second of **3 or 6 digits and nothing else** (7+ were clamped to 6 by `parse_ts`'s own regex, so those were fine).
 
 Measured over all 10⁶ microsecond values a `time.Time` can carry:
 
-| fractional digits emitted | count | parses |
+| fractional digits emitted | count | parsed, pre-mg-3ba8 |
 |---|---|---|
 | 6 | 900,000 | yes |
 | 5 | 90,000 | **no** |
@@ -195,11 +230,19 @@ Measured over all 10⁶ microsecond values a `time.Time` can carry:
 | 1 | 9 | **no** |
 | 0 | 1 | yes |
 
-**99,099 of 1,000,000 — 9.91% — are rejected.** A rejected record is dropped by `load_episodes`, so that episode's coalescing is silently dead for its whole burst.
+**99,099 of 1,000,000 — 9.91% — were rejected.** A rejected record is dropped by `load_episodes`, so
+that episode's coalescing was silently dead for its whole burst.
 
-**It degrades toward noise, not silence.** With no episode, every message pages on its own — arm E asserts exactly that, and asserts the alarm is still among them. So this is not a reason to distrust the alarm; it is a reason the burst it arrives in may be N banners instead of one, which is the condition arm C exists to measure. The fix belongs in `pogo-reminders`' `parse_ts` (pad or regex-normalise the fraction before parsing), not in this repo, and is filed as a successor to mg-d788 (**mg-3ba8**).
+**It degrades toward noise, not silence.** With no episode, every message pages on its own — arm E
+asserts exactly that of *any* unreadable record, and asserts the alarm is still among them. So this
+was never a reason to distrust the alarm; it is a reason the burst it arrives in may be N banners
+instead of one, which is the condition arm C exists to measure. **`parse_ts` now right-pads short
+fractions to 6 digits (mg-3ba8) and names a dropped boundary on stderr instead of degrading
+quietly**, so the width no longer costs any coalescing on the deployed copy — arm F prints
+`NORMALISED the width` against it, and `REJECTED the width` against an older one.
 
-`ProbeLastHop` truncates its own clock to the second so it exercises the parseable path deterministically instead of failing one run in ten; arm E constructs the failing width on purpose so the defect stays visible in the probe's own output.
+`ProbeLastHop` truncates its own clock to the second so the arms that need a parseable boundary get
+one deterministically rather than taking whichever width the clock lands on.
 
 ### What the last hop measured, and what it did not
 

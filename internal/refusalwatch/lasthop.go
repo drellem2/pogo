@@ -48,6 +48,29 @@ import (
 //   - CONTROL, the same burst with the alarm's sender inside the episode
 //     roster: it IS swallowed into the group. Without this arm the previous one
 //     is green because grouping never fired, not because the alarm escaped it.
+//   - CONTROL, an episode boundary that is not a timestamp at all: the grouping
+//     is dropped, every message pages on its own, and the alarm is among them.
+//     That is the notifier's degrade DIRECTION — toward noise, never silence.
+//   - the fractional-second width Go's RFC3339Nano really emits: the alarm keeps
+//     its own banner whether the reader normalises the width or drops the
+//     record, and which one it did is REPORTED rather than required.
+//
+// # An arm here may depend on what the notifier DOES, never on what it gets WRONG
+//
+// This is a rule paid for. Arm E used to construct a four-digit fractional
+// second because Python 3.9's fromisoformat rejected that width, and asserted
+// the drop that followed. On 2026-09-08 at 06:08Z pogo-reminders' parse_ts was
+// correctly repaired (mg-3ba8) and deployed to ~/.pogo — the copy this file's
+// resolution PREFERS — and the arm went red on pogo commits that had not
+// changed. main was deterministically red (5 runs, 5 failures) and every branch
+// entering the merge gate failed, because a test in this repo was asserting the
+// continued presence of a defect somebody in another repo was commissioned to
+// remove. Nothing in either repo could have predicted it (mg-c51f).
+//
+// The generalisation, for the next arm added here: the notifier is a dependency
+// with its own maintainers, so gate on the invariants they are trying to hold
+// (the alarm is raised; unreadable input costs grouping and nothing else) and
+// merely RECORD the version-dependent facts.
 //
 // # What this probe does NOT claim
 //
@@ -86,6 +109,25 @@ const DeadmanMinAgeSeconds = 900
 // here to test is that a non-empty directory does not swallow the alarm, and
 // that needs it non-empty, not enormous.
 const lastHopBacklog = 60
+
+// unreadableStamp is the episode boundary ARM E constructs. It is not a
+// timestamp in any format, which is the point: an arm that wants the reader to
+// FAIL must construct a failure the reader can never be fixed out of. Its
+// predecessor used a fractional-second width that a then-current pogo-reminders
+// happened to reject, and when that was correctly repaired and deployed on
+// 2026-09-08 at 06:08Z the arm went red on unchanged pogo commits and blocked
+// the whole merge queue (mg-c51f).
+const unreadableStamp = "not-a-timestamp"
+
+// emittedShortFrac is a fractional second Go's RFC3339Nano really emits — the
+// width produced whenever the microsecond value ends in two zeros — and
+// emittedShortShare is how often the emitter produces a width Python 3.9's bare
+// fromisoformat rejects (widths 1, 2, 4 and 5: 99,099 of 10^6). ARM F drives
+// this width and gates on what survives it, not on whether the reader takes it.
+const (
+	emittedShortFrac  = ".1234"
+	emittedShortShare = "9.91%"
+)
 
 // NotifierScript resolves the notifier poll-mail.sh drives.
 //
@@ -173,10 +215,11 @@ func ProbeLastHop() ProbeResult {
 	// A record that does not parse is dropped, and that episode's coalescing is
 	// silently dead for the whole burst.
 	//
-	// Truncating here makes this probe deterministic instead of failing one run
-	// in ten. It is NOT hiding the defect: arm E below constructs the failing
-	// width on purpose and asserts what the reader does with it. See
-	// docs/operations.md and the successor item filed off mg-d788.
+	// Truncating here makes this probe deterministic instead of taking whichever
+	// width the clock happens to land on. It is NOT hiding the width question:
+	// ARM F below drives an emitted short width on purpose and gates on what
+	// survives it either way. See docs/operations.md, mg-3ba8 (the parse repair,
+	// in pogo-reminders) and mg-c51f (why no arm here asserts its absence).
 	now := time.Now().UTC().Truncate(time.Second)
 	alarm := probeAlarm(now)
 
@@ -354,19 +397,27 @@ func ProbeLastHop() ProbeResult {
 			"roster, and nothing enforces that.",
 	}, runD))
 
-	// ---------------- ARM E: the width the emitter really produces one time in ten.
+	// ---------------- ARM E: a boundary the reader cannot read, CONSTRUCTED HERE.
 	//
-	// pogod stamps opened_at/closed_at with Go's RFC3339Nano, which trims
-	// trailing zeros; the deployed reader parses them with Python 3.9's
-	// fromisoformat, which takes 3 or 6 fractional digits and nothing else.
-	// Measured over all 10^6 microsecond values, 9.91% of emitted records carry
-	// a width it rejects. This arm builds one of them (4 digits) and asserts what
-	// the reader then does — because the consequence, not the parse, is what
-	// matters to an alarm: the record is dropped, that episode's coalescing is
-	// silently dead, and every message pages on its own. The alarm is STILL
-	// raised. The fragility degrades toward noise, never toward silence, and that
-	// is the whole reason it is reported here rather than treated as a red gate.
-	runE, err := newLastHopRun(dir, "unparseable", bin, binDir)
+	// The property under test is DEGRADE-TO-SAFE: an episode record the notifier
+	// cannot read must cost the grouping and nothing else — every message pages
+	// on its own, and the alarm is still among them. That is a property this repo
+	// is entitled to require of ANY version of the notifier.
+	//
+	// The boundary is a string that is not a timestamp at all, and the shape of
+	// that choice is the repair mg-c51f made. Until then this arm used a FOUR-
+	// DIGIT fractional second — a width Python 3.9's fromisoformat happened to
+	// reject — so it was asserting that a DEFECT IN ANOTHER REPO WAS STILL
+	// PRESENT. On 2026-09-08 at 06:08Z that defect was correctly fixed in
+	// pogo-reminders (mg-3ba8) and deployed to ~/.pogo, which the resolution
+	// below prefers; this arm went red on a pogo commit that had not changed,
+	// main was deterministically red (5 runs, 5 failures), and the merge queue
+	// was blocked for every branch in the repo until the arm was rewritten.
+	//
+	// The rule that falls out of it: a test in this repo may depend on what the
+	// notifier DOES, never on what the notifier gets WRONG. A bug is the one
+	// property of a dependency that somebody is actively commissioned to remove.
+	runE, err := newLastHopRun(dir, "unreadable", bin, binDir)
 	if err != nil {
 		res.Blind = err.Error()
 		return res
@@ -381,7 +432,7 @@ func ProbeLastHop() ProbeResult {
 		res.Blind = err.Error()
 		return res
 	}
-	if err := runE.writeEpisodeFrac("ep-lasthop", burstSenders, now, ".1234"); err != nil {
+	if err := runE.writeEpisodeStamped("ep-lasthop", burstSenders, now, unreadableStamp, unreadableStamp); err != nil {
 		res.Blind = err.Error()
 		return res
 	}
@@ -396,17 +447,78 @@ func ProbeLastHop() ProbeResult {
 	}
 	ownE := ownBanner(notesE, "FLEET STOPPED")
 	res.Arms = append(res.Arms, withTranscript(ProbeArm{
-		Name: "CONTROL: an episode record whose fractional second the reader CANNOT parse (9.91% of what pogod emits) drops the grouping, and the alarm is still raised",
+		Name: "CONTROL: an episode boundary the reader cannot read AT ALL drops the grouping, and the alarm is still raised",
 		Want: fmt.Sprintf("no group banner, %d individual banners, the alarm among them", len(burstE)+1),
 		Got: fmt.Sprintf("%d banner(s), %d of them a coalesced group; the alarm's own banner is %s",
 			len(notesE), countGroups(notesE), presence(ownE)),
 		OK: ownE && countGroups(notesE) == 0 && len(notesE) == len(burstE)+1,
-		Detail: "Go's RFC3339Nano trims trailing zeros and emits every fractional width 0..6; Python 3.9's " +
-			"datetime.fromisoformat accepts 3 or 6 and nothing else. Over all 10^6 microsecond values that is " +
-			"900,000 at 6 digits and 900 at 3 against 99,099 that are rejected. The reader DEGRADES TO SAFE — " +
-			"it pages each message rather than hiding any — so this is a noise defect, not a silence one, and " +
-			"the fix belongs in pogo-reminders' parse_ts, not here.",
+		Detail: "the boundary is " + unreadableStamp + " — not a near-miss width some reader version " +
+			"accepts and another rejects, but a string no parser turns into an instant. That keeps this " +
+			"arm measuring the notifier's DEGRADE DIRECTION (page each, hide none) rather than the " +
+			"presence of a particular bug in it. See ARM F for the width pogod really emits.",
 	}, runE))
+
+	// ---------------- ARM F: the width pogod really emits one time in ten.
+	//
+	// pogod stamps opened_at/closed_at with Go's RFC3339Nano, which trims
+	// trailing zeros and so emits every fractional width from 0 to 6. Measured
+	// over all 10^6 microsecond values: 6 digits 900,000, 5 digits 90,000, 4
+	// digits 9,000, 3 digits 900, 2 digits 90, 1 digit 9, none 1. Python 3.9's
+	// fromisoformat takes 3 or 6 and nothing else, so a reader that hands it the
+	// raw string rejects 99,099 of them — 9.91%. mg-3ba8 fixed that in
+	// pogo-reminders by normalising the fraction to 6 digits before parsing.
+	//
+	// THIS ARM DOES NOT ASSERT WHICH READER IS DEPLOYED, and that is deliberate:
+	// which one is on the box is a fact about another repo's release state, and a
+	// gate in this repo that reads it goes red the moment somebody there does
+	// their job. What it asserts is the invariant that holds under BOTH — the
+	// width decides HOW MANY banners the burst becomes, never WHETHER the alarm
+	// is raised — and it RECORDS which behaviour it saw, so the probe's output
+	// still tells you the answer without the gate depending on it.
+	runF, err := newLastHopRun(dir, "emitted-width", bin, binDir)
+	if err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	burstF, err := runF.seedBurst(burstSenders, 3, now)
+	if err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	alarmF, err := runF.deliver(alarm, "pogod")
+	if err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	if err := runF.writeEpisodeFrac("ep-lasthop", burstSenders, now, emittedShortFrac); err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	if err := backdateAll(append(burstF, alarmF), now.Add(-time.Hour)); err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	notesF, err := runF.poll()
+	if err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	ownF := ownBanner(notesF, "FLEET STOPPED")
+	groupedF := countGroups(notesF)
+	coalesced := groupedF == 1 && len(notesF) == 2
+	dropped := groupedF == 0 && len(notesF) == len(burstF)+1
+	res.Arms = append(res.Arms, withTranscript(ProbeArm{
+		Name: fmt.Sprintf("the fractional width pogod emits %s of the time decides how many banners, never whether the alarm is raised", emittedShortShare),
+		Want: "the alarm's own banner, and a coherent burst: either 1 group banner (the reader normalises the width) or " +
+			fmt.Sprintf("%d individual ones (it drops the record)", len(burstF)+1),
+		Got: fmt.Sprintf("%d banner(s), %d of them a coalesced group; the alarm's own banner is %s — the reader %s",
+			len(notesF), groupedF, presence(ownF), describeWidthHandling(coalesced, dropped)),
+		OK: ownF && (coalesced || dropped),
+		Detail: "a " + emittedShortFrac[1:] + "-digit fraction is what Go's RFC3339Nano produces whenever the " +
+			"microsecond value ends in two zeros. Whether the notifier reads it is pogo-reminders' business " +
+			"(fixed there by mg-3ba8, deployed 2026-09-08 06:08Z); whether the alarm survives either answer " +
+			"is this repo's, and is what this arm gates on.",
+	}, runF))
 
 	return res
 }
@@ -524,7 +636,7 @@ func (r *lastHopRun) writeEpisode(id string, roster []string, now time.Time) err
 }
 
 // writeEpisodeFrac writes the same record with a chosen fractional-second suffix
-// on the window bounds, so a caller can construct a width the reader rejects.
+// on the window bounds, so a caller can drive a specific emitted width.
 func (r *lastHopRun) writeEpisodeFrac(id string, roster []string, now time.Time, frac string) error {
 	stamp := func(t time.Time) string {
 		if frac == "" {
@@ -532,16 +644,28 @@ func (r *lastHopRun) writeEpisodeFrac(id string, roster []string, now time.Time,
 		}
 		return t.Format("2006-01-02T15:04:05") + frac + "Z"
 	}
+	return r.writeEpisodeStamped(id, roster, now, stamp(now.Add(-2*time.Hour)), stamp(now.Add(-1*time.Minute)))
+}
+
+// writeEpisodeStamped writes the record with caller-supplied boundary strings.
+//
+// The boundaries are written VERBATIM so a caller can construct one the reader
+// cannot read at all, rather than borrowing a width some version of the reader
+// happens to reject — which is the coupling mg-c51f removed. The record's own
+// top-level timestamp stays well-formed: load_episodes never parses it, and a
+// second broken field would make an arm's failure ambiguous about which one
+// caused it.
+func (r *lastHopRun) writeEpisodeStamped(id string, roster []string, now time.Time, opened, closed string) error {
 	rec := map[string]any{
 		"event_type": "incident_episode_cleared",
 		"agent":      "pogod",
-		"timestamp":  stamp(now),
+		"timestamp":  now.Format(time.RFC3339Nano),
 		"details": map[string]any{
 			"kind":       "auth",
 			"episode_id": id,
 			"roster":     roster,
-			"opened_at":  stamp(now.Add(-2 * time.Hour)),
-			"closed_at":  stamp(now.Add(-1 * time.Minute)),
+			"opened_at":  opened,
+			"closed_at":  closed,
 		},
 	}
 	blob, err := json.Marshal(rec)
@@ -549,6 +673,20 @@ func (r *lastHopRun) writeEpisodeFrac(id string, roster []string, now time.Time,
 		return fmt.Errorf("could not write the episode record: %w", err)
 	}
 	return os.WriteFile(r.events, append(blob, '\n'), 0o644)
+}
+
+// describeWidthHandling names which of ARM F's two coherent outcomes was seen,
+// so the probe's output still reports which reader is deployed even though no
+// arm gates on the answer.
+func describeWidthHandling(coalesced, dropped bool) string {
+	switch {
+	case coalesced:
+		return "NORMALISED the width and coalesced the burst"
+	case dropped:
+		return "REJECTED the width and dropped the episode, so every message paged on its own"
+	default:
+		return "did NEITHER coherently — that is the failure this arm is for"
+	}
 }
 
 // isSeen reports whether the notifier consumed a message id.
