@@ -134,8 +134,30 @@ func TestInspectPushedUnmergedBranchSaysResubmit(t *testing.T) {
 	if f.PreRegistration != nil {
 		t.Errorf("PreRegistration = %+v, want nil: no commit here records predictions", f.PreRegistration)
 	}
-	if s := f.Summary(); !strings.Contains(s, "Resubmit") || strings.Contains(s, "dispatch a worker at this item,") == false {
-		t.Errorf("Summary does not name the remedy: %q", s)
+	// The remedy AND the warning, and the warning is checked for what it now says
+	// rather than for the sentence it used to (mg-ba32). It read "do NOT dispatch
+	// a worker at this item, it would re-derive work that already exists", which
+	// treats every dispatch as a re-derivation — false for the one dispatch that
+	// lands this branch, `--stranded-adopt`, and that false universal is what the
+	// spawn gate then embedded in its refusal. So the assertion is that the
+	// warning NAMES THE BASE REF it is about, and that the old unconditional form
+	// is gone.
+	s := f.Summary()
+	// `submit` lower-cased: SubmitRemedy renders the command, and the previous
+	// spelling of this check looked for "Resubmit", which is satisfied by this
+	// test's own t.TempDir() path (it contains the test's name) whatever Summary
+	// says. An assertion that cannot fail is not one.
+	if !strings.Contains(s, "pogo refinery submit "+f.Branch) {
+		t.Errorf("Summary does not name the remedy command: %q", s)
+	}
+	if !strings.Contains(s, "FROM "+f.Target) {
+		t.Errorf("Summary's re-derivation warning does not name the base ref that makes a dispatch "+
+			"a re-derivation, so it reads as a claim about every dispatch: %q", s)
+	}
+	if strings.Contains(s, "do NOT dispatch a worker at this item") {
+		t.Errorf("Summary still says a dispatch at this item is necessarily a re-derivation. It is not: "+
+			"a worker sent to CONTINUE this branch is the opposite of one, and on 2026-08-14 this "+
+			"sentence refused exactly that dispatch (mg-ba32). Got: %q", s)
 	}
 }
 

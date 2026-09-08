@@ -180,45 +180,66 @@ func (r *Registry) getStrandedWorkGate() StrandedWorkGate {
 // the guard was blind here; it is not blind, it was misreporting, and a refusal
 // nobody can act on is the failure mode a blind guard would have had anyway.
 func (r *Registry) strandedWorkRefusal(workItemID, repo, target string) string {
+	_, refusal := r.strandedWorkCheck(workItemID, repo, target)
+	return refusal
+}
+
+// strandedWorkCheck is strandedWorkRefusal with the FINDINGS kept.
+//
+// The findings are returned because the refusal is no longer the only thing a
+// caller does with them: --stranded-adopt bases the new worktree on the branch
+// the gate found, so the dispatch path needs the branch itself and not only the
+// sentence describing it (mg-ba32). Re-scanning to recover it would ask git the
+// same question twice and — worse — could get a different answer than the
+// refusal the operator is reading.
+//
+// findings is non-empty exactly when refusal is non-empty; both are empty when
+// the gate allows the dispatch or could not answer.
+func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strandedwork.Finding, string) {
 	findings, err := r.getStrandedWorkGate().StrandedFindings(workItemID, repo, target)
 	if err != nil {
 		// Loud but not fatal — see the fail-open rationale on StrandedFindings.
 		log.Printf("stranded-work gate: could not check work item %s in %s: %v — "+
 			"dispatching WITHOUT the stranded-work check; if this item has pushed work on a "+
 			"polecat branch, this spawn is about to re-derive it", workItemID, repo, err)
-		return ""
+		return nil, ""
 	}
 	if len(findings) == 0 {
-		return ""
+		return nil, ""
 	}
 
 	// Pre-registration first, whatever the scan order: it is the disposition
 	// whose advice must not be crowded out.
 	for _, f := range findings {
 		if f.Disposition == strandedwork.DispositionPreRegistration {
-			// The remedy names only mechanisms that exist. A polecat spawn always
-			// bases its worktree on origin/<target> (resolvePolecatBaseRef) — there
-			// is no flag that bases it on a sha — so "re-dispatch from the
-			// pre-registration commit" is not a spawn option, it is a checkout of
-			// the branch that already carries that commit.
-			return fmt.Sprintf("work item %s already has %s, UNMERGED work, and it includes a "+
+			// The remedy names only mechanisms that exist. That used to rule OUT a
+			// re-dispatch here — a spawn always based its worktree on
+			// origin/<target> (resolvePolecatBaseRef) and no flag based it on a
+			// sha, so "continue from the pre-registration commit" was a hand-typed
+			// `git worktree add` outside the dispatch path entirely. Since mg-ba32
+			// it IS a spawn option: --stranded-adopt bases the worktree on this
+			// branch's ref, so the commit arrives as an ancestor of the worker's own
+			// branch, which is what makes it unamendable. The hand-typed form is no
+			// longer spelled out here — Summary() above already names the
+			// dispatch-from-the-sha route for a reader working outside pogod — and
+			// the flag is what this refusal is in a position to offer.
+			return findings, fmt.Sprintf("work item %s already has %s, UNMERGED work, and it includes a "+
 				"PRE-REGISTRATION commit: %s. A polecat spawned now would base its worktree on %s and write "+
 				"its predictions AFTER seeing the results — the artifact would look identical to a valid "+
-				"one, so nothing downstream could catch it. Get the branch merged instead (`%s`); if the "+
-				"analysis genuinely has to be redone, CONTINUE ON %s (`git -C %s worktree add <dir> %s`), "+
-				"which already carries %s, and never amend that commit. Dispatch anyway with "+
-				"--stranded-override=\"<why>\" only if this branch is spent",
+				"one, so nothing downstream could catch it. Get the branch merged instead (`%s`). "+
+				"%s Either way %s already carries %s, and never amend that commit",
 				workItemID, strandedwork.Provenance(f.Pushed), f.Summary(), f.Target,
 				strandedwork.SubmitRemedy(f.Repo, f.Branch, workItemID, f.Pushed),
-				f.Branch, f.Repo, f.Branch, f.PreRegistration.SHA[:min(12, len(f.PreRegistration.SHA))])
+				strandedExits(f)+".",
+				f.Branch, f.PreRegistration.SHA[:min(12, len(f.PreRegistration.SHA))])
 		}
 	}
 	f := findings[0]
-	msg := fmt.Sprintf("work item %s already has %s, UNMERGED work: %s. Dispatching a worker at it "+
-		"re-derives work that already exists — mg-9a19 lost 1026 lines that way. Get the branch merged "+
-		"instead (`%s`). Dispatch anyway with --stranded-override=\"<why>\" if this branch is genuinely spent",
+	msg := fmt.Sprintf("work item %s already has %s, UNMERGED work: %s. A worker dispatched FROM THE "+
+		"TARGET at it re-derives work that already exists — mg-9a19 lost 1026 lines that way. Get the "+
+		"branch merged instead (`%s`). %s",
 		workItemID, strandedwork.Provenance(f.Pushed), f.Summary(),
-		strandedwork.SubmitRemedy(f.Repo, f.Branch, workItemID, f.Pushed))
+		strandedwork.SubmitRemedy(f.Repo, f.Branch, workItemID, f.Pushed), strandedExits(f))
 	// The second opinion travels WITH the refusal and never instead of it
 	// (mg-5ec6). `git cherry` over-reports on a branch that landed through an
 	// ordinary clean rebase, and this refusal is where that costs the most: told
@@ -229,7 +250,31 @@ func (r *Registry) strandedWorkRefusal(workItemID, repo, target string) string {
 	if _, note := strandedwork.Corroborate(f.Repo, f); note != "" {
 		msg += ". " + note
 	}
-	return msg
+	return findings, msg
+}
+
+// strandedExits is the sentence that names BOTH ways past this gate, and it is
+// the half mg-ba32 was filed for.
+//
+// The refusal used to offer one exit and assert a reason for it — "dispatch
+// anyway with --stranded-override if this branch is genuinely spent". That
+// sentence is a claim about the branch, and the gate has no way to know whether
+// it is true: it fires just as hard on a branch that is finished and only needs
+// a rebase, which is the case where the dispatch is not a re-derivation at all
+// but the only route the work has left. An operator holding that case had to
+// type a flag that said the opposite of what they meant, and after that nothing
+// in the log could tell the two apart.
+//
+// So the exits are stated as the two dispositions they are, with what each one
+// DOES to the branch rather than a reason the operator may not hold. Neither is
+// recommended here: which one is right is a fact about the branch, and the
+// reader is the one who can go and read it.
+func strandedExits(f strandedwork.Finding) string {
+	return fmt.Sprintf("If a worker really has to go here, say WHICH of the two you mean: "+
+		"--stranded-adopt=\"<why>\" bases its worktree ON %s so the existing work is continued and "+
+		"landed, and --stranded-override=\"<why>\" bases it on %s and leaves %s behind. Passing both "+
+		"is refused",
+		f.Ref, f.Target, f.Branch)
 }
 
 // reportStrandedWorkOnRelease records that a polecat being stopped left pushed

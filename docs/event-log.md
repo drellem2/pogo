@@ -382,13 +382,18 @@ an event. Additive — no `schema_version` bump.
 
 #### `dispatch_stranded_work_overridden`
 
-A dispatch went ahead over the stranded-work gate's refusal, with a stated
-reason (`pogo agent spawn-polecat --stranded-override="<why>"`). The gate
-attributes a branch to a work item heuristically — a commit-subject id, or the
-item's id-suffix in the branch name — so it can be wrong, and a refusal with no
-way past it becomes a wedge that gets resolved by disarming the gate. This event
-is what keeps the override from being silent. Additive — no `schema_version`
-bump.
+A dispatch went ahead over the stranded-work gate's refusal in the **spent,
+discard** disposition, with a stated reason (`pogo agent spawn-polecat
+--stranded-override="<why>"`). The gate attributes a branch to a work item
+heuristically — a commit-subject id, or the item's id-suffix in the branch name —
+so it can be wrong, and a refusal with no way past it becomes a wedge that gets
+resolved by disarming the gate. This event is what keeps the override from being
+silent. Additive — no `schema_version` bump.
+
+It means the worker was dispatched **from the target** and the stranded branch
+was left behind. A worker dispatched to CONTINUE that branch emits
+`dispatch_stranded_work_adopted` instead, and never this — see mg-ba32 for why
+one event for both was worse than none.
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
 - **Optional envelope:** `repo`
@@ -400,6 +405,42 @@ bump.
 
 ```json
 {"schema_version":1,"timestamp":"2026-08-05T09:58:11.000000000Z","event_type":"dispatch_stranded_work_overridden","agent":"cat-a9a19","work_item_id":"mg-9a19","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"a9a19","reason":"branch is a stale duplicate; the real work merged as 9072f34","refusal":"work item mg-9a19 already has PUSHED, UNMERGED work: ..."}}
+```
+
+#### `dispatch_stranded_work_adopted`
+
+A dispatch went ahead over the stranded-work gate's refusal in the **good,
+adopt** disposition, with a stated reason (`pogo agent spawn-polecat
+--stranded-adopt="<why>"`). The polecat's worktree was based on the stranded
+branch's ref rather than on the target, so the worker inherits the existing
+commits and its job is to land them. Additive — no `schema_version` bump.
+
+It is a separate event type from `dispatch_stranded_work_overridden` and that is
+the point of it (mg-ba32): the gate refuses two populations that want opposite
+handling, and once they share one record nothing afterwards can tell "a worker
+was sent to continue this branch" from "a worker was sent past it". Only one of
+the two events is ever emitted for a given dispatch; passing both flags is
+refused and emits neither.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **Optional envelope:** `repo`
+- **`details` fields:**
+  - `agent_type` (string, required): always `"polecat"` in v1
+  - `agent_name` (string, required): the name of the polecat dispatched to continue the branch
+  - `reason` (string, required): the operator's stated why — it also reaches the worker as the first block of its prompt
+  - `refusal` (string, required): the bypassed refusal verbatim
+  - `adopted_branch` (string, required): the branch the worktree was based on
+  - `adopted_ref` (string, required): the ref its commits were read from — a remote-tracking ref, or a local head for work that is not on origin
+  - `base_ref` (string, required): the ref actually passed to `git worktree add`; equal to `adopted_ref`
+  - `pushed` (bool, required): whether the adopted work is on origin
+  - `target` (string, required): the ref the branch was compared against
+  - `disposition` (string, required): the finding's disposition — `"resubmit"` or `"pre_registration"`
+  - `unmerged` (int, required): how many commits the target does not have
+  - `pre_registration` (bool, required): whether the adopted branch carries an unmerged pre-registration commit, which the worker must never amend
+  - `not_adopted` (array of strings, optional): other stranded branches for this item that were found and left behind; absent when there were none
+
+```json
+{"schema_version":1,"timestamp":"2026-08-14T02:21:40.000000000Z","event_type":"dispatch_stranded_work_adopted","agent":"cat-a5058","work_item_id":"mg-5058","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"a5058","reason":"the branch is finished and only needs a rebase onto main; land it","refusal":"work item mg-5058 already has PUSHED, UNMERGED work: ...","adopted_branch":"polecat-5058","adopted_ref":"refs/remotes/origin/polecat-5058","base_ref":"refs/remotes/origin/polecat-5058","pushed":true,"target":"refs/remotes/origin/main","disposition":"resubmit","unmerged":3,"pre_registration":false}}
 ```
 
 #### `dispatch_preserved_worktree_overridden`
