@@ -78,12 +78,28 @@
 // discarded rather than folded into the error text: shell init files can print
 // things, and an error message is a thing that gets logged and mailed.
 //
-// # Staleness
+// # Staleness — and why "benign" was wrong (mg-4d59)
 //
 // Like pathenv, this runs once at startup, so a token rotated afterwards is not
-// picked up until pogod restarts. Stated rather than hidden. The failure mode is
-// the benign one — lookups go back to indeterminate, which the detector already
-// reports loudly and never mistakes for "closed".
+// picked up until pogod restarts. That much was always stated here. What was
+// stated with it — that the failure mode is "the benign one", lookups going back
+// to indeterminate — was measured false on 2026-09-08 and is retracted.
+//
+// The staleness is worse than indeterminate for one specific reason: this
+// package returns SourceAmbient for ANY non-blank GH_TOKEN in the process
+// environment, without asking whether it works. pogod had been exec'd from a
+// shell 174 hours earlier and held that shell's copy; the token was rotated
+// since; `~/.zshenv` and every shell and crew agent got the new one and pogod
+// did not. So Ensure kept reporting a credential present (source=ambient) —
+// truthfully — while every `gh` child it spawned got HTTP 401, and the intake
+// detector, which arms on OK(), rendered 173 hours of failures under a heading
+// that ruled a credential fault OUT.
+//
+// Nothing about that is a defect in Ensure: EXISTENCE is the predicate it
+// implements and existence was the truth. The defect was that existence was the
+// only predicate available, so callers spent it on a claim about VALIDITY. See
+// Verify (verify.go), which answers the second question and is deliberately a
+// separate call on the failure path rather than a change to this one.
 package ghtoken
 
 import (
