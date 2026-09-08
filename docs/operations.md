@@ -172,8 +172,34 @@ Four arms, two of them controls:
 | B | **CONTROL** — the same alarm *younger* than the gate | raise nothing **and not be marked seen**: a gate that consumes a too-young message drops it instead of holding it (mg-65d2) |
 | C | the alarm arriving in the same cycle as a 12-message watcher burst the notifier coalesces | keep its **own** banner beside the one group banner |
 | D | **CONTROL** — the same alarm sent *from inside* that burst's roster | be **swallowed** by the grouping, so C cannot be green merely because coalescing is dead |
+| E | **CONTROL** — an episode record whose fractional second the reader cannot parse | drop the grouping and page **every** message, the alarm among them |
 
 `POGO_NOTIFIER_SCRIPT` overrides which script is driven. A box with no notifier deployed reports `INSTRUMENT FAILURE` for this half — unknown, never fine.
+
+#### One episode record in ten is silently unparseable, and it was this probe's own flake
+
+Arm E is not hypothetical. It was found because arms C and D failed in the merge gate about one run in ten while passing in isolation, and the cause is a **cross-repo format mismatch nothing enforces**:
+
+- pogod stamps `opened_at` / `closed_at` with Go's **`time.RFC3339Nano`**, which trims trailing zeros and therefore emits every fractional width from 0 to 6 digits;
+- the notifier's `parse_ts` hands them to **Python 3.9's `datetime.fromisoformat`**, which accepts a fractional second of **3 or 6 digits and nothing else** (7+ are clamped to 6 by `parse_ts`'s own regex, so those are fine).
+
+Measured over all 10⁶ microsecond values a `time.Time` can carry:
+
+| fractional digits emitted | count | parses |
+|---|---|---|
+| 6 | 900,000 | yes |
+| 5 | 90,000 | **no** |
+| 4 | 9,000 | **no** |
+| 3 | 900 | yes |
+| 2 | 90 | **no** |
+| 1 | 9 | **no** |
+| 0 | 1 | yes |
+
+**99,099 of 1,000,000 — 9.91% — are rejected.** A rejected record is dropped by `load_episodes`, so that episode's coalescing is silently dead for its whole burst.
+
+**It degrades toward noise, not silence.** With no episode, every message pages on its own — arm E asserts exactly that, and asserts the alarm is still among them. So this is not a reason to distrust the alarm; it is a reason the burst it arrives in may be N banners instead of one, which is the condition arm C exists to measure. The fix belongs in `pogo-reminders`' `parse_ts` (pad or regex-normalise the fraction before parsing), not in this repo, and is filed as a successor to mg-d788 (**mg-3ba8**).
+
+`ProbeLastHop` truncates its own clock to the second so it exercises the parseable path deterministically instead of failing one run in ten; arm E constructs the failing width on purpose so the defect stays visible in the probe's own output.
 
 ### What the last hop measured, and what it did not
 
