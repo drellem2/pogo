@@ -198,9 +198,11 @@ one-shot detection and the repeating report are countable together.
 | Situation | What happens |
 |---|---|
 | item's work is on a branch, unmerged | dropped from both dispatch checks; re-reported by the **stranded-push** notice, which says *do NOT dispatch* and names the branch, its provenance and the unmerged count |
+| that branch is **already in the refinery queue** | same exclusion, different remedy — see below |
 | a live worker or a preserved worktree also fits | left to those checks — their work is less durable, and two notices about one item is how a channel gets skimmed |
 | probe cannot answer at all | unchanged, i.e. advertised: the spawn gate still refuses, and a false silence looks like a healthy queue |
 | a repo could not be listed | dispatch notices fire **and** carry the caveat |
+| the refinery queue could not be asked | the notice says so, because its own remedy may be a duplicate submit |
 
 **It is not a race and not a window.** Two polecats were stopped on 2026-09-07,
 both following the pre-deploy quiesce procedure exactly, both with their work
@@ -214,6 +216,52 @@ merge-request state is one of its inputs, so submitting the branch does not
 disarm it. The refusal is **409** while the per-repo cap's is **503**, and the
 stranded gate runs first — so a repo at cap does not mask the guard, which is
 what the ticket's own precaution assumed it would.
+
+#### "Pushed and unmerged" is TWO states, and they take opposite instructions (mg-64bb)
+
+The exclusion above asks *does work for this item already exist outside the
+item?* — and that question has **two** yeses:
+
+1. a branch **pushed and abandoned**, which needs somebody to submit it;
+2. a branch **already in the refinery merge queue**, which needs everybody to
+   leave it alone.
+
+Both are pushed and unmerged, so both reached the `stranded_push` notice
+identically and rendered identically — including the paste-ready `pogo refinery
+submit`, aimed at a branch whose merge was already running. Measured on
+`mg-a19a`: **four** such notices across ~36 minutes while
+`mr-dacudtqtjv1hjkm21420` was `processing` or `queued` throughout. The refinery
+has no dedup, so following that line merges the same work twice — and `pogo
+check-stranded`, which the notice names as the place to look, was meanwhile
+calling the same branch `in_flight` and saying *wait*. Two components of pogod
+contradicting each other about one item is the finding mg-4bf1 exists for,
+reachable through mg-4bf1's own repair.
+
+So the probe now consults the refinery queue — `QueueWithProcessing`, the same
+population `/refinery/queue` serves and `pogo check-stranded` reads — once per
+sample, and attaches the merge request to the branch.
+
+| | pushed, not submitted | pushed, in the queue |
+|---|---|---|
+| dispatch checks | dropped | dropped (**unchanged** — the queue changes the remedy, not the exclusion) |
+| notice remedy | `pogo refinery submit <branch> …` | *nothing to submit and nothing to dispatch; it closes itself when it lands* |
+| notice names | branch, provenance, unmerged count | the same, plus the **MR id and its status**, verbatim |
+| `stall_watch_fired` details | `branches[]` row | the same row plus `queued_mr` / `queued_status` |
+
+**With the queue unasked, every branch reads as un-submitted** — which is exactly
+the state that gets a submit line. That is mg-8baa's collapse in the direction
+where the damage lands on the *remedy* rather than on the finding, so
+`queue_consulted` is stamped on the event and the notice says the queue was not
+consulted. Unlike the repo-listing caveat, this sentence rides on the
+**stranded-push notice** and not on the dispatch notices: an unasked queue cannot
+cause an item to be missed, only its remedy to be wrong, so it is told to the
+reader who is being handed that remedy.
+
+**The remedy is checked against the defect it repairs, again.** mg-4bf1 guarded
+the submit line against a branch that is *not* on origin, where `pogo refinery
+submit` refuses (mg-586d) and the failure is loud. A queued branch fails the
+other way: the command **runs**, and what it produces is a duplicate merge
+request. The guard that catches the first does not catch the second.
 
 ### Threshold B — unread mail
 

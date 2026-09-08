@@ -1748,6 +1748,13 @@ distinguishable: stranded is **409** and names the branch, the per-repo cap is
 half of the repair lives in stall-watch's `stranded_push` notice — see
 `docs/design/stall-watch-design.md`.
 
+**That notice reads the queue too (mg-64bb).** It used to render a queued branch
+exactly like an abandoned one — including a paste-ready `pogo refinery submit`
+against a merge already running, which the refinery does not deduplicate. It now
+names the merge request and its status instead and tells the reader to wait, so
+this report and stall-watch answer *"is this branch in the queue?"* from the same
+population (`QueueWithProcessing`) rather than one of them not asking.
+
 #### `rescue_unbuilt` — why one row type is denied a runnable remedy
 
 A rescue commits a dead polecat's possibly-partial work with `--no-verify`

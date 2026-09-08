@@ -2271,7 +2271,13 @@ Flags:
 			// `[stranded-push] ... do NOT dispatch` about — two of this daemon's
 			// own signals contradicting each other in one inbox, with the
 			// recommendation winning because it is the one that repeats.
-			Stranded: newStallStranded(),
+			// The queue thunk is what makes that answer distinguish the two
+			// states a pushed-and-unmerged branch can be in (mg-64bb): abandoned,
+			// which needs somebody to submit it, and already merging, which needs
+			// everybody to leave it alone. Without it the notice printed a
+			// paste-ready `pogo refinery submit` at a running merge, and the
+			// refinery has no dedup.
+			Stranded: newStallStranded(func() *refinery.Refinery { return mergeQueue }),
 		})
 		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s fallback_cap=%d priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s indefinite_hold=%t hold_age=%s hold_cooldown=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,

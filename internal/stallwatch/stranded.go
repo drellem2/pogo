@@ -10,7 +10,9 @@ import (
 )
 
 // An available item whose work is already sitting on a branch is not ready to
-// dispatch, and the do-not-dispatch signal for it has to REPEAT (mg-4bf1).
+// dispatch, and the do-not-dispatch signal for it has to REPEAT (mg-4bf1) —
+// whether the branch is merely pushed or already in the refinery merge queue,
+// which are two states taking OPPOSITE instructions (mg-64bb).
 //
 // THE DEFECT THIS CLOSES IS NOT A MISSING SIGNAL. It is a CONTRADICTED one, and
 // the distinction is the whole reason this file exists rather than a new
@@ -54,6 +56,22 @@ import (
 // measured in tens of minutes on this box before learning the answer, and a
 // channel that recommends refused actions is one the reader learns to skim
 // (mg-dd77 made the same argument about the per-repo cap).
+//
+// WHY THE QUEUE IS THE SECOND HALF OF THE SAME QUESTION (mg-64bb). "Does work
+// for this item already exist outside the item?" has two yeses, and mg-4bf1
+// shipped only one of them. A branch in the refinery queue is pushed and
+// unmerged, so it reaches this check exactly like an abandoned one and used to
+// render exactly like one — including the paste-ready `pogo refinery submit`,
+// aimed at a branch whose merge was already running. Measured on mg-a19a: four
+// such notices across ~36 minutes while mr-dacudtqtjv1hjkm21420 was `processing`
+// or `queued` throughout. The refinery has no dedup, so following that line
+// queues a second merge of the same work; and `pogo check-stranded` — which this
+// notice names as the place to look — was meanwhile calling the same branch
+// `in_flight` and saying "wait". Two components of pogod contradicting each
+// other about one item is the finding mg-4bf1 exists for, and it was reachable
+// through mg-4bf1's own repair. So the queue is consulted here too, from the
+// same instrument, and it changes the REMEDY rather than the exclusion: the item
+// was already withheld from both dispatch checks and still is.
 //
 // WHY THE ITEMS ARE RE-REPORTED RATHER THAN SILENCED. Same rule as mg-1a8a's
 // worked-but-unclaimed check and mg-836c's preserved-worktree check: a stranded
@@ -99,6 +117,48 @@ type StrandedBranch struct {
 	// — a re-dispatch that bases on the target writes its predictions after
 	// seeing the results — so it travels rather than being folded into the count.
 	PreRegistration string
+	// Queued is the refinery merge request ALREADY RUNNING for this branch, or
+	// nil when the branch is in no queue (mg-64bb). See QueuedMerge for why the
+	// distinction cannot be left to the reader.
+	Queued *QueuedMerge
+}
+
+// QueuedMerge is the merge request already in the refinery queue for a stranded
+// branch: the remedy for it, running.
+//
+// WHY A STRANDED BRANCH HAS TO CARRY THIS (mg-64bb). "Pushed and not merged" is
+// TWO states, not one, and they take opposite instructions. A branch nobody has
+// submitted needs `pogo refinery submit`. A branch already in the queue needs
+// nothing at all — and a submit against it is a DUPLICATE merge request, because
+// the refinery has no dedup. Before this field the two rendered identically
+// here, so the notice below printed a paste-ready submit for a branch whose
+// merge was running: measured on mg-a19a, four notices across ~36 minutes while
+// mr-dacudtqtjv1hjkm21420 was `processing` or `queued` the whole time.
+//
+// IT IS THE SAME EXCLUSION `pogo check-stranded` ALREADY APPLIES, and that is
+// the point rather than an aside. internal/strandwatch turns exactly this
+// combination — a queued branch under an item that is NOT claimed — into a
+// KindInFlight row whose remedy is "wait", for reasons its own comment states at
+// length. This package sends the reader to that instrument by name, so answering
+// the same question differently was two components of pogod contradicting each
+// other about one item, which is the finding mg-4bf1 exists for, committed by
+// its own repair.
+//
+// A PLAIN STRUCT AND NOT refinery.MergeRequest, for StrandedBranch's reason:
+// internal/stallwatch keeps no edge to the packages that do the work, so the
+// notice text stays testable with no refinery and no git repository.
+type QueuedMerge struct {
+	// MR is the merge-request id, e.g. "mr-dacudtqtjv1hjkm21420". It travels
+	// rather than a bare bool for internal/strandwatch's QueuedRequest reason: a
+	// reader told "this is in flight" and not told WHICH request has to go find
+	// it, and the whole failure being repaired is a reader left to arbitrate
+	// between two confident signals.
+	MR string
+	// Status is the refinery's own word — "queued" while it waits, "processing"
+	// while a gate runs on it. Printed VERBATIM: both mean "do not resubmit", but
+	// they are different answers to "how long until I can stop worrying about
+	// this item".
+	Status string
 }
 
 // StrandedWork is one snapshot of which available work items already have their
@@ -114,6 +174,13 @@ type StrandedWork struct {
 	// silent — so the note travels with the dispatch advice rather than replacing
 	// it.
 	Uncertain string
+	// QueueConsulted records whether the refinery queue was ASKED. False means
+	// every StrandedBranch.Queued is nil because nothing looked, not because
+	// nothing is in flight — mg-8baa's collapse, and the one field that keeps
+	// "the queue said no" and "the queue was never asked" from rendering alike.
+	// It is stamped on the event and stated in the notice, because with the queue
+	// unasked this check's own remedy may be a duplicate submit.
+	QueueConsulted bool
 }
 
 // StrandedItem is one item the probe is being asked about: its id and the
@@ -269,32 +336,102 @@ func (w *Watcher) checkStrandedPush(now time.Time, items []workitem.WorkItem, fl
 	}
 
 	ids := itemIDs(due)
+	anyQueued, allQueued := queuedCounts(due, found)
 	msg := fmt.Sprintf(
 		"stall-watch: %d work item(s) sit in available/ while the work they ask for ALREADY EXISTS "+
-			"on a branch — %s. This is NOT a dispatch request, it is the opposite, and it is the same "+
+			"%s — %s. This is NOT a dispatch request, it is the opposite, and it is the same "+
 			"fact pogod already mailed as `[stranded-push] ... do NOT dispatch` when the polecat was "+
 			"released. That mail is sent ONCE; this repeats for as long as the state lasts, so the "+
 			"prohibition and the dispatch recommendation no longer differ in how often they arrive. "+
 			"A worker dispatched at one of these re-derives work that already exists — mg-9a19 lost "+
-			"1026 lines that way. Get the branch merged instead (%s); `pogo check-stranded` shows the "+
+			"1026 lines that way. %s `pogo check-stranded` shows the "+
 			"same population with its per-branch remedy, and `pogo agent spawn-polecat` refuses these "+
 			"items until then.",
-		len(due), strings.Join(strandedSentences(due, found), "; "), submitHint(due, found))
+		len(due), whereTheWorkIs(allQueued), strings.Join(strandedSentences(due, found), "; "),
+		strandedRemedy(due, found, allQueued))
+	msg += strand.queueNote(anyQueued)
 	msg += sel.repeatNotice()
 
 	details := map[string]any{
-		"category":           categoryStrandedPush,
-		"watched_agent":      w.cfg.Agent,
-		"item_count":         len(due),
-		"item_ids":           ids,
-		"branches":           strandedDetails(due, found),
+		"category":      categoryStrandedPush,
+		"watched_agent": w.cfg.Agent,
+		"item_count":    len(due),
+		"item_ids":      ids,
+		"branches":      strandedDetails(due, found),
+		// Whether the refinery queue was ASKED, stamped beside the rows it
+		// qualifies: with it false every row's `queued` is absent because nothing
+		// looked, and a counter over these events would read that as "no item was
+		// ever held for a merge in flight" (mg-8baa).
+		"queue_consulted":    strand.QueueConsulted,
 		"oldest_age_seconds": now.Sub(oldestModTime(due)).Seconds(),
 	}
 	sel.stampDetails(details)
 	w.fire(categoryStrandedPush, Notice{
-		Subject: subject(nItems(len(due))+" unclaimed with work ALREADY ON A BRANCH", now.Sub(oldestModTime(due)), ids),
+		Subject: subject(nItems(len(due))+" unclaimed with work "+headlineWhere(allQueued), now.Sub(oldestModTime(due)), ids),
 		Message: msg,
 	}, details)
+}
+
+// whereTheWorkIs and headlineWhere say where the work already is, in the words
+// that decide what the reader does next.
+//
+// They only speak in the queue's terms when EVERY branch in the notice is in it.
+// A headline is the half that travels — it is what gets skimmed, quoted and
+// forwarded — so a mixed set says the thing that is true of both halves rather
+// than the more specific thing that is true of one.
+func whereTheWorkIs(allQueued bool) string {
+	if allQueued {
+		return "on a branch IN THE REFINERY MERGE QUEUE"
+	}
+	return "on a branch"
+}
+
+func headlineWhere(allQueued bool) string {
+	if allQueued {
+		return "ALREADY IN THE MERGE QUEUE"
+	}
+	return "ALREADY ON A BRANCH"
+}
+
+// strandedRemedy names the move, which is NOT the same move for the two states
+// this check now separates (mg-64bb).
+//
+//   - every branch queued: there is nothing to do but wait. The remedy is
+//     already running, and the one command a reader would otherwise reach for
+//     makes it worse — the refinery does not deduplicate, so a second request is
+//     a second merge of the same work.
+//   - anything else: the pre-mg-64bb sentence, with submitHint's own guard on
+//     whether a paste-ready submit can be printed at all.
+func strandedRemedy(items []workitem.WorkItem, found map[string][]StrandedBranch, allQueued bool) string {
+	if allQueued {
+		return "There is nothing to submit and nothing to dispatch: the merge is ALREADY RUNNING and " +
+			"the item closes itself when it lands. Do NOT re-submit it — the refinery has no dedup, " +
+			"so a second merge request merges the same work twice."
+	}
+	return "Get the branch merged instead (" + submitHint(items, found) + ");"
+}
+
+// queueNote is the sentence this notice appends when the refinery queue was NOT
+// consulted.
+//
+// It is attached HERE and not only to the dispatch notices, unlike
+// uncertaintyNote, because the direction of the damage is reversed. An
+// unconsulted queue cannot cause an item to be missed — the branch is found
+// either way — it causes this check's own REMEDY to be wrong, recommending a
+// submit for a merge that may already be running. So the reader who is being
+// handed that remedy is the one who has to be told.
+//
+// It says nothing when the queue was consulted, and nothing when it was not but
+// some branch is already known to be queued — which cannot happen, and is
+// guarded rather than asserted because a future wiring that half-answers must
+// not print a contradiction.
+func (s StrandedWork) queueNote(anyQueued bool) string {
+	if s.QueueConsulted || anyQueued {
+		return ""
+	}
+	return " The refinery queue was NOT consulted for this notice, so a branch already awaiting " +
+		"merge is indistinguishable here from one nobody has submitted; `pogo check-stranded` asks " +
+		"the queue and says which."
 }
 
 // strandedSentences renders one clause per item naming its branches.
@@ -325,7 +462,46 @@ func (b StrandedBranch) summary() string {
 		// one.
 		s += "; includes an unmerged PRE-REGISTRATION commit " + b.PreRegistration
 	}
+	if b.Queued != nil {
+		// The clause that changes the instruction rather than its urgency: this
+		// branch's remedy is already RUNNING, so the reader's move is to wait,
+		// and a submit against it queues a second merge request for the same work.
+		s += fmt.Sprintf("; ALREADY IN THE REFINERY MERGE QUEUE as %s (%s) — do NOT resubmit",
+			b.Queued.MR, orUnreportedStatus(b.Queued.Status))
+	}
 	return s + ")"
+}
+
+// orUnreportedStatus keeps a queue entry with no status from rendering as "()",
+// which reads as a formatting bug rather than as a fact the refinery did not
+// supply. The MR id is the actionable half and it is present either way.
+func orUnreportedStatus(status string) string {
+	if status == "" {
+		return "status unreported"
+	}
+	return status
+}
+
+// queued reports whether any branch on any of these items is already in the
+// refinery queue, and whether EVERY one is.
+//
+// The two answers are separate because they change different sentences: "any"
+// decides whether the notice must say anything about the queue at all, and "all"
+// decides whether the headline and the remedy may speak in the queue's terms
+// without being wrong about a branch in the same notice that nobody has
+// submitted. A mixed set gets the neutral wording and the per-branch clauses,
+// which is the only rendering true of both halves.
+func queuedCounts(items []workitem.WorkItem, found map[string][]StrandedBranch) (some, all bool) {
+	total, inQueue := 0, 0
+	for _, it := range items {
+		for _, b := range found[it.ID] {
+			total++
+			if b.Queued != nil {
+				inQueue++
+			}
+		}
+	}
+	return inQueue > 0, total > 0 && inQueue == total
 }
 
 // provenance names where the branch's commits actually live, in the words the
@@ -346,6 +522,13 @@ func (b StrandedBranch) provenance() string {
 // reader two false things at once. With a mixed or local-only set the reader is
 // sent to the instrument that renders the per-branch remedy correctly rather
 // than being handed a command that cannot work.
+//
+// A QUEUED BRANCH IS THE SECOND WAY THAT COMMAND CAN BE WRONG, and it fails in
+// the opposite direction (mg-64bb): the submit RUNS, and what it produces is a
+// duplicate merge request for work whose merge is already in flight. The refusal
+// that catches the unpushed case does not catch this one, so the guard has to be
+// here. Measured on mg-a19a: exactly one branch, pushed, four notices — the
+// shape that reaches this line — while its MR sat in the queue for ~36 minutes.
 func submitHint(items []workitem.WorkItem, found map[string][]StrandedBranch) string {
 	var only StrandedBranch
 	n, id := 0, ""
@@ -355,7 +538,7 @@ func submitHint(items []workitem.WorkItem, found map[string][]StrandedBranch) st
 			only, id = b, it.ID
 		}
 	}
-	if n != 1 || !only.Pushed {
+	if n != 1 || !only.Pushed || only.Queued != nil {
 		return "`pogo check-stranded` names the branch and the remedy for each"
 	}
 	return fmt.Sprintf("`pogo refinery submit %s --repo=%s --author=%s`", only.Branch, only.Repo, id)
@@ -380,6 +563,14 @@ func strandedDetails(items []workitem.WorkItem, found map[string][]StrandedBranc
 			}
 			if b.PreRegistration != "" {
 				row["pre_registration"] = b.PreRegistration
+			}
+			if b.Queued != nil {
+				// So "held because its work was pushed and abandoned" and "held
+				// because its merge is running" are countable apart in events.log.
+				// They are the same exclusion and different emergencies: one needs
+				// somebody to act, the other needs everybody not to.
+				row["queued_mr"] = b.Queued.MR
+				row["queued_status"] = b.Queued.Status
 			}
 			out = append(out, row)
 		}

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/stallwatch"
 	"github.com/drellem2/pogo/internal/strandedwork"
 )
@@ -47,8 +49,17 @@ import (
 // something else fetches; that is the loud direction (the item keeps being
 // advertised, exactly as before this fix) and the spawn gate, which does fetch,
 // still refuses it.
-func newStallStranded() stallwatch.Stranded {
+func newStallStranded(queue func() *refinery.Refinery) stallwatch.Stranded {
 	return stallwatch.StrandedFunc(func(items []stallwatch.StrandedItem) (stallwatch.StrandedWork, bool) {
+		// The refinery queue, snapshotted ONCE per probe for probeStranded's own
+		// reason: a branch must not read as in-flight to one item and free to the
+		// next within one sample. Reached through the THUNK rather than a captured
+		// pointer, like every other refinery reader in this file's neighbours — an
+		// orchestration restart replaces *mergeQueue, and a closure over the old
+		// one would answer "nothing is queued" from a refinery nobody is using,
+		// which is this lookup's silent direction.
+		inQueue, queueConsulted := refineryQueueByBranch(queue)
+
 		byRepo := map[string][]string{}
 		noRepo := 0
 		for _, it := range items {
@@ -110,9 +121,29 @@ func newStallStranded() stallwatch.Stranded {
 					if f.PreRegistration != nil {
 						b.PreRegistration = f.PreRegistration.SHA
 					}
+					// Whether this branch's merge is ALREADY RUNNING (mg-64bb).
+					// It does not change whether the item is withheld from
+					// dispatch — it is, either way, and that is the exclusion
+					// mg-4bf1 shipped — it changes what the notice may tell the
+					// reader to do about it.
+					if q, ok := queuedFor(inQueue, repo, f.Branch); ok {
+						b.Queued = &q
+					}
 					work.Items[id] = append(work.Items[id], b)
 				}
 			}
+		}
+		work.QueueConsulted = queueConsulted
+		// The gap is recorded only when a branch was actually found. An unasked
+		// queue is a defect in a REMEDY, and with nothing found there is no
+		// remedy to be wrong about — a snapshot of an idle fleet stays silent,
+		// which is what makes the note worth reading when it does appear.
+		if !queueConsulted && len(work.Items) > 0 {
+			// Not folded into Uncertain: an unlisted repository makes the
+			// snapshot INCOMPLETE, while an unasked queue makes it complete and
+			// wrongly REMEDIED. They travel to different readers and say
+			// different things, so they stay different fields.
+			gaps = append(gaps, "the refinery queue could not be consulted, so a branch already awaiting merge cannot be told from one nobody submitted")
 		}
 		if noRepo > 0 {
 			gaps = append(gaps, fmt.Sprintf("%d available item(s) name no repo, so no branch was looked for", noRepo))
@@ -129,4 +160,61 @@ func newStallStranded() stallwatch.Stranded {
 		// cleanly along with the one that did not.
 		return work, true
 	})
+}
+
+// refineryQueueByBranch snapshots the merge requests still in flight, keyed by
+// (repo, branch), and says whether the queue could be READ AT ALL.
+//
+// The second return is not decoration. With no refinery — the daemon started
+// with `[refinery] enabled = false`, or an orchestration restart between the
+// thunk and this call — every branch comes back unqueued, which is exactly what
+// a genuinely empty queue looks like. Recorded rather than assumed, because the
+// consequence of the confusion is a paste-ready submit against a running merge
+// (mg-8baa is the general form; mg-64bb is this instance).
+//
+// PROCESSING IS INCLUDED, not just pending: QueueWithProcessing returns the
+// in-flight request alongside the queued ones, and the in-flight one is the
+// likeliest to be the branch being asked about — it is the one whose gate run is
+// holding the queue up. `pogo check-stranded` reads the same endpoint for the
+// same reason.
+func refineryQueueByBranch(queue func() *refinery.Refinery) (map[string][]refinery.MergeRequest, bool) {
+	if queue == nil {
+		return nil, false
+	}
+	q := queue()
+	if q == nil {
+		return nil, false
+	}
+	mrs := q.QueueWithProcessing()
+	out := make(map[string][]refinery.MergeRequest, len(mrs))
+	for _, mr := range mrs {
+		out[mr.Branch] = append(out[mr.Branch], mr)
+	}
+	return out, true
+}
+
+// queuedFor finds this repo's queued request for a branch.
+//
+// KEYED ON BOTH REPO AND BRANCH, and the branch half alone would be wrong: a
+// branch NAME is not unique across repositories, so `polecat-ta932` queued in
+// another clone must not answer for this one. That direction is the dangerous
+// one, because what it suppresses is the submit line for a branch nobody has
+// actually submitted.
+//
+// The repo half is config.SameRepo, which is filepath.Clean equality and NOT a
+// name resolver — "pogo" does not match "/Users/daniel/dev/pogo" here. It does
+// not have to: an item spelling its repo as a bare name (42 of them do, against
+// 883 spelling a path — mg-cd4a, pm-pogo's count, not re-derived) never reaches
+// this line, because strandedwork.PolecatBranches fails on it first and the
+// repository is recorded as a gap. What SameRepo buys is agreement over the
+// spellings that DO both resolve — a trailing slash, an unclean path — which
+// exact string keying would silently treat as different repositories.
+func queuedFor(inQueue map[string][]refinery.MergeRequest, repo, branch string) (stallwatch.QueuedMerge, bool) {
+	for _, mr := range inQueue[branch] {
+		if !config.SameRepo(mr.RepoPath, repo) {
+			continue
+		}
+		return stallwatch.QueuedMerge{MR: mr.ID, Status: string(mr.Status)}, true
+	}
+	return stallwatch.QueuedMerge{}, false
 }

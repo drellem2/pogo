@@ -7,8 +7,45 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/stallwatch"
 )
+
+// emptyRefinery is a real refinery holding nothing, so a probe under it has
+// genuinely CONSULTED the queue and found the branch absent from it.
+//
+// A real one and not a nil thunk, because those two answers are exactly what
+// mg-64bb is about keeping apart: nil means nobody asked, and every test below
+// that reads a clean Uncertain would then be asserting over a snapshot that says
+// it could not tell. See TestStallStrandedSaysWhenTheQueueWasNotConsulted for
+// the other side, and note that a submitted merge request is left UNSTARTED —
+// Start is a separate call, so the request stays pending and nothing merges.
+func emptyRefinery(t *testing.T) func() *refinery.Refinery {
+	t.Helper()
+	return refineryWith(t)
+}
+
+// refineryWith builds a refinery holding these requests, pending.
+func refineryWith(t *testing.T, reqs ...refinery.MergeRequest) func() *refinery.Refinery {
+	t.Helper()
+	r, err := refinery.New(refinery.Config{
+		Enabled:     true,
+		WorktreeDir: t.TempDir(),
+		// No macguffin gate and no persistence, so the test never reads or
+		// writes the host's real ~/.macguffin or ~/.pogo state.
+		MacguffinDir: "",
+		StatePath:    "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, req := range reqs {
+		if _, err := r.Submit(req); err != nil {
+			t.Fatalf("submit %s: %v", req.Branch, err)
+		}
+	}
+	return func() *refinery.Refinery { return r }
+}
 
 // strandRepo is a throwaway git repository with an origin, built per test.
 //
@@ -86,7 +123,7 @@ func TestStallStrandedFindsAPushedUnmergedBranch(t *testing.T) {
 	r.git("push", "-q", "origin", "polecat-ta932")
 	r.git("checkout", "-q", "main")
 
-	work, known := newStallStranded().Branches([]stallwatch.StrandedItem{{ID: "mg-a932", Repo: r.dir}})
+	work, known := newStallStranded(emptyRefinery(t)).Branches([]stallwatch.StrandedItem{{ID: "mg-a932", Repo: r.dir}})
 	if !known {
 		t.Fatal("known=false — the question was answerable and a false unknown puts every check back to advertising the item")
 	}
@@ -132,7 +169,7 @@ func TestStallStrandedIgnoresAMergedBranch(t *testing.T) {
 	r.git("merge", "-q", "--ff-only", "polecat-ta932")
 	r.git("push", "-q", "origin", "main")
 
-	work, known := newStallStranded().Branches([]stallwatch.StrandedItem{{ID: "mg-a932", Repo: r.dir}})
+	work, known := newStallStranded(emptyRefinery(t)).Branches([]stallwatch.StrandedItem{{ID: "mg-a932", Repo: r.dir}})
 	if !known {
 		t.Fatal("known=false")
 	}
@@ -152,7 +189,7 @@ func TestStallStrandedIgnoresABranchForAnotherItem(t *testing.T) {
 	r.git("push", "-q", "origin", "polecat-pd788")
 	r.git("checkout", "-q", "main")
 
-	work, known := newStallStranded().Branches([]stallwatch.StrandedItem{{ID: "mg-a932", Repo: r.dir}})
+	work, known := newStallStranded(emptyRefinery(t)).Branches([]stallwatch.StrandedItem{{ID: "mg-a932", Repo: r.dir}})
 	if !known {
 		t.Fatal("known=false")
 	}
@@ -172,7 +209,7 @@ func TestStallStrandedReportsAnUnlistableRepoAsUncertainty(t *testing.T) {
 	}
 	missing := filepath.Join(t.TempDir(), "not-a-repo")
 
-	work, known := newStallStranded().Branches([]stallwatch.StrandedItem{{ID: "mg-a932", Repo: missing}})
+	work, known := newStallStranded(emptyRefinery(t)).Branches([]stallwatch.StrandedItem{{ID: "mg-a932", Repo: missing}})
 	if !known {
 		t.Fatal("known=false — one unlistable repo must not discard the whole snapshot")
 	}
@@ -188,7 +225,7 @@ func TestStallStrandedReportsAnUnlistableRepoAsUncertainty(t *testing.T) {
 // nothing but the item names, so an item with no `repo:` cannot be answered for
 // at all — and "not looked for" must not render as "nothing there".
 func TestStallStrandedSaysSoWhenAnItemNamesNoRepo(t *testing.T) {
-	work, known := newStallStranded().Branches([]stallwatch.StrandedItem{{ID: "mg-a932"}})
+	work, known := newStallStranded(emptyRefinery(t)).Branches([]stallwatch.StrandedItem{{ID: "mg-a932"}})
 	if !known {
 		t.Fatal("known=false")
 	}
@@ -200,11 +237,185 @@ func TestStallStrandedSaysSoWhenAnItemNamesNoRepo(t *testing.T) {
 // TestStallStrandedIsQuietOnAnEmptyPopulation, so a fleet with nothing available
 // pays nothing and reports nothing.
 func TestStallStrandedIsQuietOnAnEmptyPopulation(t *testing.T) {
-	work, known := newStallStranded().Branches(nil)
+	work, known := newStallStranded(emptyRefinery(t)).Branches(nil)
 	if !known {
 		t.Fatal("known=false on an empty population")
 	}
 	if len(work.Items) != 0 || work.Uncertain != "" {
 		t.Errorf("work = %+v, want empty", work)
+	}
+}
+
+// TestStallStrandedNamesTheMergeRequestForAQueuedBranch is mg-64bb's headline
+// state, reproduced end to end: the branch is pushed, unmerged, and its merge is
+// ALREADY RUNNING. Before this, that branch reached the notice indistinguishable
+// from one nobody had submitted, and the notice printed `pogo refinery submit`
+// at it — measured four times over ~36 minutes on mg-a19a while
+// mr-dacudtqtjv1hjkm21420 was queued throughout.
+//
+// The item is still REPORTED. The queue changes the remedy, not the exclusion.
+func TestStallStrandedNamesTheMergeRequestForAQueuedBranch(t *testing.T) {
+	r := newStrandRepo(t)
+	r.git("checkout", "-q", "-b", "polecat-pa19a", "main")
+	r.commit("fix.go", "fix(stallwatch): work that already exists reads available (mg-a19a)")
+	r.git("push", "-q", "origin", "polecat-pa19a")
+	r.git("checkout", "-q", "main")
+
+	queue := refineryWith(t, refinery.MergeRequest{
+		RepoPath:  r.dir,
+		Branch:    "polecat-pa19a",
+		TargetRef: "main",
+		Author:    "mg-a19a",
+	})
+
+	work, known := newStallStranded(queue).Branches([]stallwatch.StrandedItem{{ID: "mg-a19a", Repo: r.dir}})
+	if !known {
+		t.Fatal("known=false")
+	}
+	got := work.Items["mg-a19a"]
+	if len(got) != 1 {
+		t.Fatalf("branches for mg-a19a = %+v, want exactly one — a queued branch is still reported, "+
+			"because suppressing it drops the do-not-dispatch instruction with it (mg-4bf1)", got)
+	}
+	if got[0].Queued == nil {
+		t.Fatal("a branch whose merge is ALREADY IN THE QUEUE came back indistinguishable from one " +
+			"nobody has submitted — which is the state that gets a paste-ready duplicate submit printed at it")
+	}
+	if got[0].Queued.MR == "" {
+		t.Error("Queued.MR is empty — a reader told 'this is in flight' and not told which request " +
+			"has to go find it is the arbitration this field exists to end")
+	}
+	if got[0].Queued.Status == "" {
+		t.Error("Queued.Status is empty — 'queued behind others' and 'a gate is running on it now' " +
+			"are different answers to how long this item has to be left alone")
+	}
+	if !work.QueueConsulted {
+		t.Error("QueueConsulted = false while the queue plainly answered")
+	}
+}
+
+// TestStallStrandedIgnoresAQueuedBranchInAnotherRepo. A branch NAME is not
+// unique across repositories, and a same-named branch queued elsewhere must not
+// answer for this one — that direction is the dangerous one, because it
+// SUPPRESSES the submit line for a branch nobody has actually submitted.
+func TestStallStrandedIgnoresAQueuedBranchInAnotherRepo(t *testing.T) {
+	r := newStrandRepo(t)
+	r.git("checkout", "-q", "-b", "polecat-pa19a", "main")
+	r.commit("fix.go", "fix: work (mg-a19a)")
+	r.git("push", "-q", "origin", "polecat-pa19a")
+	r.git("checkout", "-q", "main")
+
+	// A DIFFERENT repository, with a branch of the same name queued in it.
+	other := newStrandRepo(t)
+	other.git("checkout", "-q", "-b", "polecat-pa19a", "main")
+	other.commit("elsewhere.go", "fix: an unrelated repo's branch of the same name")
+	other.git("push", "-q", "origin", "polecat-pa19a")
+	other.git("checkout", "-q", "main")
+
+	queue := refineryWith(t, refinery.MergeRequest{
+		RepoPath:  other.dir,
+		Branch:    "polecat-pa19a",
+		TargetRef: "main",
+		Author:    "mg-a19a",
+	})
+
+	work, known := newStallStranded(queue).Branches([]stallwatch.StrandedItem{{ID: "mg-a19a", Repo: r.dir}})
+	if !known {
+		t.Fatal("known=false")
+	}
+	got := work.Items["mg-a19a"]
+	if len(got) != 1 {
+		t.Fatalf("branches for mg-a19a = %+v, want exactly one", got)
+	}
+	if got[0].Queued != nil {
+		t.Errorf("another repository's queued branch answered for this one: %+v — the submit line "+
+			"this suppresses is the remedy for work that is genuinely sitting there", got[0].Queued)
+	}
+}
+
+// TestStallStrandedSaysWhenTheQueueWasNotConsulted. With no refinery — disabled
+// in config, or replaced between the thunk and the call — every branch comes
+// back unqueued, which is exactly what an empty queue looks like. mg-8baa's
+// collapse, and here it would be handed to the reader as a submit against a
+// running merge.
+func TestStallStrandedSaysWhenTheQueueWasNotConsulted(t *testing.T) {
+	r := newStrandRepo(t)
+	r.git("checkout", "-q", "-b", "polecat-pa19a", "main")
+	r.commit("fix.go", "fix: work (mg-a19a)")
+	r.git("push", "-q", "origin", "polecat-pa19a")
+	r.git("checkout", "-q", "main")
+
+	noQueue := func() *refinery.Refinery { return nil }
+	work, known := newStallStranded(noQueue).Branches([]stallwatch.StrandedItem{{ID: "mg-a19a", Repo: r.dir}})
+	if !known {
+		t.Fatal("known=false — an unreadable queue must not discard the branch finding it qualifies")
+	}
+	if len(work.Items["mg-a19a"]) != 1 {
+		t.Fatalf("the branch was dropped along with the queue answer: %+v", work.Items["mg-a19a"])
+	}
+	if work.QueueConsulted {
+		t.Error("QueueConsulted = true with no refinery at all")
+	}
+	if !strings.Contains(work.Uncertain, "refinery queue") {
+		t.Errorf("Uncertain = %q, want it to state that the queue was not asked", work.Uncertain)
+	}
+}
+
+// TestQueuedForIsKeyedOnRepoAndBranch. A branch name is not unique across
+// repositories, and the wrong-repo match is the dangerous direction: it
+// SUPPRESSES the submit line for a branch nobody has submitted. The unclean
+// spelling is the other half — filepath.Clean equality, so a trailing slash is
+// the same repository and a different repository is not.
+func TestQueuedForIsKeyedOnRepoAndBranch(t *testing.T) {
+	inQueue := map[string][]refinery.MergeRequest{
+		"polecat-pa19a": {{ID: "mr-dacudtqtjv1hjkm21420", RepoPath: "/Users/daniel/dev/pogo",
+			Branch: "polecat-pa19a", Status: refinery.StatusQueued}},
+	}
+	q, ok := queuedFor(inQueue, "/Users/daniel/dev/pogo", "polecat-pa19a")
+	if !ok || q.MR != "mr-dacudtqtjv1hjkm21420" {
+		t.Fatalf("full path did not match: ok=%v q=%+v", ok, q)
+	}
+	if _, ok := queuedFor(inQueue, "/Users/daniel/dev/pogo", "polecat-pd788"); ok {
+		t.Error("a different branch matched")
+	}
+	if _, ok := queuedFor(inQueue, "/Users/daniel/dev/onethird_program", "polecat-pa19a"); ok {
+		t.Error("a different repository matched")
+	}
+	if _, ok := queuedFor(inQueue, "/Users/daniel/dev/pogo/", "polecat-pa19a"); !ok {
+		t.Error("a trailing slash was treated as a different repository")
+	}
+}
+
+// TestQueuedForCarriesTheStatusVerbatim. "queued" and "processing" both mean
+// do-not-resubmit and are printed unchanged anyway, because they are different
+// answers to how long the item has to be left alone.
+func TestQueuedForCarriesTheStatusVerbatim(t *testing.T) {
+	for _, status := range []refinery.MergeStatus{refinery.StatusQueued, refinery.StatusProcessing} {
+		inQueue := map[string][]refinery.MergeRequest{
+			"polecat-pa19a": {{ID: "mr-x", RepoPath: "/repo", Branch: "polecat-pa19a", Status: status}},
+		}
+		q, ok := queuedFor(inQueue, "/repo", "polecat-pa19a")
+		if !ok {
+			t.Fatalf("status %q did not match", status)
+		}
+		if q.Status != string(status) {
+			t.Errorf("Status = %q, want %q verbatim", q.Status, status)
+		}
+	}
+}
+
+// TestRefineryQueueByBranchSaysUnknownWithNoRefinery, and the positive control
+// beside it: without the control, a lookup that answered "not consulted" to
+// everything would pass the negative assertion and look like a working guard.
+func TestRefineryQueueByBranchSaysUnknownWithNoRefinery(t *testing.T) {
+	if _, ok := refineryQueueByBranch(nil); ok {
+		t.Error("a nil thunk reported the queue as consulted")
+	}
+	if _, ok := refineryQueueByBranch(func() *refinery.Refinery { return nil }); ok {
+		t.Error("a thunk over a nil refinery reported the queue as consulted")
+	}
+	if _, ok := refineryQueueByBranch(emptyRefinery(t)); !ok {
+		t.Error("a real refinery reported the queue as unconsulted — the instrument answers " +
+			"'not consulted' to everything and the negatives above say nothing")
 	}
 }

@@ -44,8 +44,13 @@ func (f *fakeStranded) calls() int {
 // strandedIn builds a snapshot naming one PUSHED branch on one item, in the
 // shape of the 2026-09-08 00:54Z finding: the polecat is gone, the work is on
 // origin, and the item is back in available/ describing itself as untouched.
+//
+// QueueConsulted is TRUE here, so these snapshots describe the ordinary case: the
+// refinery queue was asked and this branch is not in it. A default of false would
+// make every test below assert over a snapshot that says it could not tell
+// (mg-64bb), and the note that fires on that state would be in every message.
 func strandedIn(item, branch string, unmerged int) StrandedWork {
-	return StrandedWork{Items: map[string][]StrandedBranch{
+	return StrandedWork{QueueConsulted: true, Items: map[string][]StrandedBranch{
 		item: {{
 			Branch:   branch,
 			Ref:      "refs/remotes/origin/" + branch,
@@ -55,6 +60,16 @@ func strandedIn(item, branch string, unmerged int) StrandedWork {
 			Repo:     "/Users/daniel/dev/pogo",
 		}},
 	}}
+}
+
+// queuedIn is strandedIn plus the fact that changes the instruction: this
+// branch's merge is ALREADY RUNNING.
+func queuedIn(item, branch string, unmerged int, mr, status string) StrandedWork {
+	work := strandedIn(item, branch, unmerged)
+	b := work.Items[item][0]
+	b.Queued = &QueuedMerge{MR: mr, Status: status}
+	work.Items[item] = []StrandedBranch{b}
+	return work
 }
 
 // strandedEnv is preservedEnv plus a stranded probe.
@@ -398,5 +413,217 @@ func TestStrandedAttributionIsStampedOnTheEvent(t *testing.T) {
 	}
 	if rows[0]["branch"] != "polecat-ta932" || rows[0]["pushed"] != true {
 		t.Errorf("branch attribution = %#v", rows[0])
+	}
+}
+
+// TestQueuedBranchIsStillWithheldFromPriorityWake is mg-64bb's headline
+// requirement, and it is deliberately the SAME assertion as
+// TestPriorityWakeDoesNotAdvertiseAStrandedItem: a branch in the merge queue is
+// work that already exists outside the item, so the item is not "ready" whatever
+// the board says. On 2026-09-03 mg-a19a was advertised four times across ~36
+// minutes with mr-dacudtqtjv1hjkm21420 in the queue throughout.
+func TestQueuedBranchIsStillWithheldFromPriorityWake(t *testing.T) {
+	probe := &fakeStranded{work: queuedIn("mg-a19a", "polecat-pa19a", 1, "mr-dacudtqtjv1hjkm21420", "processing")}
+	w, rec, workRoot := strandedEnv(t, baseConfig(), nil, nil, probe)
+	now := time.Now()
+	writeItemForRepo(t, workRoot, "mg-a19a", "mayor", "high", "/Users/daniel/dev/pogo", now.Add(-5*time.Minute))
+
+	w.Check(now)
+
+	for _, cat := range categories(rec) {
+		if cat == categoryPriorityWake {
+			t.Fatalf("priority-wake advertised an item whose merge is already running: %q", rec.nudges[0].message)
+		}
+	}
+	msg := strings.Join(nudgeMessages(rec), " ")
+	if !strings.Contains(msg, "mg-a19a") {
+		t.Fatalf("the item went unreported entirely — suppressing it drops the do-not-dispatch "+
+			"instruction with it, which is the exclusion mg-4bf1 had to undo: %v", nudgeMessages(rec))
+	}
+}
+
+// TestQueuedBranchGetsNoSubmitLine is this fix checked against the defect it
+// repairs, in the direction that is NOT caught by the pushed/local-only guard.
+//
+// `pogo refinery submit` refuses a branch that is not on origin, so mg-586d's
+// remedy fails loudly. A queued branch is on origin: the command RUNS, and what
+// it produces is a duplicate merge request for work whose merge is in flight,
+// because the refinery has no dedup. The reader is told to wait instead, and the
+// MR is named so the wait is checkable.
+func TestQueuedBranchGetsNoSubmitLine(t *testing.T) {
+	probe := &fakeStranded{work: queuedIn("mg-a19a", "polecat-pa19a", 2, "mr-dacudtqtjv1hjkm21420", "processing")}
+	w, rec, workRoot := strandedEnv(t, baseConfig(), nil, nil, probe)
+	now := time.Now()
+	writeItemForRepo(t, workRoot, "mg-a19a", "mayor", "", "/Users/daniel/dev/pogo", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	msg := strings.Join(nudgeMessages(rec), " ")
+	// The BRANCH ARGUMENT is what makes a line paste-ready, and it is what this
+	// forbids. A sentence that names the command in order to prohibit it is the
+	// opposite of the defect, so the assertion is on `submit <branch>` rather
+	// than on the command's name appearing anywhere.
+	if strings.Contains(msg, "pogo refinery submit polecat-pa19a") {
+		t.Errorf("a paste-ready submit was printed for a branch already in the merge queue — the "+
+			"refinery has no dedup, so that command merges the same work twice: %q", msg)
+	}
+	for _, want := range []string{
+		"mr-dacudtqtjv1hjkm21420",
+		"processing",
+		"MERGE QUEUE",
+		"do NOT resubmit",
+		"Do NOT re-submit it",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("notice = %q, want it to contain %q", msg, want)
+		}
+	}
+}
+
+// TestMixedQueuedAndStrandedSpeaksNeutrally. A headline is the half that gets
+// skimmed and forwarded, so a notice covering one queued branch and one nobody
+// has submitted must not say "already in the merge queue" — that is true of one
+// half and false of the other, and the false half is the one that needs somebody
+// to act.
+func TestMixedQueuedAndStrandedSpeaksNeutrally(t *testing.T) {
+	work := queuedIn("mg-a19a", "polecat-pa19a", 1, "mr-dacudtqtjv1hjkm21420", "queued")
+	other := strandedIn("mg-a854", "polecat-pa854", 1)
+	work.Items["mg-a854"] = other.Items["mg-a854"]
+
+	probe := &fakeStranded{work: work}
+	w, rec, workRoot := strandedEnv(t, baseConfig(), nil, nil, probe)
+	now := time.Now()
+	writeItemForRepo(t, workRoot, "mg-a19a", "mayor", "", "/Users/daniel/dev/pogo", now.Add(-20*time.Minute))
+	writeItemForRepo(t, workRoot, "mg-a854", "mayor", "", "/Users/daniel/dev/pogo", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var subj, msg string
+	for _, n := range rec.nudges {
+		if strings.Contains(n.message, "ALREADY EXISTS") {
+			subj, msg = n.subject, n.message
+		}
+	}
+	if msg == "" {
+		t.Fatalf("no stranded notice fired: %+v", rec.nudges)
+	}
+	if strings.Contains(subj, "ALREADY IN THE MERGE QUEUE") {
+		t.Errorf("subject = %q claims the whole set is in the queue while mg-a854 is not "+
+			"submitted at all", subj)
+	}
+	if !strings.Contains(msg, "mr-dacudtqtjv1hjkm21420") {
+		t.Errorf("the queued half lost its MR id in a mixed notice: %q", msg)
+	}
+	if strings.Contains(msg, "pogo refinery submit polecat-pa19a") {
+		t.Errorf("the queued branch was handed a submit line in a mixed notice: %q", msg)
+	}
+}
+
+// TestAllQueuedNoticeSaysWaitInTheHeadline. When every branch in the notice is
+// in the queue there is nothing to submit and nothing to dispatch, and the
+// subject is where a reader who reads no further learns it.
+func TestAllQueuedNoticeSaysWaitInTheHeadline(t *testing.T) {
+	probe := &fakeStranded{work: queuedIn("mg-a19a", "polecat-pa19a", 1, "mr-dacudtqtjv1hjkm21420", "queued")}
+	w, rec, workRoot := strandedEnv(t, baseConfig(), nil, nil, probe)
+	now := time.Now()
+	writeItemForRepo(t, workRoot, "mg-a19a", "mayor", "", "/Users/daniel/dev/pogo", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var subj, msg string
+	for _, n := range rec.nudges {
+		if strings.Contains(n.message, "ALREADY EXISTS") {
+			subj, msg = n.subject, n.message
+		}
+	}
+	if !strings.Contains(subj, "ALREADY IN THE MERGE QUEUE") {
+		t.Errorf("subject = %q, want it to say where the work already is", subj)
+	}
+	if !strings.Contains(msg, "closes itself when it lands") {
+		t.Errorf("the notice does not say the item resolves on its own — the reader is left "+
+			"looking for an action that does not exist: %q", msg)
+	}
+}
+
+// TestUnconsultedQueueIsStatedOnTheStrandedNotice. With the queue unasked every
+// branch reads as un-submitted, which is the state that gets a submit line — so
+// the reader being handed that remedy is the one who has to be told the remedy
+// might already be running. mg-8baa's collapse, in the direction where the
+// damage lands on the remedy rather than on the finding.
+func TestUnconsultedQueueIsStatedOnTheStrandedNotice(t *testing.T) {
+	work := strandedIn("mg-a19a", "polecat-pa19a", 1)
+	work.QueueConsulted = false
+
+	probe := &fakeStranded{work: work}
+	w, rec, workRoot := strandedEnv(t, baseConfig(), nil, nil, probe)
+	now := time.Now()
+	writeItemForRepo(t, workRoot, "mg-a19a", "mayor", "", "/Users/daniel/dev/pogo", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	msg := strings.Join(nudgeMessages(rec), " ")
+	if !strings.Contains(msg, "refinery queue was NOT consulted") {
+		t.Errorf("notice = %q, want it to say the queue was not asked", msg)
+	}
+
+	// Positive control: consulted snapshots must NOT carry the sentence, or it
+	// is decoration rather than a signal.
+	probe2 := &fakeStranded{work: strandedIn("mg-a854", "polecat-pa854", 1)}
+	w2, rec2, workRoot2 := strandedEnv(t, baseConfig(), nil, nil, probe2)
+	writeItemForRepo(t, workRoot2, "mg-a854", "mayor", "", "/Users/daniel/dev/pogo", now.Add(-20*time.Minute))
+	w2.Check(now)
+	if msg2 := strings.Join(nudgeMessages(rec2), " "); strings.Contains(msg2, "NOT consulted") {
+		t.Errorf("a consulted snapshot printed the unconsulted-queue note: %q", msg2)
+	}
+}
+
+// TestQueuedAttributionIsStampedOnTheEvent, so "held because its work was pushed
+// and abandoned" and "held because its merge is running" are countable apart in
+// events.log. They are the same exclusion and different emergencies: one needs
+// somebody to act, the other needs everybody not to.
+func TestQueuedAttributionIsStampedOnTheEvent(t *testing.T) {
+	probe := &fakeStranded{work: queuedIn("mg-a19a", "polecat-pa19a", 1, "mr-dacudtqtjv1hjkm21420", "processing")}
+	w, rec, workRoot := strandedEnv(t, baseConfig(), nil, nil, probe)
+	now := time.Now()
+	writeItemForRepo(t, workRoot, "mg-a19a", "mayor", "", "/Users/daniel/dev/pogo", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(rec.events))
+	}
+	ev := rec.events[0]
+	if ev.Details["queue_consulted"] != true {
+		t.Errorf("queue_consulted = %#v, want true — with it absent a counter over these events "+
+			"reads 'no item was ever held for a merge in flight'", ev.Details["queue_consulted"])
+	}
+	rows, ok := ev.Details["branches"].([]map[string]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("branches detail = %#v, want one row", ev.Details["branches"])
+	}
+	if rows[0]["queued_mr"] != "mr-dacudtqtjv1hjkm21420" || rows[0]["queued_status"] != "processing" {
+		t.Errorf("queued attribution = %#v", rows[0])
+	}
+
+	// And an ordinary stranded branch carries NO queue keys, so their presence
+	// means something.
+	probe2 := &fakeStranded{work: strandedIn("mg-a854", "polecat-pa854", 1)}
+	w2, rec2, workRoot2 := strandedEnv(t, baseConfig(), nil, nil, probe2)
+	writeItemForRepo(t, workRoot2, "mg-a854", "mayor", "", "/Users/daniel/dev/pogo", now.Add(-20*time.Minute))
+	w2.Check(now)
+	rec2.mu.Lock()
+	defer rec2.mu.Unlock()
+	rows2, ok := rec2.events[0].Details["branches"].([]map[string]any)
+	if !ok || len(rows2) != 1 {
+		t.Fatalf("branches detail = %#v", rec2.events[0].Details["branches"])
+	}
+	if _, present := rows2[0]["queued_mr"]; present {
+		t.Errorf("a branch in no queue was stamped with a merge request: %#v", rows2[0])
 	}
 }
