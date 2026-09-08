@@ -222,6 +222,18 @@ func TestUnclaimedWorkingPolecatIsTheDefect(t *testing.T) {
 	// And the close of the loop: with the mechanism ON, the same watcher over the
 	// same store is silent. This is the pair that makes the guard's value a
 	// measurement rather than a claim.
+	//
+	// The first polecat is stopped first, and that is not bookkeeping. The two
+	// dispatches are ALTERNATIVE WORLDS — pogod before mg-7254 and pogod after
+	// it — not two workers coexisting on one item. Leaving cat-unclaimed
+	// running would make the second dispatch a genuine duplicate onto a live
+	// worker's item, which the live-owner gate now refuses outright
+	// (drellem2/pogo#167), correctly: this test's subject is where the ITEM
+	// ends up, and it must not be measured through a dispatch the fleet is
+	// meant to refuse.
+	if err := reg.Stop("cat-unclaimed", 5*time.Second); err != nil {
+		t.Fatalf("stopping the first polecat: %v", err)
+	}
 	reg2 := newClaimTestRegistry(t, root)
 	if rr := spawnPolecatRaw(t, reg2, SpawnPolecatAPIRequest{
 		Name: "cat-claimed", Id: id, Template: claimTestTemplate(t),

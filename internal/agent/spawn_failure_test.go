@@ -322,9 +322,16 @@ func TestReclaimStalePolecatBranch_RefusesUnmergedWork(t *testing.T) {
 // TestReclaimStalePolecatBranch_RefusesLiveWorktree: a branch checked out in a
 // worktree belongs to a running polecat. Reclaiming it would pull the floor out
 // from under live work.
+//
+// The worktree is deliberately at a path whose basename is NOT the polecat name
+// (drellem2/pogo#167). Both liveness tests would fire on the natural
+// polecats/<name> layout, and this test's subject is the checked-out one, so it
+// has to be the only one that can answer — otherwise a regression in it would
+// hide behind its sibling. TestReclaimStalePolecatBranch_RefusesOwnerOnForeignBranch
+// is the mirror image, isolating the other.
 func TestReclaimStalePolecatBranch_RefusesLiveWorktree(t *testing.T) {
 	workDir, _ := makeRepoWithOrigin(t)
-	wt := filepath.Join(t.TempDir(), "live")
+	wt := filepath.Join(t.TempDir(), "somewhere-else")
 	runGit(t, workDir, "worktree", "add", wt, "-b", "polecat-live")
 
 	err := reclaimStalePolecatBranch(workDir, "polecat-live", "main")
@@ -334,8 +341,110 @@ func TestReclaimStalePolecatBranch_RefusesLiveWorktree(t *testing.T) {
 	if !strings.Contains(err.Error(), "still live") {
 		t.Errorf("refusal must name the live polecat, got: %v", err)
 	}
+	// Matched on the basename, not the full path: git reports a worktree at the
+	// location it resolved when it was added, which on macOS is the /private
+	// form of a /var temp dir. Asserting the string the test happens to hold
+	// measures the platform's symlink layout, not the refusal.
+	if !strings.Contains(err.Error(), "somewhere-else") {
+		t.Errorf("refusal must name the worktree holding the branch, got: %v", err)
+	}
 	if !hasBranch(t, workDir, "polecat-live") {
 		t.Fatal("live polecat's branch was deleted")
+	}
+}
+
+// TestReclaimStalePolecatBranch_RefusesOwnerOnForeignBranch is the regression
+// for drellem2/pogo#167, and it is the case the old checked-out-branch proxy got
+// wrong in the destructive direction.
+//
+// A polecat is working a FOREIGN branch — a review or QA polecat reading someone
+// else's work, which our own shipped roles instruct — so nothing anywhere has
+// polecat-<name> checked out. Under the old lookup that made the branch read as
+// an unowned leftover: no worktree, nothing unmerged against the base, so it was
+// deleted. That deletion is only the first half; `git worktree add` then fails
+// on the occupied path and the rollback for THAT failure removed the live tree
+// with --force.
+//
+// The tree here is named after the polecat and holds an UNTRACKED file, which is
+// what the incident actually costs: a path on no branch, in no stash and on no
+// remote, so the tree is its only copy anywhere on the machine.
+func TestReclaimStalePolecatBranch_RefusesOwnerOnForeignBranch(t *testing.T) {
+	workDir, _ := makeRepoWithOrigin(t)
+	polecats := t.TempDir()
+	wt := filepath.Join(polecats, "82ad")
+	runGit(t, workDir, "worktree", "add", wt, "-b", "polecat-82ad")
+	// The polecat moves to someone else's branch and starts working.
+	runGit(t, wt, "checkout", "-q", "-b", "polecat-e400")
+	live := filepath.Join(wt, "LIVE_WORK.txt")
+	if err := os.WriteFile(live, []byte("the only copy\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Positive control for the instrument: the branch really is invisible to
+	// the checked-out test now, so a pass below is the ownership check working
+	// and not the situation failing to reproduce.
+	holder, err := polecatBranchHolders(workDir, "polecat-82ad")
+	if err != nil {
+		t.Fatalf("polecatBranchHolders: %v", err)
+	}
+	if holder.CheckedOutAt != "" {
+		t.Fatalf("setup did not reproduce the defect: polecat-82ad is checked out at %s, so the "+
+			"old proxy would have caught it and this test proves nothing", holder.CheckedOutAt)
+	}
+	// Compared on the basename: git reports the location it resolved at add
+	// time, which on macOS is the /private form of a /var temp dir, and
+	// ownership is defined on the basename anyway
+	// (gitgc.PolecatNameForWorktree).
+	if filepath.Base(holder.OwnerTree) != "82ad" {
+		t.Fatalf("OwnerTree = %q, want the tree named 82ad — ownership must follow the directory name",
+			holder.OwnerTree)
+	}
+
+	err = reclaimStalePolecatBranch(workDir, "polecat-82ad", "main")
+	if err == nil {
+		t.Fatal("reclaim deleted the branch of a live polecat working a foreign branch " +
+			"(drellem2/pogo#167): the spawn that follows destroys its worktree")
+	}
+	if !strings.Contains(err.Error(), "still live") {
+		t.Errorf("refusal must name the live polecat, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), holder.OwnerTree) {
+		t.Errorf("refusal must name the owning worktree so the operator can read it, got: %v", err)
+	}
+	if !hasBranch(t, workDir, "polecat-82ad") {
+		t.Fatal("live polecat's branch was deleted")
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("the live polecat's untracked file is gone: %v", err)
+	}
+}
+
+// TestReclaimStalePolecatBranch_StillReclaimsASpentBranch is the control for the
+// two refusals above: the ownership check must not have turned reclamation off.
+// A spent branch whose polecat is gone — the mg-d22a state, and by far the
+// common one — is still cleared, or every re-dispatch of a reused work item id
+// is permanently blocked.
+func TestReclaimStalePolecatBranch_StillReclaimsASpentBranch(t *testing.T) {
+	workDir, _ := makeRepoWithOrigin(t)
+	runGit(t, workDir, "branch", "polecat-gone", "main")
+
+	if err := reclaimStalePolecatBranch(workDir, "polecat-gone", "main"); err != nil {
+		t.Fatalf("reclaim refused a spent branch with no worktree at all: %v", err)
+	}
+	if hasBranch(t, workDir, "polecat-gone") {
+		t.Fatal("spent branch survived reclamation: the next re-dispatch of this item is blocked")
+	}
+}
+
+// TestPolecatBranchHoldersFailsClosedOnAnUnreadableRepo. The caller deletes a
+// branch on the strength of this answer, so "I could not look" must be an error
+// rather than an empty holder — an empty holder is spendable as "nobody is
+// there", which is the one reading that destroys work.
+func TestPolecatBranchHoldersFailsClosedOnAnUnreadableRepo(t *testing.T) {
+	notARepo := t.TempDir()
+	if _, err := polecatBranchHolders(notARepo, "polecat-x"); err == nil {
+		t.Fatal("polecatBranchHolders returned a clean empty answer for a directory that is not a " +
+			"git repo: an unreadable worktree list must not read as an empty one")
 	}
 }
 
@@ -392,7 +501,11 @@ func TestSpawnPolecat_StaleOrphanBranchNoLongerBlocksDispatch(t *testing.T) {
 	// point (no harness binary in a test env), and that failure path rolls the
 	// worktree back — so assert on the reclamation having happened, which is
 	// what unblocks re-dispatch.
-	if hasBranch(t, workDir, branch) && polecatBranchWorktree(workDir, branch) == "" {
+	holder, err := polecatBranchHolders(workDir, branch)
+	if err != nil {
+		t.Fatalf("polecatBranchHolders: %v", err)
+	}
+	if hasBranch(t, workDir, branch) && holder.OwnerTree == "" && holder.CheckedOutAt == "" {
 		t.Errorf("branch %s is still an orphan after dispatch: the next "+
 			"re-dispatch of this work item is still blocked", branch)
 	}
