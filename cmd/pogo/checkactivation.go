@@ -122,6 +122,25 @@ type activationJob struct {
 	Detail        string `json:"detail"`
 }
 
+// activationScript is one installed PAYLOAD SCRIPT's row (mg-30f8) — the file a
+// managed job actually executes, as distinct from the plist that names it.
+//
+// It is a second list rather than more fields on activationJob because one job can own
+// two payloads (com.pogo.deploy installs the runner AND the net-control library it
+// sources) and because the two subjects have independent answers: on the box this was
+// added for, every plist matched this build and the runner com.pogo.deploy executes was
+// 1191 lines stale.
+type activationScript struct {
+	Label      string   `json:"label"`
+	Name       string   `json:"name"`
+	Path       string   `json:"path"`
+	Source     string   `json:"source,omitempty"`
+	State      string   `json:"state"`
+	MissingIDs []string `json:"missing_ids,omitempty"`
+	Remedy     string   `json:"remedy,omitempty"`
+	Detail     string   `json:"detail"`
+}
+
 // activationReport is the whole answer, in one value, so the human text and the
 // JSON are two renderings of one thing rather than two computations.
 type activationReport struct {
@@ -144,6 +163,26 @@ type activationReport struct {
 	// Jobs is every managed job, including the clean ones. A report that lists
 	// only findings cannot be told from one that did not run.
 	Jobs []activationJob `json:"jobs"`
+	// Scripts is every managed payload script, including the clean ones, for the
+	// same reason Jobs lists the clean jobs: a report that lists only findings
+	// cannot be told from one that did not run.
+	Scripts []activationScript `json:"scripts"`
+	// ScriptsExamined / ScriptsDrifted / ScriptsOrphaned / ScriptsAbsent /
+	// ScriptsUnreadable are the payload population, split. Separate counters rather
+	// than added into the job counters above: a caller that has been reading
+	// `drifted` since mg-b9e7 must not silently start receiving a different
+	// quantity under the same name.
+	ScriptsExamined   int `json:"scripts_examined"`
+	ScriptsDrifted    int `json:"scripts_drifted"`
+	ScriptsOrphaned   int `json:"scripts_orphaned"`
+	ScriptsAbsent     int `json:"scripts_absent"`
+	ScriptsUnreadable int `json:"scripts_unreadable"`
+	// PayloadSummary / PayloadStatus are the `launchd payload` doctor row's own
+	// sentence and status, carried for the same reason Summary and DoctorStatus are:
+	// so a divergence between the two surfaces is visible in the output rather than
+	// only in a test.
+	PayloadSummary string `json:"payload_summary"`
+	PayloadStatus  string `json:"payload_status"`
 	// Scope is the audit's denominator, rendered by the same helper the doctor
 	// row uses.
 	Scope string `json:"scope"`
@@ -178,15 +217,19 @@ func (r activationReport) ExitCode() int {
 // is fixed. Same reasoning as auditLaunchAgent one package over: the audit's own
 // correctness must not be something only the machine that has the bug can
 // demonstrate.
-func buildActivationReport(audits []service.LaunchAgentAudit, supported bool, scope service.LaunchAgentScope, build string) activationReport {
+func buildActivationReport(audits []service.LaunchAgentAudit, payloads []service.PayloadScriptAudit, supported bool, scope service.LaunchAgentScope, build string) activationReport {
 	status, detail := launchAgentActivationLine(audits, supported, scope)
+	payloadStatus, payloadDetail := launchPayloadLine(payloads, supported)
 	r := activationReport{
-		Marker:       activationMarker,
-		Build:        build,
-		Examined:     len(audits),
-		Summary:      detail,
-		DoctorStatus: status,
-		Scope:        launchAgentScopeNote(audits, scope),
+		Marker:          activationMarker,
+		Build:           build,
+		Examined:        len(audits),
+		Summary:         detail,
+		DoctorStatus:    status,
+		Scope:           launchAgentScopeNote(audits, scope),
+		ScriptsExamined: len(payloads),
+		PayloadSummary:  payloadDetail,
+		PayloadStatus:   payloadStatus,
 	}
 
 	for _, a := range audits {
@@ -208,6 +251,29 @@ func buildActivationReport(audits []service.LaunchAgentAudit, supported bool, sc
 		}
 	}
 
+	for _, p := range payloads {
+		r.Scripts = append(r.Scripts, activationScript{
+			Label:      p.Label,
+			Name:       p.Name,
+			Path:       p.Path,
+			Source:     p.Source,
+			State:      p.Status,
+			MissingIDs: p.MissingIDs,
+			Remedy:     p.Remedy,
+			Detail:     p.Detail,
+		})
+		switch p.Status {
+		case service.PayloadStale:
+			r.ScriptsDrifted++
+		case service.PayloadOrphan:
+			r.ScriptsOrphaned++
+		case service.PayloadAbsent:
+			r.ScriptsAbsent++
+		case service.PayloadUnknown:
+			r.ScriptsUnreadable++
+		}
+	}
+
 	switch {
 	case !supported:
 		r.Verdict = activationUnknown
@@ -215,12 +281,42 @@ func buildActivationReport(audits []service.LaunchAgentAudit, supported bool, sc
 	case len(audits) == 0:
 		r.Verdict = activationUnknown
 		r.Headline = "no managed launchd job was examined at all, so nothing here says an installed plist matches the code that ships it"
+	case r.ScriptsExamined == 0:
+		// An empty payload set is NOT CHECKED and must never reach the ACTIVATED
+		// branch, which would then be claiming cleanliness over zero files. This
+		// is also what an old `pogo` looks like from the inside once the payload
+		// registry exists and something has emptied it — the same reason
+		// len(audits)==0 above is a verdict rather than a skipped loop.
+		r.Verdict = activationUnknown
+		r.Headline = "every managed plist was examined, but NO installed payload script was — so nothing here says the file any of these jobs EXECUTES matches the code that ships it, which is a separate subject from the plists and has a separate answer"
+	case r.ScriptsOrphaned > 0:
+		// Loudest, and ahead of plist drift: a drifted plist runs old settings, a
+		// drifted script runs old code, and an ORPHANED one does not run at all —
+		// launchd fires the job, the exec fails, and the failure is not a pogo log
+		// line that anything downstream reads.
+		r.Verdict = activationDrifted
+		r.Headline = fmt.Sprintf("%d of %d installed payload script(s) named by a launchd job ARE NOT THERE — the job fires and the exec fails, silently", r.ScriptsOrphaned, r.ScriptsExamined)
+	case r.Drifted > 0 && r.ScriptsDrifted > 0:
+		r.Verdict = activationDrifted
+		r.Headline = fmt.Sprintf("%d of %d managed launchd job(s) disagree with the plist this build renders, AND %d of %d installed payload script(s) differ from the code this build ships", r.Drifted, r.Examined, r.ScriptsDrifted, r.ScriptsExamined)
 	case r.Drifted > 0:
 		r.Verdict = activationDrifted
 		r.Headline = fmt.Sprintf("%d of %d managed launchd job(s) disagree with the plist this build renders", r.Drifted, r.Examined)
+	case r.ScriptsDrifted > 0:
+		// The state every plist-only audit reported as clean (mg-30f8): the plists
+		// match, the jobs fire on time, and the file one of them EXECUTES is weeks
+		// old. Named separately from plist drift because the remedy reads the same
+		// and the failure does not — a stale payload runs merged-and-tested code
+		// that is not the code on this box, so a survey of the source reports every
+		// one of its defects fixed.
+		r.Verdict = activationDrifted
+		r.Headline = fmt.Sprintf("every managed plist matches this build, but %d of %d installed payload script(s) DIFFER FROM THE CODE THIS BUILD SHIPS — the job is correctly scheduled and the program it runs is not current", r.ScriptsDrifted, r.ScriptsExamined)
 	case r.Unreadable > 0:
 		r.Verdict = activationUnknown
 		r.Headline = fmt.Sprintf("%d of %d managed launchd job(s) could not be compared, so this run cannot say the box is current", r.Unreadable, r.Examined)
+	case r.ScriptsUnreadable > 0:
+		r.Verdict = activationUnknown
+		r.Headline = fmt.Sprintf("%d of %d installed payload script(s) could not be compared — this build could not locate the source it would install — so this run cannot say the file each job executes is current", r.ScriptsUnreadable, r.ScriptsExamined)
 	case r.Absent > 0:
 		// Absent is UNKNOWN, not ACTIVATED, and the difference matters here in
 		// a way it does not in the doctor row. The row is read by a person who
@@ -239,7 +335,7 @@ func buildActivationReport(audits []service.LaunchAgentAudit, supported bool, sc
 		r.Headline = fmt.Sprintf("every examined plist matches this build, but %d loaded pogo job(s) are outside this audit with NO recorded reason — a job that arrived by an install path nobody checked against the auditor", len(scope.Unexplained()))
 	default:
 		r.Verdict = activationActivated
-		r.Headline = fmt.Sprintf("all %d managed launchd job(s) on this box match the plist this build renders", r.Examined)
+		r.Headline = fmt.Sprintf("all %d managed launchd job(s) on this box match the plist this build renders, and all %d installed payload script(s) are byte-identical to the copy this build ships", r.Examined, r.ScriptsExamined)
 	}
 	return r
 }
@@ -272,8 +368,14 @@ func (r activationReport) Text() string {
 	b.WriteString("         Every verdict below is against THIS build's rendering of the plists. A `pogo`\n")
 	b.WriteString("         older than a merged plist change reports its own older plist as the expectation,\n")
 	b.WriteString("         and reinstalling from it restores the drift while printing success.\n")
+	b.WriteString("         The `<label>/<file>` rows are PAYLOAD SCRIPTS — the file each job EXECUTES.\n")
+	b.WriteString("         A plist row reading OK says nothing about them: `install-*` COPIES those\n")
+	b.WriteString("         files into ~/.pogo/bin and a merge does not refresh a copy (mg-30f8).\n")
 	for _, j := range r.Jobs {
 		fmt.Fprintf(&b, "  %s %s — %s\n", activationStateLabel(j.State, j.ScheduleDrift), j.Label, j.Detail)
+	}
+	for _, sc := range r.Scripts {
+		fmt.Fprintf(&b, "  %s %s/%s — %s\n", payloadStateLabel(sc.State), sc.Label, sc.Name, sc.Detail)
 	}
 	fmt.Fprintf(&b, "  scope: %s\n", r.Scope)
 	b.WriteString("  REPORTS ONLY: nothing here installs, bootstraps or kickstarts anything, and nothing\n")
@@ -288,9 +390,19 @@ func (r activationReport) Text() string {
 func newCheckActivationCmd(jsonOutput *bool) *cobra.Command {
 	return &cobra.Command{
 		Use:   "check-activation",
-		Short: "Report managed launchd plists that disagree with the plist this build renders (never reconciles)",
+		Short: "Report managed launchd plists and payload scripts that disagree with what this build ships (never reconciles)",
 		Long: `Compare every managed launchd job's INSTALLED plist against the plist this
-build would write, and exit on the answer.
+build would write, and every INSTALLED PAYLOAD SCRIPT against the copy this build
+would install, and exit on the answer.
+
+TWO SUBJECTS, BECAUSE THEY HAVE INDEPENDENT ANSWERS (mg-30f8). A plist is rendered
+from a Go template inside this binary; a payload script — the file the plist's
+ProgramArguments actually names — is COPIED into ~/.pogo/bin by ` + "`pogo service install-*`" + `,
+and a merge does not refresh a copy. So a job can be scheduled perfectly, fire on
+time, and execute code that is weeks old. That was the state of com.pogo.deploy on
+the reference box for three weeks: every plist ` + "`ok`" + `, and the nightly runner
+1191 lines behind the source, still executing a child-process walk that had been
+replaced upstream. Every survey that read the repo reported it fixed.
 
 This is the same comparison as the ` + "`launchd activation`" + ` row in
 ` + "`pogo doctor --check`" + `, rendered through the same code so the two cannot
@@ -316,16 +428,22 @@ pass:
   0  ACTIVATED  every managed job's installed plist matches this build, the
                 loaded set was enumerated, and every pogo job outside the audit
                 has a recorded reason.
-  1  DRIFTED    at least one installed plist differs from this build's. The
-                remedy is named per job. Schedule drift is called out as FIRES,
-                because a plist that differs in its fire times is a job doing a
-                fraction of what the code believes it does, and every fire it
-                lacks is INERT — no log line, no failure, nothing downstream that
-                can observe the absence.
+  1  DRIFTED    at least one installed plist differs from this build's, or at
+                least one installed payload script does. The remedy is named per
+                row. Schedule drift is called out as FIRES, because a plist that
+                differs in its fire times is a job doing a fraction of what the
+                code believes it does, and every fire it lacks is INERT — no log
+                line, no failure, nothing downstream that can observe the
+                absence. ORPHAN is louder still and is reported first: the plist
+                names a program that is not on disk, so the job fires, the exec
+                fails, and the failure is not a pogo log line at all.
   3  UNKNOWN    the comparison could not be completed or could not be trusted:
                 a plist that is NOT INSTALLED AT ALL, one that could not be read
-                or rendered, a loaded set that could not be enumerated, or a
-                loaded pogo job nobody has recorded an exclusion reason for.
+                or rendered, a payload script whose SOURCE this build could not
+                locate (a path that does not resolve is how a subject stops being
+                audited with nobody deciding it should be), a loaded set that
+                could not be enumerated, or a loaded pogo job nobody has recorded
+                an exclusion reason for.
 
 WHAT IT COMPARES FROM, AND WHY THAT IS PRINTED. The plists are Go templates with
 this build's constants bound in, so every verdict is relative to this binary. On
@@ -347,6 +465,7 @@ docs/design/launchd-reconcile-decision.md.`,
 			audits := service.AuditLaunchAgents()
 			rep := buildActivationReport(
 				audits,
+				service.AuditPayloadScripts(),
 				service.LaunchAgentsSupported(),
 				service.ScopeLaunchAgents(audits),
 				version.Get().Describe("pogo"),

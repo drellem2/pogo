@@ -45,8 +45,27 @@ func okAudit(label string) service.LaunchAgentAudit {
 
 const testBuild = "pogo 0.10.0 (abc1234, branch=main, source=ldflags)"
 
+// okPayload is a payload-script row in the state a correctly reconciled box is in:
+// the installed copy is byte-identical to the source this build would install.
+func okPayload(label, name string) service.PayloadScriptAudit {
+	return service.PayloadScriptAudit{
+		Label: label, Name: name,
+		Path: "/tmp/bin/" + name, Source: "/src/scripts/" + name,
+		Status: service.PayloadOK,
+		Detail: "installed copy at /tmp/bin/" + name + " is byte-identical to /src/scripts/" + name,
+	}
+}
+
+// okPayloads is the default for a case that is not about payloads. Non-empty on
+// purpose: an empty payload set is its own UNKNOWN verdict (see
+// buildActivationReport), so defaulting to nil would have quietly turned every
+// plist-subject case into a payload-subject one.
+func okPayloads() []service.PayloadScriptAudit {
+	return []service.PayloadScriptAudit{okPayload("com.pogo.deploy", "pogo-deploy.sh")}
+}
+
 func report(audits []service.LaunchAgentAudit, scope service.LaunchAgentScope) activationReport {
-	return buildActivationReport(audits, true, scope, testBuild)
+	return buildActivationReport(audits, okPayloads(), true, scope, testBuild)
 }
 
 func TestActivationVerdicts(t *testing.T) {
@@ -64,14 +83,73 @@ func TestActivationVerdicts(t *testing.T) {
 		Detail: "NOT CHECKED: could not be read",
 	}
 
+	stalePayload := service.PayloadScriptAudit{
+		Label: "com.pogo.deploy", Name: "pogo-deploy.sh", Path: "/tmp/bin/pogo-deploy.sh",
+		Source: "/src/scripts/launchd/pogo-deploy.sh", Status: service.PayloadStale,
+		MissingIDs: []string{"mg-19e4"}, Remedy: "pogo service install-deploy",
+		Detail: "THE FILE com.pogo.deploy EXECUTES IS NOT THE FILE THIS BUILD SHIPS",
+	}
+	orphanPayload := service.PayloadScriptAudit{
+		Label: "com.pogo.reclaim", Name: "pogo-reclaim.sh", Path: "/tmp/bin/pogo-reclaim.sh",
+		Source: "/src/scripts/launchd/pogo-reclaim.sh", Status: service.PayloadOrphan,
+		Remedy: "pogo service install-reclaim",
+		Detail: "ORPHANED JOB: com.pogo.reclaim is installed and names a program that is not there",
+	}
+	unfindablePayload := service.PayloadScriptAudit{
+		Label: "com.pogo.recovery", Name: "pogo-recovery.sh", Path: "/tmp/bin/pogo-recovery.sh",
+		Status: service.PayloadUnknown,
+		Detail: "NOT CHECKED: this build could not locate its copy of scripts/launchd/pogo-recovery.sh",
+	}
+
 	cases := []struct {
 		name      string
 		audits    []service.LaunchAgentAudit
+		payloads  []service.PayloadScriptAudit
 		supported bool
 		scope     service.LaunchAgentScope
 		want      string
 		wantExit  int
 	}{
+		{
+			// mg-30f8's whole subject: the plists are perfect and the file one of
+			// the jobs actually runs is weeks old. Before the payload audit this
+			// case scored ACTIVATED / exit 0, and the nightly reported it clean
+			// for three weeks while the runner executed superseded code.
+			name:      "a stale PAYLOAD is DRIFTED even when every plist matches",
+			audits:    []service.LaunchAgentAudit{okAudit("com.pogo.daemon"), okAudit("com.pogo.deploy")},
+			payloads:  []service.PayloadScriptAudit{stalePayload},
+			supported: true,
+			scope:     cleanScope("com.pogo.daemon", "com.pogo.deploy"),
+			want:      activationDrifted, wantExit: cli.ExitError,
+		},
+		{
+			name:      "a job naming a program that is not there is DRIFTED",
+			audits:    []service.LaunchAgentAudit{okAudit("com.pogo.daemon")},
+			payloads:  []service.PayloadScriptAudit{orphanPayload},
+			supported: true,
+			scope:     cleanScope("com.pogo.daemon"),
+			want:      activationDrifted, wantExit: cli.ExitError,
+		},
+		{
+			// A source this build could not locate has not been compared against
+			// anything. It is the state that must never read as a match, because
+			// a path that does not resolve is how a subject stops being audited
+			// with nobody deciding it should be.
+			name:      "a payload whose source could not be located is UNKNOWN, never a pass",
+			audits:    []service.LaunchAgentAudit{okAudit("com.pogo.daemon")},
+			payloads:  []service.PayloadScriptAudit{unfindablePayload},
+			supported: true,
+			scope:     cleanScope("com.pogo.daemon"),
+			want:      activationUnknown, wantExit: cli.ExitUnknown,
+		},
+		{
+			name:      "no payload script examined at all is UNKNOWN, never a pass",
+			audits:    []service.LaunchAgentAudit{okAudit("com.pogo.daemon")},
+			payloads:  []service.PayloadScriptAudit{},
+			supported: true,
+			scope:     cleanScope("com.pogo.daemon"),
+			want:      activationUnknown, wantExit: cli.ExitUnknown,
+		},
 		{
 			name:      "every plist matches and the scope is fully accounted for",
 			audits:    []service.LaunchAgentAudit{okAudit("com.pogo.daemon"), okAudit("com.pogo.deploy")},
@@ -141,7 +219,11 @@ func TestActivationVerdicts(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := buildActivationReport(tc.audits, tc.supported, tc.scope, testBuild)
+			payloads := tc.payloads
+			if payloads == nil {
+				payloads = okPayloads()
+			}
+			r := buildActivationReport(tc.audits, payloads, tc.supported, tc.scope, testBuild)
 			if r.Verdict != tc.want {
 				t.Errorf("verdict = %q, want %q (headline: %s)", r.Verdict, tc.want, r.Headline)
 			}
