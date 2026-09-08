@@ -144,6 +144,18 @@ registered and demands a refusal, so the probe cannot be green because it is
 unable to see. A notification mechanism verified against a healthy fleet is
 verified in the one condition where it is not needed.
 
+--probe then runs the LAST HOP (mg-d788), because "the bytes are in the maildir"
+is delivery and not readership. The box those bytes land in held 3,286 unread
+files on 2026-09-08, and whether one more is distinguishable in that volume is a
+property of the notifier, which lives in another repo. So the second half drives
+the REAL poll-mail.sh — the script com.pogo.deadman executes — over a throwaway
+maildir holding the real alarm bytes, with notify.sh stubbed so nothing reaches a
+screen, and requires the alarm to keep its own banner beside a watcher burst the
+notifier coalesces. Its control sends the same alarm from inside that burst's
+roster and demands that grouping SWALLOW it, so the arm above cannot be green
+merely because coalescing is dead. A box with no notifier deployed reports
+INSTRUMENT FAILURE for that half: unknown, never fine.
+
 REPORTS ONLY. It never restarts, nudges, or mails: no member of this class is
 fixable by restarting, and every nudge path runs through an agent, which is the
 population that has stopped.
@@ -252,6 +264,11 @@ func resolveAgentWorkdir(name string) string {
 // responses, and only one of them is the state this whole item exists to end.
 func runRefusalProbe(jsonOutput bool) {
 	res := refusalwatch.Probe()
+	// The last hop runs unconditionally beside the delivery probe rather than
+	// behind a second flag. mg-3222 was the right check that nobody ran; a
+	// last-hop probe reachable only by remembering a flag is that shape again,
+	// and this one exists because mg-6f3d's chain had an untested final link.
+	last := refusalwatch.ProbeLastHop()
 	if jsonOutput {
 		cli.PrintJSON(map[string]interface{}{
 			"store":              res.Store,
@@ -260,14 +277,26 @@ func runRefusalProbe(jsonOutput bool) {
 			"passed":             res.Passed(),
 			"instrument_failure": res.InstrumentFailure(),
 			"blind":              res.Blind,
+			"last_hop": map[string]interface{}{
+				"store":              last.Store,
+				"arms":               last.Arms,
+				"passed":             last.Passed(),
+				"instrument_failure": last.InstrumentFailure(),
+				"blind":              last.Blind,
+			},
 		})
 	} else {
 		fmt.Print(res.Render())
+		fmt.Print("\n--- LAST HOP: the notifier, not the maildir (mg-d788) ---\n\n")
+		fmt.Print(last.Render())
 	}
-	if res.InstrumentFailure() {
+	// An instrument failure in EITHER half is reported as one, because "the
+	// channel is fine" and "I could not test the channel" demand opposite
+	// responses and only one of them is the state this item exists to end.
+	if res.InstrumentFailure() || last.InstrumentFailure() {
 		os.Exit(exitInstrumentFailure)
 	}
-	if !res.Passed() {
+	if !res.Passed() || !last.Passed() {
 		os.Exit(cli.ExitError)
 	}
 }
