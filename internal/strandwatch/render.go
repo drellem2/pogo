@@ -67,9 +67,17 @@ func Render(rep Report, all bool) string {
 		fmt.Fprintf(&b, "  %d open item(s) are outside the --repo restriction and were not looked at\n",
 			rep.ItemsOutOfScope)
 	}
-	if rep.QueueUnreadable != "" {
+	switch {
+	case rep.QueueUnreadable != "":
 		fmt.Fprintf(&b, "  refinery queue UNREADABLE (%s) — a branch already awaiting merge could not be\n"+
-			"  excluded, so a row below may be one somebody already submitted\n", rep.QueueUnreadable)
+			"  identified, so a `stranded` row below may be one somebody already submitted, and the\n"+
+			"  absence of an `in_flight` row says nothing\n", rep.QueueUnreadable)
+	case !rep.QueueConsulted:
+		// "Not asked" and "asked and empty" must not render alike (mg-8baa), and
+		// this line is what keeps them apart now that an in-flight branch is a row
+		// rather than a silent exclusion.
+		b.WriteString("  refinery queue NOT CONSULTED — no row below knows whether its branch is already\n" +
+			"  awaiting merge, so a `stranded` remedy here may queue a duplicate request\n")
 	}
 	switch {
 	case !rep.HistoryConsulted:
@@ -87,7 +95,8 @@ func Render(rep Report, all bool) string {
 		fmt.Fprintf(&b, "  refinery merge history: %d completed request(s), observing %s%s\n",
 			rep.History.Records, floor, retentionNote(rep.History.Retention))
 	}
-	fmt.Fprintf(&b, "  %d exclusion(s): branches of running polecats and branches already queued\n", len(rep.Excluded))
+	fmt.Fprintf(&b, "  %d exclusion(s): branches of running polecats, and queued branches whose item is CLAIMED\n",
+		len(rep.Excluded))
 	if all {
 		for _, e := range rep.Excluded {
 			fmt.Fprintf(&b, "    %-14s %-24s %s\n", e.ItemID, e.Branch, e.Reason)
@@ -147,11 +156,12 @@ func Render(rep Report, all bool) string {
 	// must NOT be submitted" — the count that used to be folded silently into
 	// `stranded` (mg-aed4).
 	fmt.Fprintf(&b, "\n%d FINDING(S) — %d RESCUE-UNBUILT, %d ALREADY-REFUSED, %d stranded, "+
-		"%d landed-but-not-closed, %d conflict suspect, %d UNJUDGED, %d REPO UNREADABLE, "+
-		"%d ORPHAN BRANCH:\n",
+		"%d in-flight, %d landed-but-not-closed, %d conflict suspect, %d UNJUDGED, "+
+		"%d REPO UNREADABLE, %d ORPHAN BRANCH:\n",
 		len(rep.Rows), rep.Count(KindRescueUnbuilt), rep.Count(KindRefusedBefore),
-		rep.Count(KindStranded), rep.Count(KindLandedNotClosed), rep.Count(KindConflictSuspect),
-		rep.Count(KindUnjudged), rep.Count(KindRepoUnreadable), rep.Count(KindOrphanBranch))
+		rep.Count(KindStranded), rep.Count(KindInFlight), rep.Count(KindLandedNotClosed),
+		rep.Count(KindConflictSuspect), rep.Count(KindUnjudged), rep.Count(KindRepoUnreadable),
+		rep.Count(KindOrphanBranch))
 
 	for _, r := range rep.Rows {
 		b.WriteString("\n")
@@ -193,6 +203,16 @@ func Render(rep Report, all bool) string {
 		case KindLandedNotClosed:
 			fmt.Fprintf(&b, "    %d commit(s) already in the target under a rewritten sha; 0 unmerged.\n", r.Equivalent)
 			b.WriteString("    The work is ON the target and the item is still asking for it.\n")
+		case KindInFlight:
+			fmt.Fprintf(&b, "    %d unmerged commit(s); the branch is IN THE REFINERY QUEUE as %s (%s).\n",
+				r.Unmerged, r.queuedMR(), r.queuedStatus())
+			for _, sub := range r.Subjects {
+				fmt.Fprintf(&b, "      %s\n", truncateSubject(sub, 92))
+			}
+			fmt.Fprintf(&b, "    The item reads %q while its work is in flight, so priority-wake will\n"+
+				"    advertise it as ready and unclaimed. THAT ADVICE IS WRONG FOR AS LONG AS THIS\n"+
+				"    ROW EXISTS: a worker dispatched here re-derives work a gate is running on.\n",
+				r.StatusLabel())
 		case KindConflictSuspect:
 			fmt.Fprintf(&b, "    %d unmerged commit(s) by patch id, BUT %s.\n", r.Unmerged, r.Presence.Describe())
 			b.WriteString("    That is the signature of a rebase that resolved a conflict: the work landed\n" +

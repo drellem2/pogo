@@ -380,19 +380,31 @@ func liveAgentNames() (map[string]bool, error) {
 	return live, nil
 }
 
-// queuedRefineryBranches returns the branches already awaiting merge.
+// queuedRefineryBranches returns the branches already awaiting merge, and the
+// request that is awaiting it.
 //
 // Keyed by (repo, branch): a branch name alone is ambiguous across the three
 // repos this fleet works, and polecat branch names are derived from work-item
 // ids that are only 4 hex digits wide.
-func queuedRefineryBranches() (map[string]bool, error) {
+//
+// THE MR ID AND STATUS TRAVEL WITH THE KEY (mg-4bf1). A bare bool was enough
+// while a queued branch was silently excluded from the report; now that it is a
+// row, the reader has to be able to go look at the request in one command
+// instead of searching the queue for it. Status is carried verbatim so
+// "processing" and "pending" stay distinguishable — a gate running on the branch
+// right now and a branch waiting behind four others are different answers to how
+// long the item stays in this state.
+func queuedRefineryBranches() (map[string]strandwatch.QueuedRequest, error) {
 	queue, err := client.GetRefineryQueue()
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]bool, len(queue))
+	out := make(map[string]strandwatch.QueuedRequest, len(queue))
 	for _, mr := range queue {
-		out[strandwatch.QueueKey(mr.RepoPath, mr.Branch)] = true
+		out[strandwatch.QueueKey(mr.RepoPath, mr.Branch)] = strandwatch.QueuedRequest{
+			MR:     mr.ID,
+			Status: string(mr.Status),
+		}
 	}
 	return out, nil
 }

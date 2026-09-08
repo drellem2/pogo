@@ -366,10 +366,16 @@ func TestRunningPolecatIsExcludedWhenItsBranchNameDiffers(t *testing.T) {
 	}
 }
 
-// TestQueuedBranchIsExcluded: the remedy for a stranded branch is to submit it,
-// and it is already submitted. The refinery has no dedup, so a second submit is
-// a duplicate MR.
-func TestQueuedBranchIsExcluded(t *testing.T) {
+// TestQueuedBranchOnAnAvailableItemIsAnInFlightRow is the mg-4bf1 regression,
+// and it is the exact state measured at 2026-09-07 22:47Z: two branches
+// submitted minutes earlier, both still queued, both items back in available/,
+// and `pogo check-stranded | grep -cE 'mg-daf4|mg-a854'` returning 0 while
+// priority-wake advertised one of them three times.
+//
+// The queued branch must still NOT get a submit remedy — that was always right,
+// the refinery has no dedup — but it must not vanish either, because the
+// `do NOT dispatch at mg-<id>` instruction rode on the row that vanished.
+func TestQueuedBranchOnAnAvailableItemIsAnInFlightRow(t *testing.T) {
 	r := newRepo(t)
 	r.branch("polecat-q56ac", "main")
 	r.commit("fix.md", "fix(deploy): bounded git steps (mg-56ac)")
@@ -379,8 +385,61 @@ func TestQueuedBranchIsExcluded(t *testing.T) {
 	rep, err := Scan(Options{
 		Items:      board(Item{ID: "mg-56ac", Status: "available", Repo: r.dir}),
 		LiveAgents: fleet(),
-		QueuedBranches: func() (map[string]bool, error) {
-			return map[string]bool{QueueKey(r.dir, "polecat-q56ac"): true}, nil
+		QueuedBranches: func() (map[string]QueuedRequest, error) {
+			return map[string]QueuedRequest{
+				QueueKey(r.dir, "polecat-q56ac"): {MR: "mr-abc123", Status: "processing"},
+			}, nil
+		},
+		Target: "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	row, ok := rowFor(rep, "mg-56ac")
+	if !ok {
+		t.Fatalf("a queued branch on an AVAILABLE item was dropped from the report — the "+
+			"do-not-dispatch instruction goes with it, while priority-wake keeps advertising "+
+			"the item\n%s", Render(rep, true))
+	}
+	if row.Kind != KindInFlight {
+		t.Errorf("kind = %q, want %q", row.Kind, KindInFlight)
+	}
+	if row.Queued == nil || row.Queued.MR != "mr-abc123" || row.Queued.Status != "processing" {
+		t.Errorf("row does not name the merge request that is in flight: %+v", row.Queued)
+	}
+	remedy := row.Remedy()
+	if strings.Contains(remedy, "refinery submit") {
+		t.Errorf("the remedy recommends submitting a branch that is already in the queue: %s", remedy)
+	}
+	if !strings.Contains(remedy, "do NOT dispatch at mg-56ac") {
+		t.Errorf("the remedy does not carry the do-not-dispatch instruction: %s", remedy)
+	}
+	if !strings.Contains(remedy, "mr-abc123") {
+		t.Errorf("the remedy does not name the in-flight request, so a reader cannot check it: %s", remedy)
+	}
+	if !rep.Actionable() {
+		t.Error("Actionable() is false with an item advertised as available while its work is in flight")
+	}
+}
+
+// TestQueuedBranchOnAClaimedItemStaysExcluded is the other half of mg-4bf1, and
+// it is what keeps the new row from firing on the steady state: a polecat that
+// has submitted its own branch and is polling for the merge holds a claimed item
+// with a queued branch, which is every healthy submit in the fleet.
+func TestQueuedBranchOnAClaimedItemStaysExcluded(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-q56ac", "main")
+	r.commit("fix.md", "fix(deploy): bounded git steps (mg-56ac)")
+	r.push("polecat-q56ac")
+	r.checkout("main")
+
+	rep, err := Scan(Options{
+		Items:      board(Item{ID: "mg-56ac", Status: "claimed", Repo: r.dir}),
+		LiveAgents: fleet(),
+		QueuedBranches: func() (map[string]QueuedRequest, error) {
+			return map[string]QueuedRequest{
+				QueueKey(r.dir, "polecat-q56ac"): {MR: "mr-abc123", Status: "pending"},
+			}, nil
 		},
 		Target: "main",
 	})
@@ -388,8 +447,15 @@ func TestQueuedBranchIsExcluded(t *testing.T) {
 		t.Fatalf("Scan: %v", err)
 	}
 	if _, ok := rowFor(rep, "mg-56ac"); ok {
-		t.Errorf("a branch already in the refinery queue was reported, and its remedy is to "+
-			"submit it again\n%s", Render(rep, true))
+		t.Errorf("a queued branch under a CLAIMED item was reported — that is every healthy "+
+			"submit in the fleet, and a finding that fires on the steady state is one readers "+
+			"learn to skip\n%s", Render(rep, true))
+	}
+	if len(rep.Excluded) != 1 {
+		t.Fatalf("exclusions = %d, want 1 — the suppression must stay countable", len(rep.Excluded))
+	}
+	if !strings.Contains(rep.Excluded[0].Reason, "mr-abc123") {
+		t.Errorf("the exclusion does not name the request it was suppressed for: %q", rep.Excluded[0].Reason)
 	}
 }
 
@@ -405,8 +471,10 @@ func TestQueueKeyIsPerRepo(t *testing.T) {
 	rep, err := Scan(Options{
 		Items:      board(Item{ID: "mg-56ac", Status: "available", Repo: r.dir}),
 		LiveAgents: fleet(),
-		QueuedBranches: func() (map[string]bool, error) {
-			return map[string]bool{QueueKey("/some/other/repo", "polecat-q56ac"): true}, nil
+		QueuedBranches: func() (map[string]QueuedRequest, error) {
+			return map[string]QueuedRequest{
+				QueueKey("/some/other/repo", "polecat-q56ac"): {MR: "mr-elsewhere", Status: "pending"},
+			}, nil
 		},
 		Target: "main",
 	})
@@ -518,7 +586,7 @@ func TestUnreadableQueueIsStatedNotFatal(t *testing.T) {
 	rep, err := Scan(Options{
 		Items:          board(Item{ID: "mg-9a19", Status: "available", Repo: r.dir}),
 		LiveAgents:     fleet(),
-		QueuedBranches: func() (map[string]bool, error) { return nil, errors.New("connection refused") },
+		QueuedBranches: func() (map[string]QueuedRequest, error) { return nil, errors.New("connection refused") },
 		Target:         "main",
 	})
 	if err != nil {
@@ -529,6 +597,53 @@ func TestUnreadableQueueIsStatedNotFatal(t *testing.T) {
 	}
 	if out := Render(rep, false); !strings.Contains(out, "UNREADABLE") {
 		t.Errorf("the report does not disclose that the queue could not be consulted:\n%s", out)
+	}
+}
+
+// TestUnconsultedQueueIsStatedNotSilent. "Not asked" and "asked and empty" must
+// not render alike (mg-8baa), and that stopped being a fine distinction at
+// mg-4bf1: with the queue unasked, a branch already awaiting merge renders as an
+// ordinary `stranded` row whose remedy would queue a duplicate, and the absence
+// of any in_flight row reads as "nothing is in flight".
+func TestUnconsultedQueueIsStatedNotSilent(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-q9a19", "main")
+	r.commit("audit.md", "feat(audit): drift battery (mg-9a19)")
+	r.push("polecat-q9a19")
+	r.checkout("main")
+
+	rep, err := Scan(Options{
+		Items:      board(Item{ID: "mg-9a19", Status: "available", Repo: r.dir}),
+		LiveAgents: fleet(),
+		Target:     "main",
+		// QueuedBranches deliberately nil.
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if rep.QueueConsulted {
+		t.Error("QueueConsulted is true with no queue source wired")
+	}
+	out := Render(rep, false)
+	if !strings.Contains(out, "NOT CONSULTED") {
+		t.Errorf("the report does not disclose that the queue was never asked:\n%s", out)
+	}
+	// And the positive control for the same field: a wired queue says so by NOT
+	// printing that line, which is what makes its presence readable.
+	rep2, err := Scan(Options{
+		Items:          board(Item{ID: "mg-9a19", Status: "available", Repo: r.dir}),
+		LiveAgents:     fleet(),
+		QueuedBranches: func() (map[string]QueuedRequest, error) { return nil, nil },
+		Target:         "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if !rep2.QueueConsulted {
+		t.Error("QueueConsulted is false with a queue source wired that answered")
+	}
+	if strings.Contains(Render(rep2, false), "queue NOT CONSULTED") {
+		t.Error("a consulted, empty queue rendered as an unconsulted one — the two must not read alike")
 	}
 }
 

@@ -262,6 +262,40 @@ const (
 	// retained window" must not render alike. See Row.HistoryGap.
 	KindRefusedBefore Kind = "refused_before"
 
+	// KindInFlight is an item whose branch carries unmerged work AND is already
+	// in the refinery queue, while the item itself is NOT claimed — so the board
+	// advertises it as available while the remedy for it is running.
+	//
+	// IT USED TO BE AN EXCLUSION, AND THAT IS THE DEFECT (mg-4bf1). Dropping a
+	// queued branch was defensible on its own terms: this report's stranded
+	// remedy is "submit it", the refinery has no dedup, and it is already
+	// submitted. What was missed is that NO OTHER SIGNAL TAKES OVER for the
+	// duration. Measured 2026-09-07: two branches were submitted minutes apart,
+	// both still queued, and
+	//
+	//	pogo check-stranded | grep -cE 'mg-daf4|mg-a854'   ->   0
+	//
+	// while priority-wake went on naming mg-daf4 as "high priority and ready" —
+	// three notices between 22:44Z and 22:55Z. Before the submit this report had
+	// printed `# do NOT dispatch at mg-<id>` for both. The submit cleared the
+	// prohibition and did not clear the recommendation.
+	//
+	// THE ROW IS KEYED ON THE ITEM'S STATUS, NOT ON THE QUEUE ALONE. A queued
+	// branch whose item is `claimed` is the ordinary healthy state of every
+	// polecat polling its own merge, and reporting it would put a row on this
+	// report for most branches of most runs — a finding that fires on the steady
+	// state is one readers learn to skim, which is the failure this package cites
+	// against itself repeatedly. Those stay exclusions. What fires here is the
+	// combination that has no owner: unmerged work in flight under an item the
+	// board is offering to anybody.
+	//
+	// THE REMEDY IS NEITHER OF THE OTHER TWO. It is not `refinery submit` (the
+	// branch is in the queue; a second request is a duplicate MR the refinery
+	// will not deduplicate) and it is not `mg done` (nothing has merged). It is
+	// to WAIT, and meanwhile not to dispatch — so the row exists to carry the
+	// prohibition that the exclusion silently dropped.
+	KindInFlight Kind = "in_flight"
+
 	// KindLandedNotClosed is an open item whose branch is fully merged. The work
 	// is done and on the target; the item is what is out of date. Close it.
 	KindLandedNotClosed Kind = "landed_not_closed"
@@ -417,16 +451,24 @@ func (k Kind) Rank() int {
 		return 1
 	case KindStranded:
 		return 2
-	case KindUnjudged:
+	case KindInFlight:
+		// AHEAD OF UNJUDGED, and the ordering is the ticket (mg-4bf1). An
+		// in-flight row's item is `available` by construction, so it is one a
+		// coordinator may be about to dispatch at right now — the same imminence
+		// that puts stranded first. It sits BEHIND stranded because its remedy is
+		// already running: somebody has to act on a stranded branch, and nobody
+		// has to act on this one beyond not acting on the item.
 		return 3
-	case KindRepoUnreadable:
+	case KindUnjudged:
 		return 4
-	case KindConflictSuspect:
+	case KindRepoUnreadable:
 		return 5
-	case KindOrphanBranch:
+	case KindConflictSuspect:
 		return 6
-	default:
+	case KindOrphanBranch:
 		return 7
+	default:
+		return 8
 	}
 }
 
@@ -455,6 +497,29 @@ func statusRank(status string) int {
 	default:
 		return 4
 	}
+}
+
+// QueuedRequest is one merge request STILL IN THE QUEUE for a branch: the
+// remedy for a stranded branch already running.
+//
+// IT CARRIES THE MR ID RATHER THAN A BARE bool (mg-4bf1). The bool was enough
+// while a queued branch was silently excluded; it is not enough for a row,
+// because a reader told "this is in flight" and not told WHICH request has to go
+// find it, and the whole finding this row exists for is a reader left to
+// arbitrate between two confident signals. One id makes the arbitration one
+// command.
+//
+// A PLAIN STRUCT AND NOT refinery.MergeRequest, for PriorSubmission's reason:
+// the sweep has to be exercisable against a synthetic refinery.
+type QueuedRequest struct {
+	// MR is the merge-request id, e.g. "mr-daflo22tjv1hjkm214cg".
+	MR string `json:"mr"`
+	// Status is the refinery's own word for where the request is — "pending"
+	// while it waits, "processing" while a gate runs on it. Both mean the same
+	// thing to this report and are printed VERBATIM anyway: "queued behind
+	// others" and "a gate is running on it at this instant" are different answers
+	// to "how long until I can stop worrying about this item".
+	Status string `json:"status"`
 }
 
 // PriorSubmission is one COMPLETED merge request the refinery still remembers
@@ -667,6 +732,10 @@ type Row struct {
 	// about.
 	HistoryGap string `json:"history_gap,omitempty"`
 
+	// Queued is the merge request already in flight for this branch, when there
+	// is one. Set on a KindInFlight row and nowhere else.
+	Queued *QueuedRequest `json:"queued,omitempty"`
+
 	// Error is why a KindUnjudged row could not be answered. Empty otherwise.
 	Error string `json:"error,omitempty"`
 }
@@ -833,6 +902,21 @@ func (r Row) remedy() string {
 	case KindStranded:
 		return fmt.Sprintf("%s   # do NOT dispatch at %s",
 			strandedwork.SubmitRemedy(r.Item.Repo, r.Branch, r.Item.ID, r.Pushed), r.Item.ID)
+	case KindInFlight:
+		// NO SUBMIT LINE — the branch is in the queue and a second request is a
+		// duplicate MR the refinery will not deduplicate. And no `mg done`:
+		// nothing has merged.
+		//
+		// THE COMMENT LEADS WITH THE PROHIBITION, not with the wait. The wait is
+		// the answer to "what do I do about this branch", which nobody is asking;
+		// the prohibition is the answer to "may I dispatch at this item", which
+		// priority-wake is at this moment telling the same reader yes to. This
+		// row exists because that instruction had nowhere to live once the branch
+		// was submitted (mg-4bf1).
+		return fmt.Sprintf("pogo refinery show %s   # do NOT dispatch at %s — %s is IN THE QUEUE (%s) "+
+			"on %s; the remedy is already running, so do NOT submit it again either. The item goes to "+
+			"`done` when it merges",
+			r.queuedMR(), r.Item.ID, r.Branch, r.queuedStatus(), r.Target)
 	case KindLandedNotClosed:
 		return fmt.Sprintf("mg done %s --result='{\"branch\": \"%s\", \"note\": \"landed before the item was closed\"}'",
 			r.Item.ID, r.Branch)
@@ -865,6 +949,28 @@ func (r Row) remedy() string {
 		return fmt.Sprintf("git -C %s log --oneline %s..%s   # then submit OR close; do neither blind",
 			r.Item.Repo, r.Target, r.Ref)
 	}
+}
+
+// queuedMR names the in-flight request, and degrades rather than panicking.
+//
+// Scan always sets Queued alongside the kind, so nil here means the row came
+// back through JSON. A renderer that dereferenced it would take out every OTHER
+// row in the report with it — and the rows this one sits among are the ones a
+// coordinator is about to act on.
+func (r Row) queuedMR() string {
+	if r.Queued == nil || r.Queued.MR == "" {
+		return "<mr id NOT recorded — `pogo refinery queue` to find it>"
+	}
+	return r.Queued.MR
+}
+
+// queuedStatus is the refinery's own word for where the in-flight request is,
+// or a phrase that says the field was not recorded rather than inventing one.
+func (r Row) queuedStatus() string {
+	if r.Queued == nil || r.Queued.Status == "" {
+		return "status not recorded"
+	}
+	return "status=" + r.Queued.Status
 }
 
 // priorWhere names where and when the prior request came out, as a phrase that
@@ -1037,6 +1143,16 @@ type Report struct {
 	// fatal: one unreadable ref must not turn a sweep of a hundred items into a
 	// single error a reader renders as "nothing stranded".
 	InspectErrors []string `json:"inspect_errors,omitempty"`
+	// QueueConsulted distinguishes "the queue was not asked" from "the queue was
+	// asked and holds nothing for these branches" (mg-4bf1).
+	//
+	// It matters now that an in-flight branch is a ROW rather than a silent
+	// exclusion: with the queue unasked, a branch already awaiting merge renders
+	// as an ordinary `stranded` row whose remedy is a submit that would queue a
+	// duplicate — and the ABSENCE of any in_flight row reads as "nothing is in
+	// flight". That is mg-8baa's shape ("not consulted" and "consulted and empty"
+	// must not render alike), one field away from being re-learned here.
+	QueueConsulted bool `json:"queue_consulted"`
 	// QueueUnreadable is set when the refinery queue could not be consulted, so
 	// branches already awaiting merge could not be excluded. Stated, not fatal.
 	QueueUnreadable string `json:"queue_unreadable,omitempty"`
@@ -1154,7 +1270,7 @@ type Options struct {
 	// QueuedBranches returns the branches already awaiting merge, keyed by
 	// QueueKey(repo, branch). Optional: nil means "not consulted", an error means
 	// "could not be consulted" — the report distinguishes them.
-	QueuedBranches func() (map[string]bool, error)
+	QueuedBranches func() (map[string]QueuedRequest, error)
 
 	// History returns the refinery's completed merge requests, so a stranded
 	// row's remedy can be checked against whether that branch has ALREADY been
@@ -1225,7 +1341,8 @@ func Scan(opts Options) (Report, error) {
 		return rep, fmt.Errorf("listing open work items: %w", err)
 	}
 
-	queued := map[string]bool{}
+	queued := map[string]QueuedRequest{}
+	rep.QueueConsulted = opts.QueuedBranches != nil
 	if opts.QueuedBranches != nil {
 		q, qerr := opts.QueuedBranches()
 		if qerr != nil {
@@ -1390,7 +1507,7 @@ func Scan(opts Options) (Report, error) {
 				if !strandedwork.BranchMatchesItem(branch, it.ID) {
 					continue
 				}
-				if reason := excludedBecause(branch, it, live, queued, repo); reason != "" {
+				if reason := excludedBecause(branch, it, live, repo); reason != "" {
 					rep.Excluded = append(rep.Excluded, Excluded{ItemID: it.ID, Branch: branch, Reason: reason})
 					continue
 				}
@@ -1411,6 +1528,24 @@ func Scan(opts Options) (Report, error) {
 					continue
 				}
 				if row != nil {
+					q, disp := queueDisposition(queued, repo, branch, it, *row)
+					switch disp {
+					case queueExcluded:
+						rep.Excluded = append(rep.Excluded, Excluded{
+							ItemID: it.ID, Branch: branch,
+							Reason: "already in the refinery queue (" + q.MR + "), and the item is claimed",
+						})
+						continue
+					case queueRow:
+						// The branch is already in the queue, so the remedy is
+						// running and this row must NOT print a submit. Before
+						// mg-4bf1 that was implemented by dropping the row
+						// entirely, which took the do-not-dispatch instruction
+						// with it while priority-wake went on advertising the
+						// item. Keep the finding, change the remedy.
+						row.Kind = KindInFlight
+						row.Queued = &q
+					}
 					rep.Rows = append(rep.Rows, *row)
 				}
 			}
@@ -1439,21 +1574,25 @@ func Scan(opts Options) (Report, error) {
 
 // excludedBecause names the reason a matched branch is not reported, or "".
 //
-// The two exclusions are the ones the ticket named, and each is a state that
-// looks IDENTICAL to a strand from the outside:
+// THE EXCLUSION IS A RUNNING POLECAT'S BRANCH, and it is a state that looks
+// IDENTICAL to a strand from the outside: it has unmerged commits on a claimed
+// item because that is what work in progress is. polecat-qfa70 was mid-flight
+// during the mayor's manual sweep and was indistinguishable from a strand.
 //
-//   - a running polecat's branch. It has unmerged commits on a claimed item
-//     because that is what work in progress is. polecat-qfa70 was mid-flight
-//     during the mayor's manual sweep and was indistinguishable from a strand.
-//   - a branch already in the refinery queue. The remedy for a stranded branch is
-//     "submit it", and it is already submitted.
-//
-// Both match on the BRANCH, not on the item, with one addition: a branch whose
+// It matches on the BRANCH, not on the item, with one addition: a branch whose
 // item is claimed by a live polecat is also in flight even when the branch name
 // does not match that polecat's agent name (an agent renamed around a collision).
 // Over-excluding here costs a missed report on an item somebody is actively
 // working; under-excluding costs a false alarm on every live worker.
-func excludedBecause(branch string, it Item, live, queued map[string]bool, repo string) string {
+//
+// THE REFINERY QUEUE USED TO BE A SECOND EXCLUSION HERE AND IS NOW A ROW
+// (mg-4bf1). The reasoning that put it here was sound as far as it went — the
+// remedy for a stranded branch is "submit it", and it is already submitted — but
+// suppressing the row suppressed the `# do NOT dispatch at mg-<id>` that rode on
+// it, and nothing else took over. See KindInFlight and queueDisposition for the
+// replacement, and for why it is keyed on the item's status rather than on the
+// queue alone.
+func excludedBecause(branch string, it Item, live map[string]bool, repo string) string {
 	name := strings.TrimPrefix(branch, strandedwork.BranchPrefix)
 	if live[name] {
 		return fmt.Sprintf("polecat %s is running on this branch", name)
@@ -1463,10 +1602,52 @@ func excludedBecause(branch string, it Item, live, queued map[string]bool, repo 
 			return fmt.Sprintf("polecat %s is running on work item %s", agentName, it.ID)
 		}
 	}
-	if queued[QueueKey(repo, branch)] {
-		return "already in the refinery queue"
-	}
 	return ""
+}
+
+// What the refinery queue does to a row.
+const (
+	// queueUnaffected: this branch is not in the queue. The row stands as
+	// classified.
+	queueUnaffected = iota
+	// queueRow: the row becomes KindInFlight — its remedy must not be a submit,
+	// and it must carry the do-not-dispatch instruction.
+	queueRow
+	// queueExcluded: the row is suppressed, which is what a queued branch used
+	// to get unconditionally.
+	queueExcluded
+)
+
+// queueDisposition decides what an in-queue branch does to its row.
+//
+// EACH TERM IS LOAD-BEARING:
+//
+//   - the branch is QUEUED. Its remedy is running; printing `refinery submit`
+//     would queue a duplicate, and the refinery has no dedup. So it is never an
+//     ordinary stranded row.
+//   - the item is `claimed` -> still an EXCLUSION, exactly as before mg-4bf1. A
+//     queued branch under a claimed item is the ordinary state of every polecat
+//     polling its own merge — the healthy majority — and a finding that fires on
+//     the steady state is one readers learn to skip.
+//   - the item is anything else -> a ROW. This is the combination that has no
+//     owner: unmerged work in flight under an item the board is offering to
+//     anybody, which is what priority-wake was advertising while this report
+//     said nothing.
+//   - a landed_not_closed row is left alone. It has no unmerged commits by
+//     construction, so there is nothing in flight to wait for, and its remedy
+//     (`mg done`) stays correct.
+//
+// The queue lookup is per (repo, branch) — see QueueKey. A same-named branch
+// queued in a DIFFERENT repository must not answer for this one.
+func queueDisposition(queued map[string]QueuedRequest, repo, branch string, it Item, row Row) (QueuedRequest, int) {
+	q, ok := queued[QueueKey(repo, branch)]
+	if !ok || row.Kind == KindLandedNotClosed {
+		return QueuedRequest{}, queueUnaffected
+	}
+	if strings.EqualFold(it.Status, "claimed") {
+		return q, queueExcluded
+	}
+	return q, queueRow
 }
 
 // classify turns one (repo, branch, item) into a row, or nil when there is

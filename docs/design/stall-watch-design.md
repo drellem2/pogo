@@ -108,9 +108,11 @@ LATER, not a never — and inventing a self-draining queue would repeat this
 ticket's defect in the opposite direction.
 
 What a "free slots" verdict does **not** promise: the per-repo cap is one of
-several refusals. Gated assignees and `stage: gated` items never reach a notice
-at all, but the host-load gate and the stranded-push gate are not consulted, so
-"free" means *the cap would let this through*, not *this dispatch will succeed*.
+several refusals. Gated assignees, `stage: gated` items, items a live worker
+holds, items with a preserved worktree and — since mg-4bf1 — items whose work is
+already on a branch never reach a dispatch notice at all, but the **host-load
+gate** is still not consulted by this split, so "free" means *the cap would let
+this through*, not *this dispatch will succeed*.
 
 #### `available` is not evidence that nobody is working it (mg-1a8a)
 
@@ -167,6 +169,51 @@ without asking pogod. Nothing at the spawn point refuses a second polecat on an
 item a live worker already holds; the claim-at-spawn conflict is that guard, and
 it is precisely the guard that failed open here. This fix removes the nag that
 induces the second dispatch, not the ability to make one.
+
+#### The do-not-dispatch signal was CONTRADICTED, not missing (mg-4bf1)
+
+The third exclusion has the same shape as the first two and a different cause,
+and the cause is what the ticket turns on.
+
+When `pogo agent stop` releases a polecat's claim — correctly (mg-fb13) — pogod
+*already* detects a strand exactly. `reportStrandedWorkOnRelease` emits
+`work_item_stranded_push` and mails the coordinator `[stranded-push] <polecat>
+left pushed work behind on <branch> — do NOT dispatch`, naming the polecat, the
+item, the branch, the ref, `pushed=true`, the target and the commit. Meanwhile
+the item is back in `available/`, so priority-wake says *"1 high-priority work
+item(s) are ready and unclaimed — claim or dispatch now: mg-a932"* about the
+same item, in the same minute, into the same inbox.
+
+**Which one wins is decided by cadence, not by correctness.** The recommendation
+is re-derived from `available/` every tick and repeats on a backoff; the
+prohibition is sent **once**. A reader who reads their mail unevenly sees the
+dispatch advice several times and the do-not-dispatch advice never. So the fix
+is not another detector — it is a `stallwatch.Stranded` probe (wired in
+`cmd/pogod` to `strandedwork.PolecatBranches` + `Inspect`, the same package the
+spawn gate and `pogo check-stranded` read) sampled once per tick beside the
+other two, plus a `stranded_push` notice that re-derives the prohibition on
+every tick. The category name matches the release-time event on purpose, so the
+one-shot detection and the repeating report are countable together.
+
+| Situation | What happens |
+|---|---|
+| item's work is on a branch, unmerged | dropped from both dispatch checks; re-reported by the **stranded-push** notice, which says *do NOT dispatch* and names the branch, its provenance and the unmerged count |
+| a live worker or a preserved worktree also fits | left to those checks — their work is less durable, and two notices about one item is how a channel gets skimmed |
+| probe cannot answer at all | unchanged, i.e. advertised: the spawn gate still refuses, and a false silence looks like a healthy queue |
+| a repo could not be listed | dispatch notices fire **and** carry the caveat |
+
+**It is not a race and not a window.** Two polecats were stopped on 2026-09-07,
+both following the pre-deploy quiesce procedure exactly, both with their work
+confirmed durable before the stop, and both items were advertised this way. The
+stop *always* releases the claim, the item *always* re-enters the pool, and
+priority-wake *always* picks it up.
+
+**What this does not fix, and did not need to.** The spawn point already refuses
+these dispatches: `strandedWorkRefusal` reads the branch off disk and no
+merge-request state is one of its inputs, so submitting the branch does not
+disarm it. The refusal is **409** while the per-repo cap's is **503**, and the
+stranded gate runs first — so a repo at cap does not mask the guard, which is
+what the ticket's own precaution assumed it would.
 
 ### Threshold B — unread mail
 

@@ -1678,9 +1678,9 @@ $ pogo check-stranded
 stranded and landed-not-closed work — open items joined to their branches
   114 open work item(s) scanned across 1 repo(s)
     /Users/daniel/dev/pogo — 73 item(s), 683 polecat branch(es), refs refreshed from origin
-  1 exclusion(s): branches of running polecats and branches already queued
+  1 exclusion(s): branches of running polecats, and queued branches whose item is CLAIMED
 
-3 FINDING(S) — 0 stranded, 3 landed-but-not-closed, 0 conflict suspect, 0 UNJUDGED:
+3 FINDING(S) — 0 stranded, 0 in-flight, 3 landed-but-not-closed, 0 conflict suspect, 0 UNJUDGED:
 
   landed_not_closed available  mg-65d2
     Build the REPRESENTATIVE relay: move the two readers, not the twenty-one writers
@@ -1699,11 +1699,54 @@ Exit 0 clean, 1 at least one finding, 2 usage, 3 this run measured nothing.
 | `rescue_unbuilt` | stranded, **and** the unmerged work is a `RESCUE` commit: recovered from a dead polecat's worktree with the pre-commit hook bypassed | read it, then build it. **No submit command is printed for these rows** |
 | `refused_before` | stranded, **and** the refinery has already been given this branch and refused it, with a failure its own class table commits to reproducing | the branch has to **change** first. **No submit command is printed for these rows** |
 | `stranded` | the branch has commits the target does not | `pogo refinery submit`; do **not** dispatch |
+| `in_flight` | the branch has unmerged commits **and** is already in the refinery queue, while the item is **not** claimed | `pogo refinery show <mr>` — do **not** dispatch and do **not** resubmit. **No submit command is printed for these rows** |
 | `landed_not_closed` | the branch is fully merged, the item still asks for it | `mg done` |
 | `conflict_suspect` | the two instruments below disagree | read it yourself; **neither** command |
 | `unjudged` | the branch could not be read | re-run; this is not a clean row |
 | `repo_unreadable` | the item's repo could not be listed, so no branch was looked for | fix the item's repo field; not a clean row |
 | `orphan_branch` | a polecat worktree on this host whose branch holds commits **no remote ref has**, named by no open item | `git push origin <branch>` — there is no owner to ask and nothing to submit under |
+
+#### `in_flight` — the exclusion that took the prohibition with it (mg-4bf1)
+
+A queued branch used to be dropped from this report entirely, and the reasoning
+was sound as far as it went: the stranded remedy is *submit it*, the refinery has
+no dedup, and it is already submitted. What it missed is that **no other signal
+takes over for the duration**. Measured 2026-09-07 22:47Z, on two branches
+submitted minutes earlier and both still in the queue:
+
+```
+polecat-pa854    ahead of origin/main: 1
+polecat-pdaf4    ahead of origin/main: 1
+pogo check-stranded | grep -cE 'mg-daf4|mg-a854'   ->   0
+```
+
+Before the submit, both were listed here with `# do NOT dispatch at mg-<id>` on
+the remedy line. After it, neither was — while priority-wake went on naming
+`mg-daf4` as high-priority and ready, three times between 22:44Z and 22:55Z. The
+submit cleared the prohibition and did not clear the recommendation.
+
+So the row survives and only the remedy changes. It prints no submit (the branch
+is in the queue) and no `mg done` (nothing has merged); it names the merge
+request, so the reader can check the arbitration in one command.
+
+**It is keyed on the item's status, not on the queue alone.** A queued branch
+whose item is `claimed` is the ordinary state of every polecat polling its own
+merge — the healthy majority of submits — and stays an exclusion. What fires here
+is the combination that has no owner: unmerged work in flight under an item the
+board is offering to anybody.
+
+The coverage block gained a matching line: with no queue source wired the report
+now says `refinery queue NOT CONSULTED`, because the absence of an `in_flight`
+row otherwise reads as *nothing is in flight* — the same "not asked vs asked and
+empty" collapse mg-8baa was filed about, one field away from being re-learned.
+
+**The dispatch itself is still refused.** `spawn-polecat`'s stranded gate reads
+the branch off disk and no merge-request state is one of its inputs, so this row
+is a *reporting* repair, not the guard. (The two refusals are also
+distinguishable: stranded is **409** and names the branch, the per-repo cap is
+**503** and names the cap, and the stranded gate runs first.) The repeating
+half of the repair lives in stall-watch's `stranded_push` notice — see
+`docs/design/stall-watch-design.md`.
 
 #### `rescue_unbuilt` — why one row type is denied a runnable remedy
 
