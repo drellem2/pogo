@@ -443,10 +443,38 @@ func alreadyClaimedOutput(id string) string {
 	return fmt.Sprintf("Error: %s: not done — it is already claimed (in progress).", id)
 }
 
+// ErrMGWorkItemArchived reports that mg reopen refused because the item is
+// archived. Like ErrMGWorkItemNotDone this is a benign outcome and not a
+// failure: `mg reopen` moves items out of done/ ONLY, so an archived item
+// cannot be flipped back to claimed/ by a failed merge at all (mg-4d21).
+//
+// It is separated from the generic failure because reporting it as one is a
+// false alarm on a line whose whole job is to be read — and because it is the
+// mechanism behind the only known NEGATIVE instance of the flip this ticket is
+// about: mg-3ba8 was archived four minutes after its merge, and the failed MR
+// that followed left it alone.
+var ErrMGWorkItemArchived = errors.New("work item is archived, so there is nothing to reopen")
+
+// archivedOutput returns mg reopen's COMPLETE output for the "archived" refusal
+// on the given id, remediation line included.
+//
+// Exact for alreadyClaimedOutput's reason, and measured against the live binary
+// on 2026-09-08 rather than transcribed from macguffin's source: unlike the
+// still-claimed refusal, this one carries a remediation line, so a comparison
+// built from the Error: line alone would never match.
+//
+//	$ mg reopen mg-ed67
+//	Error: mg-ed67: is archived, not done.
+//	  → Run 'mg unarchive mg-ed67' to restore it.
+func archivedOutput(id string) string {
+	return fmt.Sprintf("Error: %s: is archived, not done.\n  \u2192 Run 'mg unarchive %s' to restore it.", id, id)
+}
+
 // ReopenMGWorkItem calls mg reopen to move a done work item back to claimed/.
 // Returns nil if the reopen succeeds. Non-fatal errors are returned as errors
-// for the caller to log; the "already claimed (in progress)" refusal wraps
-// ErrMGWorkItemNotDone so callers can tell it from a real failure.
+// for the caller to log; the "already claimed (in progress)" and "archived"
+// refusals wrap ErrMGWorkItemNotDone and ErrMGWorkItemArchived so callers can
+// tell them from a real failure.
 func ReopenMGWorkItem(id string) error {
 	cmd := execCommand("mg", "reopen", id)
 	cmd.Stderr = nil
@@ -455,6 +483,9 @@ func ReopenMGWorkItem(id string) error {
 		out := strings.TrimSpace(string(raw))
 		if out == alreadyClaimedOutput(id) {
 			return fmt.Errorf("%w: %s", ErrMGWorkItemNotDone, out)
+		}
+		if out == archivedOutput(id) {
+			return fmt.Errorf("%w: %s", ErrMGWorkItemArchived, out)
 		}
 		return fmt.Errorf("mg reopen failed: %s (%w)", out, err)
 	}
