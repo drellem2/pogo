@@ -124,6 +124,15 @@ type PreservedTree struct {
 	// split is load-bearing rather than stylistic.
 	UntouchedSeconds int  `json:"untouched_seconds,omitempty"`
 	UntouchedKnown   bool `json:"untouched_known"`
+	// UntouchedError is WHY the age is unknown, when it is (mg-1530).
+	//
+	// It exists because the bound added in that ticket created a second way to
+	// have no age, and the two want different readers. "The tree could not be
+	// listed" sends someone to a broken directory; "the walk was abandoned
+	// after 60s" sends them to a tree that is merely enormous — and on a host
+	// holding 196 retained trees (drellem2/pogo#162) the second is the common
+	// case. Collapsing them would report a slow tree as a damaged one.
+	UntouchedError string `json:"untouched_error,omitempty"`
 
 	// Live is true when the OWNER is a running polecat. Such a tree is not
 	// retained — it is in use — and it is reported separately so the headline
@@ -155,6 +164,9 @@ type PreservedTree struct {
 // reads as "recent" to some people and "old" to others.
 func (t PreservedTree) UntouchedText() string {
 	if !t.UntouchedKnown {
+		if t.UntouchedError != "" {
+			return "age unknown — " + t.UntouchedError
+		}
 		return "age unknown — the tree could not be listed"
 	}
 	return "untouched " + humanAge(time.Duration(t.UntouchedSeconds)*time.Second)
@@ -212,7 +224,83 @@ type PreservedScanOptions struct {
 	// false at-risk annotation. Empty resolves to DefaultTargetBranch. See
 	// PreservedItemOptions.Target.
 	Target string
+	// Progress, when non-nil, receives every step of the scan AS IT HAPPENS
+	// (mg-1530). See PreservedScanEvent — this is the whole of the streaming
+	// mechanism, and the reason drellem2/pogo#158's symptom is no longer
+	// reachable.
+	Progress PreservedProgressFunc
+	// AgeWalkBudget bounds the per-tree age walk. Zero uses
+	// defaultAgeWalkBudget; the walk is never unbounded here.
+	AgeWalkBudget time.Duration
 }
+
+// PreservedScanEvent is one step of the scan, handed to
+// PreservedScanOptions.Progress the moment it happens.
+//
+// # This is what drellem2/pogo#158 was actually about (mg-1530)
+//
+// The command wrote its first byte only after the ENTIRE scan finished. Every
+// intermediate fact — how many directories there are, which one is being read,
+// what the last twelve resolved to — existed in memory and reached nobody, so a
+// scan that was merely slow was indistinguishable from a hung one, and neither
+// told the operator which tree to go and look at. The reporter saw zero bytes
+// and no return, and had no way to learn more except to kill it.
+//
+// Note what the events carry and what they do not. There is no percentage, no
+// ETA and no rate: the scan's cost per tree varies by orders of magnitude (a
+// node_modules worktree walk was measured at 21.6-28.1s in drellem2/pogo#168
+// against ~0.03s for a small tree), so any projection from the trees already
+// read would be a confident wrong number. Index, total, and the NAME of the
+// tree currently being read are facts; "43% done" would not be.
+type PreservedScanEvent struct {
+	// Phase is "start" once, then "enter"/"done" per directory.
+	//
+	// An "enter" is emitted BEFORE any subprocess runs or any directory is
+	// walked for that tree, which is the property that makes a stalled scan
+	// name its culprit: the last "enter" with no matching "done" IS the tree
+	// that is hanging.
+	Phase string
+	// Index is the 1-based position of this directory, and Total how many
+	// directories the scan will visit. Total is set on every event, including
+	// "start", where Index is 0.
+	Index, Total int
+	// Owner is the directory name and Path its full path. Empty on "start".
+	Owner, Path string
+	// Disposition, on "done", is what the directory resolved to:
+	// "retained", "in-use", "clean", "not-a-worktree" or "other-repo".
+	Disposition string
+	// Note is the text of a "note" event: a caveat established during the
+	// scan that changes how the rows should be read — an unreadable work-item
+	// index, say, which makes every `--force` column below it "unknown". It
+	// is delivered WHEN IT IS ESTABLISHED rather than held to the end,
+	// because a caveat that arrives after the rows it qualifies has already
+	// failed at its job.
+	Note string
+	// Tree is the resolved record on the "retained" and "in-use"
+	// dispositions, and nil otherwise. It is the FULL record, not a summary:
+	// a streaming consumer renders the same block the final report would, so
+	// a scan read halfway is a partial inventory rather than a teaser for one.
+	Tree *PreservedTree
+}
+
+// PreservedProgressFunc receives scan events. It is called synchronously from
+// the scan goroutine, in order, and must not block for long — every millisecond
+// it spends is a millisecond the scan is not scanning.
+type PreservedProgressFunc func(PreservedScanEvent)
+
+// defaultAgeWalkBudget bounds ONE tree's age walk.
+//
+// Chosen against a hang, not against slowness, and the difference decides the
+// value. drellem2/pogo#168 measured a legitimate node_modules worktree walk at
+// 21.6-28.1s, so a tight bound would report "age unknown" for trees whose age
+// is perfectly readable — and the age is the field an operator uses to decide
+// whether a permanent pin can go. 60s clears the largest measured legitimate
+// walk with room to spare while still converting an unresponsive filesystem
+// from an unbounded wait into one row that says so.
+//
+// Making the walk CHEAP is drellem2/pogo#156/#168's work, not this one's. This
+// listing owns degrading legibly; those own the cost.
+var defaultAgeWalkBudget = 60 * time.Second
 
 // PreservedReport is the population of retained worktrees, plus what the scan
 // skipped and why.
@@ -305,6 +393,36 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 	}
 	rep := PreservedReport{PolecatsDir: opts.PolecatsDir, RepoFilter: opts.Repo}
 
+	progress := opts.Progress
+	if progress == nil {
+		progress = func(PreservedScanEvent) {}
+	}
+	note := func(text string) {
+		rep.Notes = append(rep.Notes, text)
+		progress(PreservedScanEvent{Phase: "note", Note: text})
+	}
+
+	entries, err := os.ReadDir(opts.PolecatsDir)
+	if err != nil {
+		return rep, fmt.Errorf("read polecats dir %s: %w", opts.PolecatsDir, err)
+	}
+	var dirs []os.DirEntry
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, e)
+		}
+	}
+
+	ageBudget := opts.AgeWalkBudget
+	if ageBudget <= 0 {
+		ageBudget = defaultAgeWalkBudget
+	}
+	// The denominator is emitted BEFORE the first tree is touched, because it
+	// is the one number that makes a slow scan bearable: an operator watching
+	// "12 of 196" knows to wait, and an operator watching "12 of 13" knows
+	// something is wrong. It is also the only figure available for free.
+	progress(PreservedScanEvent{Phase: "start", Total: len(dirs)})
+
 	tickets := opts.Tickets
 	rep.TicketsLoaded = tickets != nil
 	if tickets == nil {
@@ -313,7 +431,7 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 			// Degrade rather than fail. The listing's irreplaceable half is the
 			// set of trees and the files in them; the ticket column is a
 			// convenience that `mg show` can supply by hand.
-			rep.Notes = append(rep.Notes, fmt.Sprintf(
+			note(fmt.Sprintf(
 				"work-item states unavailable (%v) — ticket state reads \"unknown\" for every "+
 					"tree below, and whether `--force` would reclaim one cannot be computed.", err))
 			tickets = TicketIndex{}
@@ -323,16 +441,21 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 		}
 	}
 
-	entries, err := os.ReadDir(opts.PolecatsDir)
-	if err != nil {
-		return rep, fmt.Errorf("read polecats dir %s: %w", opts.PolecatsDir, err)
-	}
-
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
+	for i, e := range dirs {
 		path := filepath.Join(opts.PolecatsDir, e.Name())
+		index := i + 1
+		// Emitted before ANY work on this tree — no subprocess, no walk, not
+		// even the .git stat. A scan that stops leaves this line as its last
+		// output, which is how the operator learns which tree stopped it.
+		progress(PreservedScanEvent{
+			Phase: "enter", Index: index, Total: len(dirs), Owner: e.Name(), Path: path,
+		})
+		done := func(disposition string, tree *PreservedTree) {
+			progress(PreservedScanEvent{
+				Phase: "done", Index: index, Total: len(dirs), Owner: e.Name(), Path: path,
+				Disposition: disposition, Tree: tree,
+			})
+		}
 		// No .git entry at all means this is not a linked worktree — it is a
 		// phase-1b orphan dir, which has no index and no HEAD, so
 		// "uncommitted" is not a property it has. Counted, never listed:
@@ -340,6 +463,7 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 		// claim about it that nobody can make.
 		if _, lerr := os.Lstat(filepath.Join(path, ".git")); lerr != nil {
 			rep.NotWorktreeCount++
+			done("not-a-worktree", nil)
 			continue
 		}
 
@@ -357,6 +481,7 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 		// something was already wrong with it.
 		if opts.Repo != "" && tree.Repo != "" && tree.Repo != opts.Repo {
 			rep.OtherRepoCount++
+			done("other-repo", nil)
 			continue
 		}
 
@@ -366,6 +491,7 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 		chk := checkWorktreeRemoval(path, tree.Repo, opts.Target)
 		if chk.Refusal == nil {
 			rep.CleanCount++
+			done("clean", nil)
 			continue
 		}
 
@@ -383,10 +509,7 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 			// filled by the annotation further down rather than from the refusal,
 			// so the listing and the guard read the tree independently.
 			tree.Outcome = "unpushed"
-			if newest, werr := newestWrite(path); werr == nil {
-				tree.UntouchedSeconds = int(time.Since(newest).Seconds())
-				tree.UntouchedKnown = true
-			}
+			setTreeAge(&tree, path, ageBudget)
 		case errors.As(chk.Refusal, &dwe):
 			tree.Outcome = "preserved"
 			// Re-read the full porcelain list: DirtyWorktreeError.Files is
@@ -403,15 +526,18 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 			tree.Total, tree.Modified, tree.Untracked = dwe.Total, dwe.Modified, dwe.Untracked
 			// The age is measured here for dirty trees; the guard only computes
 			// it on the cannot-read path, where the refusal line needs it.
-			if newest, werr := newestWrite(path); werr == nil {
-				tree.UntouchedSeconds = int(time.Since(newest).Seconds())
-				tree.UntouchedKnown = true
-			}
+			setTreeAge(&tree, path, ageBudget)
 		case errors.As(chk.Refusal, &uwe):
 			tree.Outcome = "undetermined"
 			tree.StatusError = uwe.Err.Error()
 			tree.UntouchedSeconds = int(uwe.Untouched.Seconds())
 			tree.UntouchedKnown = uwe.UntouchedKnown
+			// The guard already walked this tree (bounded), so the listing
+			// takes its answer rather than walking a second time — including
+			// the reason it has no answer, when it has none.
+			if !uwe.UntouchedKnown {
+				tree.UntouchedError = untouchedReason(uwe.UntouchedErr, defaultAgeWalkBudget)
+			}
 		default:
 			// No third refusal exists today. Report it rather than dropping the
 			// tree: a retained worktree missing from the list of retained
@@ -463,6 +589,7 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 			// A live owner's tree is never gc's to take, whatever --force says.
 			tree.ForceReclaims = "no"
 			rep.InUse = append(rep.InUse, tree)
+			done("in-use", &tree)
 			continue
 		}
 		// Detachment is asked with the probe rather than inferred from the
@@ -473,12 +600,48 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 		tree.ForceReclaims = forceReclaims(rep.TicketsLoaded, tickets, tree.Owner, tree.Branch,
 			detached && derr == nil)
 		rep.Retained = append(rep.Retained, tree)
+		done("retained", &tree)
 	}
 
 	sortPreserved(rep.Retained)
 	sortPreserved(rep.InUse)
 	rep.applyCounts()
 	return rep, nil
+}
+
+// setTreeAge fills a tree's age fields from a BOUNDED walk, recording why the
+// age is missing when it is.
+//
+// The failure is written down rather than dropped (mg-1530). Before the bound
+// there was exactly one way to have no age — the tree could not be enumerated —
+// and the renderer could name it from the bool alone. There are now two, they
+// send a reader to different places, and the one this ticket added is the one
+// that will fire in the field: a host holding 196 retained trees
+// (drellem2/pogo#162) has slow trees long before it has broken ones.
+func setTreeAge(tree *PreservedTree, path string, budget time.Duration) {
+	newest, werr := newestWriteWithin(path, budget)
+	if werr == nil {
+		tree.UntouchedSeconds = int(time.Since(newest).Seconds())
+		tree.UntouchedKnown = true
+		return
+	}
+	tree.UntouchedKnown = false
+	tree.UntouchedError = untouchedReason(werr, budget)
+}
+
+// untouchedReason renders why a tree has no age, in the vocabulary
+// untouchedClause uses for the same two shapes.
+//
+// The wording for an unenumerable tree is unchanged and stays unchanged
+// deliberately: it is the sentence the refusal line has printed since mg-4d45,
+// and two components describing one condition in two ways is the failure this
+// listing family keeps being about.
+func untouchedReason(werr error, budget time.Duration) string {
+	if errors.Is(werr, ErrWalkBudget) {
+		return fmt.Sprintf("the tree is too large to measure in %s, so the walk was "+
+			"abandoned. The tree is fine; this is a COST, not damage", budget)
+	}
+	return "the tree could not be listed"
 }
 
 // forceReclaims answers whether `pogo gc --apply --force` would take this tree.
@@ -620,7 +783,15 @@ func (r *PreservedReport) applyCounts() {
 	}
 }
 
-// Summary renders the report for an operator.
+// Summary renders the report for an operator, whole, once the scan is done.
+//
+// It is NOT what `pogo gc --list-preserved` prints any more — that command
+// streams (StreamedHeader/StreamedTree/StreamedTail), because a report that
+// exists only at the end is a report a slow scan never produces (mg-1530).
+// Summary remains the rendering for a report already in hand: tests, and any
+// caller holding a PreservedReport it did not watch being built. Both
+// renderings derive from the same fields through the same helpers, which is
+// what keeps them from disagreeing about the population.
 func (r PreservedReport) Summary() string {
 	var b strings.Builder
 
@@ -628,27 +799,8 @@ func (r PreservedReport) Summary() string {
 	// render without touching the caller's report.
 	r.applyCounts()
 
-	fmt.Fprintf(&b, "retained polecat worktrees under %s\n", r.PolecatsDir)
-	if r.RepoFilter != "" {
-		fmt.Fprintf(&b, "  (filtered to repo %s — %d tree(s) in other repositories not shown;\n"+
-			"   a tree whose .git pointer could not be read is shown anyway, since it may be this one)\n",
-			r.RepoFilter, r.OtherRepoCount)
-	}
-	fmt.Fprintf(&b, "  %d retained: %d holding uncommitted work, %d unreadable, "+
-		"%d clean but holding commits that exist nowhere else\n",
-		r.RetainedCount, r.RetainedUncommitted, r.RetainedUndetermined, r.RetainedUnpushed)
-	// The untracked subset gets its own headline line rather than living only
-	// in the per-tree rows below. It is the number a reader carries away, and
-	// on 2026-09-06 it was the number that made a deploy's "no polecat holds
-	// unpushed work" false rather than merely narrow: three of seven trees held
-	// content in no branch, no stash and on no remote — the mayor's count that
-	// day, four of seven when re-derived on 2026-09-07 (mg-e621).
-	fmt.Fprintf(&b, "  of those, %d hold UNTRACKED files — on no branch, in no stash, on no remote,\n"+
-		"  so the tree is the only copy of those git objects\n", r.RetainedUntracked)
-	fmt.Fprintf(&b, "  %d dirty tree(s) in use by a live polecat — not retained, listed at the end\n",
-		r.InUseCount)
-	fmt.Fprintf(&b, "  %d clean, %d not linked worktrees (no .git — see `pogo gc` orphan dirs)\n",
-		r.CleanCount, r.NotWorktreeCount)
+	writeHeadline(&b, r)
+	writeCounts(&b, r)
 
 	for _, n := range r.Notes {
 		fmt.Fprintf(&b, "\n  note: %s\n", n)
@@ -659,26 +811,77 @@ func (r PreservedReport) Summary() string {
 	} else {
 		b.WriteString(preservedPreamble)
 		for _, group := range groupByRepo(r.Retained) {
-			writeRepoGroup(&b, group)
+			writeRepoHeader(&b, group)
+			for _, t := range group.Trees {
+				writeTree(&b, t)
+			}
 		}
 		b.WriteString(preservedFooter)
 	}
 
-	if len(r.InUse) > 0 {
-		fmt.Fprintf(&b, "\nin use by a live polecat (NOT retained — do not touch):\n")
-		for _, t := range r.InUse {
-			fmt.Fprintf(&b, "  %s  owner %s, branch %s, %d uncommitted\n",
-				t.Path, t.Owner, branchOrNone(t), t.Total)
-		}
-	}
-
-	if len(r.Errors) > 0 {
-		fmt.Fprintf(&b, "\nerrors (%d):\n", len(r.Errors))
-		for _, e := range r.Errors {
-			fmt.Fprintf(&b, "  %s\n", e)
-		}
-	}
+	writeInUse(&b, r)
+	writeErrors(&b, r)
 	return b.String()
+}
+
+// writeHeadline names the directory the listing covers.
+//
+// The --repo filter's accounting deliberately does NOT live here: it carries a
+// COUNT, and a count is not known until the scan ends. It moved to writeCounts
+// with the other numbers so that a streamed listing cannot print it early, at
+// zero, and be believed.
+func writeHeadline(b *strings.Builder, r PreservedReport) {
+	fmt.Fprintf(b, "retained polecat worktrees under %s\n", r.PolecatsDir)
+}
+
+// writeCounts renders the population block — the numbers a reader carries away.
+//
+// Split out of Summary so the streamed listing renders the SAME block from the
+// SAME fields at the end of its scan. Two renderings of one population that
+// count it separately is the defect mg-e621 records; this is the guard
+// applyCounts is, one layer up.
+func writeCounts(b *strings.Builder, r PreservedReport) {
+	if r.RepoFilter != "" {
+		fmt.Fprintf(b, "  (filtered to repo %s — %d tree(s) in other repositories not shown;\n"+
+			"   a tree whose .git pointer could not be read is shown anyway, since it may be this one)\n",
+			r.RepoFilter, r.OtherRepoCount)
+	}
+	fmt.Fprintf(b, "  %d retained: %d holding uncommitted work, %d unreadable, "+
+		"%d clean but holding commits that exist nowhere else\n",
+		r.RetainedCount, r.RetainedUncommitted, r.RetainedUndetermined, r.RetainedUnpushed)
+	// The untracked subset gets its own headline line rather than living only
+	// in the per-tree rows below. It is the number a reader carries away, and
+	// on 2026-09-06 it was the number that made a deploy's "no polecat holds
+	// unpushed work" false rather than merely narrow: three of seven trees held
+	// content in no branch, no stash and on no remote — the mayor's count that
+	// day, four of seven when re-derived on 2026-09-07 (mg-e621).
+	fmt.Fprintf(b, "  of those, %d hold UNTRACKED files — on no branch, in no stash, on no remote,\n"+
+		"  so the tree is the only copy of those git objects\n", r.RetainedUntracked)
+	fmt.Fprintf(b, "  %d dirty tree(s) in use by a live polecat — not retained, listed at the end\n",
+		r.InUseCount)
+	fmt.Fprintf(b, "  %d clean, %d not linked worktrees (no .git — see `pogo gc` orphan dirs)\n",
+		r.CleanCount, r.NotWorktreeCount)
+}
+
+func writeInUse(b *strings.Builder, r PreservedReport) {
+	if len(r.InUse) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\nin use by a live polecat (NOT retained — do not touch):\n")
+	for _, t := range r.InUse {
+		fmt.Fprintf(b, "  %s  owner %s, branch %s, %d uncommitted\n",
+			t.Path, t.Owner, branchOrNone(t), t.Total)
+	}
+}
+
+func writeErrors(b *strings.Builder, r PreservedReport) {
+	if len(r.Errors) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\nerrors (%d):\n", len(r.Errors))
+	for _, e := range r.Errors {
+		fmt.Fprintf(b, "  %s\n", e)
+	}
 }
 
 // preservedPreamble is the report's refusal to do the reader's job for them.
@@ -706,8 +909,8 @@ deliberately. Keeping it forever is the third one, and it is what produced this
 list.
 `
 
-// writeRepoGroup renders one repository's retained trees, headed by what the
-// reclaim command for that repo would actually do.
+// writeRepoHeader renders one repository's heading — what the reclaim command
+// for that repo would actually do, and to which of its trees.
 //
 // THE HEADER IS THE POINT OF THE GROUPING. `pogo gc --repo=<repo> --apply
 // --force` is repo-scoped and forced: it acts on every eligible retained tree
@@ -715,7 +918,7 @@ list.
 // takes the command out of a per-tree preservation notice — which is where it
 // appears — has no way to see that from the notice. Grouping puts the blast
 // radius above the trees it covers, and names the count.
-func writeRepoGroup(b *strings.Builder, g repoGroup) {
+func writeRepoHeader(b *strings.Builder, g repoGroup) {
 	repo := g.Repo
 	if repo == "" {
 		fmt.Fprintf(b, "\nrepository UNRESOLVED (the tree's .git pointer could not be read)\n")
@@ -764,14 +967,28 @@ func writeRepoGroup(b *strings.Builder, g repoGroup) {
 			fmt.Fprintf(b, "    unknown, work-item states could not be read: %s\n", strings.Join(unknown, ", "))
 		}
 	}
-
-	for _, t := range g.Trees {
-		writeTree(b, t)
-	}
 }
 
-func writeTree(b *strings.Builder, t PreservedTree) {
+func writeTree(b *strings.Builder, t PreservedTree) { writeTreeRow(b, t, false) }
+
+// writeTreeRow renders one tree, optionally naming the repository ON the row.
+//
+// The grouped report does not need that — writeRepoHeader has just named the
+// repository above the trees it covers, and repeating it per tree would be
+// noise. A STREAMED row does: it arrives in scan order, under no group header,
+// and the reclaim command is repo-scoped, so a row that cannot say which
+// repository it belongs to is a row an operator cannot act on. The same fact,
+// carried differently because the surrounding structure differs.
+func writeTreeRow(b *strings.Builder, t PreservedTree, showRepo bool) {
 	fmt.Fprintf(b, "\n  %s\n", t.Path)
+	if showRepo {
+		if t.Repo != "" {
+			fmt.Fprintf(b, "    repository %s\n", t.Repo)
+		} else {
+			fmt.Fprintf(b, "    repository UNRESOLVED (the tree's .git pointer could not be read: %s)\n",
+				t.RepoError)
+		}
+	}
 	fmt.Fprintf(b, "    owner %s, branch %s, work item %s, %s\n",
 		t.Owner, branchOrNone(t), workItemOrUnresolved(t), t.UntouchedText())
 	writeTreeCommits(b, t)

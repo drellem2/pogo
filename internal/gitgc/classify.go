@@ -2,7 +2,6 @@ package gitgc
 
 import (
 	"encoding/json"
-	"os/exec"
 	"regexp"
 	"strings"
 )
@@ -114,7 +113,7 @@ type TicketIndex map[string]TicketState
 // which emits one JSON object per work item across every status including
 // archived and shelved.
 func LoadTicketIndex() (TicketIndex, error) {
-	out, err := exec.Command("mg", "list", "--all", "--json").Output()
+	out, err := runOutput("mg", "list", "--all", "--json")
 	if err != nil {
 		return nil, err
 	}

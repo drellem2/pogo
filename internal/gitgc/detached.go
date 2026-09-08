@@ -1,7 +1,6 @@
 package gitgc
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -38,12 +37,9 @@ func WorktreeDetached(worktreeDir string) (bool, error) {
 	if worktreeDir == "" {
 		return false, fmt.Errorf("empty worktree path")
 	}
-	cmd := exec.Command("git", "-C", worktreeDir, "symbolic-ref", "-q", "HEAD")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
+	stdout, stderr, err := runSplit("git", "-C", worktreeDir, "symbolic-ref", "-q", "HEAD")
 	if err == nil {
-		if strings.TrimSpace(stdout.String()) == "" {
+		if strings.TrimSpace(string(stdout)) == "" {
 			// git exited 0 and named no ref. Report it rather than answering
 			// "attached", which is the answer that licenses a removal.
 			return false, fmt.Errorf("symbolic-ref %s: exited 0 naming no ref", worktreeDir)
@@ -54,7 +50,7 @@ func WorktreeDetached(worktreeDir string) (bool, error) {
 	if errors.As(err, &ee) && ee.ExitCode() == 1 {
 		return true, nil
 	}
-	return false, fmt.Errorf("symbolic-ref %s: %w: %s", worktreeDir, err, strings.TrimSpace(stderr.String()))
+	return false, fmt.Errorf("symbolic-ref %s: %w: %s", worktreeDir, err, strings.TrimSpace(string(stderr)))
 }
 
 // OrphanCommitsError reports a removal refused because the worktree is on a

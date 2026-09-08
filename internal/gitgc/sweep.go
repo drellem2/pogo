@@ -459,7 +459,7 @@ func refusalReason(err error) (string, bool) {
 		// clear the pin in one read, because nothing else ever will.
 		return fmt.Sprintf("git status could not be read (%v)%s — refusing to act on a tree we could "+
 			"not read; rerun with --force to discard", uwe.Err,
-			untouchedClause(uwe.Untouched, uwe.UntouchedKnown)), true
+			untouchedClause(uwe.Untouched, uwe.UntouchedKnown, uwe.UntouchedErr)), true
 	}
 	return "", false
 }

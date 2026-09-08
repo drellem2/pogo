@@ -14,15 +14,40 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/workitem"
 )
 
-// ListAgents returns all running agents from pogod.
-func ListAgents() ([]agent.AgentInfo, error) {
-	r, err := http.Get(serverURL + "/agents")
+// ListAgents returns all running agents from pogod, with NO time limit — the
+// behaviour every caller has had since this was written.
+func ListAgents() ([]agent.AgentInfo, error) { return ListAgentsWithin(0) }
+
+// ListAgentsWithin is ListAgents bounded by a wall-clock timeout. A zero or
+// negative timeout means no bound.
+//
+// # Why the bound is OPT-IN rather than the default (mg-1530)
+//
+// http.Get uses Go's DefaultClient, whose Timeout is zero: a pogod that accepts
+// the connection and then never answers blocks this call forever. That is a
+// real hazard on the `pogo gc --list-preserved` path (drellem2/pogo#158), where
+// it runs BEFORE the scan — so it can produce the reported symptom, zero output
+// and no return, without a single worktree having been read.
+//
+// The triage for #158 left "does this ticket bound the shared client?" open for
+// the human precisely because ListAgents has ten callers and giving all of them
+// a deadline is a wider change than the listing needs. This is the narrow
+// answer: the bound exists, the caller that needs it asks for it, and the other
+// nine keep the behaviour they were written against. Widening it to a package
+// default is a separate decision with a separate blast radius.
+func ListAgentsWithin(timeout time.Duration) ([]agent.AgentInfo, error) {
+	c := http.DefaultClient
+	if timeout > 0 {
+		c = &http.Client{Timeout: timeout}
+	}
+	r, err := c.Get(serverURL + "/agents")
 	if err != nil {
 		return nil, err
 	}

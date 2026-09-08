@@ -4,15 +4,29 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/client"
 )
 
 // gcListAgentsFn is the registry read `pogo gc` performs, indirected so a test
-// can drive gcLivePolecats without a live pogod. Production always uses
-// client.ListAgents.
-var gcListAgentsFn = client.ListAgents
+// can drive gcLivePolecats without a live pogod.
+//
+// It is BOUNDED (mg-1530). This call runs before `--list-preserved` reads a
+// single worktree, and until this ticket it was an http.Get on Go's
+// DefaultClient — no timeout at all — so a pogod that accepted the connection
+// and then went quiet produced drellem2/pogo#158's exact symptom (no output, no
+// return) with the scan not yet started. The registry half is already
+// best-effort here: an unreachable pogod costs a note and the persisted witness
+// answers instead, so a deadline costs nothing that was load-bearing. Ten
+// seconds is far past a local unix-socket-speed request and far short of
+// forever.
+var gcListAgentsFn = func() ([]agent.AgentInfo, error) {
+	return client.ListAgentsWithin(gcListAgentsTimeout)
+}
+
+const gcListAgentsTimeout = 10 * time.Second
 
 // gcLivePolecats builds the do-not-touch set for `pogo gc` and the lines the
 // command should print about how it was built. It returns an error only when the

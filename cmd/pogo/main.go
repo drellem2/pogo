@@ -4441,7 +4441,21 @@ them all "in flight", because an available item is one dispatch away from
 concluding and a claim outlives the process that made it.
 
 --list-preserved never changes anything, so --apply and --force do not apply
-to it.`,
+to it.
+
+It STREAMS. The header prints before the first tree is touched, each retained
+tree prints as it resolves, and the counts — which cannot be known until the
+scan ends — print at the end after a "scan complete" line. The scan is not
+cheap (a full working-tree walk per retained tree, plus a git status per
+directory), so on a host holding many trees it takes minutes; what streaming
+buys is that those minutes are legible instead of silent. A run that ends
+WITHOUT the "scan complete" line was interrupted, and the listing you have is
+partial — the header says so too, before there is anything to misread.
+
+Progress goes to stderr, one line per directory, naming each tree BEFORE it is
+read: if the scan stalls, the last line names the tree it stalled on. That
+keeps stdout a clean listing under "> file", and keeps --json a single
+parseable document while a human can still watch the scan move.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			repo, err := filepath.Abs(gcRepo)
@@ -4502,7 +4516,8 @@ to it.`,
 	cmdGC.Flags().BoolVar(&gcForce, "force", false,
 		"also reclaim worktrees holding uncommitted work (DISCARDS that work)")
 	cmdGC.Flags().BoolVar(&gcListPreserved, "list-preserved", false,
-		"list the retained worktrees across all repos and what is in them; change nothing")
+		"list the retained worktrees across all repos and what is in them; change nothing "+
+			"(streams as it scans; progress on stderr)")
 
 	// `pogo --version` prints the same line as `pogo version`, not a bare
 	// semver (mg-3141). scripts/launchd/pogo-deploy.sh's partial-install

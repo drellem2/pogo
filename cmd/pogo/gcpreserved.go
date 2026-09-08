@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"time"
 
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/gitgc"
@@ -27,6 +29,20 @@ import (
 // part. Knowing which of the trees can safely take it is, and that is a
 // question about the files inside them — see the preamble the report prints,
 // and PreservedTree's doc comment for the case that settled it.
+//
+// # Why it STREAMS (mg-1530, drellem2/pogo#158)
+//
+// It used to buffer: the whole scan ran, then the whole report printed. With
+// every external call unbounded and a full working-tree walk per retained tree,
+// one slow tree gave the reporter zero bytes and no return, with nothing to say
+// which tree — indistinguishable from a hang, and their only move was to kill
+// it. Now the header lands before the first tree is touched, each retained tree
+// prints as it resolves, and the counts follow at the end.
+//
+// The progress trace goes to STDERR and the listing to STDOUT, which buys two
+// things at once: `--json` keeps a single parseable document on stdout WHILE a
+// human watching the terminal still sees where the scan is, and a redirected
+// `> inventory.txt` captures the listing without the trace running through it.
 func runGCListPreserved(jsonOutput bool, repoFilter string) {
 	polecatsDir, err := gitgc.DefaultPolecatsDir()
 	if err != nil {
@@ -49,10 +65,67 @@ func runGCListPreserved(jsonOutput bool, repoFilter string) {
 		live = nil
 	}
 
+	// These notes are printed HERE, before the scan, rather than held until it
+	// returns (mg-1530). They were established before a single tree was read
+	// and they qualify every row that follows; a caveat delivered after the
+	// rows it qualifies has already failed at its job, and on a slow scan it
+	// may never be delivered at all.
+	if !jsonOutput {
+		for _, n := range notes {
+			fmt.Println(n)
+		}
+		if len(notes) > 0 {
+			fmt.Println()
+		}
+	}
+
+	var (
+		total          int
+		treeStarted    time.Time
+		printedRowHead bool
+	)
+	progress := func(ev gitgc.PreservedScanEvent) {
+		switch ev.Phase {
+		case "start":
+			total = ev.Total
+			if !jsonOutput {
+				fmt.Print(gitgc.StreamedHeader(polecatsDir, repoFilter, ev.Total))
+			}
+			fmt.Fprintf(os.Stderr, "scanning %d director(ies) under %s\n", ev.Total, polecatsDir)
+		case "note":
+			// stderr only: the note is in the report and the tail prints it to
+			// stdout. Printing it to both would put one caveat in the listing
+			// twice, which reads as two.
+			fmt.Fprintf(os.Stderr, "note: %s\n", ev.Note)
+		case "enter":
+			treeStarted = time.Now()
+			fmt.Fprintf(os.Stderr, "  [%*d/%d] %s ...", digits(total), ev.Index, total, ev.Owner)
+		case "done":
+			// The elapsed time is printed only when it is worth reading. The
+			// whole question this command failed to answer was WHICH TREE is
+			// slow, and a second column of "0.0s" on every fast tree buries
+			// the one row that answers it.
+			elapsed := ""
+			if d := time.Since(treeStarted); d >= time.Second {
+				elapsed = fmt.Sprintf(" (%.1fs)", d.Seconds())
+			}
+			fmt.Fprintf(os.Stderr, " %s%s\n", ev.Disposition, elapsed)
+			if jsonOutput || ev.Disposition != "retained" || ev.Tree == nil {
+				return
+			}
+			if !printedRowHead {
+				fmt.Print(gitgc.PreservedPreamble())
+				printedRowHead = true
+			}
+			fmt.Print(gitgc.StreamedTree(*ev.Tree))
+		}
+	}
+
 	rep, err := gitgc.ScanPreserved(gitgc.PreservedScanOptions{
 		PolecatsDir:  polecatsDir,
 		Repo:         repoFilter,
 		LivePolecats: live,
+		Progress:     progress,
 	})
 	if err != nil {
 		cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -65,11 +138,16 @@ func runGCListPreserved(jsonOutput bool, repoFilter string) {
 		cli.PrintJSON(rep)
 		return
 	}
-	for _, n := range notes {
-		fmt.Println(n)
+	fmt.Print(rep.StreamedTail())
+}
+
+// digits is the column width for a scan counter, so "[  7/196]" lines up with
+// "[196/196]" and the trace reads as a column rather than as ragged text.
+func digits(n int) int {
+	w := 1
+	for n >= 10 {
+		n /= 10
+		w++
 	}
-	if len(notes) > 0 {
-		fmt.Println()
-	}
-	fmt.Print(rep.Summary())
+	return w
 }

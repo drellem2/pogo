@@ -2,7 +2,6 @@ package gitgc
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -161,7 +160,7 @@ func WorktreeCommitsAtRisk(worktreeDir, repo, target string) (WorktreeCommitFind
 // would answer a SHA question next to a patch question and disagree with itself
 // on precisely the rebase case both exist to survive.
 func cherryAheadCommits(repo, upstream, head string) ([]string, error) {
-	out, err := exec.Command("git", "-C", repo, "cherry", "-v", upstream, head).Output()
+	out, err := runOutput("git", "-C", repo, "cherry", "-v", upstream, head)
 	if err != nil {
 		return nil, fmt.Errorf("cherry -v %s %s: %w", upstream, head, err)
 	}

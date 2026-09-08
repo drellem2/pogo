@@ -19,7 +19,7 @@
 package gitgc
 
 import (
-	"bytes"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -53,7 +53,7 @@ func DefaultPolecatsDir() (string, error) {
 // non-zero exit is turned into an error carrying the trimmed output.
 func git(repo string, args ...string) ([]byte, error) {
 	full := append([]string{"-C", repo}, args...)
-	out, err := exec.Command("git", full...).CombinedOutput()
+	out, err := runCombined("git", full...)
 	if err != nil {
 		return out, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
@@ -204,8 +204,7 @@ func CheckedOutBranches(repo string) (map[string]bool, error) {
 // BranchMerged reports whether branch is an ancestor of target (i.e. its
 // commits are already contained in target).
 func BranchMerged(repo, branch, target string) (bool, error) {
-	cmd := exec.Command("git", "-C", repo, "merge-base", "--is-ancestor", branch, target)
-	err := cmd.Run()
+	_, _, err := runSplit("git", "-C", repo, "merge-base", "--is-ancestor", branch, target)
 	if err == nil {
 		return true, nil
 	}
@@ -327,19 +326,34 @@ type UndeterminedWorktreeError struct {
 	// print an unhelpful number; it cannot be blind in a way that costs files.
 	Untouched      time.Duration
 	UntouchedKnown bool
+	// UntouchedErr is why the age is unknown, when it is (mg-1530). Nil on a
+	// measured age, and nil on every construction that predates the bound.
+	//
+	// The refusal reads the same either way — this error never reaches the
+	// DECISION, which was already "refuse" before the walk ran — but the
+	// SENTENCE differs, and an operator sent to fsck a repository that is
+	// merely large has been sent to the wrong place.
+	UntouchedErr error
 }
 
 func (e *UndeterminedWorktreeError) Error() string {
 	return fmt.Sprintf("worktree %s: cannot determine whether it holds uncommitted work%s, "+
-		"refusing to remove: %v", e.Path, untouchedClause(e.Untouched, e.UntouchedKnown), e.Err)
+		"refusing to remove: %v", e.Path,
+		untouchedClause(e.Untouched, e.UntouchedKnown, e.UntouchedErr), e.Err)
 }
 
 // untouchedClause renders the reported age of a tree, or says plainly that it
 // could not be established. It is never empty: on a permanent refusal the
 // operator needs the age or an explicit statement that there isn't one, and a
 // silently missing clause reads as "recent" to some people and "old" to others.
-func untouchedClause(d time.Duration, known bool) string {
+func untouchedClause(d time.Duration, known bool, why error) string {
 	if !known {
+		if errors.Is(why, ErrWalkBudget) {
+			// A tree too big to measure inside the budget is not a tree that
+			// could not be listed, and saying the second about the first is
+			// how a fine-but-enormous worktree gets reported as damage.
+			return " (age unknown — the tree is too large to measure inside the walk budget)"
+		}
 		return " (age unknown — the tree could not be listed)"
 	}
 	return " (untouched " + humanAge(d) + ")"
@@ -483,8 +497,51 @@ func NewestWrite(worktreeDir string) (time.Time, error) { return newestWrite(wor
 // correct for this caller; a future caller pointed at a main worktree is a
 // different question and should be answered before reusing this.
 func newestWrite(worktreeDir string) (time.Time, error) {
+	return newestWriteWithin(worktreeDir, 0)
+}
+
+// ErrWalkBudget marks an age walk this package ABANDONED for exceeding its
+// budget, as opposed to one that could not enumerate the tree.
+//
+// Separate from ErrCommandBudget because the two are different machines: that
+// one kills a subprocess, this one stops a filesystem walk. They read the same
+// to an operator ("this tree is too slow to measure") and land in the same
+// column, but the remedy differs, so the listing names which one fired.
+var ErrWalkBudget = errors.New("age walk abandoned after the budget")
+
+// newestWriteWithin is newestWrite with a wall-clock budget: a non-zero budget
+// abandons the walk once it is exceeded and returns ErrWalkBudget, so the
+// caller reports an unknown age rather than waiting.
+//
+// # Why the budget is a PARAMETER and not baked in (mg-1530)
+//
+// This walk is the measured cost sink of `pogo gc --list-preserved`
+// (drellem2/pogo#158): one node_modules worktree was measured at 21.6-28.1s in
+// drellem2/pogo#168, and #162 reports a host holding 196 retained trees. It is
+// ALSO the second conjunct of cmd/pogod's progresswatch, which calls the
+// exported NewestWrite and is explicitly not this ticket's to change.
+//
+// So the bound is opt-in per caller. ScanPreserved passes one because it is
+// answering a human who is watching an empty terminal; progresswatch passes
+// none and behaves exactly as it did. Making the walk CHEAP — rather than
+// merely interruptible — belongs to #156/#168, which own that walk's cost for
+// their own consumer and want different acceptance for it.
+//
+// An abandoned walk NEVER returns a partial maximum. The rule newestWrite
+// already applies to an unreadable directory applies here for the same reason:
+// a maximum over the part we happened to reach would silently answer "untouched
+// 30 days" about a tree whose recently written half was never visited, and this
+// number is what a human clears a permanent pin on.
+func newestWriteWithin(worktreeDir string, budget time.Duration) (time.Time, error) {
+	var deadline time.Time
+	if budget > 0 {
+		deadline = time.Now().Add(budget)
+	}
 	var newest time.Time
 	err := filepath.WalkDir(worktreeDir, func(path string, d fs.DirEntry, err error) error {
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return fmt.Errorf("%s: %w of %s (reached %s)", worktreeDir, ErrWalkBudget, budget, path)
+		}
 		if err != nil {
 			// A directory we cannot read. Report no age at all rather than a
 			// maximum over the part we happened to see — a partial walk would
@@ -605,11 +662,19 @@ func checkWorktreeRemoval(worktreeDir, repo, target string) worktreeRemovalCheck
 	// not a second kind of refusal: the answer was already "refuse", and all
 	// that changes is that the line has to say the age could not be measured
 	// rather than name one.
-	newest, werr := newestWrite(worktreeDir)
+	//
+	// The walk is BOUNDED (mg-1530). That is safe here in the one direction
+	// that matters: the refusal is already decided above and this walk only
+	// reports, so an abandoned walk costs a number and cannot license a
+	// removal. The bound is unconditional rather than a parameter because
+	// every caller of this guard — the sweep, the exit hook, the listing —
+	// wants the same answer to "how long may reporting one age take".
+	newest, werr := newestWriteWithin(worktreeDir, defaultAgeWalkBudget)
 	return worktreeRemovalCheck{
 		Refusal: &UndeterminedWorktreeError{
 			Path: worktreeDir, Err: err,
 			Untouched: time.Since(newest), UntouchedKnown: werr == nil,
+			UntouchedErr: werr,
 		},
 		StatusErr: err,
 	}
@@ -707,15 +772,13 @@ func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 	if _, err := os.Stat(worktreeDir); err != nil {
 		return false, nil, fmt.Errorf("stat worktree %s: %w", worktreeDir, err)
 	}
-	cmd := exec.Command("git", "-C", worktreeDir, "status", "--porcelain")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	stdout, stderr, err := runSplit("git", "-C", worktreeDir, "status", "--porcelain")
+	if err != nil {
 		return false, nil, fmt.Errorf("status %s: %w: %s",
-			worktreeDir, err, strings.TrimSpace(stderr.String()))
+			worktreeDir, err, strings.TrimSpace(string(stderr)))
 	}
 	var files []string
-	for _, line := range strings.Split(stdout.String(), "\n") {
+	for _, line := range strings.Split(string(stdout), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			files = append(files, line)
 		}

@@ -2,7 +2,6 @@ package gitgc
 
 import (
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -219,7 +218,7 @@ func BranchDurable(repo, branch, target string) (DurabilityVerdict, string) {
 // silently. A 40-hex SHA cannot be ambiguous, so nobody rewriting a step here
 // in terms of `git log` or `rev-list` can reintroduce it.
 func resolveCommit(repo, rev string) (string, error) {
-	out, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet", rev+"^{commit}").Output()
+	out, err := runOutput("git", "-C", repo, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("rev-parse %s: %w", rev, err)
 	}
@@ -263,8 +262,8 @@ func resolveIntegrationRef(repo, target string) (name, commit string, err error)
 // Ordering across refs is git's own (`for-each-ref` sorts by refname), so the
 // named holder is stable across sweeps rather than incidental.
 func originRefContaining(repo, commit string) (string, error) {
-	out, err := exec.Command("git", "-C", repo, "for-each-ref",
-		"--contains", commit, "--format=%(refname)", "refs/remotes/origin/").Output()
+	out, err := runOutput("git", "-C", repo, "for-each-ref",
+		"--contains", commit, "--format=%(refname)", "refs/remotes/origin/")
 	if err != nil {
 		return "", fmt.Errorf("for-each-ref --contains %s: %w", commit, err)
 	}
@@ -286,7 +285,7 @@ func originRefContaining(repo, commit string) (string, error) {
 // the question" produce, and collapsing that pair is the mistake mg-65b2
 // records one subsystem over.
 func cherryAhead(repo, upstream, head string) (int, error) {
-	out, err := exec.Command("git", "-C", repo, "cherry", upstream, head).Output()
+	out, err := runOutput("git", "-C", repo, "cherry", upstream, head)
 	if err != nil {
 		return 0, fmt.Errorf("cherry %s %s: %w", upstream, head, err)
 	}

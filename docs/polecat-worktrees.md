@@ -342,6 +342,68 @@ needs an owner rather than the population that has one. Clean trees and
 non-worktree orphan dirs are counted too, so the listing is a partition of the
 directory rather than a selection out of it.
 
+### It streams, and a partial listing says so (mg-1530, drellem2/pogo#158)
+
+The listing used to be **fully buffered**: the whole scan ran, then the whole
+report printed. The scan is not cheap — a `git status` per directory and a full
+working-tree walk per retained tree, 114 git/`mg` subprocesses in one measured
+60-directory run — and until this ticket **not one of those calls was bounded**.
+So one slow tree gave an operator zero bytes, no return, and nothing naming the
+tree responsible. That is what an external reporter filed: a command that reads
+as a hang.
+
+It now prints as it goes.
+
+```
+retained polecat worktrees under /Users/x/.pogo/polecats
+  60 director(ies) to read. Each retained tree is printed BELOW as it resolves;
+  the counts can only be known at the end and are printed there.
+  Progress goes to STDERR, one line per directory, naming each tree BEFORE it
+  is read — so if this stalls, the last line names the tree it stalled on.
+
+  IF THIS OUTPUT ENDS WITHOUT THE "scan complete" LINE, THE SCAN DID NOT FINISH
+  AND WHAT YOU HAVE READ IS PARTIAL — there are retained trees below the last
+  one shown.
+```
+
+Three properties, and each of them is load-bearing:
+
+- **Each directory is named on stderr *before* it is read.** The last line of a
+  stalled scan is therefore the tree that stalled it. An elapsed time is printed
+  beside any directory that took a second or more, and beside none of the others
+  — a column of `0.0s` on 59 fast trees buries the one row that answers the
+  question.
+- **A finished listing says it finished.** The header names `scan complete` up
+  front, before there is any output to misread, and nothing but the tail prints
+  it. This is not a flourish: the reader of this output is deciding what to
+  delete, their alternative is `--apply --force`, and *a listing that stopped
+  early but reads as complete is worse than the hang it replaced* — the hang at
+  least announced itself.
+- **Trace on stderr, listing on stdout.** `--json` stays a single parseable
+  document (`scripts/pogo-self-deploy` reads it with `sed` and no `jq`) while a
+  human running it interactively still watches the scan move, and
+  `> inventory.txt` captures a listing rather than a listing with a progress
+  trace sewn through it.
+
+Streaming does **not** make the scan faster, and is not meant to. Every external
+call on the path is now bounded — 90s per git/`mg` subprocess, 60s per age walk,
+10s on the pogod `/agents` read that runs before the scan — and each bound
+degrades to a **row**, never to a silence: a tree over budget is listed, with
+its files, saying the walk was abandoned for **cost, not damage**. An abandoned
+walk reports no age at all rather than the maximum over the part it reached,
+because a partial maximum would answer "untouched 30 days" about a tree whose
+recently-written half was never visited.
+
+The bound under the removal guard fails in the safe direction by construction:
+that guard is shared with the destructive sweep and pogod's exit hook, and a
+timed-out `git status` lands on the cannot-tell arm, which refuses removal
+unconditionally at any age and any ownership.
+
+Making the walk **cheap** is a different ticket (drellem2/pogo#156, #168, which
+own `gitgc.NewestWrite`'s cost for `progresswatch`). The budget here is opt-in
+per caller for exactly that reason: `ScanPreserved` passes one, `progresswatch`
+passes none and is unchanged.
+
 The preservation notice now names this list, says it will not itself be
 repeated, and states that the reclaim command it recommends is repo-scoped and
 forced.
