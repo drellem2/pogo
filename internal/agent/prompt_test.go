@@ -6569,6 +6569,7 @@ func TestShippedPromptsWarnPgrepIsNotALivenessInstrument(t *testing.T) {
 		"prompts/templates/polecat-architect.md",
 		"prompts/mayor.md",
 		"prompts/crew/doctor.md",
+		"prompts/pm/pm-template.md",
 	}
 	for _, name := range names {
 		data, err := defaultPrompts.ReadFile(name)
@@ -6635,6 +6636,7 @@ func TestShippedPromptsWarnPgrepIsNotALivenessInstrument(t *testing.T) {
 	if len(entries) == 0 {
 		t.Fatal("no shipped prompts found; the sweep below would pass vacuously")
 	}
+	displayLabelPrompts := 0
 	for _, path := range entries {
 		data, err := defaultPrompts.ReadFile(path)
 		if err != nil {
@@ -6644,6 +6646,41 @@ func TestShippedPromptsWarnPgrepIsNotALivenessInstrument(t *testing.T) {
 		if strings.Contains(body, "$(pgrep") && !strings.Contains(body, `[ -n "$PID" ]`) {
 			t.Errorf("%s: shows a $(pgrep ...) capture with no `[ -n \"$PID\" ]` guard beside it; an empty match silently removes the argument and the wrapping command answers a different question at exit 0 (mg-cbee)", path)
 		}
+		// mg-2646: a prompt may not ship the mg-710c display-label line ALONE.
+		// That line says nothing sets `pogo-crew-<name>`/`pogo-cat-<name>` on any
+		// process, so a pgrep for it matches nothing against a healthy agent —
+		// true, and a DIFFERENT defect with the same symptom. A reader holding
+		// only it has been taught that an empty pgrep is a naming artifact, which
+		// is the wrong lesson to carry into an ancestry failure, where the empty
+		// result means the process was filtered out before the pattern was
+		// applied and the agent may be entirely fine or entirely gone. That
+		// configuration was not hypothetical: pm-template.md carried the
+		// display-label line and not the ancestry rule, and mg-fb1c's original
+		// measurement was taken from pm-pogo, which is a pm-template stub. Every
+		// pm-* crew agent is such a stub, so the gap was fleet-wide across the
+		// tier that does the most independent diagnosis. Keyed on the
+		// display-label line rather than on a file list, because the next prompt
+		// to grow one will not be one of the nine that carry it today.
+		//
+		// Keyed on the ticket id OR the phrasing, because either alone is an
+		// instrument that goes quiet without saying so: a prompt that reworded
+		// the sentence and dropped the citation would sail past a ticket-id key,
+		// and the count check below is what makes that silence audible rather
+		// than a vacuous pass.
+		if strings.Contains(body, "mg-710c") || strings.Contains(body, "**display label**") {
+			displayLabelPrompts++
+			for _, want := range []string{
+				"and every one of its ancestors",
+				"is not evidence that pogod is down",
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("%s: carries the mg-710c display-label line but not %q; half the story teaches the reader that an empty pgrep is a naming artifact, and they carry that reading into an ancestry failure where it is wrong (mg-2646)", path, want)
+				}
+			}
+		}
+	}
+	if displayLabelPrompts < len(names) {
+		t.Errorf("the display-label sweep matched %d prompts but %d are pinned by name above and every one of them carries that line today; the key has drifted and the sweep is now passing over prompts it no longer reads (mg-2646)", displayLabelPrompts, len(names))
 	}
 }
 
