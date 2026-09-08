@@ -197,7 +197,14 @@ Measured over all 10⁶ microsecond values a `time.Time` can carry:
 
 **99,099 of 1,000,000 — 9.91% — are rejected.** A rejected record is dropped by `load_episodes`, so that episode's coalescing is silently dead for its whole burst.
 
-**It degrades toward noise, not silence.** With no episode, every message pages on its own — arm E asserts exactly that, and asserts the alarm is still among them. So this is not a reason to distrust the alarm; it is a reason the burst it arrives in may be N banners instead of one, which is the condition arm C exists to measure. The fix belongs in `pogo-reminders`' `parse_ts` (pad or regex-normalise the fraction before parsing), not in this repo, and is filed as a successor to mg-d788 (**mg-3ba8**).
+**It degrades toward noise, not silence.** With no episode, every message pages on its own — arm E asserts exactly that, and asserts the alarm is still among them. So this is not a reason to distrust the alarm; it is a reason the burst it arrives in may be N banners instead of one, which is the condition arm C exists to measure.
+
+**FIXED in `pogo-reminders`, not here (mg-3ba8).** `RFC3339Nano` is correct, every Go-side reader parses it, and `internal/synthwatch`'s tests assert it — the *reader* was the defect. `pogo-reminders`' `parse_ts` now normalises the fraction to 6 digits in **both** directions (right-pad short with zeros, clamp long as before), and `tests/test-poll-mail-episode-coalesce.sh` replays every width 0–6 plus the 7- and 9-digit long side, showing 1, 2, 4 and 5 fail against a copy of the same script with the fix reverted. Two things worth carrying forward:
+
+- **The table above is a model; the live log agrees with it.** `~/.pogo/events.log` holds 11 real `incident_episode_cleared` records (22 boundary fields). Exactly one is unparseable by the old clamp — episode `ep-1787367213823303000-architect`, `closed_at = 2026-08-24T02:06:31.45799Z`, five digits, a roster of six. That is 1 record in 11 against a predicted 9.91%, and that six-agent episode's mail paged one-by-one.
+- **The drop is no longer silent.** This survived as long as it did because a dropped boundary looks exactly like an episode that never happened: coalescing simply stops, once in ten bursts, with nothing in the log. `load_episodes` now writes `plan: episode <id> DROPPED - unparseable boundary (…)` to stderr for a well-formed record it cannot read. The degrade itself is unchanged and still safe — the mail pages, one notification each; only the silence is gone.
+
+Arm E stays. It is the standing control that this reader still degrades toward noise rather than dropping the alarm, and it is what the *next* format mismatch will trip.
 
 `ProbeLastHop` truncates its own clock to the second so it exercises the parseable path deterministically instead of failing one run in ten; arm E constructs the failing width on purpose so the defect stays visible in the probe's own output.
 
