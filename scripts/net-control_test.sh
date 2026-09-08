@@ -44,6 +44,24 @@
 # nothing answers, AND nothing answers slowly. A refusal satisfies the first and
 # not the second, and only the second is the shape section 3 exists for.
 #
+# Section 2c is mg-a932's, and it is the section that would have caught the
+# defect the other sections could not. Until 2026-09-08 the control's `up` meant
+# "a TCP connection was completed", and on this box that is a CONSTANT: the VPN
+# terminates connect(2) locally, so 192.0.2.1, 198.51.100.1, 203.0.113.1 and
+# even 240.0.0.1 — reserved Class E, routed nowhere on earth — all "answered" in
+# about 0.10s, faster than github.com. Every green in section 1 was therefore
+# unfalsifiable, and it passed identically against a probe that could not fail.
+#
+# So 2c asserts the pair, and the second half is the whole test:
+#     UP   for a real reachable host
+#     DOWN for 192.0.2.1 — an address the OLD probe called up
+# with identical knobs, one address apart. It then repeats the DOWN against a
+# loopback endpoint that ACCEPTS a TCP connection and speaks nothing, which is
+# the same discrimination built out of the local kernel so it holds on a box
+# without this one's tunnel — and it asserts, with the control's own connect
+# primitive, that that endpoint really does complete a connect. A test that only
+# asserted "reports UP for a real host" is the test that let this ship.
+#
 # Sections 4 onward are the other half of the bar: the control must be
 # distinguishable from a control that is merely broken. Each one drives it into
 # a state where it cannot measure and requires `unknown`, never `down`.
@@ -66,7 +84,14 @@ pogo_sandbox_create netcontrol
 # not run on SIGTERM, and a SYN sink that outlives the suite holds a loopback
 # port with a permanently full accept queue.
 BH_SINK_PID=""
-netc_teardown() { [ -n "$BH_SINK_PID" ] && kill "$BH_SINK_PID" 2>/dev/null; pogo_sandbox_down; }
+# MUTE_PID is section 2c's listener: it accepts TCP connections and speaks
+# nothing, which is the condition mg-a932's fix exists to discriminate.
+MUTE_PID=""
+netc_teardown() {
+    [ -n "$BH_SINK_PID" ] && kill "$BH_SINK_PID" 2>/dev/null
+    [ -n "$MUTE_PID" ] && kill "$MUTE_PID" 2>/dev/null
+    pogo_sandbox_down
+}
 trap netc_teardown EXIT INT TERM HUP
 pogo_sandbox_isolate
 
@@ -234,12 +259,21 @@ else
     # a real blackhole rather than a way around one. But it IS the control's own
     # documented false-green condition, observed, so it gets said out loud here
     # and again next to the summary.
+    # UPDATED FOR mg-a932, and the update matters as much as the note did. This
+    # used to end "so section 1's UP is NOT evidence that anything beyond that
+    # something is reachable". That sentence was true of a control whose UP
+    # meant a completed connect, and it is FALSE of this one — leaving it would
+    # tell every future reader to discount a green that is now sound, which is
+    # the same defect as the one it was written to flag, pointed the other way.
     BH_PROXY_NOTE="  Only $BH_RFC_OK of 3 RFC 5737 documentation addresses blackholed a SYN on this box.
   Something on this host COMPLETES TCP handshakes for destinations that are
-  routed nowhere, so section 1's UP is NOT evidence that anything beyond that
-  something is reachable — it is the transparent-proxy false green named in
-  net-control.sh's own limits section, no longer hypothetical here. Every RED
-  below was still proven, against the substrate named beside it."
+  routed nowhere — 240.0.0.1 (reserved Class E) included, measured 2026-09-08.
+  Since mg-a932 the control's UP requires a completed HTTP request rather than a
+  completed connect, so this condition can no longer produce a false green, and
+  section 2c ASSERTS that: the control must report DOWN for 192.0.2.1 on a box
+  where a bare connect to it succeeds. What the condition still costs is the
+  substrate for sections 3, 4e and 5, which is why those use a CONSTRUCTED
+  blackhole instead of these addresses."
     echo "  NOTE — this box completes handshakes for destinations that are routed nowhere:"
     printf '%s\n' "$BH_PROXY_NOTE"
 
@@ -295,6 +329,129 @@ fi
 
 if [ -z "$BH_KIND" ]; then
     fail "no blackhole could be established on this host: the RFC 5737 addresses did not swallow a SYN (they either answered or refused fast — $BH_RFC_OK of 3 blackholed), and no loopback SYN sink could be stood up either (needs python3). Sections 3, 4e and 5 cannot run, so the control's RED is UNPROVEN against dropped SYNs. Not skipped: the untested direction is the one that matters."
+fi
+
+# ---------------------------------------------------------------------------
+# 2c. mg-a932: UP AND DOWN, SAME KNOBS, ONE ADDRESS APART
+# ---------------------------------------------------------------------------
+# The load-bearing assertion of this ticket, and it is the DOWN arm. A test that
+# only requires UP for a real host passes identically against the broken probe —
+# that is how a connect-only control survived on a box where connect(2) is a
+# constant TRUE. Both arms run with the same knobs and the same floor; the only
+# difference between them is the address.
+echo "--- 2c. UP for a real host, DOWN for 192.0.2.1 (the mg-a932 pair) ---"
+
+netc_one_target() {  # TARGET -> runs the control against exactly that one target
+    POGO_NET_CONTROL_TARGETS="$1" \
+    POGO_NET_CONTROL_NAME_TARGETS="" \
+    POGO_NET_CONTROL_MIN_TARGETS=1 \
+    POGO_NET_CONTROL_TIMEOUT="${2:-3}" \
+    bash "$LIB" 2>&1
+}
+
+PAIR_UP_OUT="$(netc_one_target 1.1.1.1:443)"; PAIR_UP_RC=$?
+if [ "$PAIR_UP_RC" -eq 0 ] && printf '%s' "$PAIR_UP_OUT" | grep -q 'POSITIVE CONTROL: UP'; then
+    pass "arm 1 of the pair: a single REAL reachable host (1.1.1.1:443) => UP"
+else
+    fail "the control did not report UP for a single real reachable host (exit $PAIR_UP_RC) — either this box is offline, in which case arm 2 below proves nothing, or the probe is broken. Output: $PAIR_UP_OUT"
+fi
+
+PAIR_DOWN_OUT="$(netc_one_target 192.0.2.1:443)"; PAIR_DOWN_RC=$?
+if [ "$PAIR_DOWN_RC" -eq 1 ] && printf '%s' "$PAIR_DOWN_OUT" | grep -q 'POSITIVE CONTROL: DOWN'; then
+    pass "arm 2 of the pair, and the one that matters: 192.0.2.1:443 (RFC 5737 TEST-NET-1) => DOWN, from the same invocation shape that just said UP"
+else
+    fail "the control did NOT report DOWN for 192.0.2.1:443 (exit $PAIR_DOWN_RC). A probe that cannot report DOWN for a documentation address it has no route to is not measuring reachability. Output: $PAIR_DOWN_OUT"
+fi
+
+printf '%s' "$PAIR_DOWN_OUT" | grep -q 'self-test: PASSED' \
+    && pass "the DOWN for 192.0.2.1 came from a WORKING instrument — its self-test passed on loopback in the same run" \
+    || fail "the DOWN for 192.0.2.1 arrived with a failed or missing self-test. Output: $PAIR_DOWN_OUT"
+
+# Is the discrimination actually being exercised HERE? On this host it is: the
+# tunnel completes the connect. On a box without one, 192.0.2.1 is a plain
+# blackhole and arm 2 above would pass against the old probe too — which is
+# precisely why the hermetic arm below exists and is asserted rather than noted.
+if (
+    # shellcheck source=/dev/null
+    source "$LIB"
+    netc_resolve_nc >/dev/null 2>&1 || exit 1
+    netc_probe 192.0.2.1 443 3
+); then
+    pass "and the DOWN is a genuine DISCRIMINATION on this box: a bare connect() to 192.0.2.1:443 SUCCEEDS here, so the old connect-only probe would have called that address UP"
+    printf '%s' "$PAIR_DOWN_OUT" | grep -q 'bare connect() SUCCEEDED' \
+        && pass "and the report SAYS SO in its per-target table, so a reader is not left to read the DOWN as 'off the network'" \
+        || fail "the table did not record that a bare connect succeeded, which is the one fact that tells a reader this box's tunnel is answering for addresses that are routed nowhere. Output: $PAIR_DOWN_OUT"
+else
+    echo "  NOTE: a bare connect() to 192.0.2.1:443 does NOT succeed on this box, so arm 2"
+    echo "        above would also pass against a connect-only probe. The discrimination is"
+    echo "        asserted hermetically below instead."
+fi
+
+# THE HERMETIC ARM. A loopback endpoint that completes a TCP connection and
+# speaks nothing — the tunnel's observable, built out of the local kernel so it
+# is there on every box and no routing change can take it away. Its substrate is
+# PROVEN with the control's own connect primitive before it is used, exactly as
+# section 2b proves its blackhole: an endpoint that did not actually accept
+# would let the DOWN below pass for the wrong reason.
+MUTE_PORTS=""
+if command -v python3 >/dev/null 2>&1; then
+    MUTE_PORTFILE="$WORK/mute.ports"
+    python3 - "$MUTE_PORTFILE" 2 >/dev/null 2>&1 <<'PY' &
+import socket, select, sys
+srvs = []
+for _ in range(int(sys.argv[2])):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0)); s.listen(16)
+    srvs.append(s)
+with open(sys.argv[1], "w") as fh:
+    fh.write(" ".join(str(s.getsockname()[1]) for s in srvs))
+# Accept and close, forever. connect(2) completes; nothing is ever spoken.
+while True:
+    ready, _w, _e = select.select(srvs, [], [], 600)
+    for s in ready:
+        try:
+            c, _a = s.accept(); c.close()
+        except OSError:
+            pass
+PY
+    MUTE_PID=$!
+    i=0
+    while [ ! -s "$MUTE_PORTFILE" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$(( i + 1 )); done
+    MUTE_PORTS="$(cat "$MUTE_PORTFILE" 2>/dev/null)"
+fi
+
+MUTE_TARGETS=""
+MUTE_CONNECTS=0
+for port in $MUTE_PORTS; do
+    if (
+        # shellcheck source=/dev/null
+        source "$LIB"
+        netc_resolve_nc >/dev/null 2>&1 || exit 1
+        netc_probe 127.0.0.1 "$port" 3
+    ); then
+        MUTE_CONNECTS=$(( MUTE_CONNECTS + 1 ))
+        MUTE_TARGETS="$MUTE_TARGETS 127.0.0.1:$port"
+    fi
+done
+MUTE_TARGETS="${MUTE_TARGETS# }"
+
+if [ "$MUTE_CONNECTS" -ge 2 ]; then
+    pass "the hermetic substrate is PROVEN before it is used: 2 loopback endpoints ACCEPT a TCP connection, so a connect-only probe is obliged to call them UP"
+    MUTE_OUT="$(POGO_NET_CONTROL_TARGETS="$MUTE_TARGETS" \
+                POGO_NET_CONTROL_NAME_TARGETS="" \
+                POGO_NET_CONTROL_TIMEOUT=3 \
+                bash "$LIB" 2>&1)"; MUTE_RC=$?
+    if [ "$MUTE_RC" -eq 1 ] && printf '%s' "$MUTE_OUT" | grep -q 'POSITIVE CONTROL: DOWN'; then
+        pass "and the control reports DOWN for them anyway — the verdict probe requires an HTTP reply, so a completed connect(2) can no longer produce an UP on ANY box"
+    else
+        fail "the control did not report DOWN for endpoints that accept a TCP connection and speak nothing (exit $MUTE_RC) — a bare connect can still produce an UP. Output: $MUTE_OUT"
+    fi
+    printf '%s' "$MUTE_OUT" | grep -q 'bare connect() SUCCEEDED' \
+        && pass "and it names the completed connect in its table, which is the difference between 'off the network' and 'something local is answering for you'" \
+        || fail "the DOWN did not record that the connect succeeded. Output: $MUTE_OUT"
+else
+    fail "could not stand up 2 loopback endpoints that accept a connection and speak nothing (needs python3; $MUTE_CONNECTS accepted), so mg-a932's discrimination is unproven hermetically on this host"
 fi
 
 # ---------------------------------------------------------------------------
@@ -439,6 +596,64 @@ if [ -n "$BH_KIND" ]; then
 else
     fail "no blackhole substrate (section 2b), so the floor rule could not be exercised against an actually-unreachable target"
 fi
+
+# 4g. No HTTP primitive at all. The verdict is made of a completed HTTP request,
+# so without one the control cannot measure — and it must NOT fall back to the
+# connect it still has, because on this box that is a constant TRUE (mg-a932).
+(
+    # shellcheck source=/dev/null
+    source "$LIB"
+    netc_resolve_curl() { NETC_CURL=""; return 1; }
+    net_control; rc=$?
+    [ "$rc" -eq 2 ] && [ "$NET_CONTROL_VERDICT" = "unknown" ] \
+        && printf '%s' "$NET_CONTROL_REASON" | grep -q 'ABOVE the TCP layer'
+) && pass "no usable HTTP primitive => unknown, and specifically NOT a fall back to the bare connect it still has" \
+  || fail "a control with no HTTP primitive did not report unknown, or fell back to the connect probe"
+
+# 4h. The mirror of 4c at the HTTP layer: a probe that can only ever say YES.
+# It would report the network up during a total outage.
+cat > "$WORK/curl-always-yes" <<'EOF'
+#!/bin/sh
+echo 200
+exit 0
+EOF
+chmod +x "$WORK/curl-always-yes"
+(
+    # shellcheck source=/dev/null
+    source "$LIB"
+    # Two layers, both asserted. The resolver demands the pair (000, non-zero)
+    # from a CLOSED loopback port, so the stub is rejected there and has to be
+    # forced past it to reach the self-test underneath — otherwise the resolver
+    # would fall through to the real curl and this would test nothing.
+    POGO_NET_CONTROL_CURL="$WORK/curl-always-yes"
+    netc_resolve_curl && [ "$NETC_CURL" = "$WORK/curl-always-yes" ] && exit 1  # must NOT be chosen
+    netc_resolve_curl() { NETC_CURL="$WORK/curl-always-yes"; return 0; }
+    net_control; rc=$?
+    [ "$rc" -eq 2 ] && [ "$NET_CONTROL_VERDICT" = "unknown" ] \
+        && printf '%s' "$NET_CONTROL_SELFTEST" | grep -q 'CLOSED loopback port as reachable'
+) && pass "an HTTP probe that can only ever say YES is refused at resolution AND caught by the self-test => unknown, never a false green" \
+  || fail "a stuck-positive HTTP primitive was not caught"
+
+# 4i. And the other mirror: an HTTP probe that can only ever say NO. This one is
+# ACCEPTED by the resolver — saying no to a closed port is exactly what the
+# resolver asks for — so the only thing standing between it and a permanent
+# silent red is the self-test's YES arm.
+cat > "$WORK/curl-always-no" <<'EOF'
+#!/bin/sh
+printf '000'
+exit 7
+EOF
+chmod +x "$WORK/curl-always-no"
+(
+    # shellcheck source=/dev/null
+    source "$LIB"
+    POGO_NET_CONTROL_CURL="$WORK/curl-always-no"
+    netc_resolve_curl && [ "$NETC_CURL" = "$WORK/curl-always-no" ] || exit 1  # IS accepted
+    net_control; rc=$?
+    [ "$rc" -eq 2 ] && [ "$NET_CONTROL_VERDICT" = "unknown" ] \
+        && printf '%s' "$NET_CONTROL_SELFTEST" | grep -q 'FAILED'
+) && pass "an HTTP probe that can only ever say NO passes resolution but fails the self-test => unknown, NOT a permanent silent red" \
+  || fail "a stuck-negative HTTP primitive was not caught by the self-test"
 
 # 4f. The report must carry the self-test line even when the control failed —
 # those are precisely the runs where the reader needs to see that the verdict

@@ -1492,7 +1492,8 @@ load_net_control() {
 }
 
 # run_net_control — once per run, memoized. The control costs one bounded sweep
-# of a handful of TCP connects; the reason it is memoized is not cost but
+# of a handful of HTTP requests (TLS-and-a-status-line, not a bare connect —
+# mg-a932); the reason it is memoized is not cost but
 # meaning. Two verdicts from two instants in the same alert is a thing a reader
 # has to reconcile, and there is no question here that a second sweep answers.
 run_net_control() {
