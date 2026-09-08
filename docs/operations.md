@@ -154,6 +154,44 @@ Ask this when the census comes back clean. **A notification mechanism verified a
 
 The probe builds a throwaway macguffin store with **no agents in it at all** — the fleet-down condition — delivers the alarm by the same code path pogod uses, driving the same real `mg` binary, and confirms the bytes are in the maildir the notifier polls. Its matched controls send to a mailbox nobody registered (must be **refused**), write a ledger to a path that cannot be created (must **not** confirm), and run `Deliver` with every sink failing (must return `ErrNoRecipient`, not `nil`). A probe that could not be *built* reports `INSTRUMENT FAILURE` and exits 3 — never a pass. The same probe runs in `go test ./...`, so the refinery exercises it on every merge.
 
+### The last hop — the notifier, not the maildir (mg-d788)
+
+**"The file exists in `new/`" is delivery, not readership.** The paragraph above ends at the maildir, and that is one arrow short of a person:
+
+```
+detector -> alarm -> maildir -> notifier -> ?
+```
+
+The box the alarm lands in, `~/.macguffin/mail/human/new`, held **3,286 unread** files against **43** in `cur/` when mg-d788 was filed, and **3,288** against the same 43 when this work re-counted it at 2026-09-08 00:00Z — a 76:1 unread-to-read ratio either way. Whether one more file is distinguishable in that volume is a property of the notifier, which lives in another repo (`pogo-reminders`), so `--probe` now drives the real thing: it copies the deployed `poll-mail.sh` — the script `com.pogo.deadman` executes — next to a **stubbed `notify.sh`**, points it at a throwaway maildir holding the real alarm bytes, and reads back what it decided. Nothing reaches a screen.
+
+Four arms, two of them controls:
+
+| arm | construction | must |
+|---|---|---|
+| A | the alarm, aged past the deadman's own 900s gate, in a maildir already holding a backlog | raise **exactly one** banner carrying the subject |
+| B | **CONTROL** — the same alarm *younger* than the gate | raise nothing **and not be marked seen**: a gate that consumes a too-young message drops it instead of holding it (mg-65d2) |
+| C | the alarm arriving in the same cycle as a 12-message watcher burst the notifier coalesces | keep its **own** banner beside the one group banner |
+| D | **CONTROL** — the same alarm sent *from inside* that burst's roster | be **swallowed** by the grouping, so C cannot be green merely because coalescing is dead |
+
+`POGO_NOTIFIER_SCRIPT` overrides which script is driven. A box with no notifier deployed reports `INSTRUMENT FAILURE` for this half — unknown, never fine.
+
+### What the last hop measured, and what it did not
+
+**The backlog does not saturate the notifier, and this is the ticket's own hypothesis being refused.** `com.pogo.deadman` keys on its **own seen-set**, not on how full the directory is: `~/.pogo/reminders-deadman/notify-seen.json` held **3,290 entries against 3,288 files** on 2026-09-08, i.e. it had already raised a banner for every one of them, one each, titled `[UNPROCESSED]`, and was still delivering (`deadman.log`, per-arrival deliveries through 23:54Z). So the 3,286 are not un-notified. They are un-**read**, which is a narrower and harder problem than the volume suggests, and it sits after the banner rather than before it.
+
+**The backlog does cost something, and what it costs is the alarm's clock.** `poll-mail.sh` consults its seen-set by spawning one `python3` per file per cycle, so the scan is linear in the file count:
+
+| files in `new/` | one ONESHOT cycle |
+|---|---|
+| 0 | 0.04s |
+| 500 | 13.7s |
+| 1,500 | 40.7s |
+| 3,288 | 88.4s |
+
+Measured on the live box from `deadman.log`'s own `poll cycle` lines: **median gap 157s against a configured `POLL_INTERVAL` of 60** — about 97s of scan work every cycle, forever. **Positive control:** `com.pogo.notify`, the *same script* over `daniel/new` (~35 files, interval 30), medians **31s**. Nothing reports this; the poller logs `poll cycle` identically either way. It is a second, independent argument for triage at the reading end — draining the backlog buys back alarm latency as well as readability.
+
+**What the probe does not claim.** A banner was raised is not a person read it. It measures the notifier's decision — one interruption, its own banner, the subject in the title — and stops at the boundary where it can still be honest. And the alarm is *distinguishable but not privileged*: `build_plan` dispatches lowest salience first, and its top rank is reachable only by a reply to a request **verified** to come from `human`/`daniel`, which an alarm pogod raises unprompted never is. That is recorded, not repaired — deciding what to do about the backlog is not this probe's job.
+
 ### What to do
 
 **Do not restart. Do not nudge.** Identical to the section above and for the same reasons, with one addition: every nudge path runs through an agent, and the agents are what has stopped. The alarm names the mode and what clears it — `entitlement` is an **admin setting that `/login` does not fix**, `spend_limit` needs the cap raised, `login` needs a human in a live session, `timeout` and `api_error` clear with time.
