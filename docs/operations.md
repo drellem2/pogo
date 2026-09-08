@@ -476,6 +476,19 @@ misconfigured into a temp dir. Full measurements:
 [pgrep-cannot-see-pogod-2026-08-20.md](investigations/pgrep-cannot-see-pogod-2026-08-20.md)
 (mg-cbee).
 
+**Its siblings stay visible, which is why knowing the rule above does not save
+you.** Measured 2026-09-08 from a polecat shell: `pgrep -f claude` returned 7 of
+pogod's 8 `claude` children and omitted exactly one — that shell's own parent —
+same binary, same argv shape, same user, same pattern, ancestry the only
+difference. The instrument therefore passes its own smoke test on plausible
+non-empty output nearly every time it is used, and the single case it answers
+wrongly is the case under test. The mechanism above was already shipped verbatim
+in the mayor prompt when mg-cbee happened; a rule you hold is no defence against
+an instrument that behaves correctly in every case except the one you are asking
+about. Survey of who still asks it, and two findings left open:
+[pgrep-siblings-and-liveness-caller-survey-2026-09-08.md](investigations/pgrep-siblings-and-liveness-caller-survey-2026-09-08.md)
+(mg-fb1c).
+
 The `pid` from `pogo server status` is served by pogod itself, so it cannot
 report a pid for a daemon that is not answering — the command fails with `pogo
 server is not reachable` instead. `GET /health/full` (`pogod.pid`) and
