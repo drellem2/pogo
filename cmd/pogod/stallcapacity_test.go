@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -90,19 +91,57 @@ func TestCleanOccupancyCarriesNoCaveat(t *testing.T) {
 // TestNewStallCapacityReadsTheLiveRegistry proves the closure is wired to the
 // method the spawn point refuses on, not to a copy of it. An empty registry
 // with the cap disarmed refuses nothing, which is the answer it must give.
+//
+// The repository is one this test CREATES. It used to be the literal
+// "/Users/daniel/dev/pogo", which is a directory on exactly one host —
+// RepoOccupancyFor stats the path and reports an absolute path that is not a
+// directory as UNRESOLVABLE, so on every other machine this test failed
+// instantly on `known = false`. It did, on every GitHub Actions run for five
+// days (mg-d64b): twenty consecutive red runs, one package of eighty-five,
+// `--- FAIL ... (0.00s)` with `Unresolved:"/Users/daniel/dev/pogo is not a
+// directory on this host"`. The merge gate runs on the one host where the path
+// exists, so the gate could not see it and twenty commits merged through a CI
+// that was already red. See TestNewStallCapacityReportsAnAbsentRepoAsUNKNOWN
+// below, which pins the half that was doing the failing.
 func TestNewStallCapacityReadsTheLiveRegistry(t *testing.T) {
 	reg, err := agent.NewRegistry(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	c, known := newStallCapacity(reg).CapacityFor("/Users/daniel/dev/pogo")
+	repo := t.TempDir()
+	c, known := newStallCapacity(reg).CapacityFor(repo)
 	if !known {
 		t.Fatalf("known = false against a live registry: %#v", c)
 	}
 	if c.AtCap {
 		t.Errorf("AtCap = true with no workers anywhere: %#v", c)
 	}
-	if c.Repo != "/Users/daniel/dev/pogo" {
-		t.Errorf("Repo = %q, want the queried path", c.Repo)
+	if c.Repo != repo {
+		t.Errorf("Repo = %q, want the queried path %q", c.Repo, repo)
+	}
+}
+
+// TestNewStallCapacityReportsAnAbsentRepoAsUNKNOWN is the positive control for
+// the test above, and it is the assertion the old spelling was making by
+// accident on every host but one.
+//
+// A path that is not a directory here took no count, so Count 0 is not "room" —
+// and the closure must say so rather than name a remedy. Pinning it explicitly
+// is what keeps the two apart: with only the resolvable case under test, a
+// host where the named repo happens to be absent reports the same
+// `known = false` and the reader cannot tell a real UNKNOWN from a test that
+// was written against somebody's home directory.
+func TestNewStallCapacityReportsAnAbsentRepoAsUNKNOWN(t *testing.T) {
+	reg, err := agent.NewRegistry(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	absent := filepath.Join(t.TempDir(), "no-such-repo")
+	c, known := newStallCapacity(reg).CapacityFor(absent)
+	if known {
+		t.Fatalf("known = true for a path that is not a directory: %#v", c)
+	}
+	if !strings.Contains(c.Unresolved, absent) {
+		t.Errorf("Unresolved = %q, want the unresolvable path named", c.Unresolved)
 	}
 }
