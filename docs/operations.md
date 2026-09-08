@@ -1211,18 +1211,21 @@ launchctl print gui/$(id -u)/com.pogo.revisionprobe | head -20
 ```
 
 ```
-2026-08-09T19:20:03Z exit=0 OK           running=e8dd75f1 reference=e8dd75f1 age=-     threshold=24h
-2026-08-09T20:20:04Z exit=0 DIVERGED     running=738e322a reference=e8dd75f1 age=3h12m threshold=24h
-2026-08-10T08:20:02Z exit=1 ALERT        running=738e322a reference=e8dd75f1 age=1d0h  threshold=24h
+2026-09-08T13:20:03Z exit=0 subject=pogod        OK             running=e8dd75f1 reference=e8dd75f1 age=-     threshold=24h
+2026-09-08T14:20:04Z exit=0 subject=pogod        DIVERGED       running=738e322a reference=e8dd75f1 age=3h12m threshold=24h
+2026-09-08T14:20:04Z exit=0 subject=bridget      NOT-DISPROVEN  pid=11674 started=2026-09-01T11:08:23Z ref=d19895b0 newer=0
+2026-09-08T14:20:04Z exit=1 subject=notify-mail  STALE-PROCESS  pid=22136 started=2026-08-11T21:57:09Z ref=78183d41 newer=2 age=2d1h threshold=24h
 ```
 
-The ledger is written from an EXIT trap rather than from each terminal branch, so
+One line **per subject** per run (mg-e2e6; before it, one line per run). The
+ledger is written from an EXIT trap rather than from each terminal branch, so
 "either way" is structural instead of remembered — including the exit-2 paths,
 which record `UNREACHABLE` and `NO-REVISION` as the distinct states they are. The
 point is not tidiness: **a witness that writes only when it is unhappy cannot be
 told apart from a witness that is not running.** The newest line's age is the only
 thing on this box that answers *"is the probe still firing?"*, and nothing alerts
-on it — a reader has to look.
+on it — a reader has to look. `scripts/check-revisionprobe-install.sh` is that
+read, in one command (below).
 
 **What it witnesses, and what it does not.** Named here because an instrument's
 silence only means something if its blind spots are written down.
@@ -1240,7 +1243,7 @@ silence only means something if its blind spots are written down.
 | a host powered off at every fire time | above |
 | this job being booted out, or its plist deleted | nothing re-arms it; the ledger going quiet is the only sign |
 | `pogod` on the right revision in the wrong **run mode** | index-only serves `/version` happily — that is `/server/mode` and mg-6d2f's subject |
-| any long-lived process that is not `pogod` | the bridget reader ran two days older than the merge that changed its behaviour and nothing reported it (mg-c2f5 / mg-8158). Scoped narrow deliberately; filed, not implied |
+| ~~any long-lived process that is not `pogod`~~ | **closed by mg-e2e6** — see *The general subject* below. Kept in the table because the scope it names is still what `com.pogo.revisionprobe` arms; what changed is the tracked registry it reads |
 
 **The circularity, so it is not rediscovered as a bug.** This job reaches a box
 through a merge and an install, and the install is part of the deploy it watches.
@@ -1269,6 +1272,116 @@ is not replaced by this — the two exist together, because a component cannot b
 the sole reporter of its own absence. `pogo check-staleness` (above) reads the
 deploy's own *record* of its runs; `pogo service status` compares running vs
 installed vs `main` and is itself deploy-installed.
+
+### The general subject: any long-lived process, not only `pogod` (mg-e2e6)
+
+mg-a03d scoped the probe to `pogod`, said so, and filed the general case rather
+than implying it. Apply architect's test to what it shipped — *what would this
+instrument report if the thing it names stopped entirely?* — and the narrow probe
+answers **green** for a bridget reader that has been inert for two days, because
+it is not watching it. That happened twice and was found by hand both times: the
+mg-65d2 change sat unexecuted in the running bridget for a day (mg-c2f5 /
+mg-8158), and on 2026-08-14 pid 1736 had been up 2d08h and predated two merged
+fixes, one of them functional (mg-18bf). `~/.pogo/bin/bridget` is a **symlink**
+into `~/dev/bridget`, so the file on disk is always current and **only the
+running process is stale** — any check that stats the file reports healthy.
+
+The probe now also reads a tracked registry, `scripts/revision-subjects.conf`,
+inside `--repo`. **`com.pogo.revisionprobe` needed no change to gain subjects:**
+the registry lives in the checkout the probe already reads, so a new subject is
+armed by a merge plus the deploy runner's `sync_src` — no plist edit, no
+re-install, no `pogo`, no build. A subject list in the plist would change only
+when somebody re-ran the installer, which is the arming gap one layer down; and a
+second launchd job would be a second thing to notice has stopped.
+
+**Two axes, and the second is weaker — it is reported as the weaker thing.**
+
+| axis | reading | what it dates |
+|---|---|---|
+| http | `GET /version` → revision, vs `origin/main` | the **code** the process loaded. Strong. |
+| process | `ps` elapsed time → start instant, vs commit dates in the checkout it runs from | the **process**. Weak, and one-sided. |
+
+The process axis can only *disprove*:
+
+- commits landed **after** the process started → it cannot be executing them; its
+  image was fixed at exec. A finding: `STALE-PROCESS`, exit 1.
+- **no** commits since it started → proves nothing. The binary it exec'd may
+  itself predate them, and a subject running a *deployed copy* — the notifier
+  pollers run `~/.pogo/pogo-reminders/bin/*`, not the repo — can differ from its
+  repo with no commit involved. The verdict word is **`NOT-DISPROVEN`, never
+  `OK`**: a word that reads as health is the word a reader acts on.
+- a subject with **no matching process** is `ABSENT`, exit 2. A staleness check
+  whose only verdicts are {current, stale} has no cell for {gone}, and the
+  arithmetic then files a dead subject in whichever cell it lands in.
+- an **absent registry** is `NO-REGISTRY`, exit 2 — not a quiet fall back to
+  pogod-only, which is the narrow state this closes. `--subjects none` is how to
+  ask for the narrow scope on purpose, and it says so when it does.
+
+The exit status is the **worst across all subjects**: a run that found `pogod`
+current and bridget absent has not found this box healthy.
+
+Registry format — four whitespace-separated fields, `#` comments; a leading `~/`
+or `$HOME` is expanded and nothing is `eval`ed:
+
+```
+# name            repo                      ref     pattern
+bridget           $HOME/dev/bridget         HEAD    /dev/bridget/bridget$
+notify-mail       $HOME/dev/pogo-reminders  HEAD    /pogo-reminders/bin/poll-mail.sh$
+```
+
+`pattern` is a **fixed substring** of the full command line, not a regex; a
+trailing `$` anchors it to the end, which several entries need because
+`/dev/bridget/bridget` is a prefix of `/dev/bridget/bridget-supervise` and two
+subjects collapsing into one is a witness reporting the wrong process's age under
+the right name. The matcher is `ps`, never `pgrep`: **pgrep excludes the caller
+and every one of its ancestors** unless passed `-a`, so a probe running under a
+supervisor it watches would report that supervisor `ABSENT`. `pogod` is
+deliberately **not** in the registry — it has the strong reading already, and two
+alerts for one fact means the weaker one is the noisier.
+
+```bash
+scripts/revision-probe.sh --subjects ~/.pogo/deploy-src/scripts/revision-subjects.conf
+scripts/revision-probe.sh --subjects none     # pogod only, the mg-a03d scope
+```
+
+### Auditing the job itself: `scripts/check-revisionprobe-install.sh` (mg-e2e6)
+
+`internal/service/launchagentaudit.go`'s `managedLaunchAgents()` promises that a
+fourth launchd job means a row there, and deliberately does not carry
+`com.pogo.revisionprobe`: a row needs a Go copy of the plist to render against
+(the mirror mg-b201 was filed for), and it would put the auditor for the deploy
+witness inside the binary the deploy installs. Both reasons still stand — and
+together they still left an audit that does not happen.
+
+This script is that audit without either problem. It renders through the tracked
+installer from the tracked template, and invokes no `go`, `pogo` or `pogod`
+(asserted with all three poisoned on PATH), so it runs on the box that needs it.
+
+```bash
+scripts/check-revisionprobe-install.sh
+```
+
+Four rows, reported separately because "3 of 4 clean" over different subjects is
+a sentence nobody can act on:
+
+| row | question | why it is not covered elsewhere |
+|---|---|---|
+| `PLIST` | does the installed plist match what this checkout would write? | the row the Go registry would have carried |
+| `LOADED` | does launchd know the label at all? | a byte-perfect plist that was never bootstrapped fires never |
+| `BODY` | is `--src` current with `origin/main`? | the job's program is the tracked script in deploy-src, which `sync_src` advances — a deploy that stops firing freezes the probe's *text* while the job keeps firing |
+| `LEDGER` | how old is the newest ledger line? | the *"is the witness still firing?"* read that nothing on this box performs |
+
+Exit 0 all clean, 1 a finding, 2 a row that could not be evaluated — which is
+**not** a pass. **Nothing schedules it**, and it must not be scheduled by
+`com.pogo.revisionprobe`: a detector for "this job is not armed" activated by
+that job is the anti-pattern the probe is the implementation of. Its fixture
+controls live in `scripts/install-revision-probe_test.sh` and run on every merge;
+those prove the checker works, not that this box is clean.
+
+Measured on the reference box 2026-09-08, first run: `PLIST` ok, `LOADED` ok,
+`LEDGER` ok (newest line 54m old), and `BODY` a **finding** — `~/.pogo/deploy-src`
+was behind `origin/main` by more than a fetch, so the hourly job was firing probe
+text that contained none of the fixes merged since.
 
 ## The external witness that the FLEET is still completing turns (`scripts/fleet-liveness-probe.sh`)
 

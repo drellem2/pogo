@@ -58,6 +58,15 @@ pogo_sandbox_isolate
 PROBE="$HERE/revision-probe.sh"
 [ -x "$PROBE" ] || pogo_sandbox_fail "scripts/revision-probe.sh is not executable — the thing under test cannot be run"
 
+# EVERY SECTION BELOW EXCEPT 14 IS ABOUT THE pogod AXIS, so the process axis is
+# switched off for them by default (mg-e2e6). This is not a way of hiding the new
+# behaviour from the old controls: the sections that count ledger LINES would
+# otherwise be counting subjects, and an assertion whose number moves whenever
+# somebody edits scripts/revision-subjects.conf is an assertion about the wrong
+# thing. Section 14 turns it back on against its own fixtures, including the
+# control that an ABSENT registry is a finding rather than a quiet narrowing.
+export POGO_REVISION_PROBE_SUBJECTS=none
+
 # ---------------------------------------------------------------------------
 # Fixtures: a bare upstream, and two clones taken at DIFFERENT points
 # ---------------------------------------------------------------------------
@@ -712,6 +721,370 @@ if [ "$rc" -eq 1 ]; then
     pass "a delivered notification does not change the ALERT or its exit status"
 else
     fail "a run that mailed exited $rc, want 1 — output: $out"
+fi
+
+
+# --- 14. THE PROCESS AXIS — the general subject (mg-e2e6) --------------------
+#
+# THE LOAD-BEARING CASE IS 14a. mg-a03d's witness is scoped to pogod, and
+# architect's test on it — "what would this instrument report if the thing it
+# names stopped entirely?" — answers GREEN for a bridget reader inert for two
+# days, because it is not watching it. Every assertion here is about a subject
+# with NO /version endpoint, where the only available reading is a `ps` start
+# time against commit dates.
+#
+# The second thing this section guards is the HONESTY of that reading. It is
+# one-sided: commits landing after a process started disprove that the process
+# is running them; no commits since it started proves nothing at all. 14c
+# asserts the verdict word for the second case is NOT-DISPROVEN and not OK,
+# because a word that reads as health is the word a reader acts on.
+#
+# The process table is a stub, for the reason the daemon is: the subject is a
+# start time the test must control, and a real process can only ever have the
+# one start time it has.
+
+PSBIN="$SANDBOX/psbin"
+mkdir -p "$PSBIN"
+
+# fake_ps writes a ps stub whose subject has a FIXED START INSTANT, $1 seconds
+# before now, and computes its elapsed time from that instant on every call —
+# which is what a real ps does.
+#
+# The first version of this froze the etime as a literal instead, and that is a
+# fixture bug with teeth: `now - etime` then drifts by the whole gap between two
+# probe runs, so a throttle keyed on the derived start looked broken under gate
+# load and fine on a quiet box. It also found a real defect in the probe (see
+# same_process in revision-probe.sh) — but only because the merge gate ran slow
+# enough to separate two runs by more than a second, which is not a control, it
+# is luck. 14l is the control.
+fake_ps() {
+    local ago="$1" cmd="$2" pid="${3:-4242}" start
+    start=$(( $(date +%s) - ago ))
+    cat > "$PSBIN/ps" <<EOF
+#!/usr/bin/env bash
+# A stub \`ps\`. It ignores its arguments the way the probe's single call site
+# uses it: -Ao pid=,etime=,command=
+now=\$(date +%s); el=\$(( now - $start ))
+printf '%5d %02d-%02d:%02d:%02d %s\n' $pid \$(( el / 86400 )) \$(( (el % 86400) / 3600 )) \$(( (el % 3600) / 60 )) \$(( el % 60 )) '$cmd'
+EOF
+    chmod +x "$PSBIN/ps"
+}
+
+# fake_ps_skewed is fake_ps with the reported elapsed time deliberately off by
+# $3 seconds, which is what truncation does to a real one: the probe subtracts
+# whole-second etime from a whole-second clock, so two samples of the SAME
+# unrestarted process can put its start a second apart.
+fake_ps_skewed() {
+    local ago="$1" cmd="$2" skew="$3" pid="${4:-4242}" start
+    start=$(( $(date +%s) - ago ))
+    cat > "$PSBIN/ps" <<EOF
+#!/usr/bin/env bash
+now=\$(date +%s); el=\$(( now - $start + ($skew) ))
+printf '%5d %02d-%02d:%02d:%02d %s\n' $pid \$(( el / 86400 )) \$(( (el % 86400) / 3600 )) \$(( (el % 3600) / 60 )) \$(( el % 60 )) '$cmd'
+EOF
+    chmod +x "$PSBIN/ps"
+}
+
+# A checkout whose commits carry KNOWN dates, so "commits newer than the process
+# start" is a fact the test states rather than a race it hopes for.
+PROCREPO="$SANDBOX/procrepo"
+git init --quiet "$PROCREPO"
+git -C "$PROCREPO" symbolic-ref HEAD refs/heads/main
+proc_commit() {   # message, committer date (epoch)
+    echo "$1" > "$PROCREPO/file"
+    git -C "$PROCREPO" add file
+    GIT_AUTHOR_DATE="@$2 +0000" GIT_COMMITTER_DATE="@$2 +0000" \
+        git -C "$PROCREPO" commit --quiet -m "$1"
+}
+
+# THESE DATES ARE ON THE REAL CLOCK, and the sections above are not — which is a
+# difference worth stating rather than discovering. The pogod axis takes its
+# whole clock from --now, but a process start instant is DERIVED (`date +%s`
+# minus the elapsed time ps reports), and the probe deliberately does not let a
+# flag back-date it: an age a flag can move is not an age. So the fixture
+# commits are placed around the real now, and --now is then used only to choose
+# where the threshold falls.
+RNOW="$(date +%s)"
+PROC_AGE=$(( 3 * 86400 ))
+PROC_START=$(( RNOW - PROC_AGE ))
+proc_commit "before the process started"       $(( PROC_START - 86400 ))
+proc_commit "landed after the process started" $(( PROC_START + 86400 ))
+proc_commit "and another"                      $(( PROC_START + 2 * 86400 ))
+# The oldest commit the process missed is therefore 2 days old: past a 24h
+# threshold at --now RNOW, inside it an hour after it landed.
+PROC_MISSED_AT=$(( PROC_START + 86400 ))
+
+SUBJ="$SANDBOX/subjects.conf"
+SUBJ_STAMP="$SANDBOX/proc.stamp"
+PATTERN="/fixture/bin/thereader"
+
+run_proc_probe() {
+    # The pogod axis is held at OK throughout so that any non-zero status below
+    # can only have come from a process subject.
+    serve_revision "$C3"
+    rm -f "$STAMP"
+    PATH="$PSBIN:$PATH" POGO_REVISION_PROBE_PS="$PSBIN/ps" \
+        bash "$PROBE" --url "$URL" --stamp "$STAMP" --tries 1 \
+        --repo "$FRESH" --stale-after 24h "$@" 2>&1
+}
+
+printf 'thereader %s main %s$\n' "$PROCREPO" "$PATTERN" > "$SUBJ"
+
+# 14a. THE MEASURED INSTANCE. A process that started before two commits landed
+# is reported, at exit 1, by name — which is the thing that did not happen on
+# 2026-08-06, on 2026-08-14, or on any day between.
+fake_ps $(( 3 * 86400 )) "/usr/bin/python3 $PATTERN"
+out="$(run_proc_probe --subjects "$SUBJ" --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 1 ]; then
+    pass "a process older than commits in its own checkout is an ALERT — the case mg-a03d's pogod-only witness reports green"
+else
+    fail "the stale process exited $rc, want 1 — output: $out"
+fi
+if printf '%s' "$out" | grep -q 'thereader'; then
+    pass "the alert names the subject"
+else
+    fail "the alert does not name the subject — output: $out"
+fi
+if printf '%s' "$out" | grep -q 'DOES NOT'; then
+    pass "the report states what the process axis does NOT prove — it dates the process, not the code it loaded"
+else
+    fail "the report presents the weak reading without its limit, which is the 'green that means less than it looks' this ticket rejects — output: $out"
+fi
+
+# 14b. ARCHITECT'S TEST, ON THE NEW INSTRUMENT ITSELF. A subject that stopped
+# entirely must not read clean. A staleness check whose only verdicts are
+# {current, stale} has no cell for {gone}, and the arithmetic then files a dead
+# subject in whichever cell it happens to land in.
+fake_ps $(( 3 * 86400 )) "/usr/bin/python3 /some/other/program"
+out="$(run_proc_probe --subjects "$SUBJ" --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 2 ]; then
+    pass "a subject with NO matching process exits 2 — ABSENT is its own verdict, not a pass"
+else
+    fail "a subject that is not running at all exited $rc, want 2 — output: $out"
+fi
+if printf '%s' "$out" | grep -q 'ABSENT'; then
+    pass "the verdict word for a stopped subject is ABSENT"
+else
+    fail "a stopped subject was not reported as absent — output: $out"
+fi
+
+# 14c. THE WEAK READING IS REPORTED AS WEAK. No commit since the process started
+# does not mean the process is current: the binary it exec'd may itself predate
+# them, and a subject running a deployed COPY can differ from its repo with no
+# commit at all. The verdict word carries that or nothing does.
+fake_ps 60 "/usr/bin/python3 $PATTERN"
+LEDGER14="$SANDBOX/ledger14.log"
+rm -f "$LEDGER14"
+out="$(run_proc_probe --subjects "$SUBJ" --now "$RNOW" --log "$LEDGER14")"; rc=$?
+if [ "$rc" -eq 0 ]; then
+    pass "a process newer than every commit exits 0"
+else
+    fail "a process younger than the newest commit exited $rc, want 0 — output: $out"
+fi
+if grep -q 'NOT-DISPROVEN' "$LEDGER14" && ! grep -q ' OK  *pid=' "$LEDGER14"; then
+    pass "the clean process verdict is NOT-DISPROVEN, never OK — the ledger does not offer a reader a word that means more than was measured"
+else
+    fail "the process axis recorded a verdict that reads as proof of currency — ledger: $(cat "$LEDGER14")"
+fi
+
+# 14d. ONE LEDGER LINE PER SUBJECT, and pogod keeps its own. The heartbeat
+# property only survives if every subject writes either way.
+if [ "$(grep -c '^' "$LEDGER14")" = "2" ] \
+    && grep -q 'subject=pogod' "$LEDGER14" && grep -q 'subject=thereader' "$LEDGER14"; then
+    pass "each subject gets its own ledger line, pogod's included"
+else
+    fail "the ledger does not carry one line per subject — got: $(cat "$LEDGER14")"
+fi
+
+# 14e. AN ABSENT REGISTRY IS A FINDING. Reverting to pogod-only is the narrow
+# state this ticket exists to end; it must not be reachable by a file quietly
+# going missing. This is the assertion that keeps the general witness general.
+out="$(run_proc_probe --subjects "$SANDBOX/no-such-registry.conf" --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 2 ]; then
+    pass "a missing subject registry exits 2 — a witness that silently narrows itself is the defect, not the fallback"
+else
+    fail "a missing registry exited $rc, want 2 — the probe narrowed to pogod and said nothing: $out"
+fi
+if printf '%s' "$out" | grep -q 'watched pogod ONLY'; then
+    pass "the run says out loud which scope it actually ran at"
+else
+    fail "the narrowing was silent — output: $out"
+fi
+
+# And asking for the narrow scope ON PURPOSE is a different thing from falling
+# into it, so it exits 0 and says so.
+out="$(run_proc_probe --subjects none --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qi 'DISABLED'; then
+    pass "--subjects none is the deliberate narrow scope: exit 0, and it announces itself"
+else
+    fail "--subjects none exited $rc (want 0) or did not announce the scope — output: $out"
+fi
+
+# 14f. THE WORST STATUS WINS. A run that found pogod current and a subject
+# missing has not found this box healthy, and a caller reading only the exit
+# code must not be told that it has.
+fake_ps $(( 3 * 86400 )) "/usr/bin/python3 /some/other/program"
+out="$(run_proc_probe --subjects "$SUBJ" --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'OK — pogod is running'; then
+    pass "a clean pogod does not soften an absent subject — the run exits with the WORST subject's status"
+else
+    fail "the aggregate status was $rc with pogod clean; a subject's exit 2 was averaged away — output: $out"
+fi
+
+# 14g. THE THRESHOLD AND THE THROTTLE APPLY TO THE NEW AXIS TOO. mg-a03d's
+# reasoning about sampling rate versus notification rate does not become less
+# true for a subject without a /version endpoint, and a second alarm with no
+# throttle is the "alarm nobody reads" one component along.
+fake_ps $(( 3 * 86400 )) "/usr/bin/python3 $PATTERN"
+out="$(run_proc_probe --subjects "$SUBJ" --now $(( PROC_MISSED_AT + 3600 )))"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'BEHIND'; then
+    pass "a young divergence on the process axis is BEHIND, within threshold — not an alert"
+else
+    fail "a divergence younger than the threshold alerted (exit $rc) — output: $out"
+fi
+
+PROCMAIL="$SANDBOX/procmail"
+mkdir -p "$PROCMAIL"
+PROC_SENT="$SANDBOX/proc.mail.sent"
+cat > "$PROCMAIL/mg" <<EOF
+#!/usr/bin/env bash
+case "\$1" in --help) echo "macguffin — the mg CLI"; exit 0 ;; esac
+echo "\$*" >> "$PROC_SENT"
+exit 0
+EOF
+chmod +x "$PROCMAIL/mg"
+proc_mails() { [ -f "$PROC_SENT" ] && wc -l < "$PROC_SENT" | tr -d ' ' || echo 0; }
+
+rm -f "$PROC_SENT" "$SUBJ_STAMP" "${STAMP}.thereader"
+PATH="$PROCMAIL:$PATH" GOBIN="$PROCMAIL" run_proc_probe --subjects "$SUBJ" \
+    --now "$RNOW" --mail >/dev/null 2>&1
+if [ "$(proc_mails)" = "1" ]; then
+    pass "the first alerting run on a process subject mails"
+else
+    fail "the first process-subject alert sent $(proc_mails) mail(s), want 1"
+fi
+PATH="$PROCMAIL:$PATH" GOBIN="$PROCMAIL" run_proc_probe --subjects "$SUBJ" \
+    --now $(( RNOW + 3600 )) --mail >/dev/null 2>&1
+if [ "$(proc_mails)" = "1" ]; then
+    pass "the same unresolved process alert an hour later does NOT mail again — the throttle covers the new axis"
+else
+    fail "$(proc_mails) mails after a second run one hour on; the process axis has no throttle"
+fi
+PATH="$PROCMAIL:$PATH" GOBIN="$PROCMAIL" run_proc_probe --subjects "$SUBJ" \
+    --now $(( RNOW + 13 * 3600 )) --mail >/dev/null 2>&1
+if [ "$(proc_mails)" = "2" ]; then
+    pass "the process alert repeats once the re-notify interval has passed — throttled is not silenced"
+else
+    fail "$(proc_mails) mails after 13h with a 12h re-notify, want 2"
+fi
+
+# 14h. A RESTART IS A NEW SITUATION. The throttle is keyed on the process start
+# instant for the reason the pogod one is keyed on the running revision: the
+# subject changed, so the next finding is news rather than a continuation.
+fake_ps $(( 2 * 86400 + 43200 )) "/usr/bin/python3 $PATTERN" 4243
+PATH="$PROCMAIL:$PATH" GOBIN="$PROCMAIL" run_proc_probe --subjects "$SUBJ" \
+    --now $(( RNOW + 13 * 3600 )) --mail >/dev/null 2>&1
+if [ "$(proc_mails)" = "3" ]; then
+    pass "a restarted subject resets the notification throttle — a different process is a different situation"
+else
+    fail "$(proc_mails) mails after the subject restarted, want 3 — the throttle outlived the situation it was throttling"
+fi
+
+# 14i. pgrep IS NOT THE INSTRUMENT, AND THE REASON IS NOT STYLE. pgrep excludes
+# the caller AND EVERY ANCESTOR unless passed -a, so a probe run under a
+# supervisor it watches would report that supervisor ABSENT — a verdict this
+# file treats as a finding. The control is that a poisoned pgrep/pkill first on
+# PATH changes nothing, which an implementation that reached for one could not
+# survive.
+PGPOISON="$SANDBOX/pgpoison"
+mkdir -p "$PGPOISON"
+for t in pgrep pkill; do
+    printf '#!/usr/bin/env bash\necho "POISONED %s was invoked" >&2\nexit 1\n' "$t" > "$PGPOISON/$t"
+    chmod +x "$PGPOISON/$t"
+done
+fake_ps $(( 3 * 86400 )) "/usr/bin/python3 $PATTERN"
+serve_revision "$C3"
+rm -f "$STAMP"
+out="$(PATH="$PGPOISON:$PSBIN:$PATH" POGO_REVISION_PROBE_PS="$PSBIN/ps" \
+    bash "$PROBE" --url "$URL" --stamp "$STAMP" --tries 1 --repo "$FRESH" \
+    --stale-after 24h --subjects "$SUBJ" --now "$RNOW" 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && ! printf '%s' "$out" | grep -q 'POISONED'; then
+    pass "the process axis reaches its verdict with pgrep and pkill poisoned first on PATH — it reads ps, whose output does not depend on who is asking"
+else
+    fail "the probe invoked pgrep/pkill or failed with them poisoned (exit $rc) — a matcher that hides ancestors cannot be the instrument here: $out"
+fi
+
+# 14k. PROCESSES AND COMMITS ARE TWO NUMBERS. They both want to be called
+# "count", and while this was being written the report did exactly that — it
+# said "2 process(es) matched" about a two-COMMIT gap over a single process. A
+# supervised program is routinely several processes, so the two are usually
+# different and the reader has no way to tell which one they are looking at.
+MULTI_START=$(( $(date +%s) - 3 * 86400 ))
+cat > "$PSBIN/ps" <<EOF
+#!/usr/bin/env bash
+now=\$(date +%s)
+el=\$(( now - $MULTI_START ))
+for pid in 5001 5002 5003; do
+    printf '%5d %02d-%02d:%02d:%02d %s\n' \$pid \$(( el / 86400 )) \$(( (el % 86400) / 3600 )) \$(( (el % 3600) / 60 )) \$(( el % 60 )) '/usr/bin/python3 $PATTERN'
+    el=\$(( el - 3600 ))
+done
+EOF
+chmod +x "$PSBIN/ps"
+out="$(run_proc_probe --subjects "$SUBJ" --now "$RNOW")"; rc=$?
+if printf '%s' "$out" | grep -q '3 process(es) matched'; then
+    pass "the report counts the PROCESSES it matched, separately from the commits"
+else
+    fail "the matched-process count is wrong or missing — output: $out"
+fi
+if printf '%s' "$out" | grep -q 'commits since it   2'; then
+    pass "and it counts the COMMITS the oldest process missed, which is a different number"
+else
+    fail "the commit count was overwritten by the process count, or vice versa — output: $out"
+fi
+if printf '%s' "$out" | grep -q 'pid 5001'; then
+    pass "the OLDEST of several matching processes is the subject — one restarted sibling cannot vouch for the rest"
+else
+    fail "the subject was not the oldest matching process — output: $out"
+fi
+
+# 14l. THE PROCESS IDENTITY IS A DERIVED, ROUNDED QUANTITY, and the throttle
+# must not treat a rounding wobble as a restart. The probe computes the start
+# instant as `date +%s` minus whole-second etime; two samples of the SAME
+# unrestarted process can land a second apart as the truncations fall either side
+# of a boundary. Under exact equality the throttle then resets on that second,
+# and the alert is re-mailed every hourly fire — the alarm nobody reads, arriving
+# through the mechanism built to prevent it. The merge gate caught this by being
+# slow; this is the control that does not need it to be.
+rm -f "$PROC_SENT" "${STAMP}.thereader"
+fake_ps $(( 3 * 86400 )) "/usr/bin/python3 $PATTERN"
+PATH="$PROCMAIL:$PATH" GOBIN="$PROCMAIL" run_proc_probe --subjects "$SUBJ" \
+    --now "$RNOW" --mail >/dev/null 2>&1
+fake_ps_skewed $(( 3 * 86400 )) "/usr/bin/python3 $PATTERN" 1
+PATH="$PROCMAIL:$PATH" GOBIN="$PROCMAIL" run_proc_probe --subjects "$SUBJ" \
+    --now $(( RNOW + 3600 )) --mail >/dev/null 2>&1
+fake_ps_skewed $(( 3 * 86400 )) "/usr/bin/python3 $PATTERN" -1
+PATH="$PROCMAIL:$PATH" GOBIN="$PROCMAIL" run_proc_probe --subjects "$SUBJ" \
+    --now $(( RNOW + 7200 )) --mail >/dev/null 2>&1
+if [ "$(proc_mails)" = "1" ]; then
+    pass "a one-second wobble in the derived start does not reset the throttle — the identity is compared with slop, not by string equality"
+else
+    fail "$(proc_mails) mails across a +/-1s rounding wobble, want 1 — the throttle resets on a process that never restarted, and re-mails every hour"
+fi
+
+# 14j. A ZERO ELAPSED TIME MUST NOT READ AS HEALTH. An unparseable etime that
+# fell through to 0 would put the process start at NOW, make every commit older
+# than it, and report every subject clean — silence in the direction that costs
+# nothing to ship and everything to trust.
+cat > "$PSBIN/ps" <<EOF
+#!/usr/bin/env bash
+printf '%5d %s %s\n' 4242 'not-an-etime' '/usr/bin/python3 $PATTERN'
+EOF
+chmod +x "$PSBIN/ps"
+out="$(run_proc_probe --subjects "$SUBJ" --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 2 ]; then
+    pass "an unparseable elapsed time is a refusal (ABSENT, exit 2), never a zero that reads as a just-started process"
+else
+    fail "a garbage etime produced exit $rc — if that is 0, the subject was silently certified healthy: $out"
 fi
 
 # --- tally -------------------------------------------------------------------

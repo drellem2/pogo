@@ -282,7 +282,10 @@ Branch 2's shipped implementation audits the launchd jobs in a registry —
 
 Of the 10 uncovered, **3 are excluded with a recorded reason**:
 `com.pogo.revisionprobe` (deliberately out, mg-a03d — a Go-rendered row would
-make the auditor for the deploy witness arrive *by* the deploy), and
+make the auditor for the deploy witness arrive *by* the deploy; **audited since
+mg-e2e6 by `scripts/check-revisionprobe-install.sh`**, a tracked script on the
+merge-activated path, which is where that job's audit belongs rather than in the
+registry), and
 `com.pogo.notify` + `com.pogo.deadman` (installed by pogo-reminders, named at
 `internal/service/launchagentaudit.go:382`).
 
