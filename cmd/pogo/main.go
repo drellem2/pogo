@@ -3653,6 +3653,22 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				}
 			}
 
+			// 2b-i. Does the file each of those jobs EXECUTES match the code
+			// that ships it (mg-30f8)? Check 2b compares plists, and a plist
+			// is rendered from a template inside this binary. The program it
+			// NAMES is a copy `pogo service install-*` made, and a merge does
+			// not refresh a copy — so 2b can be clean over a nightly runner
+			// three weeks stale. It was, for three weeks. See
+			// launchpayloaddrift.go.
+			{
+				plStatus, plDetail := launchPayloadLine(service.AuditPayloadScripts(), service.LaunchAgentsSupported())
+				if plStatus == "warn" {
+					warn(launchPayloadCheckName, plDetail)
+				} else {
+					pass(launchPayloadCheckName, plDetail)
+				}
+			}
+
 			// 2b-ii. Is any consumer reading a source nothing writes to
 			// (mg-c2f5)? Check 2b above compares an installed plist against
 			// the code that ships it, which says nothing about a plist that is

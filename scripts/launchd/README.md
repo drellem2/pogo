@@ -236,9 +236,13 @@ installed.** launchd executes `~/.pogo/bin/pogo-deploy.sh` — a static copy tha
 nothing refreshes, not the nightly and not a `pogo` upgrade. Twice now a runner
 fix has sat on `main` while 03:00 ran the pre-fix file (mg-bcc1 2026-07-29,
 mg-45b9 2026-08-19; the second was mg-9fc9's fleet bounce, three revisions
-behind). Nothing detects it either: `pogo doctor` compares the **plist** against
-the shipped template and says nothing about the runner's contents. Check it by
-hand, and believe the hashes rather than a command that reported success:
+behind). **Something detects it now (mg-30f8):** `pogo doctor --check`'s
+`launchd payload` row and `pogo check-activation` compare the INSTALLED script
+against the copy the build ships, name the work items present in the source and
+missing from the running copy, and exit `1` on drift — so the nightly mails it.
+That row is new, and an absent one means an old `pogo`, not a clean box. Until
+one has run, or to check a second way, use the hashes rather than a command that
+reported success:
 
 ```bash
 git hash-object scripts/launchd/pogo-deploy.sh ~/.pogo/bin/pogo-deploy.sh
@@ -548,6 +552,29 @@ pogo check-activation           # 0 / 1 / 3, per-job remedies, and the build it 
 pogo check-activation --json
 ```
 
+**And what it compares was widened to the payload scripts (mg-30f8).** A plist
+is rendered from a Go template inside the binary; the program it *names* is a
+copy `install-*` made, and a merge does not refresh a copy. So the plist audit
+could — and did — report `ok` over a runner three weeks and 1191 lines stale,
+still executing a child-process walk replaced upstream by mg-19e4 and a
+net-control verdict fixed by mg-a932. Both were reported fixed by every survey
+that read the repo, because in the repo they are. `check-activation` now audits
+four installed payloads (`pogo-deploy.sh`, `net-control.sh`,
+`pogo-recovery.sh`, `pogo-reclaim.sh`) alongside the four plists, and drift in
+either sets `DRIFTED`/`1`.
+
+Two properties of that half are worth carrying:
+
+- **The gap is named, not just counted.** A drifted row lists the `mg-` work
+  items present in the source and absent from the running copy. It is a **lower
+  bound** — a fix that left no id comment is invisible to it — and it is a
+  *description*, never the predicate; byte equality decides.
+- **Do not count occurrences of the thing a fix prohibits.** `grep -c 'pgrep -P'`
+  returns **2** for the fixed source and **1** for the broken installed copy: a
+  prohibition fix ADDS occurrences of the string it prohibits, and both source
+  hits are comments explaining why it is not used. Position, or set difference
+  over ids — never frequency.
+
 Three traps sit on this path. The first two have bitten; the third is why the
 command is shaped the way it is.
 
@@ -831,9 +858,14 @@ Two things make that visible instead of silent:
 - Every fire logs `runner: <path> (mtime …)`, so a log answers *which copy ran*
   without anybody trusting main.
 - `com.pogo.reclaim` is registered in `managedLaunchAgents()`, so `pogo doctor`
-  compares the installed **plist** against what the current build renders. Note
-  the asymmetry: that audit covers the plist, not the script — the script's
-  answer is the `runner:` line.
+  compares the installed **plist** against what the current build renders, and
+  in `managedPayloadScripts()` (mg-30f8), so the `launchd payload` row compares
+  the installed **script** too. The asymmetry this note used to record — plist
+  audited, script not — is closed; the `runner:` line remains the answer for
+  *which copy ran on a given night*, which a static comparison cannot give.
+- A job whose plist is installed and whose script is **not on disk** is reported
+  as `ORPHAN` and leads the row. launchd fires it, the exec fails, and that
+  failure is not a pogo log line — nothing else on the box observes it.
 
 ### Dry run
 
