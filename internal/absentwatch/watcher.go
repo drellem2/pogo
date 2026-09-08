@@ -42,12 +42,18 @@ type Options struct {
 	RenotifyAfter time.Duration
 	// NotifyTo is the mailbox announcements go to. Empty means DefaultNotifyTo.
 	NotifyTo string
-	// EscalateAfter is how long a finding may persist, unbroken, before the
-	// notice ALSO goes to EscalateTo. Zero means DefaultEscalateAfter; NEGATIVE
-	// disables the AGE-based escalation only — a finding that names NotifyTo
-	// itself still escalates immediately, because that one is not a matter of
-	// patience (see escalateNow). Zero and negative must differ, or a config
-	// that omits the key would silently turn escalation off.
+	// EscalateAfter is how long a FAULT finding may persist, unbroken, before
+	// the notice ALSO goes to EscalateTo. Zero means DefaultEscalateAfter;
+	// NEGATIVE disables the AGE-based escalation only — a finding that names
+	// NotifyTo itself still escalates immediately, because that one is not a
+	// matter of patience (see escalateNow). Zero and negative must differ, or a
+	// config that omits the key would silently turn escalation off.
+	//
+	// A DECLARED absence (on-demand) never ages into an escalation at all, at
+	// any setting. There is no duration after which `auto_start = false` becomes
+	// a fault, and pretending otherwise is what held mg-c86d escalated for 132
+	// unbroken hours over two agents that were doing exactly what they were
+	// configured to do.
 	EscalateAfter time.Duration
 	// EscalateTo receives escalated notices. Empty means DefaultEscalateTo.
 	EscalateTo string
@@ -69,13 +75,21 @@ type Options struct {
 //
 // # Episode semantics
 //
-// While at least one configured agent is confirmed absent an episode is open. A
-// changed roster mails immediately; an unchanged one stays quiet until
-// RenotifyAfter. When the last finding clears, the episode closes: a clear mail
-// goes to everyone who was told, and a generic
+// An episode is opened by FAULTS ONLY — a supervised or unclassifiable agent
+// that is not there. A changed fault roster mails immediately; an unchanged one
+// stays quiet until RenotifyAfter. When the last fault clears, the episode
+// closes: a clear mail goes to everyone who was told, and a generic
 // incident_episode_cleared{kind:"absent_agent"} event carries the roster and
 // window (the mg-55b2 contract) so the notifier coalesces the close into one
 // notification instead of a swarm.
+//
+// A DECLARED absence (on-demand, auto_start = false) is outside all of that. It
+// gets one notice when it crosses DormantAfter, is then carried as context in
+// any fault mail, and is announced again only after the agent has come back and
+// gone away once more. It opens no episode, so it cannot hold one open — which
+// is the whole of mg-c86d: an episode whose only members are agents nobody
+// intends to start is an incident that can never be closed, and an alarm that
+// cannot clear trains its reader to ignore it (mg-c232).
 type Watcher struct {
 	enabled       bool
 	interval      time.Duration
@@ -96,6 +110,13 @@ type Watcher struct {
 	// unbroken run of observations. An agent that comes back is deleted, so a
 	// flap restarts the hold-down rather than accumulating toward it.
 	sinceAbsent map[string]time.Time
+	// declaredTold is when each DELIBERATELY ABSENT on-demand agent had its
+	// one-time notice sent, within the current unbroken run of absence. It is
+	// keyed and cleared exactly like sinceAbsent — an agent that comes back is
+	// deleted — so a later absence is news again rather than permanently muted.
+	// Muting it permanently would be mg-f341 (an auto_start = false agent
+	// invisible while absent) with a different mechanism.
+	declaredTold map[string]time.Time
 	// roster is the set already reported in this episode, so an agent that
 	// joins a live episode is news (roster change) without resetting the clocks
 	// of the ones already in it.
@@ -158,9 +179,10 @@ func New(opts Options) *Watcher {
 		renotifyAfter: renotify, escalateAfter: escalate,
 		notifyTo: notifyTo, escalateTo: escalateTo,
 		source: opts.Source, mail: opts.Mail, emit: emit,
-		sinceAbsent: map[string]time.Time{},
-		roster:      map[string]Finding{},
-		confirmed:   map[string]time.Time{},
+		sinceAbsent:  map[string]time.Time{},
+		declaredTold: map[string]time.Time{},
+		roster:       map[string]Finding{},
+		confirmed:    map[string]time.Time{},
 	}
 }
 
@@ -230,18 +252,27 @@ func (w *Watcher) sample(now time.Time) {
 				"target":    f.Name,
 				"identity":  f.identity(),
 				"class":     string(f.Class),
+				"declared":  f.Declared(),
 				"hold_down": f.patience(w.holdDown, w.dormantAfter).String(),
 				"why":       "configured, not parked, not in the registry; waiting out this class's hold-down before announcing",
 			},
 		})
 	}
 
-	if len(confirmed) == 0 {
+	// The partition is the whole of mg-c86d. A fault runs the episode machinery
+	// below; a declared absence gets one notice and is thereafter context. They
+	// are split ONCE, here, so no downstream site can accidentally feed an
+	// on-demand agent into a clock it can never satisfy.
+	faults, declared := partition(confirmed)
+
+	w.announceDeclared(snap, declared, now)
+
+	if len(faults) == 0 {
 		w.closeEpisode(snap, now)
 		return
 	}
 
-	w.announce(snap, confirmed, now)
+	w.announce(snap, faults, declared, now)
 }
 
 // observe folds one snapshot into the hold-down state and returns the findings
@@ -268,10 +299,15 @@ func (w *Watcher) observe(snap Snapshot, now time.Time) (confirmed, pending []Fi
 	}
 	// An agent that came back leaves the hold-down state entirely, so a later
 	// recurrence starts its clock from scratch rather than inheriting credit for
-	// an interruption that was in fact repaired.
+	// an interruption that was in fact repaired. The one-time-notice ledger is
+	// cleared on the SAME condition and in the same loop: if the two could drift,
+	// a declared absence could end up muted across a return, which is mg-f341
+	// (an auto_start = false agent invisible while absent) wearing this fix's
+	// clothes.
 	for name := range w.sinceAbsent {
 		if !seen[name] {
 			delete(w.sinceAbsent, name)
+			delete(w.declaredTold, name)
 		}
 	}
 	sort.Slice(confirmed, func(i, j int) bool { return confirmed[i].Name < confirmed[j].Name })
@@ -279,9 +315,80 @@ func (w *Watcher) observe(snap Snapshot, now time.Time) (confirmed, pending []Fi
 	return confirmed, pending
 }
 
-// announce records the episode roster and mails when the roster changed or the
-// renotify interval elapsed.
-func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
+// announceDeclared sends the ONE-TIME notice for a DELIBERATELY ABSENT
+// on-demand agent and records that it was sent.
+//
+// It is a separate path from announce, with its own subject, its own body, its
+// own event type and no episode, because the two say different things. announce
+// says "this should be running and is not"; this says "this is off because
+// somebody declared it off, and here it is so it does not vanish". Sharing the
+// path is how the second sentence ended up being delivered with the first one's
+// escalation clock attached, for 132 unbroken hours (mg-c86d).
+//
+// The one rule it keeps from announce is escalateNow: if a declared absence
+// names the mailbox this notice is sent to, the notice also goes to EscalateTo.
+// That is not patience, it is a mail whose reader does not exist — an on-demand
+// coordinator that is off is still off, and a notice about it delivered only to
+// it is delivered to nobody.
+func (w *Watcher) announceDeclared(snap Snapshot, declared []Finding, now time.Time) {
+	if len(declared) == 0 {
+		return
+	}
+
+	w.mu.Lock()
+	var fresh []Finding
+	for _, f := range declared {
+		if _, told := w.declaredTold[f.Name]; told {
+			continue
+		}
+		w.declaredTold[f.Name] = now
+		fresh = append(fresh, f)
+	}
+	since := make(map[string]time.Time, len(w.sinceAbsent))
+	for k, v := range w.sinceAbsent {
+		since[k] = v
+	}
+	w.mu.Unlock()
+
+	if len(fresh) == 0 {
+		return
+	}
+
+	absentCoordinator := escalateNow(fresh, w.notifyTo)
+	recipients := []string{w.notifyTo}
+	body := renderDeclaredBody(snap, fresh, since, now)
+	if absentCoordinator && w.escalateTo != w.notifyTo {
+		recipients = append(recipients, w.escalateTo)
+		body = escalationPreamble(w.notifyTo, time.Time{}, now, false, true) + body
+	}
+
+	subject := "absent-watch: " + declaredSubject(fresh)
+	details := map[string]any{
+		"count":       len(fresh),
+		"configured":  snap.Configured,
+		"present":     snap.Present,
+		"parked":      snap.Parked,
+		"agents":      names(fresh),
+		"identities":  identities(fresh),
+		"notified":    strings.Join(recipients, ","),
+		"escalated":   absentCoordinator,
+		"coordinator": absentCoordinator,
+		"why":         "auto_start = false declares the absence; reported once per absence, never renotified and never escalated on age",
+	}
+	for _, to := range recipients {
+		if err := w.mail(to, mailFrom, subject, body); err != nil {
+			details["mail_error_"+to] = err.Error()
+		}
+	}
+	w.emit(events.Event{EventType: EventDeclared, Agent: "pogod", Details: details})
+}
+
+// announce records the episode roster and mails when the FAULT roster changed or
+// the renotify interval elapsed. declared is carried into the body as roster
+// context so the mail describes the whole machine, not just its faults — but it
+// touches neither the fingerprint nor the escalation clock, because a set that
+// can never clear must not be able to keep a mail going out.
+func (w *Watcher) announce(snap Snapshot, confirmed, declared []Finding, now time.Time) {
 	print := fingerprint(confirmed)
 
 	w.mu.Lock()
@@ -330,7 +437,7 @@ func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
 	stale := w.escalateAfter > 0 && !oldest.IsZero() && now.Sub(oldest) >= w.escalateAfter
 	absentCoordinator := escalateNow(confirmed, w.notifyTo)
 
-	body := renderBody(snap, confirmed, since, now)
+	body := renderBody(snap, confirmed, declared, since, now)
 	recipients := []string{w.notifyTo}
 	if (stale || absentCoordinator) && w.escalateTo != w.notifyTo {
 		recipients = append(recipients, w.escalateTo)
@@ -347,6 +454,7 @@ func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
 		"agents":      names(confirmed),
 		"identities":  identities(confirmed),
 		"classes":     classCounts(confirmed),
+		"declared":    names(declared),
 		"notified":    strings.Join(recipients, ","),
 		"escalated":   stale || absentCoordinator,
 		"coordinator": absentCoordinator,
@@ -369,6 +477,17 @@ func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
 // closeEpisode ends an open episode: it mails the all-clear to everyone who was
 // alarmed and emits the generic incident_episode_cleared event. It is a no-op
 // when no episode is open, so a complete roster stays quiet.
+//
+// The clear says out loud what is still absent by DECLARATION: "roster complete
+// again" over a machine with two on-demand agents still off would be the same
+// wrong sentence as the alarm it closes, only reassuring instead of alarming.
+//
+// That set is read from the SNAPSHOT rather than from the confirmed findings,
+// and the difference is load-bearing. A confirmed declared absence has outlived
+// DormantAfter; an agent whose frontmatter was edited to `auto_start = false`
+// twenty minutes ago has not, and would be absent from both lists while being
+// named "Restored" — a mail asserting an agent is back when it is sitting in the
+// snapshot's own Absent slice.
 func (w *Watcher) closeEpisode(snap Snapshot, now time.Time) {
 	w.mu.Lock()
 	if w.episodeID == "" {
@@ -380,6 +499,10 @@ func (w *Watcher) closeEpisode(snap Snapshot, now time.Time) {
 	}
 	episodeID, openedAt := w.episodeID, w.openedAt
 	told := w.toldEscalate
+	since := make(map[string]time.Time, len(w.sinceAbsent))
+	for k, v := range w.sinceAbsent {
+		since[k] = v
+	}
 	roster := make([]Finding, 0, len(w.roster))
 	for _, f := range w.roster {
 		roster = append(roster, f)
@@ -395,19 +518,33 @@ func (w *Watcher) closeEpisode(snap Snapshot, now time.Time) {
 
 	sort.Slice(roster, func(i, j int) bool { return roster[i].Name < roster[j].Name })
 
+	// An episode member can leave the fault set two ways, and they are not the
+	// same news. It can COME BACK, or its frontmatter can be edited to
+	// `auto_start = false` while it is still off — which is a plausible response
+	// to this very alarm, and the episode closes either way. Calling the second
+	// one "restored" would put the un-clearable sentence back in the mail with
+	// the sign flipped: a reassurance about an agent that is still absent.
+	declared := declaredIn(snap.Absent)
+	restored, reclassified := splitReclassified(roster, declared)
+
 	w.emit(episodeClearedEvent(episodeID, identities(roster), openedAt, now))
 
 	subject := "absent-watch: roster complete again — " + strings.Join(names(roster), ", ")
-	body := fmt.Sprintf(
-		"Every agent reported by absent-watch in this episode is back in the registry\n"+
-			"(or has been parked, which is a declared absence and not a finding).\n\n"+
-			"Restored:\n%s\n"+
-			"Episode: %s\n  opened %s\n  cleared %s (%s)\n\n"+
-			"%d configured agent(s) on this machine: %d running, %d parked, 0 absent.\n",
-		renderFindings(roster, nil, now), episodeID,
+	lead := "Every agent reported by absent-watch in this episode is back in the registry\n" +
+		"(or has been parked, which is a declared absence and not a finding).\n\n"
+	if len(restored) == 0 {
+		subject = "absent-watch: episode closed by DECLARATION — " + strings.Join(names(reclassified), ", ")
+		lead = "This episode closed without anything starting. Every agent in it is now\n" +
+			"`auto_start = false`, which declares the absence — so it is no longer a\n" +
+			"finding. They are still off. See the declared list below.\n\n"
+	}
+	body := fmt.Sprintf("%s%sEpisode: %s\n  opened %s\n  cleared %s (%s)\n\n"+
+		"%d configured agent(s) on this machine: %d running, %d parked, %d absent.\n",
+		lead, renderRestored(restored, reclassified, now), episodeID,
 		openedAt.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339),
 		now.Sub(openedAt).Round(time.Minute),
-		snap.Configured, snap.Present, snap.Parked)
+		snap.Configured, snap.Present, snap.Parked, len(snap.Absent))
+	body += renderDeclaredContext(declared, since, now)
 
 	recipients := []string{w.notifyTo}
 	if told && w.escalateTo != w.notifyTo {
@@ -442,6 +579,15 @@ func escalateNow(findings []Finding, notifyTo string) bool {
 	return false
 }
 
+// escalationPreamble writes the reason an escalation happened.
+//
+// Its `stale` branch is reachable only from the FAULT path. The sentence it
+// prints — "a fleet that has not started it in %s is not going to on its own" —
+// is true and damning of a supervised agent, and is the literal DEFINITION of an
+// on-demand one; printing it over `auto_start = false` is how mg-c86d escalated a
+// design property to the mayor every 12 hours for 132 hours. The partition in
+// sample is what keeps declared absences out of here, not a check in this
+// function; TestDeclaredAbsenceNeverEscalatesOnAge is what keeps it that way.
 func escalationPreamble(notifyTo string, oldest, now time.Time, stale, absentCoordinator bool) string {
 	if absentCoordinator {
 		return fmt.Sprintf(
@@ -461,34 +607,154 @@ func escalationPreamble(notifyTo string, oldest, now time.Time, stale, absentCoo
 	return ""
 }
 
-// renderBody builds the announcement. It leads with the agent NAMES and with
-// what each one's frontmatter asked for, because the reader's first question is
-// not "is it down" — the mail already said that — but "was it supposed to be".
-func renderBody(snap Snapshot, confirmed []Finding, since map[string]time.Time, now time.Time) string {
+// renderBody builds the FAULT announcement. It leads with the agent NAMES and
+// with what each one's frontmatter asked for, because the reader's first
+// question is not "is it down" — the mail already said that — but "was it
+// supposed to be".
+func renderBody(snap Snapshot, confirmed, declared []Finding, since map[string]time.Time, now time.Time) string {
 	var b strings.Builder
 	b.WriteString("These agents are CONFIGURED on this machine, are not parked, and have no\n")
-	b.WriteString("entry in pogod's registry. They appear in no other roster this fleet prints:\n")
-	b.WriteString("`pogo agent list`, the stall-watch, ackwatch and deaf-watch all iterate the\n")
-	b.WriteString("registry, and an absent member cannot appear in a set it has left.\n\n")
+	b.WriteString("entry in pogod's registry. Their own frontmatter says they SHOULD be running,\n")
+	b.WriteString("so this is a fault and not a state somebody chose. They appear in no other\n")
+	b.WriteString("roster this fleet prints: `pogo agent list`, the stall-watch, ackwatch and\n")
+	b.WriteString("deaf-watch all iterate the registry, and an absent member cannot appear in a\n")
+	b.WriteString("set it has left.\n\n")
 	b.WriteString(renderFindings(confirmed, since, now))
-	fmt.Fprintf(&b, "\n%d configured agent(s) on this machine: %d running, %d parked, %d absent.\n"+
+	b.WriteString(renderDeclaredContext(declared, since, now))
+	b.WriteString(renderDenominator(snap))
+	b.WriteString(renderReadSurface())
+	b.WriteString("Start one:\n")
+	b.WriteString(renderStartLines(confirmed))
+	b.WriteString(reportOnlyNote)
+	return b.String()
+}
+
+// renderDeclaredBody builds the ONE-TIME notice for a DELIBERATELY ABSENT
+// on-demand agent. It shares the denominator, the read surface and the
+// report-only note with renderBody — a reader must not have to reconcile two
+// accounts of the same machine — and shares none of its alarm vocabulary,
+// because the whole point is that this is not one.
+func renderDeclaredBody(snap Snapshot, fresh []Finding, since map[string]time.Time, now time.Time) string {
+	var b strings.Builder
+	b.WriteString("These agents are CONFIGURED on this machine and are NOT running — and that is\n")
+	b.WriteString("what their own frontmatter asked for. `auto_start = false` is a DECLARATION of\n")
+	b.WriteString("absence, in the same sense a park flag is: nothing is supposed to start them\n")
+	b.WriteString("but somebody asking, so there is no action owed here.\n\n")
+	b.WriteString(renderFindings(fresh, since, now))
+	b.WriteString("\nThis is said ONCE per absence. It will NOT be renotified, it will NOT escalate\n" +
+		"on age, and it holds no incident open. There is no length of time after which\n" +
+		"`auto_start = false` becomes a fault, so an alarm on it could only ever clear by\n" +
+		"starting an agent that is not supposed to be running — and an alarm that cannot\n" +
+		"clear trains its reader to ignore it (mg-c86d, mg-c232). You will hear about this\n" +
+		"agent again when it comes back and goes away once more, and it stays visible in\n" +
+		"the meantime in `pogo agent roster` and in the count below.\n\n")
+	b.WriteString(renderDenominator(snap))
+	b.WriteString(renderReadSurface())
+	b.WriteString("Start one, only if you want it running — nothing is owed:\n")
+	b.WriteString(renderStartLines(fresh))
+	b.WriteString(reportOnlyNote)
+	return b.String()
+}
+
+// renderDeclaredContext lists the declared absences as CONTEXT inside another
+// mail. It is empty for an empty set, so a machine with no on-demand agents off
+// reads exactly as it did before. Without it, a fault mail's denominator would
+// count absences the body never named, which is the mg-f341 direction — quieting
+// a declared absence must never make it invisible.
+func renderDeclaredContext(declared []Finding, since map[string]time.Time, now time.Time) string {
+	if len(declared) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nALSO ABSENT, BY DECLARATION — context, not findings:\n")
+	b.WriteString(renderFindings(declared, since, now))
+	b.WriteString("These are on-demand (`auto_start = false`), which declares the absence the way\n" +
+		"a park flag does. They were reported once and are listed here so this mail\n" +
+		"describes the whole machine rather than only its faults. Nothing is owed on them.\n")
+	return b.String()
+}
+
+// renderDenominator is the count a roster reader needs second: not which row is
+// wrong, but how many rows there should have been. `absent` counts BOTH faults
+// and declared absences on purpose — it is the machine's total, and a total that
+// silently dropped the quiet half would be a smaller lie than the alarm it
+// replaced, not a truer one.
+func renderDenominator(snap Snapshot) string {
+	return fmt.Sprintf("\n%d configured agent(s) on this machine: %d running, %d parked, %d absent.\n"+
 		"Parked agents are NOT reported here — park is a declared absence and already\n"+
 		"shows in `pogo agent list` as status=parked.\n\n",
 		snap.Configured, snap.Present, snap.Parked, len(snap.Absent))
-	b.WriteString("See the whole roster, absences included:\n  pogo agent roster\n\n")
-	b.WriteString("Start one:\n")
-	for _, f := range confirmed {
+}
+
+// declaredIn is every DELIBERATELY ABSENT member of a snapshot, hold-down or no.
+// It answers a state question ("is this agent off and declared off right now")
+// rather than a patience question, which is why it does not consult the clocks.
+func declaredIn(absent []Finding) []Finding {
+	var out []Finding
+	for _, f := range absent {
+		if f.Declared() {
+			out = append(out, f)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// splitReclassified separates the episode's members that actually came back from
+// the ones that are still absent and merely stopped being findings. A
+// reclassified member is returned in its CURRENT shape, not the shape it had
+// when the episode opened — rendering it as the supervised agent it used to be
+// would print "pogod should be running this and is not" directly above the line
+// saying the config now declares otherwise.
+func splitReclassified(roster, declared []Finding) (restored, reclassified []Finding) {
+	current := make(map[string]Finding, len(declared))
+	for _, f := range declared {
+		current[f.Name] = f
+	}
+	for _, f := range roster {
+		if cur, ok := current[f.Name]; ok {
+			reclassified = append(reclassified, cur)
+			continue
+		}
+		restored = append(restored, f)
+	}
+	return restored, reclassified
+}
+
+func renderRestored(restored, reclassified []Finding, now time.Time) string {
+	var b strings.Builder
+	if len(restored) > 0 {
+		b.WriteString("Restored:\n")
+		b.WriteString(renderFindings(restored, nil, now))
+		b.WriteString("\n")
+	}
+	if len(reclassified) > 0 {
+		b.WriteString("STILL ABSENT — no longer a finding because the config now declares it:\n")
+		b.WriteString(renderFindings(reclassified, nil, now))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func renderReadSurface() string {
+	return "See the whole roster, absences included:\n  pogo agent roster\n\n"
+}
+
+func renderStartLines(findings []Finding) string {
+	var b strings.Builder
+	for _, f := range findings {
 		note := ""
 		if !f.RestartOnCrash {
 			note = "   # restart_on_crash = false: this start will NOT survive a crash or a pogod bounce"
 		}
 		fmt.Fprintf(&b, "  pogo agent start %s%s\n", f.Name, note)
 	}
-	b.WriteString("\nThis is REPORT-ONLY — pogod did NOT start anything. Starting an absent agent\n" +
-		"would paper over WHY it left (a requested stop, a crash with no respawn, an\n" +
-		"auto-start sweep that failed), and the reason is the part worth knowing.\n")
 	return b.String()
 }
+
+const reportOnlyNote = "\nThis is REPORT-ONLY — pogod did NOT start anything. Starting an absent agent\n" +
+	"would paper over WHY it left (a requested stop, a crash with no respawn, an\n" +
+	"auto-start sweep that failed), and the reason is the part worth knowing.\n"
 
 // classCounts summarises the roster by class for the event details, so a reader
 // grepping the event log can tell a boot that went wrong (supervised) from an

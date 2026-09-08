@@ -66,8 +66,10 @@
 //     uses HoldDown (default 15m) — long enough to clear a restart's spawn gap.
 //   - ON-DEMAND (auto_start = false): nothing brings this up but somebody asking.
 //     Absence is normal for an afternoon and notable for a day, so it uses
-//     DormantAfter (default 24h). Against mg-7d20's timeline that is a notice at
-//     2026-08-11T17:14Z — 21 hours before the hand-restart actually happened.
+//     DormantAfter (default 24h) — and then it is said ONCE. Against mg-7d20's
+//     timeline that is a notice at 2026-08-11T17:14Z, 21 hours before the
+//     hand-restart actually happened. See DELIBERATELY ABSENT below for why it
+//     is said once and not repeated.
 //   - UNCLASSIFIABLE (the prompt exists and cannot be parsed): treated as
 //     SUPERVISED. We know the agent was configured and we cannot read what was
 //     wanted for it, and rounding an unknown toward the quieter answer is how
@@ -76,6 +78,54 @@
 // A PARKED agent is never a finding. Park is the supported way to be down: it is
 // declared, it persists, and `pogo agent list` already shows it as
 // status=parked. agent.RosterReport draws that line, not this package.
+//
+// # DELIBERATELY ABSENT: `auto_start = false` is a declaration, not a symptom
+//
+// The first cut of this detector had two dials on one alarm: a supervised
+// absence was announced after 15m and an on-demand one after 24h, and after that
+// they were the SAME finding — renotified every 12h, escalated to `human` at 48h,
+// and open until the agent came back.
+//
+// For an on-demand agent that ending does not exist. `doctor` and
+// `representative` are `auto_start = false` BY DESIGN; doctor is additionally
+// reaped nightly on purpose. So the finding could clear only by starting an agent
+// that is not supposed to be running, and by 2026-09-07 it had been escalated to
+// the mayor for 132 unbroken hours with the escalation preamble asserting that "a
+// fleet that has not started it in 132h is not going to on its own" — which is
+// the DEFINITION of an on-demand agent, not a fault in it (mg-c86d).
+//
+// mg-c232 recorded the cost in a different detector: an alarm that cannot clear
+// trains its reader to ignore it. This one has no redundancy to fall back on when
+// that happens — absent-watch is the only instrument on the box that can see an
+// agent which is not there — so being ignored is being blind.
+//
+// `parked` is the shape of the answer, one layer over. Park is an intentional
+// absence that stays visible without drawing nudges, and `auto_start = false` IS
+// the same declaration for an agent: it is already in the config, it is what
+// `pogo agent roster` reads, and nobody has to add a suppression flag for it.
+// So this package partitions its confirmed set:
+//
+//	FAULT     (supervised, unclassifiable) — an episode: renotified, escalated on
+//	                                         age, cleared when the agent returns.
+//	DECLARED  (on-demand)                  — reported ONCE per unbroken absence,
+//	                                         then carried as roster CONTEXT in any
+//	                                         fault mail. Never renotified, never
+//	                                         escalated on age, never holds an
+//	                                         episode open.
+//
+// The one thing that survives the partition is the ABSENT-COORDINATOR rule: a
+// declared absence that names NotifyTo still copies EscalateTo on its single
+// notice, because that is not a question of patience — it is a mail with no
+// reader (see escalateNow).
+//
+// # What this must not undo
+//
+// mg-f341 is the opposite failure and it is one line away: an `auto_start = false`
+// agent that is INVISIBLE while absent. That is the hole absent-watch was built to
+// close, so a declared absence is quieted, never hidden — it is announced once when
+// it crosses DormantAfter, it is listed in every fault mail, it counts in the
+// denominator those mails print, and `pogo agent roster` shows it on demand. The
+// change is that it stops being an OPEN FINDING, not that it stops being reported.
 //
 // # Report-only
 //
@@ -142,6 +192,13 @@ const (
 	// event log distinguishes "we saw it and waited" from "we never saw it" —
 	// the two are identical from the mail alone.
 	EventPending = "absent_watch_pending"
+	// EventDeclared records the ONE-TIME notice for a DELIBERATELY ABSENT
+	// on-demand agent: `auto_start = false` had already declared the absence, so
+	// this is roster context rather than an open finding. It is a separate event
+	// type from EventFired precisely so a reader counting alarms does not count
+	// these — an episode that never opened cannot be an incident, and mg-c86d is
+	// what happens when the two are spelled the same.
+	EventDeclared = "absent_watch_declared"
 	// EventError records a sample that could not be taken: no registry, or a
 	// prompt tree that could not be enumerated. A detector that cannot read its
 	// source has NOT found a complete roster.
@@ -216,6 +273,33 @@ func (f Finding) patience(holdDown, dormantAfter time.Duration) time.Duration {
 	return holdDown
 }
 
+// Declared reports whether this absence is one the agent's own frontmatter
+// asked for. `auto_start = false` says nothing is supposed to start this agent
+// but an explicit request, which makes its absence a DECLARATION in exactly the
+// sense a park flag is — and a declared absence is reported once, not escalated
+// forever (mg-c86d).
+//
+// ClassUnclassifiable is deliberately NOT declared: a prompt we could not read
+// declared nothing, and rounding an unknown toward the quieter answer is this
+// lineage's founding bug.
+func (f Finding) Declared() bool { return f.Class == ClassOnDemand }
+
+// partition splits a confirmed roster into the absences that are faults and the
+// ones the config declared. The two get different treatment end to end —
+// different mail, different subject, different event type, and only faults open
+// an episode — so they are separated ONCE, here, rather than re-tested at each
+// site. Both slices keep the input's sort order.
+func partition(findings []Finding) (faults, declared []Finding) {
+	for _, f := range findings {
+		if f.Declared() {
+			declared = append(declared, f)
+			continue
+		}
+		faults = append(faults, f)
+	}
+	return faults, declared
+}
+
 // Snapshot is one reading of the configured roster against the running fleet.
 type Snapshot struct {
 	// Now is the sample time.
@@ -263,12 +347,18 @@ func renderFindings(findings []Finding, since map[string]time.Time, now time.Tim
 
 // describeClass renders the frontmatter's own intent, which is the difference
 // between a fault and a state somebody chose.
+//
+// The on-demand sentence used to end "nothing will bring it back". That is
+// literally true and reads as an alarm, and for this class it is the DESIGN:
+// mg-c86d is 132 hours of escalation whose stated grounds were that sentence.
+// It now names the declaration instead, so the reader's first question — is this
+// wrong, or is this what somebody asked for — is answered by the line itself.
 func describeClass(f Finding) string {
 	switch f.Class {
 	case ClassSupervised:
 		return "auto_start = true — pogod should be running this and is not"
 	case ClassOnDemand:
-		return "auto_start = false — on-demand; nothing will bring it back"
+		return "auto_start = false — on-demand: DELIBERATELY ABSENT by declaration, and only an explicit start brings it back"
 	case ClassUnclassifiable:
 		if f.Reason != "" {
 			return "prompt unreadable: " + f.Reason
@@ -288,6 +378,20 @@ func mailSubject(findings []Finding) string {
 		return "configured agent " + names[0] + " is NOT RUNNING and nothing else reports it"
 	}
 	return fmt.Sprintf("%d configured agents are NOT RUNNING and nothing else reports them: %s",
+		len(names), strings.Join(names, ", "))
+}
+
+// declaredSubject is the one-time notice's subject. It deliberately shares no
+// alarm vocabulary with mailSubject — no "NOT RUNNING", no "nothing else reports
+// it" — because a subject line is the part that travels, and a reader who
+// forwards or filters on it must be able to tell a fault from a Tuesday without
+// opening the mail (mg-c86d).
+func declaredSubject(findings []Finding) string {
+	names := names(findings)
+	if len(names) == 1 {
+		return "on-demand agent " + names[0] + " is DELIBERATELY ABSENT (auto_start = false) — noted once, no action owed"
+	}
+	return fmt.Sprintf("%d on-demand agents are DELIBERATELY ABSENT (auto_start = false) — noted once, no action owed: %s",
 		len(names), strings.Join(names, ", "))
 }
 

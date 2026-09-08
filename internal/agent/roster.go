@@ -361,7 +361,7 @@ func describeClass(m RosterMember) string {
 	case RosterSupervised:
 		return "auto_start = true — pogod should have started this at boot and did not"
 	case RosterOnDemand:
-		return "auto_start = false — on-demand; nothing will bring it back"
+		return "auto_start = false — on-demand: DELIBERATELY ABSENT by declaration, and only an explicit start brings it back"
 	case RosterUnclassifiable:
 		return "prompt unreadable (" + m.Error + ") — cannot say what was wanted"
 	default:

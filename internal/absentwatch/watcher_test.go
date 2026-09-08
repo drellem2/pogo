@@ -525,3 +525,437 @@ func TestEpisodeKindMatchesContract(t *testing.T) {
 		t.Fatalf("event type drifted: %q vs %q", IncidentEpisodeClearedEvent, claude.IncidentEpisodeClearedEvent)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// mg-c86d: DELIBERATELY ABSENT. `auto_start = false` is a declaration, not a
+// symptom, and the detector had no way to say so — it escalated `doctor` and
+// `representative` to the mayor for 132 unbroken hours over a state both agents
+// were configured into on purpose. The tests below pin the partition: a fault
+// still runs the full episode machinery, and a declared absence is said once.
+// ---------------------------------------------------------------------------
+
+// declaredMails returns the one-time notices, which are identifiable from the
+// outside by their subject — that is the property the fix is FOR, since a
+// subject line is the part a reader filters and forwards on.
+func declaredMails(rec *recorder) []sentMail {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var out []sentMail
+	for _, m := range rec.mails {
+		if strings.Contains(m.subject, "DELIBERATELY ABSENT") {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// TestDeclaredAbsenceIsReportedExactlyOnce is the ticket in one test: two
+// on-demand agents, absent for a week, and the mailbox sees one notice.
+func TestDeclaredAbsenceIsReportedExactlyOnce(t *testing.T) {
+	rec := &recorder{}
+	w := newTestWatcher(t, rec, staticSource(onDemand("doctor"), onDemand("representative")), nil)
+
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	w.Check(t0)
+	if len(rec.mails) != 0 {
+		t.Fatalf("must wait out DormantAfter, mailed %d", len(rec.mails))
+	}
+	w.Check(t0.Add(25 * time.Hour))
+	if len(rec.mails) != 1 {
+		t.Fatalf("expected exactly 1 notice past DormantAfter, got %d", len(rec.mails))
+	}
+
+	// mg-c86d's own timeline: the live finding had run 132h when the ticket was
+	// raised, and 156h when the agents were last measured absent. Not one more
+	// byte of mail in any of it.
+	for _, d := range []time.Duration{26 * time.Hour, 37 * time.Hour, 96 * time.Hour,
+		132 * time.Hour, 156 * time.Hour, 21 * 24 * time.Hour} {
+		w.Check(t0.Add(d))
+	}
+	if len(rec.mails) != 1 {
+		t.Fatalf("a declared absence must be said ONCE; after 21 days it had been said %d times:\n%v",
+			len(rec.mails), rec.toList())
+	}
+}
+
+// TestDeclaredAbsenceNeverEscalatesOnAge: `human` must never be copied on an
+// agent that is off because its config says to be off. This is the escalation
+// that ran for 132 hours and could not clear.
+func TestDeclaredAbsenceNeverEscalatesOnAge(t *testing.T) {
+	rec := &recorder{}
+	w := newTestWatcher(t, rec, staticSource(onDemand("doctor"), onDemand("representative")),
+		func(o *Options) { o.RenotifyAfter = time.Hour; o.EscalateAfter = time.Hour })
+
+	t0 := time.Now().UTC()
+	w.Check(t0)
+	for h := 25; h <= 200; h += 5 {
+		w.Check(t0.Add(time.Duration(h) * time.Hour))
+	}
+	if has(rec.toList(), DefaultEscalateTo) {
+		t.Fatalf("a declared absence must never age into an escalation, recipients %v", rec.toList())
+	}
+	for _, m := range rec.mails {
+		if strings.Contains(m.body, "ESCALATED:") {
+			t.Fatalf("the age-escalation preamble reached a declared absence:\n%s", m.body)
+		}
+	}
+	// Positive control on the same instrument: a SUPERVISED absence at the same
+	// settings does escalate, so the negative above is the partition working and
+	// not the escalation being switched off wholesale.
+	ctl := &recorder{}
+	cw := newTestWatcher(t, ctl, staticSource(supervised("pm-pogo")),
+		func(o *Options) { o.RenotifyAfter = time.Hour; o.EscalateAfter = time.Hour })
+	cw.Check(t0)
+	cw.Check(t0.Add(16 * time.Minute))
+	cw.Check(t0.Add(3 * time.Hour))
+	if !has(ctl.toList(), DefaultEscalateTo) {
+		t.Fatalf("positive control failed: a supervised absence must still escalate, recipients %v", ctl.toList())
+	}
+}
+
+// TestDeclaredAbsenceOpensNoEpisode. An episode whose only members can never
+// return on their own is an incident nobody can close — and closing it is the
+// only thing that makes the NEXT alarm legible.
+func TestDeclaredAbsenceOpensNoEpisode(t *testing.T) {
+	rec := &recorder{}
+	w := newTestWatcher(t, rec, staticSource(onDemand("doctor")), nil)
+
+	t0 := time.Now().UTC()
+	w.Check(t0)
+	w.Check(t0.Add(25 * time.Hour))
+	w.Check(t0.Add(50 * time.Hour))
+
+	if got := len(rec.eventsOfType(EventFired)); got != 0 {
+		t.Errorf("a declared absence must emit no %s, got %d", EventFired, got)
+	}
+	if got := len(rec.eventsOfType(EventDeclared)); got != 1 {
+		t.Fatalf("expected exactly 1 %s, got %d (%v)", EventDeclared, got, rec.eventTypes())
+	}
+	for _, m := range rec.mails {
+		if strings.Contains(m.subject, "roster complete again") {
+			t.Errorf("no episode was opened, so nothing may claim to close one: %q", m.subject)
+		}
+	}
+	d := rec.eventsOfType(EventDeclared)[0]
+	if d.Details["escalated"] != false {
+		t.Errorf("declared event must record escalated=false, got %+v", d.Details)
+	}
+}
+
+// TestDeclaredAbsenceIsNewsAgainAfterItComesBack is the mg-f341 guard. Quieting
+// a declared absence must not MUTE it: the ledger clears when the agent returns,
+// so the next absence is announced afresh.
+func TestDeclaredAbsenceIsNewsAgainAfterItComesBack(t *testing.T) {
+	rec := &recorder{}
+	var absent []Finding
+	src := func(now time.Time) (Snapshot, error) {
+		return Snapshot{Now: now, Configured: 4, Present: 4 - len(absent), Absent: absent}, nil
+	}
+	w := newTestWatcher(t, rec, src, nil)
+
+	t0 := time.Now().UTC()
+	absent = []Finding{onDemand("doctor")}
+	w.Check(t0)
+	w.Check(t0.Add(25 * time.Hour))
+	if len(declaredMails(rec)) != 1 {
+		t.Fatalf("expected the first notice, got %d", len(declaredMails(rec)))
+	}
+	absent = nil
+	w.Check(t0.Add(26 * time.Hour))
+	absent = []Finding{onDemand("doctor")}
+	w.Check(t0.Add(27 * time.Hour))
+	w.Check(t0.Add(30 * time.Hour))
+	if len(declaredMails(rec)) != 1 {
+		t.Fatalf("the second absence must serve its own DormantAfter, mailed %d", len(declaredMails(rec)))
+	}
+	w.Check(t0.Add(52 * time.Hour))
+	if len(declaredMails(rec)) != 2 {
+		t.Fatalf("a declared absence that returned and went away again is news, mailed %d", len(declaredMails(rec)))
+	}
+}
+
+// TestDeclaredNoticeSaysWhichItIs. The ticket's second half: the mail must
+// distinguish "nothing will bring it back" as a fault from the same fact as a
+// design property, since one is alarming and the other is descriptive.
+func TestDeclaredNoticeSaysWhichItIs(t *testing.T) {
+	rec := &recorder{}
+	w := newTestWatcher(t, rec, func(now time.Time) (Snapshot, error) {
+		return Snapshot{Now: now, Configured: 11, Present: 9, Parked: 1,
+			Absent: []Finding{onDemand("doctor")}}, nil
+	}, nil)
+
+	t0 := time.Now().UTC()
+	w.Check(t0)
+	w.Check(t0.Add(25 * time.Hour))
+
+	m := rec.mails[0]
+	for _, want := range []string{"DELIBERATELY ABSENT", "no action owed"} {
+		if !strings.Contains(m.subject, want) {
+			t.Errorf("subject missing %q: %q", want, m.subject)
+		}
+	}
+	for _, unwanted := range []string{"NOT RUNNING", "nothing else reports"} {
+		if strings.Contains(m.subject, unwanted) {
+			t.Errorf("a declared notice must not borrow the fault subject's vocabulary (%q): %q", unwanted, m.subject)
+		}
+	}
+	for _, want := range []string{
+		"auto_start = false", "DECLARATION",
+		"said ONCE per absence", "will NOT escalate",
+		// mg-f341: quieted, never hidden. The denominator and the read surface
+		// keep it findable.
+		"11 configured", "9 running", "1 parked", "1 absent",
+		"pogo agent roster", "REPORT-ONLY",
+	} {
+		if !strings.Contains(m.body, want) {
+			t.Errorf("declared body missing %q:\n%s", want, m.body)
+		}
+	}
+	if strings.Contains(m.body, "ESCALATED") {
+		t.Errorf("declared body must carry no escalation preamble:\n%s", m.body)
+	}
+}
+
+// TestFaultMailCarriesDeclaredAbsencesAsContext: the quiet half must still
+// appear where the loud half is read, or the fault mail's own denominator counts
+// absences its body never names.
+func TestFaultMailCarriesDeclaredAbsencesAsContext(t *testing.T) {
+	rec := &recorder{}
+	w := newTestWatcher(t, rec, func(now time.Time) (Snapshot, error) {
+		return Snapshot{Now: now, Configured: 8, Present: 5, Parked: 0,
+			Absent: []Finding{onDemand("doctor"), supervised("pm-pogo"), onDemand("representative")}}, nil
+	}, nil)
+
+	t0 := time.Now().UTC()
+	w.Check(t0)
+	w.Check(t0.Add(16 * time.Minute)) // pm-pogo confirmed; the on-demand pair is still dormant
+
+	fired := rec.eventsOfType(EventFired)
+	if len(fired) != 1 {
+		t.Fatalf("expected the supervised fault to fire, got %d (%v)", len(fired), rec.eventTypes())
+	}
+	if got := fired[0].Details["count"]; got != 1 {
+		t.Errorf("the fault count must not include declared absences, got %v", got)
+	}
+	if !strings.Contains(rec.lastBody(), "3 absent") {
+		t.Errorf("the denominator must count every absence, not just the faults:\n%s", rec.lastBody())
+	}
+
+	// Once the pair crosses DormantAfter they appear as context in the fault
+	// mail — named, not merely counted — and the subject stays about the fault.
+	w.Check(t0.Add(25 * time.Hour))
+	var faultBody string
+	for _, m := range rec.mails {
+		if strings.Contains(m.subject, "pm-pogo") {
+			faultBody = m.body
+		}
+	}
+	if !strings.Contains(faultBody, "ALSO ABSENT, BY DECLARATION") {
+		t.Errorf("the fault mail must carry the declared set as context:\n%s", faultBody)
+	}
+	for _, want := range []string{"doctor", "representative"} {
+		if !strings.Contains(faultBody, want) {
+			t.Errorf("context section missing %q:\n%s", want, faultBody)
+		}
+	}
+	for _, m := range rec.mails {
+		if strings.Contains(m.subject, "doctor") && strings.Contains(m.subject, "NOT RUNNING") {
+			t.Errorf("a declared absence must never reach a fault subject: %q", m.subject)
+		}
+	}
+}
+
+// TestFaultFingerprintIgnoresDeclaredChurn: a declared absence appearing or
+// clearing must not re-mail a fault roster that did not change. Feeding it into
+// the fingerprint would put the un-clearable set back on the mailing clock by a
+// different route — the same defect, one level over.
+func TestFaultFingerprintIgnoresDeclaredChurn(t *testing.T) {
+	rec := &recorder{}
+	absent := []Finding{supervised("pm-pogo")}
+	src := func(now time.Time) (Snapshot, error) {
+		return Snapshot{Now: now, Configured: 6, Present: 6 - len(absent), Absent: absent}, nil
+	}
+	// RenotifyAfter is pushed past the whole window on purpose: this test is
+	// about the FINGERPRINT, and a 12h renotify firing at the 25h mark would
+	// account for a second mail all by itself and hide what is being measured.
+	w := newTestWatcher(t, rec, src, func(o *Options) { o.RenotifyAfter = 30 * 24 * time.Hour })
+
+	t0 := time.Now().UTC()
+	w.Check(t0)
+	w.Check(t0.Add(16 * time.Minute))
+	if len(rec.mails) != 1 {
+		t.Fatalf("expected the fault announcement, got %d", len(rec.mails))
+	}
+	absent = []Finding{supervised("pm-pogo"), onDemand("doctor")}
+	w.Check(t0.Add(20 * time.Minute))
+	w.Check(t0.Add(25 * time.Hour)) // doctor crosses DormantAfter: one declared notice
+	if len(declaredMails(rec)) != 1 {
+		t.Fatalf("expected 1 declared notice, got %d", len(declaredMails(rec)))
+	}
+	absent = []Finding{supervised("pm-pogo")}
+	w.Check(t0.Add(26 * time.Hour))
+	w.Check(t0.Add(27 * time.Hour))
+
+	var faultMails int
+	for _, m := range rec.mails {
+		if strings.Contains(m.subject, "NOT RUNNING") {
+			faultMails++
+		}
+	}
+	if faultMails != 1 {
+		t.Fatalf("the fault roster never changed, so it must have mailed once; mailed %d\n%v",
+			faultMails, rec.toList())
+	}
+}
+
+// TestEpisodeClosesOverRemainingDeclaredAbsences: the fault cleared, so the
+// episode closes — but "roster complete again" over a machine with two on-demand
+// agents still off is the alarm's own wrong sentence, reassuring instead of
+// alarming. The clear must say what is still absent and why that is fine.
+func TestEpisodeClosesOverRemainingDeclaredAbsences(t *testing.T) {
+	rec := &recorder{}
+	absent := []Finding{supervised("pm-pogo"), onDemand("doctor")}
+	src := func(now time.Time) (Snapshot, error) {
+		return Snapshot{Now: now, Configured: 6, Present: 6 - len(absent), Absent: absent}, nil
+	}
+	w := newTestWatcher(t, rec, src, nil)
+
+	t0 := time.Now().UTC()
+	w.Check(t0)
+	w.Check(t0.Add(25 * time.Hour)) // pm-pogo confirmed; doctor crosses DormantAfter
+	absent = []Finding{onDemand("doctor")}
+	w.Check(t0.Add(26 * time.Hour))
+
+	cleared := rec.eventsOfType(IncidentEpisodeClearedEvent)
+	if len(cleared) != 1 {
+		t.Fatalf("the fault cleared, so the episode must close: got %d (%v)", len(cleared), rec.eventTypes())
+	}
+	var clear string
+	for _, m := range rec.mails {
+		if strings.Contains(m.subject, "roster complete again") {
+			clear = m.body
+		}
+	}
+	if clear == "" {
+		t.Fatal("expected an all-clear mail")
+	}
+	if !strings.Contains(clear, "ALSO ABSENT, BY DECLARATION") || !strings.Contains(clear, "doctor") {
+		t.Errorf("the all-clear must name what is still absent by declaration:\n%s", clear)
+	}
+	if !strings.Contains(clear, "1 absent") {
+		t.Errorf("the all-clear must not claim 0 absent while doctor is off:\n%s", clear)
+	}
+}
+
+// TestAbsentOnDemandCoordinatorStillEscalates is the one rule that survives the
+// partition. If the mailbox this notice goes to is ITSELF the absent on-demand
+// agent, the notice has no reader — and that is not a matter of patience, so it
+// copies EscalateTo on its single firing.
+func TestAbsentOnDemandCoordinatorStillEscalates(t *testing.T) {
+	rec := &recorder{}
+	w := newTestWatcher(t, rec, staticSource(onDemand("mayor")), nil)
+
+	t0 := time.Now().UTC()
+	w.Check(t0)
+	w.Check(t0.Add(25 * time.Hour))
+
+	tos := rec.toList()
+	if !has(tos, DefaultNotifyTo) || !has(tos, DefaultEscalateTo) {
+		t.Fatalf("an absent coordinator must reach both mailboxes even when declared, got %v", tos)
+	}
+	if !strings.Contains(rec.lastBody(), "ESCALATED IMMEDIATELY") {
+		t.Errorf("the escalation must say why:\n%s", rec.lastBody())
+	}
+	d := rec.eventsOfType(EventDeclared)
+	if len(d) != 1 || d[0].Details["coordinator"] != true {
+		t.Fatalf("the declared event must record the coordinator case, got %+v", d)
+	}
+	// And it is still said once: the coordinator rule changes the RECIPIENTS,
+	// not the cadence.
+	w.Check(t0.Add(80 * time.Hour))
+	if len(declaredMails(rec)) != 2 {
+		t.Fatalf("expected 2 mails (one notice to each mailbox) and no repeats, got %d",
+			len(declaredMails(rec)))
+	}
+}
+
+// TestUnclassifiableIsNotDeclared: a prompt we could not read declared nothing.
+// Folding it in with on-demand would buy silence with an unknown, which is the
+// bug this whole lineage exists to stop.
+func TestUnclassifiableIsNotDeclared(t *testing.T) {
+	f := Finding{Name: "garbled", Class: ClassUnclassifiable, Reason: "bad bool"}
+	if f.Declared() {
+		t.Fatal("an unreadable prompt declared nothing and must not be treated as a declaration")
+	}
+	if !onDemand("doctor").Declared() {
+		t.Fatal("auto_start = false IS the declaration")
+	}
+	if supervised("pm-pogo").Declared() {
+		t.Fatal("auto_start = true is a desired state, not a declared absence")
+	}
+	faults, declared := partition([]Finding{onDemand("doctor"), f, supervised("pm-pogo")})
+	if len(faults) != 2 || len(declared) != 1 || declared[0].Name != "doctor" {
+		t.Fatalf("partition = faults %v, declared %v", names(faults), names(declared))
+	}
+}
+
+// TestEpisodeClosedByReclassificationDoesNotClaimRestoration. Editing an absent
+// agent's frontmatter to `auto_start = false` is a plausible response to this
+// very alarm, and it closes the episode without anything starting. Calling that
+// "Restored" would put the un-clearable sentence back in the mail with its sign
+// flipped — a reassurance about an agent that is still off.
+func TestEpisodeClosedByReclassificationDoesNotClaimRestoration(t *testing.T) {
+	rec := &recorder{}
+	absent := []Finding{supervised("doctor")}
+	src := func(now time.Time) (Snapshot, error) {
+		return Snapshot{Now: now, Configured: 6, Present: 6 - len(absent), Absent: absent}, nil
+	}
+	w := newTestWatcher(t, rec, src, nil)
+
+	t0 := time.Now().UTC()
+	w.Check(t0)
+	w.Check(t0.Add(16 * time.Minute))
+	if len(rec.mails) != 1 {
+		t.Fatalf("expected the supervised alarm, got %d", len(rec.mails))
+	}
+
+	// The operator flips auto_start to false. doctor is still absent — and only
+	// 20 minutes in, so it is nowhere near DormantAfter and is confirmed in
+	// NEITHER set. This is the window a confirmed-set-only check would miss.
+	absent = []Finding{onDemand("doctor")}
+	w.Check(t0.Add(20 * time.Minute))
+
+	clear := rec.mails[len(rec.mails)-1]
+	if strings.Contains(clear.subject, "roster complete again") {
+		t.Errorf("nothing was restored, so nothing may claim a complete roster: %q", clear.subject)
+	}
+	if !strings.Contains(clear.subject, "closed by DECLARATION") {
+		t.Errorf("the close must say how it closed: %q", clear.subject)
+	}
+	if strings.Contains(clear.body, "Restored:") {
+		t.Errorf("doctor never came back:\n%s", clear.body)
+	}
+	if !strings.Contains(clear.body, "STILL ABSENT") {
+		t.Errorf("the close must say the agent is still off:\n%s", clear.body)
+	}
+	if strings.Contains(clear.body, "pogod should be running this") {
+		t.Errorf("the reclassified member must render in its CURRENT class:\n%s", clear.body)
+	}
+	if !strings.Contains(clear.body, "1 absent") {
+		t.Errorf("the denominator must still count it:\n%s", clear.body)
+	}
+	// The episode is closed, so the un-clearable state is gone: no further mail
+	// however long doctor stays off.
+	before := len(rec.mails)
+	for _, d := range []time.Duration{25 * time.Hour, 60 * time.Hour, 200 * time.Hour} {
+		w.Check(t0.Add(d))
+	}
+	// Exactly one more: doctor's own one-time declared notice past DormantAfter.
+	if len(rec.mails) != before+1 {
+		t.Fatalf("expected exactly one further mail (the declared notice), got %d",
+			len(rec.mails)-before)
+	}
+	if len(declaredMails(rec)) != 1 {
+		t.Fatalf("expected 1 declared notice, got %d", len(declaredMails(rec)))
+	}
+}
