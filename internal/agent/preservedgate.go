@@ -143,6 +143,18 @@ func (r *Registry) getPreservedWorktreeGate() PreservedWorktreeGate {
 // a preserved tree is on no branch, in no stash and on no remote: that tree is
 // its only copy anywhere on the machine.
 //
+// # The read-it-first list LEADS WITH LIVENESS (drellem2/pogo#167)
+//
+// The list used to name `git status`, `git log --not --remotes` and `pogo gc
+// --list-preserved` — three instruments that describe a tree's CONTENTS and
+// none that says whether somebody is still standing in it. Read in that order,
+// a live polecat's tree presents exactly as abandoned residue: dirty, on a
+// branch, holding files that exist nowhere else. Every disposition the message
+// then offers is wrong for it, and the one an operator reaches for — override
+// and re-dispatch — is the destructive one. So `pogo agent list` and the item's
+// own claim come first, and the sentence says why they change what the rest
+// means rather than merely appending two more commands to run.
+//
 // IT DOES NOT PRESCRIBE `refinery submit`, unlike the stranded-work refusal.
 // For the uncommitted population there is nothing to submit; for the committed
 // one the refinery merges origin/<branch> and REFUSES a branch that is not on
@@ -202,7 +214,11 @@ func (r *Registry) preservedWorktreeRefusal(workItemID, repo, target string) str
 	return head + ". A polecat spawned now gets a FRESH worktree and cannot see any of it, so it " +
 		"re-derives work that already exists — and the original is destroyed by the next gc reap. " +
 		"DO NOT remove the worktree to clear this: nothing else on this machine holds it. " +
-		"Read it first (`git -C " + t.Path + " status`; `git -C " + t.Path +
+		"Read it first — starting with WHETHER ANYONE IS STILL IN IT (`pogo agent list` names every " +
+		"live worker; `mg show " + workItemID + "` names the claim and the pid holding it), because " +
+		"a tree with a live polecat in it is not preserved residue to dispose of, it is work in " +
+		"progress, and there is nothing to decide until that worker is stopped " +
+		"(drellem2/pogo#167) — then the tree itself (`git -C " + t.Path + " status`; `git -C " + t.Path +
 		" log --oneline HEAD --not --remotes` for the commits that never left this box — that " +
 		"one is a SHA test, so it can list a commit this gate already cleared as having landed by " +
 		"rebase; `pogo gc " +

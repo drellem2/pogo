@@ -1514,6 +1514,34 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Live-owner gate: refuse to put a SECOND worker on a name or a work item a
+	// live polecat already holds (drellem2/pogo#167). FIRST of the conflict
+	// gates, and non-overridable — both deliberate, and both for the same
+	// reason. See liveownergate.go for the whole argument.
+	//
+	// First, because the gates below it can be overridden, and three of those
+	// overrides are reached exactly when a live polecat is standing in the tree:
+	// --preserved-override is typed at a message about a retained worktree,
+	// --stranded-override at a message about an unmerged branch, and both
+	// describe residue rather than a running worker. An operator who clears one
+	// of those has cleared a gate about work that was LEFT BEHIND, not
+	// permission to dispatch over work in progress — so the non-overridable
+	// answer has to be the one they meet first, or a flag aimed at a different
+	// question silently carries past it.
+	//
+	// 409 like the gates below: the request conflicts with the fleet's own
+	// state, and retrying it unchanged is refused identically until the live
+	// worker is stopped. Ahead of every side effect (the mg-ef80 rule), which
+	// here is not tidiness — the side effects on this path are what destroy the
+	// live worker's tree.
+	//
+	// Fails CLOSED on a witness it cannot read, alone among these gates; the
+	// rationale is on liveOwnerRefusal.
+	if refusal := r.liveOwnerRefusal(spawnReq.Name, spawnReq.Id); refusal != "" {
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+		return
+	}
+
 	// Dispatch gate: refuse to put a worker on a work item whose assignee gates
 	// it away from automatic execution — "human" (a person must do this by hand)
 	// or "parked" (deliberately set aside). This is the mg-4798 ruling: the rule
@@ -2078,6 +2106,39 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		// delete on the failure path below.
 		branchPreexisted := polecatBranchExists(sourceRepo, branchName)
 
+		// And whether the DIRECTORY exists now, for the same reason and with a
+		// sharper consequence (drellem2/pogo#167). `git worktree add` refuses a
+		// path that is already there, so a directory here means the add below
+		// will fail — and the rollback for that failure force-removes this
+		// path. A directory this spawn did not create is not ours to destroy:
+		// the shape that produces one is a LIVE polecat whose name is being
+		// reused, whose tree holds uncommitted files that exist nowhere else.
+		//
+		// The live-owner gate above refuses that dispatch before it reaches
+		// here, so this is the second of two guards rather than the only one —
+		// deliberately, because the gate reads liveness (registry and witness)
+		// and this reads the filesystem, and the population neither of them
+		// alone covers is real: an ORPHAN directory left by a pogod that died
+		// mid-spawn (gh #31) is invisible to the gate, and a polecat whose tree
+		// is not where its name says is invisible to this.
+		dirPreexisted := false
+		if _, err := os.Stat(worktreeDir); err == nil {
+			dirPreexisted = true
+			log.Printf("polecat %s: %s already exists before `git worktree add` — this spawn will "+
+				"not create it and must not remove it on failure (drellem2/pogo#167)",
+				spawnReq.Name, worktreeDir)
+		} else if !os.IsNotExist(err) {
+			// Could not look. Treat that as pre-existing: the only thing a
+			// "this is ours" answer authorises is DESTRUCTION, so "I could not
+			// establish it" must not be spendable as permission. A stat failure
+			// here also means the add is about to fail for the same underlying
+			// reason.
+			dirPreexisted = true
+			log.Printf("polecat %s: cannot stat %s (%v) — treating it as pre-existing, so a failed "+
+				"spawn will leak it rather than remove a directory it could not examine",
+				spawnReq.Name, worktreeDir, err)
+		}
+
 		wtArgs := []string{"-C", sourceRepo, "worktree", "add", worktreeDir, "-b", branchName}
 		if baseRef != "" {
 			wtArgs = append(wtArgs, baseRef)
@@ -2092,8 +2153,15 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			// one did not (mg-d22a). Roll back only the branch we created:
 			// deleting a branch that appeared underneath us would destroy a
 			// concurrent spawn's work.
+			//
+			// And roll back the DIRECTORY only if this spawn created it. The
+			// add just failed, and the commonest reason it fails is that the
+			// path is already occupied — so this is the one call site where
+			// "the tree was made moments ago and no agent ran in it" can be
+			// false, and where it is false it is false because a live polecat
+			// is standing in it (drellem2/pogo#167).
 			if !branchPreexisted {
-				cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
+				cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName, !dirPreexisted)
 			}
 			failPolecatSpawn(w, spawnReq, http.StatusInternalServerError,
 				fmt.Sprintf("worktree creation failed: %v\n%s", err, out))
@@ -2109,7 +2177,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			if err := verifyAdoption(sourceRepo, adoption.BaseRef(), branchName); err != nil {
 				os.Remove(promptFile)
 				if !branchPreexisted {
-					cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
+					cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName, worktreeDirIsOurs)
 				}
 				failPolecatSpawn(w, spawnReq, http.StatusInternalServerError, err.Error())
 				return
@@ -2135,7 +2203,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	})
 	if cmdErr != nil {
 		os.Remove(promptFile)
-		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
+		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName, worktreeDirIsOurs)
 		failPolecatSpawn(w, spawnReq, http.StatusInternalServerError, fmt.Sprintf("agent command template error: %v", cmdErr))
 		return
 	}
@@ -2149,7 +2217,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		expanded, err := ExpandString(tmplMeta.NudgeOnStart, vars)
 		if err != nil {
 			os.Remove(promptFile)
-			cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
+			cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName, worktreeDirIsOurs)
 			failPolecatSpawn(w, spawnReq, http.StatusInternalServerError, fmt.Sprintf("nudge_on_start template error: %v", err))
 			return
 		}
@@ -2183,7 +2251,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	claimVerdict, claimRefusal := r.claimForSpawn(spawnReq)
 	if claimRefusal != "" {
 		os.Remove(promptFile)
-		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
+		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName, worktreeDirIsOurs)
 		failPolecatSpawn(w, spawnReq, http.StatusConflict, claimRefusal)
 		return
 	}
@@ -2220,7 +2288,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	})
 	if err != nil {
 		os.Remove(promptFile) // Clean up temp file on spawn failure
-		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName)
+		cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName, worktreeDirIsOurs)
 		// The only failure path after the claim, and therefore the only one that
 		// has to give it back. A claim left behind here would strand the item in
 		// claimed/ with no worker on it — dispatch skips claimed items and
@@ -2376,6 +2444,16 @@ func emitPolecatPreservedOverridden(spawnReq SpawnPolecatAPIRequest, reason, ref
 	})
 }
 
+// The two answers to cleanupFailedPolecatSpawn's dirIsOurs, named so the claim
+// is legible at the call site rather than a bare true/false a reader has to
+// resolve against the signature. It is a claim about THIS spawn attempt, not
+// about the directory's contents: "ours" means this handler's own `git worktree
+// add` created it and is known to have succeeded.
+const (
+	worktreeDirIsOurs     = true
+	worktreeDirPreexisted = false
+)
+
 // cleanupFailedPolecatSpawn undoes the git side effects of a polecat spawn
 // that failed after its worktree was created: it removes the worktree and
 // deletes the polecat-<name> branch that `git worktree add -b` made. Without
@@ -2399,16 +2477,53 @@ func emitPolecatPreservedOverridden(spawnReq SpawnPolecatAPIRequest, reason, ref
 //
 // The distinguishing fact is whether an agent ever executed in the worktree,
 // not the dirtiness of the tree, which is why the rule cannot be shared.
-func cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName string) {
+//
+// # THE INVARIANT IS NOW TESTED RATHER THAN ASSUMED (drellem2/pogo#167)
+//
+// "`git worktree add` created this tree moments ago" is the load-bearing
+// sentence above, and until this fix nothing established it. The function took
+// a path and force-removed whatever was there. On the ONE call site where the
+// sentence can be false — the rollback for a `git worktree add` that FAILED,
+// which is the path a directory already at that location produces — the
+// directory it destroyed was, by construction, one this spawn did not create.
+// Reached with a live polecat standing in it (its name reused, or its branch
+// reclaimed out from under it by the branch-name liveness proxy), that removed
+// the running worker's uncommitted files, which are on no branch, in no stash
+// and on no remote.
+//
+// So the caller now states the fact instead: dirIsOurs is true only where this
+// spawn's own `git worktree add` is known to have succeeded. Where it is false
+// the directory is LEFT BEHIND and the leak is logged with its path. That
+// direction was chosen deliberately over the alternative it re-opens — gh #31,
+// the orphan directory the --force was added for. A leaked directory is
+// visible, recoverable and costs disk; the alternative is unrecoverable and
+// silent, and the two are not comparable losses.
+//
+// The branch rollback is unaffected either way. `git branch -D` refuses a
+// branch checked out in another worktree, and the only call site that can see a
+// foreign directory already guards the branch deletion on branchPreexisted.
+func cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName string, dirIsOurs bool) {
 	if worktreeDir == "" {
 		return
 	}
-	exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
-	// Backstop: if git refused (e.g. files created after checkout) or the
-	// worktree was never registered, reclaim the directory anyway so no
-	// orphan is left behind (gh #31).
-	if err := os.RemoveAll(worktreeDir); err != nil {
-		log.Printf("polecat spawn cleanup: failed to remove worktree dir %s: %v", worktreeDir, err)
+	if !dirIsOurs {
+		// Not ours to destroy, and NOT silently skipped: an operator has to be
+		// able to find and reclaim it, which means the path has to be in the log
+		// at the moment it is orphaned rather than inferred later from a
+		// directory listing.
+		log.Printf("polecat spawn cleanup: LEAKING the directory %s — it existed before this spawn "+
+			"attempt, so this spawn did not create it and cannot show it is not a live polecat's "+
+			"worktree. Nothing under it was touched. Establish who owns it (`pogo agent list`; "+
+			"`git -C %s status`) and reclaim it by hand once nobody is working in it "+
+			"(drellem2/pogo#167)", worktreeDir, worktreeDir)
+	} else {
+		exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
+		// Backstop: if git refused (e.g. files created after checkout) or the
+		// worktree was never registered, reclaim the directory anyway so no
+		// orphan is left behind (gh #31).
+		if err := os.RemoveAll(worktreeDir); err != nil {
+			log.Printf("polecat spawn cleanup: failed to remove worktree dir %s: %v", worktreeDir, err)
+		}
 	}
 	if branchName != "" {
 		if out, err := exec.Command("git", "-C", sourceRepo, "branch", "-D", branchName).CombinedOutput(); err != nil {
@@ -2426,24 +2541,76 @@ func polecatBranchExists(repo, branch string) bool {
 		"refs/heads/"+branch).Run() == nil
 }
 
-// polecatBranchWorktree returns the path of the worktree that has branch
-// checked out, or "" if no worktree does. A branch with a worktree belongs to
-// a live polecat; a branch without one is a leftover.
-func polecatBranchWorktree(repo, branch string) string {
-	out, err := exec.Command("git", "-C", repo, "worktree", "list", "--porcelain").Output()
+// polecatBranchHolder names the worktrees that stand between a polecat branch
+// and its deletion. The two fields are DIFFERENT FACTS and neither implies the
+// other — which is the whole of drellem2/pogo#167.
+type polecatBranchHolder struct {
+	// OwnerTree is the worktree that OWNS the branch's polecat name: the tree
+	// whose directory basename is the "polecat-" suffix, whatever is checked
+	// out inside it. This is the fact that answers "is a polecat for this work
+	// item still live".
+	OwnerTree string
+	// CheckedOutAt is the worktree that has the branch checked out, if any.
+	// Usually the same tree as OwnerTree and occasionally some unrelated
+	// checkout; `git branch -D` refuses it either way, so a refusal that names
+	// it is strictly better than the git error the caller would otherwise
+	// surface.
+	CheckedOutAt string
+}
+
+// polecatBranchHolders reports both, from one `git worktree list`.
+//
+// # Why OwnerTree exists and why it is the load-bearing one (drellem2/pogo#167)
+//
+// This lookup used to ask ONLY which worktree had the branch checked out, and
+// treated an empty answer as "no live polecat". That is the identical defect
+// gh #94 reported against gitgc's sweep, one caller over, and gitgc's fix was
+// never carried here: the branch is a fact about what a polecat is WORKING ON,
+// the path is a fact about WHOSE TREE THIS IS, and they disagree the moment a
+// polecat checks out a foreign branch — which our own shipped review and QA
+// roles are instructed to do. When they disagree, the live polecat is invisible:
+// its polecat-<name> branch reads as an unowned leftover, the spent test finds
+// nothing unmerged on it, and it is deleted. The `git worktree add` that follows
+// then fails on the occupied path, and the rollback for THAT failure removed the
+// live tree.
+//
+// So the ownership question is answered by gitgc.PolecatNameForWorktree — the
+// same predicate gh #94's fix installed in the sweep, called rather than
+// restated, so the two callers of one rule cannot drift.
+//
+// CheckedOutAt is retained beside it, and that is not an OR re-admitting the bad
+// signal (gitgc.PolecatNameForWorktree's doc warns against exactly that). There,
+// the question is "may I delete this DIRECTORY", which only the path answers.
+// Here the question is "may I delete this BRANCH", and being checked out
+// anywhere is an independent, separately-fatal reason not to — `git branch -D`
+// will refuse it — so reporting it produces a refusal that names its cause
+// instead of git's.
+//
+// A read failure is an ERROR, not an empty answer. The caller deletes a branch
+// on the strength of this, and "I could not look" must not be spendable as "no
+// one is there".
+func polecatBranchHolders(repo, branch string) (polecatBranchHolder, error) {
+	var h polecatBranchHolder
+	name := strings.TrimPrefix(branch, gitgc.BranchPrefix)
+	worktrees, err := gitgc.ListWorktrees(repo)
 	if err != nil {
-		return ""
+		return h, err
 	}
-	var wt string
-	for _, line := range strings.Split(string(out), "\n") {
-		switch {
-		case strings.HasPrefix(line, "worktree "):
-			wt = strings.TrimPrefix(line, "worktree ")
-		case line == "branch refs/heads/"+branch:
-			return wt
+	for _, wt := range worktrees {
+		if wt.Branch == branch && h.CheckedOutAt == "" {
+			h.CheckedOutAt = wt.Path
+		}
+		if wt.Main || wt.Bare {
+			// The primary checkout is never a polecat's tree, and its basename
+			// is the repo's — which would collide with a polecat named after
+			// the repo. Ownership is asked of polecat trees only.
+			continue
+		}
+		if name != "" && name != branch && gitgc.PolecatNameForWorktree(wt.Path) == name && h.OwnerTree == "" {
+			h.OwnerTree = wt.Path
 		}
 	}
-	return ""
+	return h, nil
 }
 
 // polecatBranchIsSpent reports whether every commit on branch is already
@@ -2475,19 +2642,44 @@ func polecatBranchIsSpent(repo, branch, baseRef string) bool {
 // provably spent — no worktree, and no commits absent from baseRef. The two
 // refusals are the cases where deleting would destroy something:
 //
-//   - checked out in a worktree: a live polecat owns it.
+//   - owned by a live polecat's worktree: the tree named after this branch's
+//     polecat exists, whatever is checked out inside it (drellem2/pogo#167).
+//   - checked out in a worktree: something is standing on the ref.
 //   - carries unmerged commits: real work nobody has merged.
 //
-// Both return an error naming the recovery, so the caller sees why the item is
-// undispatchable instead of git's misleading "a branch named X already exists",
-// which names nothing about the actual cause.
+// All three return an error naming the recovery, so the caller sees why the item
+// is undispatchable instead of git's misleading "a branch named X already
+// exists", which names nothing about the actual cause.
+//
+// THE FIRST TWO USED TO BE ONE CHECK, and collapsing them is what made a live
+// polecat invisible here: a worker on a foreign branch owns polecat-<name>
+// without having it checked out, so the checked-out test returned nothing and
+// the branch was deleted out from under it. See polecatBranchHolders.
 func reclaimStalePolecatBranch(repo, branch, baseRef string) error {
 	if !polecatBranchExists(repo, branch) {
 		return nil
 	}
-	if wt := polecatBranchWorktree(repo, branch); wt != "" {
+	holder, err := polecatBranchHolders(repo, branch)
+	if err != nil {
+		// Fails CLOSED, like polecatBranchIsSpent below and for its reason: the
+		// next statement in this function deletes a branch, and the cost of a
+		// wrong "nobody is there" is destroyed work.
+		return fmt.Errorf("cannot establish whether a polecat still owns branch %s: %v. Refusing to "+
+			"reclaim it — an unreadable worktree list is not an empty one, and this check is the only "+
+			"thing standing between a live worker's branch and `git branch -D`. Fix the repo at %s "+
+			"(`git -C %s worktree list`) and re-dispatch", branch, err, repo, repo)
+	}
+	if holder.OwnerTree != "" {
+		return fmt.Errorf("branch %s is owned by the worktree at %s: a polecat for this work item is "+
+			"still live — that tree is named after it, whether or not the branch is what is checked "+
+			"out inside (a worker on a review or QA branch owns its name just the same). "+
+			"Stop it before re-dispatching (`pogo agent list`, then `pogo agent stop %s`); do NOT "+
+			"remove the worktree to clear this, its uncommitted files exist nowhere else",
+			branch, holder.OwnerTree, gitgc.PolecatNameForWorktree(holder.OwnerTree))
+	}
+	if holder.CheckedOutAt != "" {
 		return fmt.Errorf("branch %s is checked out at %s: a polecat for this work item is still live. "+
-			"Stop it before re-dispatching", branch, wt)
+			"Stop it before re-dispatching", branch, holder.CheckedOutAt)
 	}
 	// resolvePolecatBaseRef returns "" to mean "base on local HEAD"; use the
 	// same ref here so the spent test is asked against the commit the worktree
