@@ -360,9 +360,14 @@ func TestCherryLandingCasesAreDocumented(t *testing.T) {
 		// TestCherry_ContextWindowBitesTheRebaseMergePathToo is the
 		// measurement; this is the sentence it licenses.
 		"only when `main` has\nnot moved inside the hunk's three-line context window",
-		// Row 4 of the disposition table closes a PR and is reachable from a
-		// `+`, so the table's safety claim has to name it.
-		"**Row 4 is not**",
+		// The disposition row that closes a PR is reachable from a `+`, so the
+		// table's safety claim has to name it. Keyed on the row's NAME rather
+		// than its number since mg-1f04: that change inserted a row in the
+		// middle of the table, at which point every number in the paragraph
+		// pointed at the wrong row and only this guard noticed. The claim being
+		// pinned is unchanged — the unsafe row must still be called out by the
+		// sentence a reader acts on.
+		"**Superseded is not** — it closes a PR",
 		// The test file itself, so a reader can re-run the measurement.
 		"internal/gitgc/cherrylanding_test.go",
 	} {
