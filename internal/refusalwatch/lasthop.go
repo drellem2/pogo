@@ -162,7 +162,22 @@ func ProbeLastHop() ProbeResult {
 		return res
 	}
 
-	now := time.Now().UTC()
+	// TRUNCATED TO THE SECOND, AND THIS IS NOT TIDINESS.
+	//
+	// The deployed reader parses an episode record's timestamps with Python
+	// 3.9's datetime.fromisoformat, which accepts a fractional second of 3 or 6
+	// digits and NOTHING ELSE, while Go's RFC3339Nano trims trailing zeros and
+	// so emits every width from 0 to 6. Measured over all 10^6 microsecond
+	// values: 6 digits 900,000, 5 digits 90,000, 4 digits 9,000, 3 digits 900,
+	// 2 digits 90, 1 digit 9, none 1 — so 99,099 of them, 9.91%, do not parse.
+	// A record that does not parse is dropped, and that episode's coalescing is
+	// silently dead for the whole burst.
+	//
+	// Truncating here makes this probe deterministic instead of failing one run
+	// in ten. It is NOT hiding the defect: arm E below constructs the failing
+	// width on purpose and asserts what the reader does with it. See
+	// docs/operations.md and the successor item filed off mg-d788.
+	now := time.Now().UTC().Truncate(time.Second)
 	alarm := probeAlarm(now)
 
 	// ---------------- ARM A: the last hop, in the condition it must survive.
@@ -194,7 +209,7 @@ func ProbeLastHop() ProbeResult {
 		res.Blind = err.Error()
 		return res
 	}
-	res.Arms = append(res.Arms, ProbeArm{
+	res.Arms = append(res.Arms, withTranscript(ProbeArm{
 		Name: fmt.Sprintf("the alarm lands in a maildir already holding %d messages and the REAL notifier raises it", lastHopBacklog),
 		Want: "exactly 1 notification, titled with the alarm's subject",
 		Got:  describeNotifications(notesA, "FLEET STOPPED"),
@@ -202,7 +217,7 @@ func ProbeLastHop() ProbeResult {
 		Detail: "mg-6f3d confirmed the bytes reach the directory; this is the hop after that. " +
 			"A backlog does not suppress the alarm because the notifier keys on its own seen-set, " +
 			"not on how full the directory is.",
-	})
+	}, runA))
 
 	// ---------------- ARM B: the deadman's gate, as a matched control.
 	//
@@ -236,14 +251,14 @@ func ProbeLastHop() ProbeResult {
 	} else {
 		gotB += " and held unseen for a later cycle"
 	}
-	res.Arms = append(res.Arms, ProbeArm{
+	res.Arms = append(res.Arms, withTranscript(ProbeArm{
 		Name: fmt.Sprintf("CONTROL: an alarm younger than the deadman's %ds gate raises nothing YET, and is not consumed", DeadmanMinAgeSeconds),
 		Want: "0 notifications, and the message still unseen",
 		Got:  gotB,
 		OK:   len(notesB) == 0 && seenErr == nil && !heldB,
 		Detail: "if this arm goes green by marking the message seen, the alarm is dropped rather than " +
 			"held, and arm A is green only for alarms that happen to be old enough on their first cycle",
-	})
+	}, runB))
 
 	// ---------------- ARM C: distinguishable INSIDE a burst.
 	//
@@ -282,7 +297,7 @@ func ProbeLastHop() ProbeResult {
 	}
 	ownC := ownBanner(notesC, "FLEET STOPPED")
 	groupedC := countGroups(notesC)
-	res.Arms = append(res.Arms, ProbeArm{
+	res.Arms = append(res.Arms, withTranscript(ProbeArm{
 		Name: fmt.Sprintf("the alarm arrives in the same cycle as a %d-message watcher burst the notifier COALESCES", len(burstPaths)),
 		Want: "the burst collapses to 1 group banner and the alarm keeps its OWN",
 		Got: fmt.Sprintf("%d banner(s), %d of them a coalesced group; the alarm's own banner is %s",
@@ -292,7 +307,7 @@ func ProbeLastHop() ProbeResult {
 			"Its top rank is reachable only by a reply to a request verified to come from human/daniel, " +
 			"which an unprompted alarm never is — so the alarm is distinguishable but not privileged. " +
 			"That is the notifier's design, recorded, not a failure of this delivery.",
-	})
+	}, runC))
 
 	// ---------------- ARM D: the control that makes ARM C mean something.
 	//
@@ -328,7 +343,7 @@ func ProbeLastHop() ProbeResult {
 		return res
 	}
 	ownD := ownBanner(notesD, "FLEET STOPPED")
-	res.Arms = append(res.Arms, ProbeArm{
+	res.Arms = append(res.Arms, withTranscript(ProbeArm{
 		Name: "CONTROL: the SAME alarm sent from inside the burst's roster IS swallowed by the grouping",
 		Want: "no banner of its own — coalescing demonstrably fires",
 		Got:  fmt.Sprintf("%d banner(s); the alarm's own banner is %s", len(notesD), presence(ownD)),
@@ -337,9 +352,74 @@ func ProbeLastHop() ProbeResult {
 			"instrument goes green because it cannot see rather than because there is nothing to see. " +
 			"It also names the real hazard: the alarm escapes grouping because pogod is in no episode " +
 			"roster, and nothing enforces that.",
-	})
+	}, runD))
+
+	// ---------------- ARM E: the width the emitter really produces one time in ten.
+	//
+	// pogod stamps opened_at/closed_at with Go's RFC3339Nano, which trims
+	// trailing zeros; the deployed reader parses them with Python 3.9's
+	// fromisoformat, which takes 3 or 6 fractional digits and nothing else.
+	// Measured over all 10^6 microsecond values, 9.91% of emitted records carry
+	// a width it rejects. This arm builds one of them (4 digits) and asserts what
+	// the reader then does — because the consequence, not the parse, is what
+	// matters to an alarm: the record is dropped, that episode's coalescing is
+	// silently dead, and every message pages on its own. The alarm is STILL
+	// raised. The fragility degrades toward noise, never toward silence, and that
+	// is the whole reason it is reported here rather than treated as a red gate.
+	runE, err := newLastHopRun(dir, "unparseable", bin, binDir)
+	if err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	burstE, err := runE.seedBurst(burstSenders, 3, now)
+	if err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	alarmE, err := runE.deliver(alarm, "pogod")
+	if err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	if err := runE.writeEpisodeFrac("ep-lasthop", burstSenders, now, ".1234"); err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	if err := backdateAll(append(burstE, alarmE), now.Add(-time.Hour)); err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	notesE, err := runE.poll()
+	if err != nil {
+		res.Blind = err.Error()
+		return res
+	}
+	ownE := ownBanner(notesE, "FLEET STOPPED")
+	res.Arms = append(res.Arms, withTranscript(ProbeArm{
+		Name: "CONTROL: an episode record whose fractional second the reader CANNOT parse (9.91% of what pogod emits) drops the grouping, and the alarm is still raised",
+		Want: fmt.Sprintf("no group banner, %d individual banners, the alarm among them", len(burstE)+1),
+		Got: fmt.Sprintf("%d banner(s), %d of them a coalesced group; the alarm's own banner is %s",
+			len(notesE), countGroups(notesE), presence(ownE)),
+		OK: ownE && countGroups(notesE) == 0 && len(notesE) == len(burstE)+1,
+		Detail: "Go's RFC3339Nano trims trailing zeros and emits every fractional width 0..6; Python 3.9's " +
+			"datetime.fromisoformat accepts 3 or 6 and nothing else. Over all 10^6 microsecond values that is " +
+			"900,000 at 6 digits and 900 at 3 against 99,099 that are rejected. The reader DEGRADES TO SAFE — " +
+			"it pages each message rather than hiding any — so this is a noise defect, not a silence one, and " +
+			"the fix belongs in pogo-reminders' parse_ts, not here.",
+	}, runE))
 
 	return res
+}
+
+// withTranscript appends the notifier's own account to an arm that missed. A
+// green arm does not carry it: the transcript is evidence for a failure, and
+// pasting it into every pass is how a report stops being read.
+func withTranscript(a ProbeArm, r *lastHopRun) ProbeArm {
+	if a.OK || r == nil || r.transcript == "" {
+		return a
+	}
+	a.Detail = strings.TrimSpace(a.Detail + "\n         the notifier's own account: " + r.transcript)
+	return a
 }
 
 // lastHopRun is one throwaway store plus the environment the notifier runs in.
@@ -350,8 +430,12 @@ type lastHopRun struct {
 	notifyLog string
 	events    string
 	home      string
-	bin       string // mg
-	binDir    string // staged notifier + stub notify.sh
+	// transcript is the notifier's own combined output from the last poll. A
+	// missed arm carries it, because "0 groups" is a symptom and the plan lines
+	// on stderr are the notifier saying why.
+	transcript string
+	bin        string // mg
+	binDir     string // staged notifier + stub notify.sh
 }
 
 func newLastHopRun(dir, name, bin, binDir string) (*lastHopRun, error) {
@@ -436,16 +520,28 @@ func (r *lastHopRun) seedBurst(senders []string, each int, now time.Time) ([]str
 // same constant the emitter uses via docs; a drift there makes grouping silently
 // dead, which is what ARM D would catch.
 func (r *lastHopRun) writeEpisode(id string, roster []string, now time.Time) error {
+	return r.writeEpisodeFrac(id, roster, now, "")
+}
+
+// writeEpisodeFrac writes the same record with a chosen fractional-second suffix
+// on the window bounds, so a caller can construct a width the reader rejects.
+func (r *lastHopRun) writeEpisodeFrac(id string, roster []string, now time.Time, frac string) error {
+	stamp := func(t time.Time) string {
+		if frac == "" {
+			return t.Format(time.RFC3339Nano)
+		}
+		return t.Format("2006-01-02T15:04:05") + frac + "Z"
+	}
 	rec := map[string]any{
 		"event_type": "incident_episode_cleared",
 		"agent":      "pogod",
-		"timestamp":  now.Format(time.RFC3339Nano),
+		"timestamp":  stamp(now),
 		"details": map[string]any{
 			"kind":       "auth",
 			"episode_id": id,
 			"roster":     roster,
-			"opened_at":  now.Add(-2 * time.Hour).Format(time.RFC3339Nano),
-			"closed_at":  now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
+			"opened_at":  stamp(now.Add(-2 * time.Hour)),
+			"closed_at":  stamp(now.Add(-1 * time.Minute)),
 		},
 	}
 	blob, err := json.Marshal(rec)
@@ -487,7 +583,9 @@ func (r *lastHopRun) poll() ([]notification, error) {
 		"TITLE_PREFIX=[UNPROCESSED] ",
 		"NOTIFY_LOG="+r.notifyLog,
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	r.transcript = notifierTranscript(string(out))
+	if err != nil {
 		return nil, fmt.Errorf("the notifier exited non-zero, so nothing it did can be read as a verdict: %w\n%s", err, out)
 	}
 	return readNotifications(r.notifyLog)
@@ -587,6 +685,26 @@ func countGroups(notes []notification) int {
 		}
 	}
 	return n
+}
+
+// notifierTranscript keeps the lines that say what the notifier DECIDED and drops
+// the per-cycle breadcrumbs, so a missed arm carries an explanation rather than a
+// wall of "poll cycle".
+func notifierTranscript(out string) string {
+	var keep []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" || strings.Contains(line, "poll cycle") {
+			continue
+		}
+		if strings.Contains(line, "New mail:") {
+			continue
+		}
+		keep = append(keep, strings.TrimSpace(line))
+	}
+	if len(keep) == 0 {
+		return "(the notifier said nothing beyond its per-cycle breadcrumbs)"
+	}
+	return strings.Join(keep, " ⏎ ")
 }
 
 func describeNotifications(notes []notification, marker string) string {
