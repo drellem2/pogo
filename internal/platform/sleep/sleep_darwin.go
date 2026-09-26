@@ -211,6 +211,14 @@ func isUserWakeLine(line string) bool {
 	if strings.HasPrefix(line, "Timestamp ") {
 		return false
 	}
+	// The stream's FIRST line echoes the predicate itself —
+	//   Filtering the log data using "composedMessage CONTAINS[c] "Wake reason:""
+	// — so it carries the marker below and, unfiltered, nudged the heartbeat
+	// on every pogod boot on darwin and never on Linux (mg-18b3). Real
+	// events begin with a timestamp, so the prefix cannot shadow one.
+	if strings.HasPrefix(line, "Filtering the log data") {
+		return false
+	}
 	// Self-reference: every `log` invocation is itself logged by the
 	// unified log along with its argv, which contains our predicate text
 	// and therefore matches the predicate. The `log` tool tags these

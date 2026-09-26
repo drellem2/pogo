@@ -87,7 +87,8 @@ func bootLifecycle(startedAt time.Time) *lifecycle {
 	// no OnTick, so the loop's first write lands one full interval (~30s) after
 	// start: a daemon killed inside that window left no beat, and the next boot
 	// either had no bound on its death or — worse — reported an EARLIER run's
-	// beat as its last one. On darwin a spurious wake nudge at startup hid the
+	// beat as its last one. On darwin a spurious wake nudge at startup (the
+	// `log stream` predicate banner, since filtered by mg-18b3) hid the
 	// window; on a Linux runner it was the whole of a SIGKILL test (mg-e71d).
 	// The periodic tick (main's hb.OnTick) keeps it fresh from here, and owns
 	// the write-failure condition; a failure here is only logged.

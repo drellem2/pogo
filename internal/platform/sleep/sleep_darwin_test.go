@@ -39,9 +39,12 @@ func TestIsUserWakeLine_Recognized(t *testing.T) {
 // (feedback-loop guard), and unrelated lines.
 func TestIsUserWakeLine_Rejected(t *testing.T) {
 	cases := map[string]string{
-		"empty":                     "",
-		"banner":                    "Timestamp                       Thread     Type        Activity             PID    TTL  ",
-		"self-reference (log show)": `2026-05-03 17:43:37.519139+0100 0xca5c279  Default     0x0                  32899  0    log: [com.apple.log:] log run noninteractively, parent: 32839 (zsh), args: '/usr/bin/log' 'show' '--last' '7d' '--predicate' 'eventMessage CONTAINS "Wake reason"'`,
+		"empty":  "",
+		"banner": "Timestamp                       Thread     Type        Activity             PID    TTL  ",
+		// Verbatim first line of `log stream --predicate` on darwin 24.6
+		// (measured 2026-09-26); it contains "Wake reason:" (mg-18b3).
+		"predicate banner":                           `Filtering the log data using "composedMessage CONTAINS[c] "Wake reason:""`,
+		"self-reference (log show)":                  `2026-05-03 17:43:37.519139+0100 0xca5c279  Default     0x0                  32899  0    log: [com.apple.log:] log run noninteractively, parent: 32839 (zsh), args: '/usr/bin/log' 'show' '--last' '7d' '--predicate' 'eventMessage CONTAINS "Wake reason"'`,
 		"self-reference (log stream, our predicate)": `2026-05-03 17:50:00.000000+0100 0xca6aaaa  Default     0x0                  40000  0    log: [com.apple.log:] log run noninteractively, parent: 39000 (pogod), args: '/usr/bin/log' 'stream' '--predicate' 'eventMessage CONTAINS[c] "Wake reason:"'`,
 		"unrelated":                              `2026-05-03 16:00:00.000000+0100 0xca18000  Default     0x0                  100    0    powerd: (CoreFoundation) [com.apple.powerd] Display dimmed`,
 		"contains 'wake' but not 'wake reason:'": `2026-05-03 16:00:00.000000+0100 0xca18001  Default     0x0                  101    0    kernel: NoWake-Lock created, dummy wake event`,
