@@ -319,6 +319,12 @@ const (
 	// confirmed: "spawn ok, dialog answered" over a dead harness is how #177
 	// stayed invisible.
 	trustWatchRefused
+	// trustWatchAPIKeyGate: the budget was spent with Claude Code parked on its
+	// "Detected a custom API key" prompt (mg-2037). The prompt is a pre-composer
+	// gate the hook deliberately does not answer — see apikeygate.go — so the
+	// composer never appeared, and that is NOT evidence that the ready sentinel
+	// went stale. Recording it as drift would page about the wrong thing.
+	trustWatchAPIKeyGate
 )
 
 func (o trustWatchOutcome) String() string {
@@ -331,6 +337,8 @@ func (o trustWatchOutcome) String() string {
 		return "confirmed"
 	case trustWatchRefused:
 		return "refused"
+	case trustWatchAPIKeyGate:
+		return "api-key-gate"
 	}
 	return "unknown"
 }
@@ -355,7 +363,30 @@ func watchForTrustDialog(a *agent.Agent, budget, poll time.Duration) {
 		agent.RecordTrustDialogReady(a.ProviderID(), agent.DefaultNudgeProfile.PromptReadySentinel, false)
 	case trustWatchRefused:
 		reportTrustRefused(a)
+	case trustWatchAPIKeyGate:
+		// Already reported when the prompt was first seen; not a drift sample.
 	}
+}
+
+// reportAPIKeyPrompt makes the custom-API-key gate loud the moment it is seen:
+// a log line AND a durable claude_api_key_prompt event, for the same reason
+// reportTrustRefused emits one — the spawn was reported ok, and the only other
+// trace is an initial nudge timing out a minute later with no cause attached.
+func reportAPIKeyPrompt(a *agent.Agent) {
+	// Stand the agent package's blind keystrokes down first: the initial
+	// nudge's best-effort delivery and the start-verify renudge both end in a
+	// CR, and a CR here answers "No" for the operator (agent/precomposergate.go).
+	a.HoldAtPreComposerGate(APIKeyGateName)
+	log.Printf("agent %s: Claude Code is stopped at \"Detected a custom API key\" (default No) — "+
+		"pogo does not answer it; the agent will not reach its composer. Remedy: %s", a.Name, APIKeyApprovalRemedy)
+	emitEvent(events.Event{
+		EventType:  "claude_api_key_prompt",
+		Agent:      a.EventAgent(),
+		WorkItemID: a.WorkItemID,
+		Details: map[string]any{
+			"provider": a.ProviderID(),
+		},
+	})
 }
 
 // emitEvent is the event sink for trust_dialog_refused. A package var so the
@@ -478,17 +509,29 @@ func trustDialogWatch(a *agent.Agent, budget, poll time.Duration, now func() tim
 	// failClosedLogged keeps a dialog the hook will not answer to one log line
 	// per spawn rather than one per tick.
 	failClosedLogged := false
+	// apiKeyGateSeen: the custom-API-key prompt was on screen (mg-2037). It is
+	// reported once, and it turns a spent budget from drift into
+	// trustWatchAPIKeyGate. The watch keeps running after it: a human may answer
+	// the prompt through the PTY, and the trust dialog can still follow.
+	apiKeyGateSeen := false
+	spent := func() trustWatchOutcome {
+		o := spentBudgetOutcome(a.Done(), answered)
+		if o == trustWatchDrift && apiKeyGateSeen {
+			return trustWatchAPIKeyGate
+		}
+		return o
+	}
 
 	for {
 		select {
 		case <-wakeup:
-			return spentBudgetOutcome(a.Done(), answered)
+			return spent()
 		case <-a.Done():
 			return exitOutcome(answered)
 		case <-ticker.C:
 			// The tick is only a wakeup hint; the budget decides.
 			if !now().Before(deadlineAt) {
-				return spentBudgetOutcome(a.Done(), answered)
+				return spent()
 			}
 			output := a.RecentOutput(composerScanBytes)
 			if len(output) == 0 {
@@ -501,6 +544,13 @@ func trustDialogWatch(a *agent.Agent, budget, poll time.Duration, now func() tim
 			// confirmation that the answer was accepted. See composerReady.
 			if composerReady(output) {
 				return trustWatchConfirmed
+			}
+			// Checked after composerReady, like the trust marker, so an echoed
+			// prompt mentioning the gate cannot match. No keystroke: see
+			// apikeygate.go for why this gate is named and never answered.
+			if !apiKeyGateSeen && matchesAPIKeyPrompt(output) {
+				apiKeyGateSeen = true
+				reportAPIKeyPrompt(a)
 			}
 			if answered || !matchesTrustDialog(output) {
 				continue

@@ -151,6 +151,12 @@ func (r *Registry) verifyStartAndRenudge(a *Agent) {
 		// HARD unstarted-signal. The kickoff nudge did not take. Re-deliver a
 		// bare submit terminator (CR) to flush any paste-buffered kickoff
 		// without injecting a stray character.
+		//
+		// Except onto a screen pogo will not answer: a CR there IS an answer
+		// (mg-2037). The kickoff was withheld too, so there is nothing to flush.
+		if a.heldAtGate("auto-renudge") {
+			return
+		}
 		switch reason {
 		case reasonNoReadyComposer:
 			log.Printf("agent %s: still shows no ready composer %s after nudge (attempt %d/%d) — re-delivering submit terminator",

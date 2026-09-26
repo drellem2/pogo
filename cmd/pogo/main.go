@@ -22,6 +22,7 @@ import (
 	"github.com/drellem2/pogo/internal/ackwatch"
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/auditwatch"
+	"github.com/drellem2/pogo/internal/claude"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/closingref"
@@ -3811,6 +3812,20 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					warn(provider.Binary+" in PATH", fmt.Sprintf("not found (configured agent harness %q)", provider.ID))
 				} else {
 					pass(provider.Binary+" in PATH", p)
+				}
+			}
+
+			// 3b. Claude Code's "Detected a custom API key" gate (mg-2037).
+			// `claude auth status` says loggedIn:true for an API-key user
+			// whether or not the key was ever approved, so no auth preflight
+			// sees this; the answer lives in the profile's
+			// customApiKeyResponses. Warn-only — pogo never answers it.
+			if checkedProviders[claude.Provider.ID] {
+				akState, akPath := claude.CheckAPIKeyApproval()
+				if akStatus, akDetail := claude.APIKeyApprovalLine(akState, akPath); akStatus == "warn" {
+					warn(claudeAPIKeyCheckName, akDetail)
+				} else {
+					pass(claudeAPIKeyCheckName, akDetail)
 				}
 			}
 

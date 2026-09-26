@@ -27,6 +27,27 @@ The trust dialog hook polls the agent's output buffer for up to 8 seconds after 
 
 The `--add-dir` flag was considered and rejected. Adding the worktree directory to Claude Code's trusted directories triggers an interactive trust confirmation prompt — the opposite of what we want. Since `--dangerously-skip-permissions` already handles permissions globally, `--add-dir` is unnecessary.
 
+### The custom-API-key prompt is detected, never answered
+
+When `ANTHROPIC_API_KEY` is set in the environment pogod gives its agents, and the Claude Code profile has never answered for that key, Claude Code stops before its composer:
+
+```
+Detected a custom API key in your environment
+ANTHROPIC_API_KEY: sk-ant-...<last 20 characters>
+Do you want to use this API key?
+  Yes
+❯ No (recommended)
+```
+
+`claude auth status` reports `loggedIn: true` for an API-key user whether or not the key was ever approved, so an auth preflight cannot see this gate (mg-2037). pogo does **not** answer it, unlike the trust dialog. Its two rows are two billing choices: "Yes" bills the key, and "No" falls back to the profile's Claude login, or to no auth at all. Claude Code remembers the answer for good, keyed on the key's last 20 characters in `customApiKeyResponses` in `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`).
+
+What pogo does instead:
+
+- **At spawn**, `claude.TrustDialogHook` recognises the prompt and logs it with the remedy. It emits `claude_api_key_prompt` and marks the agent as held at a pre-composer gate (`agent.HoldAtPreComposerGate`). While the gate is held and the composer has never appeared, the initial nudge's best-effort delivery and the start-verify renudge send **nothing**. Both end in Enter, and on Claude Code 2.1.283 that Enter selected "No" and recorded the key as rejected. A held gate is also not counted as sentinel drift.
+- **Before any spawn**, `pogo doctor --check` has a `claude API key approval` row. It warns when the shell's `ANTHROPIC_API_KEY` has no recorded answer. Agents inherit **pogod's** environment, not your shell's, so the spawn-time check is the one that sees the key agents actually get.
+
+**Remedy:** run `claude` once in a terminal with the same `ANTHROPIC_API_KEY` and answer the prompt. Choose Yes to bill the key, or No to use your Claude login. Then stop and respawn any agent that is parked on the prompt, or answer it in place with `pogo agent attach <name>`.
+
 ### The `provider` config key
 
 The agent harness provider is selected via `~/.config/pogo/config.toml`:

@@ -2050,6 +2050,19 @@ A trust-dialog hook answered a harness's directory-trust dialog, and the harness
 {"schema_version":1,"timestamp":"2026-09-26T09:20:00.000000000Z","event_type":"trust_dialog_refused","agent":"cat-p7511","work_item_id":"mg-7511","details":{"provider":"codex"}}
 ```
 
+#### `claude_api_key_prompt`
+
+Claude Code stopped before its composer at "Detected a custom API key" (default "No (recommended)"), and the Claude trust hook recognised it ([internal/claude/apikeygate.go](../internal/claude/apikeygate.go), mg-2037). pogo does not answer this prompt, because its rows are a billing choice. The agent is held at a pre-composer gate: its initial nudge and start-verify renudge are withheld, since either one's Enter would answer "No" and record the key as rejected. Its spent watch budget is not counted as `sentinel_drift`. The spawn was reported ok, and without this event the only other trace is a withheld kickoff in pogod's log. Remedy: answer the prompt once in a terminal with the same `ANTHROPIC_API_KEY`, then respawn the agent or `pogo agent attach` to it. `pogo doctor --check`'s `claude API key approval` row predicts the prompt before any spawn. Emitted at most once per spawn. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (`cat-<name>` / `crew-<name>`), `details`
+- **Optional envelope:** `work_item_id`
+- **`details` fields:**
+  - `provider` (string, required): harness provider id, always `"claude"` today
+
+```json
+{"schema_version":1,"timestamp":"2026-09-26T13:00:00.000000000Z","event_type":"claude_api_key_prompt","agent":"cat-p2037","work_item_id":"mg-2037","details":{"provider":"claude"}}
+```
+
 #### `auto_renudge`
 
 pogod's post-spawn start-verification watcher ([startverify.go](../internal/agent/startverify.go), mg-feb3, gh drellem2/macguffin#24) re-delivered a bare submit terminator (CR) to a freshly spawned polecat because its mg work item was still unclaimed after the start-verify window. Under a concurrent spawn wave a CPU-starved harness can miss the initial kickoff nudge (the false-idle gate delivers it before Claude Code is listening; it piles in the kernel input buffer and Ink absorbs it as one paste block whose CR never re-tokenizes as a submit — mg-ce61), leaving the agent alive but never claiming its item. The watcher gates on a HARD started-signal — originally the item leaving `available/`, and since mg-7d6d the claim PID moving off pogod's own for dispatches pogod claimed at spawn — never on output quiescence, and retries a bounded number of times; one event is emitted per delivered CR. A run of these on the same spawn wave is the productized-recovery footprint of the init-stall. Additive — no `schema_version` bump.

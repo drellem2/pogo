@@ -301,6 +301,14 @@ func (a *Agent) NudgeWithModeCorrelated(msg string, mode NudgeMode, timeout time
 			if !errors.Is(err, context.DeadlineExceeded) {
 				return fmt.Errorf("wait for prompt-ready: %w", err)
 			}
+			// A provider hook recognised a screen pogo will not answer, and
+			// the composer never came: a best-effort delivery would answer
+			// it (mg-2037 — the kickoff's CR rejects a custom API key for
+			// good). Withhold it, and record no drift sample: the sentinel
+			// did not go stale, a known screen held the composer back.
+			if !seen && a.heldAtGate("initial nudge") {
+				return fmt.Errorf("harness parked on the %q screen; initial nudge withheld", a.PreComposerGate())
+			}
 			// Deadline hit. Deliver best-effort rather than dropping the
 			// initial nudge — see WaitForReady's contract. Log what we saw so
 			// a stale sentinel (harness UI change) is diagnosable.

@@ -173,6 +173,12 @@ type Agent struct {
 	// (mg-c33e). See Agent.sawPromptReady.
 	promptReadySeen atomic.Bool
 
+	// preComposerGate names a screen the harness is parked on before its
+	// composer that pogo deliberately does not answer (mg-2037). Set by a
+	// provider hook through HoldAtPreComposerGate; see precomposergate.go.
+	// Holds a string; the zero Value means no gate.
+	preComposerGate atomic.Value
+
 	// socketPath is the unix domain socket for attach.
 	socketPath string
 	listener   net.Listener
