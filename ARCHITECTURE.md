@@ -416,6 +416,15 @@ The same probe feeds stall-watch, so the surfaces that *advertise* an item stop
 advertising it: `internal/stallwatch`'s preserved-worktree check reports it with
 the opposite remedy instead of dropping it silently.
 
+**An unpopulated checkout is skipped, by the probe only (drellem2/pogo#180).** A
+tree whose per-worktree git dir has no `index` yet is one `git worktree add` is
+still checking out; `git status` reads every tracked file there as a staged
+deletion, so the probe used to report a polecat seconds into its spawn as
+holding thousands of modified files. `PreservedForItems` now skips such a tree
+and logs one `no index — unpopulated checkout, not probed` line per skip.
+`checkWorktreeRemoval` keeps refusing it: that refusal is what stops gc reaping a
+tree mid-creation.
+
 **The committed half of the same tree (mg-fcba).** mg-836c defined this
 population over `git status`, which goes clean the instant a worker commits — so
 the state a polecat reaches when it gets *further* (commit, then be stopped
