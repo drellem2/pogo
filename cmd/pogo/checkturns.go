@@ -87,6 +87,24 @@ not a false positive — none of them has written the artifact — but it is als
 not the fault this is watching for, so bounce the fleet after deploying and read
 it again.
 
+WHO IS NOT IN THE POPULATION IS PRINTED TOO (mg-d88e). The population is the
+registry, and a registry holds the agents pogod is running — a STOPPED agent is
+not a silent row here, it is no row at all. So "every present agent has
+completed a turn" is true over a fleet that is missing members, and on
+2026-09-06 this command closed with exactly that line while doctor and
+representative were down. Every run therefore also reads the configured roster
+(the same read as ` + "`pogo agent list`" + `'s footer) and names the configured agents it
+did NOT examine: absent ones, and parked ones. A clean run with an absence says
+it is not a fleet-wide green; a roster that could not be read says that too,
+rather than going quiet. Under --json this is the ` + "`roster`" + ` object beside the
+report; the registry array and its contract are untouched.
+
+An absence does NOT change the exit status. Whether an absence is a fault
+depends on the agent's declared class — an auto_start = false agent is absent by
+design — and judging that over time is absent-watch's job (internal/absentwatch,
+pogod-internal, mails the mayor). This command's exit status stays about the
+question it measures: turn completion among those present.
+
 --probe runs the POSITIVE CONTROL instead of the census. It builds a throwaway
 turnlog tree holding an agent that just completed a turn, one that completed its
 last long ago, and one that never completed any, and requires this same check to
@@ -117,10 +135,11 @@ measured nothing.`,
 				fmt.Fprintf(os.Stderr, "INSTRUMENT FAILURE — this run measured nothing: %v\n", err)
 				os.Exit(exitInstrumentFailure)
 			}
+			cov := readTurnCoverage()
 			if *jsonOutput {
-				cli.PrintJSON(rep)
+				cli.PrintJSON(turnCensus{Report: rep, Roster: cov})
 			} else {
-				fmt.Print(renderTurnReport(rep, allTypes))
+				fmt.Print(renderTurnReport(rep, cov, allTypes))
 			}
 			if rep.Findings > 0 {
 				os.Exit(cli.ExitError)
@@ -166,12 +185,95 @@ func presentAgents(allTypes bool) ([]turnlog.Present, error) {
 	return out, nil
 }
 
+// turnCoverage is what check-turns did NOT examine: the configured crew/mayor
+// agents that are not in its population (mg-d88e). It is read from the roster
+// endpoint beside the registry, never folded into it, so presentAgents and the
+// registry contract that eight callers rely on are unchanged.
+type turnCoverage struct {
+	// Configured is how many crew/mayor prompts this machine has; 0 means the
+	// roster had nothing to compare, which is not completeness.
+	Configured int `json:"configured"`
+	// Parked and Absent are the configured agents outside the population.
+	Parked []string             `json:"parked"`
+	Absent []agent.RosterMember `json:"absent"`
+	// Error is set when the roster could not be read. Then nothing here says
+	// the population was the whole fleet.
+	Error string `json:"error,omitempty"`
+}
+
+// turnCensus is check-turns' --json shape: the scan's report, unchanged and
+// flattened, plus the roster object naming who was not examined.
+type turnCensus struct {
+	turnlog.Report
+	Roster turnCoverage `json:"roster"`
+}
+
+// readTurnCoverage reads the configured roster. It never fails the command —
+// turn completion among the present is still a correct answer — but a failed
+// read is carried into the output rather than dropped, because silence here
+// would read as "everybody is present".
+func readTurnCoverage() turnCoverage {
+	rep, err := rosterFn()
+	if err != nil {
+		return turnCoverage{Error: err.Error()}
+	}
+	if rep == nil {
+		return turnCoverage{Error: "roster endpoint returned no report"}
+	}
+	cov := turnCoverage{Configured: rep.Configured, Absent: rep.Absent}
+	for _, m := range rep.Members {
+		if m.State == agent.RosterParked {
+			cov.Parked = append(cov.Parked, m.Name)
+		}
+	}
+	return cov
+}
+
+// complete reports whether the population check-turns examined could have been
+// the whole configured crew fleet.
+func (c turnCoverage) complete() bool {
+	return c.Error == "" && c.Configured > 0 && len(c.Absent) == 0
+}
+
+// renderCoverage writes the "not examined" block. It prints nothing only when
+// the roster was read, is non-empty, and has no absent or parked member.
+func renderCoverage(b *strings.Builder, c turnCoverage) {
+	switch {
+	case c.Error != "":
+		fmt.Fprintf(b, "  roster check unavailable: %s\n"+
+			"  — a configured agent that is not running would not appear here\n", c.Error)
+		return
+	case c.Configured == 0:
+		b.WriteString("  roster: no configured crew/mayor agents found to compare against\n")
+		return
+	}
+	if len(c.Absent) > 0 {
+		names := make([]string, len(c.Absent))
+		for i, m := range c.Absent {
+			names[i] = m.Name
+		}
+		fmt.Fprintf(b, "  NOT EXAMINED: %d configured agent(s) ABSENT — not running, not parked: %s\n",
+			len(c.Absent), strings.Join(names, ", "))
+		for _, m := range c.Absent {
+			fmt.Fprintf(b, "    %-20s  %s\n", m.Name, absentNote(m))
+		}
+	}
+	if len(c.Parked) > 0 {
+		fmt.Fprintf(b, "  not examined: %d parked: %s\n", len(c.Parked), strings.Join(c.Parked, ", "))
+	}
+}
+
 // renderTurnReport writes the human form. The population count is printed even
 // when there are no findings, because "every present agent completed a turn"
 // and "no agent was examined" are the two readings this has to keep apart —
 // they are the same green otherwise, and the second one is what twenty-two
 // hours of this fleet looked like.
-func renderTurnReport(rep turnlog.Report, allTypes bool) string {
+//
+// The coverage block below the population line names the configured agents
+// that are NOT in it (mg-d88e). "Every present agent" was true on 2026-09-06
+// over a fleet missing two members, and the word "present" carried the whole
+// limitation where no skimming reader would see it.
+func renderTurnReport(rep turnlog.Report, cov turnCoverage, allTypes bool) string {
 	var b strings.Builder
 	scope := "crew"
 	if allTypes {
@@ -182,6 +284,7 @@ func renderTurnReport(rep turnlog.Report, allTypes bool) string {
 		len(rep.Agents), scope, rep.MaxAge)
 	fmt.Fprintf(&b, "  %d live, %d stale, %d silent, %d unreadable\n",
 		rep.Live, rep.Stale, rep.Silent, rep.Bad)
+	renderCoverage(&b, cov)
 
 	if len(rep.Agents) == 0 {
 		b.WriteString("\nNo agent was examined. This is NOT a clean fleet — it is an empty\n" +
@@ -206,6 +309,16 @@ func renderTurnReport(rep turnlog.Report, allTypes bool) string {
 
 	if rep.Findings == 0 {
 		b.WriteString("\nEvery present agent has completed a turn within the window.\n")
+		switch {
+		case cov.Error != "":
+			b.WriteString("The roster could not be read, so this says nothing about agents that are\n" +
+				"not running. It is not a fleet-wide green — read `pogo agent list`'s footer.\n")
+		case len(cov.Absent) > 0:
+			fmt.Fprintf(&b, "This is NOT a fleet-wide green: %d configured agent(s) are absent and were\n"+
+				"not examined (listed above). See `pogo agent roster`.\n", len(cov.Absent))
+		case !cov.complete():
+			b.WriteString("No configured roster to compare against, so completeness is unknown.\n")
+		}
 		return b.String()
 	}
 
