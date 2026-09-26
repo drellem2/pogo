@@ -2267,6 +2267,9 @@ type parsedConfig struct {
 	// daemon that still refuses. Same shape as blockedReminderEnabledSet.
 	dispatchCapMaxSet     bool
 	dispatchCapReserveSet bool
+	// dispatchCapCreditSet: merge_queued_credit = 0 turns the credit off, which
+	// is a value, not an absence (mg-976f).
+	dispatchCapCreditSet bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -2985,6 +2988,9 @@ func Load() *Config {
 		if fileCfg.dispatchCapReserveSet {
 			cfg.DispatchCap.RefineryReserve = fileCfg.DispatchCap.RefineryReserve
 		}
+		if fileCfg.dispatchCapCreditSet {
+			cfg.DispatchCap.MergeQueuedCredit = fileCfg.DispatchCap.MergeQueuedCredit
+		}
 
 		// [audit_successor] has no code-side defaults to preserve either — the
 		// zero value is "no repos, detector inert". Window is the one exception:
@@ -3603,6 +3609,14 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 					}
 					cfg.DispatchCap.RefineryReserve = n
 					cfg.dispatchCapReserveSet = true
+				}
+			case "merge_queued_credit":
+				if n, err := strconv.Atoi(unquotedVal); err == nil {
+					if n < 0 {
+						n = 0
+					}
+					cfg.DispatchCap.MergeQueuedCredit = n
+					cfg.dispatchCapCreditSet = true
 				}
 			}
 		case "dispatch_pairing":

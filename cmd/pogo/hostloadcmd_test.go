@@ -169,3 +169,21 @@ func TestWorkerBudgetRendersBothStatesAndItsOwnLimits(t *testing.T) {
 		t.Errorf("rendered a zero budget as a number; got:\n%s", unknown.String())
 	}
 }
+
+// TestHostLoadShowsWorkersExcusedByTheMergeQueue: a worker the cap does not
+// count must still be visible, or `Workers: 1` over three live processes reads
+// as a miscount (mg-976f).
+func TestHostLoadShowsWorkersExcusedByTheMergeQueue(t *testing.T) {
+	var buf bytes.Buffer
+	printRepoOccupancy(&buf, &agent.RepoOccupancy{
+		Repo: "/r", Cap: 2, ConfiguredCap: 3, RefineryReserved: 1, RefineryKnown: true,
+		Polecats: []string{"c"}, Count: 1,
+		MergeQueued: []string{"a", "b"}, MergeQueuedOverCredit: []string{"c"},
+	}, false)
+	out := buf.String()
+	for _, want := range []string{"Workers:    1 — c", "Waiting:    2 more live, NOT counted — a, b", "credit is spent: c"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}

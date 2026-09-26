@@ -204,6 +204,15 @@ func printRepoOccupancy(w io.Writer, occ *agent.RepoOccupancy, hostWouldRefuse b
 		fmt.Fprintf(w, " — %s", strings.Join(occ.Polecats, ", "))
 	}
 	fmt.Fprintln(w)
+	if n := len(occ.MergeQueued); n > 0 {
+		fmt.Fprintf(w, "Waiting:    %d more live, NOT counted — %s\n"+
+			"            (their branch is in the merge queue; they poll, they do not build — mg-976f)\n",
+			n, strings.Join(occ.MergeQueued, ", "))
+	}
+	if n := len(occ.MergeQueuedOverCredit); n > 0 {
+		fmt.Fprintf(w, "            %d more waiting on the queue but counted — the credit is spent: %s\n",
+			n, strings.Join(occ.MergeQueuedOverCredit, ", "))
+	}
 	if n := len(occ.ReviewSlotHolds); n > 0 {
 		held := make([]string, n)
 		for i, h := range occ.ReviewSlotHolds {

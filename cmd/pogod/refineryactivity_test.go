@@ -78,3 +78,25 @@ func TestNilRefineryIsNotAsked(t *testing.T) {
 		})
 	}
 }
+
+// TestQueuedMergesInKeepsOnlyThisRepo: the merge-queue credit (mg-976f) must
+// not excuse a worker here on the strength of a merge request in another repo,
+// and must see an in-flight request as well as a queued one — the worker whose
+// branch is IN the gate is waiting too.
+func TestQueuedMergesInKeepsOnlyThisRepo(t *testing.T) {
+	mrs := []refinery.MergeRequest{
+		{ID: "mr-1", RepoPath: capRepo, Author: "mg-aaaa", Branch: "polecat-aaaa", Status: refinery.StatusProcessing},
+		{ID: "mr-2", RepoPath: capRepo + "/", Author: "mg-bbbb", Branch: "polecat-bbbb", Status: refinery.StatusQueued},
+		{ID: "mr-3", RepoPath: "/Users/daniel/dev/other", Author: "mg-cccc", Branch: "polecat-cccc", Status: refinery.StatusQueued},
+	}
+	got := queuedMergesIn(mrs, capRepo)
+	if len(got) != 2 || got[0].Author != "mg-aaaa" || got[1].Branch != "polecat-bbbb" {
+		t.Errorf("queuedMergesIn = %+v, want the two %s requests", got, capRepo)
+	}
+}
+
+func TestNoRefineryListsNothingAndSaysSo(t *testing.T) {
+	if _, known := refineryMergeQueue(func() *refinery.Refinery { return nil }).QueuedIn(capRepo); known {
+		t.Error("a nil refinery reported a known queue — 'not asked' must not read as 'empty'")
+	}
+}

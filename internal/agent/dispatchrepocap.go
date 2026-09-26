@@ -31,6 +31,32 @@ type RefineryActivityFunc func(repo string) (bool, bool)
 // HasWorkIn implements RefineryActivity.
 func (f RefineryActivityFunc) HasWorkIn(repo string) (bool, bool) { return f(repo) }
 
+// QueuedMerge is one merge request the refinery holds, reduced to what the cap
+// needs to recognise the worker that submitted it.
+type QueuedMerge struct {
+	// Author is what the submitter passed as --author: by protocol the work
+	// item id ("mg-976f"), sometimes the agent name ("976f").
+	Author string
+	// Branch is the submitted branch, "polecat-<name>" for a polecat.
+	Branch string
+}
+
+// MergeQueueReader lists the merge requests the refinery holds for a
+// repository — queued OR in its gate — and whether it could be asked at all.
+//
+// Separate from RefineryActivity rather than a second method on it, so every
+// existing RefineryActivityFunc keeps compiling and a probe that can only say
+// "busy or not" is still a complete RefineryActivity.
+type MergeQueueReader interface {
+	QueuedIn(repo string) (mrs []QueuedMerge, known bool)
+}
+
+// MergeQueueReaderFunc adapts a function to MergeQueueReader.
+type MergeQueueReaderFunc func(repo string) ([]QueuedMerge, bool)
+
+// QueuedIn implements MergeQueueReader.
+func (f MergeQueueReaderFunc) QueuedIn(repo string) ([]QueuedMerge, bool) { return f(repo) }
+
 // RepoOccupancy is what the per-repo cap saw when it decided. It is served on
 // /agents/hostload as well as used internally, because a coordinator planning a batch
 // of dispatches needs the same numbers pogod will enforce on — the precedent is
@@ -40,10 +66,21 @@ func (f RefineryActivityFunc) HasWorkIn(repo string) (bool, bool) { return f(rep
 type RepoOccupancy struct {
 	// Repo is the normalized repository path the count is about.
 	Repo string `json:"repo"`
-	// Polecats are the live workers attributed to Repo, by name, sorted.
+	// Polecats are the live workers attributed to Repo that COUNT against the
+	// cap, by name, sorted. A worker excused by the merge-queue credit is in
+	// MergeQueued instead, never in both.
 	Polecats []string `json:"polecats"`
 	// Count is len(Polecats) and is the number compared against Cap.
 	Count int `json:"count"`
+	// MergeQueued are live workers in Repo that are NOT counted, because their
+	// branch is in the refinery's merge queue and the per-repo credit
+	// (MergeQueuedCredit) covers them (mg-976f). They are alive and polling,
+	// not building; a failed gate can send one back to building, which is why
+	// the credit is bounded. Live = Count + len(MergeQueued).
+	MergeQueued []string `json:"merge_queued,omitempty"`
+	// MergeQueuedOverCredit are workers whose branch is in the queue but who
+	// ARE counted, because the credit was already spent. They are in Polecats.
+	MergeQueuedOverCredit []string `json:"merge_queued_over_credit,omitempty"`
 	// Cap is the effective ceiling right now — MaxPolecatsPerRepo less the
 	// refinery's reserve when the refinery has work here. Zero means the cap is
 	// disarmed and nothing is refused.
@@ -122,6 +159,20 @@ func (r *Registry) dispatchCapPolicy() config.DispatchCapConfig {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.dispatchCap
+}
+
+// SetMergeQueue installs the probe the merge-queue credit reads (mg-976f).
+// nil excuses nobody: every live worker counts, as before the credit existed.
+func (r *Registry) SetMergeQueue(q MergeQueueReader) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mergeQueue = q
+}
+
+func (r *Registry) getMergeQueue() MergeQueueReader {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.mergeQueue
 }
 
 func (r *Registry) getRefineryActivity() RefineryActivity {
@@ -218,13 +269,40 @@ func (r *Registry) RepoOccupancyFor(repo string) RepoOccupancy {
 		unattributed = append(unattributed, wUnattributed...)
 	}
 
-	occ.Polecats = make([]string, 0, len(inRepo))
+	live := make([]string, 0, len(inRepo))
 	for name := range inRepo {
-		occ.Polecats = append(occ.Polecats, name)
+		live = append(live, name)
 	}
-	sort.Strings(occ.Polecats)
-	occ.Count = len(occ.Polecats)
+	sort.Strings(live)
 	occ.Unattributed = dedupeSorted(unattributed, inRepo)
+
+	var workItems map[string]string
+	if len(live) > 0 {
+		workItems = r.polecatWorkItems()
+	}
+	excused := map[string]bool{}
+	if cfg.MergeQueuedCredit > 0 && len(live) > 0 {
+		if q := r.getMergeQueue(); q != nil {
+			if mrs, known := q.QueuedIn(norm); known {
+				queued := mergeQueuedPolecats(live, workItems, mrs)
+				for i, name := range queued {
+					if i < cfg.MergeQueuedCredit {
+						excused[name] = true
+						occ.MergeQueued = append(occ.MergeQueued, name)
+					} else {
+						occ.MergeQueuedOverCredit = append(occ.MergeQueuedOverCredit, name)
+					}
+				}
+			}
+		}
+	}
+	occ.Polecats = make([]string, 0, len(live))
+	for _, name := range live {
+		if !excused[name] {
+			occ.Polecats = append(occ.Polecats, name)
+		}
+	}
+	occ.Count = len(occ.Polecats)
 
 	// An absolute path that is not a directory is the same fabrication one
 	// spelling further along: nobody is working in a repository that is not
@@ -236,7 +314,10 @@ func (r *Registry) RepoOccupancyFor(repo string) RepoOccupancy {
 	// must never demote it to "could not be determined" — that would drop the
 	// at-cap guidance for exactly the repositories that need it, which is the
 	// defect this function is being fixed for, re-entered through the fix.
-	if occ.Count == 0 && !isDirectory(norm) {
+	//
+	// len(live), not Count: a repo whose only workers are excused by the
+	// merge-queue credit has a Count of 0 and is every bit as real.
+	if len(live) == 0 && !isDirectory(norm) {
 		return unresolved(norm + " is not a directory on this host")
 	}
 
@@ -248,11 +329,45 @@ func (r *Registry) RepoOccupancyFor(repo string) RepoOccupancy {
 	if reserving && cfg.Armed() {
 		occ.RefineryReserved = cfg.MaxPolecatsPerRepo - occ.Cap
 	}
-	occ.ReviewSlotHolds = reviewSlotHolds(occ.Polecats, r.polecatWorkItems(), r.getFlowReader())
+	// Every LIVE worker, excused or not: a hold is about the reviewer a builder
+	// will need, and a builder waiting on the merge queue will still need one.
+	occ.ReviewSlotHolds = reviewSlotHolds(live, workItems, r.getFlowReader())
 	held := len(occ.ReviewSlotHolds)
 	occ.WouldRefuse = cfg.Armed() && occ.Count+held >= occ.Cap
 	occ.WouldRefuseGHIssueBuild = cfg.Armed() && occ.Count+held+2 > occ.Cap
 	return occ
+}
+
+// mergeQueuedPolecats returns, in live's (sorted) order, the live workers that
+// authored one of mrs.
+//
+// A worker is matched on any of its three spellings, because submitters are
+// not consistent: the protocol's --author is the work item id, some submit
+// under the agent name, and the branch is "polecat-<name>" whatever the author
+// says. Matching only one would leave a waiting worker counted — the direction
+// that fails CLOSED, so it would be merely the old behaviour, but silently so.
+func mergeQueuedPolecats(live []string, workItems map[string]string, mrs []QueuedMerge) []string {
+	if len(mrs) == 0 {
+		return nil
+	}
+	authors := map[string]bool{}
+	branches := map[string]bool{}
+	for _, mr := range mrs {
+		if a := strings.TrimSpace(mr.Author); a != "" {
+			authors[a] = true
+		}
+		if b := strings.TrimSpace(mr.Branch); b != "" {
+			branches[b] = true
+		}
+	}
+	var out []string
+	for _, name := range live {
+		id := strings.TrimSpace(workItems[name])
+		if authors[name] || (id != "" && authors[id]) || branches["polecat-"+name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // dedupeSorted returns the unique names in list, minus any already counted.
@@ -320,6 +435,15 @@ func (r *Registry) repoCapRefusal(repo, workItemID string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "repo %s already has %d worker(s) in it and the cap is %d: %s. ",
 		occ.Repo, occ.Count, occ.Cap, strings.Join(occ.Polecats, ", "))
+	if len(occ.MergeQueued) > 0 {
+		fmt.Fprintf(&b, "(%d more worker(s) are live but NOT counted, because their branch is in the "+
+			"merge queue and they are only waiting on it: %s — mg-976f.) ",
+			len(occ.MergeQueued), strings.Join(occ.MergeQueued, ", "))
+	}
+	if len(occ.MergeQueuedOverCredit) > 0 {
+		fmt.Fprintf(&b, "(%s also only waiting on the merge queue, but the credit for waiting workers "+
+			"is spent, so they count.) ", strings.Join(occ.MergeQueuedOverCredit, ", "))
+	}
 	if occ.RefineryReserved > 0 {
 		fmt.Fprintf(&b, "%d of the %d configured slots is RESERVED for the refinery, which has a "+
 			"merge request for this repo in flight or queued — the workers verifying their branches "+

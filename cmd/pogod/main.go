@@ -1748,8 +1748,9 @@ Flags:
 	agentRegistry.SetDispatchCap(cfg.DispatchCap)
 	if cfg.DispatchCap.Armed() {
 		log.Printf("dispatch cap armed: at most %d worker(s) per repo, %d slot(s) reserved for the "+
-			"refinery while it has work there", cfg.DispatchCap.MaxPolecatsPerRepo,
-			cfg.DispatchCap.RefineryReserve)
+			"refinery while it has work there, up to %d worker(s) waiting on the merge queue not counted",
+			cfg.DispatchCap.MaxPolecatsPerRepo, cfg.DispatchCap.RefineryReserve,
+			cfg.DispatchCap.MergeQueuedCredit)
 	} else {
 		log.Printf("dispatch cap DISARMED ([dispatch] max_polecats_per_repo = 0): " +
 			"nothing limits how many workers enter one repo")
@@ -1760,6 +1761,9 @@ Flags:
 	// (SetRefineryStarter, below), and a closure over the old pointer would
 	// reserve against a refinery nobody is using any more.
 	agentRegistry.SetRefineryActivity(refineryRepoActivity(func() *refinery.Refinery { return mergeQueue }))
+	// And which workers are only WAITING on that queue, so up to
+	// merge_queued_credit of them stop counting (mg-976f). Same thunk.
+	agentRegistry.SetMergeQueue(refineryMergeQueue(func() *refinery.Refinery { return mergeQueue }))
 
 	// How that cap reads a work item whose `repo` field is a bare NAME rather
 	// than a path — 42 items spell this repository `pogo` and 883 spell it

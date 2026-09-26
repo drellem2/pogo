@@ -60,3 +60,33 @@ func refineryHasWorkIn(mrs []refinery.MergeRequest, repo string) bool {
 	}
 	return false
 }
+
+// refineryMergeQueue lists, for the per-repo cap's merge-queue credit
+// (mg-976f), the merge requests the refinery holds for a repository — queued
+// or in its gate — so the cap can recognise the workers that are only waiting
+// on them. Same thunk and same nil rule as refineryRepoActivity: no refinery
+// is "not asked", which excuses nobody.
+func refineryMergeQueue(queue func() *refinery.Refinery) agent.MergeQueueReader {
+	return agent.MergeQueueReaderFunc(func(repo string) ([]agent.QueuedMerge, bool) {
+		if queue == nil {
+			return nil, false
+		}
+		q := queue()
+		if q == nil {
+			return nil, false
+		}
+		return queuedMergesIn(q.QueueWithProcessing(), repo), true
+	})
+}
+
+// queuedMergesIn reduces the merge requests targeting repo to what the cap
+// matches workers on. Split out for the reason refineryHasWorkIn is.
+func queuedMergesIn(mrs []refinery.MergeRequest, repo string) []agent.QueuedMerge {
+	var out []agent.QueuedMerge
+	for _, mr := range mrs {
+		if config.SameRepo(mr.RepoPath, repo) {
+			out = append(out, agent.QueuedMerge{Author: mr.Author, Branch: mr.Branch})
+		}
+	}
+	return out
+}

@@ -66,6 +66,35 @@ type DispatchCapConfig struct {
 	// built by workers dispatched BEFORE the gate starts, and by the time it
 	// starts they cannot be taken back.
 	RefineryReserve int
+	// MergeQueuedCredit is how many live workers per repo are NOT counted
+	// against MaxPolecatsPerRepo because their branch is sitting in the
+	// refinery's merge queue (queued or in its gate). Zero disables it: every
+	// live worker counts, which was the only behaviour before mg-976f.
+	//
+	// # Why a waiting worker should not count
+	//
+	// The cap exists to stop N workers running one repo's test suite at once
+	// (mg-3977). A worker that has submitted runs nothing — it polls `pogo
+	// refinery show` in a sleep loop until the merge lands and pogod stops it.
+	// Measured 2026-09-07: three pogo polecats, all submitted and waiting on a
+	// serial queue, held every slot while the fleet used 0.40 of 10 cores, and
+	// a ready high-priority item was refused for 30-45 minutes of gates. The cap
+	// counts PROCESSES; the hazard is CPU. The worker whose branch is in the
+	// gate is also counted twice over — as a worker and as the refinery's
+	// reserved slot, which exists for that very gate run.
+	//
+	// # Why it is a bounded credit and not "release the slot on submit"
+	//
+	// A submitted worker is not finished. A failed gate mails it, it stays
+	// alive, and a rebase conflict or a red build sends it back to building —
+	// at which point it is contending for the test suite again, and nothing
+	// can take back the dispatch its excused slot allowed. The credit is the
+	// most that overshoot can be: at most MergeQueuedCredit workers above the
+	// cap, and only if that many gates fail while the replacements are still
+	// building. The serial queue spreads those failures out (one gate at a
+	// time, 3-15 minutes each on this repo), and the host load gate still
+	// measures the CPU that actually arrives.
+	MergeQueuedCredit int
 }
 
 // Cap defaults. Three workers per repo on a 10-core host leaves room for the
@@ -80,6 +109,13 @@ type DispatchCapConfig struct {
 const (
 	DefaultMaxPolecatsPerRepo = 3
 	DefaultRefineryReserve    = 1
+	// DefaultMergeQueuedCredit is 2 because that is the smallest credit that
+	// frees a slot in the state that was measured (mg-976f): three workers, all
+	// submitted, with the refinery's reserve making the cap 2 — excusing one
+	// leaves 2 of 2 and still refuses. The worst case it buys is 4 building in
+	// one repo (5 with the reserve lifted), against the 7 of the mg-3977
+	// incident, and only if two gates fail back-to-back.
+	DefaultMergeQueuedCredit = 2
 )
 
 // DefaultDispatchCapConfig is the shipped policy.
@@ -87,6 +123,7 @@ func DefaultDispatchCapConfig() DispatchCapConfig {
 	return DispatchCapConfig{
 		MaxPolecatsPerRepo: DefaultMaxPolecatsPerRepo,
 		RefineryReserve:    DefaultRefineryReserve,
+		MergeQueuedCredit:  DefaultMergeQueuedCredit,
 	}
 }
 
