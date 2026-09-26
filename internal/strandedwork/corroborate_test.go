@@ -176,8 +176,92 @@ func TestCorroborateAgreesWhenTheWorkIsGenuinelyAbsent(t *testing.T) {
 	if strings.Contains(note, "MAY ALREADY HAVE LANDED") {
 		t.Errorf("work that exists nowhere but the branch was hedged as possibly landed: %s", note)
 	}
-	if !strings.Contains(note, "agrees the work is absent") {
+	if !strings.Contains(note, "consistent with absent") {
 		t.Errorf("the corroborating case produced no corroboration; got: %s", note)
+	}
+	if strings.Contains(note, "agrees the work is absent") {
+		t.Errorf("the low cell claims more than was measured (drellem2/pogo#174); got: %s", note)
+	}
+}
+
+// partlyPresentRepo builds a branch whose unmerged commit adds `present` lines
+// the target's copy of the file already holds and `absent` lines it does not.
+func partlyPresentRepo(t *testing.T, present, absent int) (*repo, Finding) {
+	t.Helper()
+	r := newRepo(t)
+	var have []string
+	for i := 0; i < present; i++ {
+		have = append(have, fmt.Sprintf("this line is already on the target, number %02d of the set", i))
+	}
+	r.write("notes.md", strings.Join(have, "\n")+"\n")
+	r.git("add", "notes.md")
+	r.git("commit", "-q", "-m", "chore: the target's notes")
+	r.push("main")
+	r.branch("polecat-a174", "main")
+	lines := append([]string{}, have...)
+	lines = append(lines, have...)
+	for i := 0; i < absent; i++ {
+		lines = append(lines, fmt.Sprintf("this line exists only on the branch, number %02d of the set", i))
+	}
+	r.write("notes.md", strings.Join(lines, "\n")+"\n")
+	r.git("add", "notes.md")
+	r.git("commit", "-q", "-m", "feat(notes): more notes (mg-a174)")
+	r.push("polecat-a174")
+	r.checkout("main")
+	f, err := Inspect(r.dir, "polecat-a174", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	return r, f
+}
+
+// TestCorroborateDoesNotCallNinetyPercentAbsent is drellem2/pogo#174 itself:
+// a branch with ~90% of its added lines already on the target printed "agrees
+// the work is absent" directly above the number that contradicted it. The
+// measured landed branches (0.88, 0.91, 0.94) all sit in this band.
+func TestCorroborateDoesNotCallNinetyPercentAbsent(t *testing.T) {
+	r, f := partlyPresentRepo(t, 27, 3)
+	p, note := Corroborate(r.dir, f)
+	if !p.Measured || p.Ratio() < ContentAbsentRatio || p.SuggestsLanded() {
+		t.Fatalf("fixture did not land in the partly-present band: %s", p.Describe())
+	}
+	if !p.PartlyPresent() || p.ConsistentWithAbsent() {
+		t.Errorf("PartlyPresent=%t ConsistentWithAbsent=%t at %.2f", p.PartlyPresent(), p.ConsistentWithAbsent(), p.Ratio())
+	}
+	if strings.Contains(note, "absent") && !strings.Contains(note, "too much to call absent") {
+		t.Errorf("a %.0f%% overlap was described as absent: %s", 100*p.Ratio(), note)
+	}
+	for _, want := range []string{"PARTLY PRESENT", "NOT CORROBORATED", "Check by hand", "(90%)"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note is missing %q; got: %s", want, note)
+		}
+	}
+}
+
+// TestCorroborateCellBoundaries pins the cells to the named constants, without
+// git: the thresholds are the contract, and ContentAbsentRatio is a labelled
+// guess that must move only in one place.
+func TestCorroborateCellBoundaries(t *testing.T) {
+	for _, c := range []struct {
+		p                      Presence
+		absent, partly, landed bool
+	}{
+		{Presence{Added: 100, Present: 49, Measured: true}, true, false, false},
+		{Presence{Added: 100, Present: 50, Measured: true}, false, true, false},
+		{Presence{Added: 345, Present: 309, Measured: true}, false, true, false}, // #174's own numbers
+		{Presence{Added: 100, Present: 95, Measured: true}, false, false, true},
+		{Presence{Added: 10, Present: 0, Measured: false}, false, false, false},
+		{Presence{}, false, false, false}, // unavailable
+	} {
+		if got := c.p.ConsistentWithAbsent(); got != c.absent {
+			t.Errorf("%+v ConsistentWithAbsent = %t, want %t", c.p, got, c.absent)
+		}
+		if got := c.p.PartlyPresent(); got != c.partly {
+			t.Errorf("%+v PartlyPresent = %t, want %t", c.p, got, c.partly)
+		}
+		if got := c.p.SuggestsLanded(); got != c.landed {
+			t.Errorf("%+v SuggestsLanded = %t, want %t", c.p, got, c.landed)
+		}
 	}
 }
 

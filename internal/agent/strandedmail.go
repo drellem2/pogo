@@ -316,13 +316,20 @@ func (a StrandedAlert) Message() (subject, body string) {
 			a.WorkItemID, a.ItemStatus, a.Finding.Branch, a.Polecat)
 	}
 
+	// "carries" is a claim only the absent cell backs. In every other cell the
+	// row rests on `git cherry` alone, which over-reports (mg-5ec6), so the
+	// opening says "may" (drellem2/pogo#174).
+	carries := "carries"
+	if !a.Presence.ConsistentWithAbsent() {
+		carries = "may carry"
+	}
 	var b strings.Builder
 	if a.itemIsClosed() {
-		fmt.Fprintf(&b, "A polecat's branch carries work the target does not have, and the item it belongs to\n"+
-			"was closed anyway.\n\n")
+		fmt.Fprintf(&b, "A polecat's branch %s work the target does not have, and the item it belongs to\n"+
+			"was closed anyway.\n\n", carries)
 	} else {
-		fmt.Fprintf(&b, "A polecat's branch carries work the target does not have, and the item it belongs to\n"+
-			"is back in the pool describing itself as untouched.\n\n")
+		fmt.Fprintf(&b, "A polecat's branch %s work the target does not have, and the item it belongs to\n"+
+			"is back in the pool describing itself as untouched.\n\n", carries)
 	}
 	fmt.Fprintf(&b, "Polecat:    %s\n", a.Polecat)
 	if a.ItemStatus != "" {
@@ -349,14 +356,7 @@ func (a StrandedAlert) Message() (subject, body string) {
 		fmt.Fprintf(&b, "%s\n\n", wrapAt(a.SecondOpinion, 88))
 	}
 
-	// The command is provenance-aware (mg-bfe0): `pogo refinery submit` REFUSES a
-	// branch that is not on origin (mg-586d), and this mail's whole point is that
-	// it reaches a reader who will act on it. The paragraph below already told
-	// unpushed readers to push — but it sits AFTER the command block, and a
-	// pasteable command beats a paragraph that qualifies it.
-	fmt.Fprintf(&b, "WHAT TO DO — resubmit, do not dispatch:\n\n")
-	fmt.Fprintf(&b, "    %s\n\n",
-		strandedwork.SubmitRemedy(a.Repo, a.Finding.Branch, a.WorkItemID, a.Finding.Pushed))
+	a.writeRemedy(&b)
 
 	if a.WorkItemID != "" && a.itemIsClosed() {
 		// The board paragraph below is FALSE for a closed item, and saying it
@@ -408,14 +408,96 @@ func (a StrandedAlert) Message() (subject, body string) {
 				"do-not-dispatch half: this item's work exists.\n\n")
 		}
 	default:
+		// "safe to submit" is true only where the remedy above says resubmit; in
+		// the check-by-hand and rescue cells it would countermand the remedy.
+		final := "final and safe to submit as it stands."
+		if !a.remedyIsResubmit() {
+			final = "final — it will not change\nunder you while you check it."
+		}
 		fmt.Fprintf(&b, "HOW THIS WAS FOUND. pogod released this polecat's claim and checked its branch on\n"+
 			"the way out (internal/agent/strandedgate.go). The polecat is gone, so the branch is\n"+
-			"final and safe to submit as it stands.\n\n")
+			"%s\n\n", final)
 	}
 
 	b.WriteString("The same fact is on the event spine as work_item_stranded_push; this mail is the\n" +
 		"half that is observable from outside the daemon that found it (mg-be37).\n")
 	return subject, b.String()
+}
+
+// rescueCommit returns the first unmerged commit that is a rescue commit, or
+// nil when there is none.
+func (a StrandedAlert) rescueCommit() *strandedwork.Commit {
+	for i := range a.Finding.Unmerged {
+		if a.Finding.Unmerged[i].IsRescue() {
+			return &a.Finding.Unmerged[i]
+		}
+	}
+	return nil
+}
+
+// writeRemedy writes the WHAT TO DO block. It has three cells, and "do not
+// dispatch" is imperative in all of them (drellem2/pogo#174):
+//
+//   - A RESCUE commit is unmerged: no paste-ready submit at all, mirroring
+//     strandwatch's KindRescueUnbuilt (mg-aed4). The work was recovered from a
+//     dead worktree with the pre-commit hook bypassed and has never been built
+//     or reviewed; a submit that PASSES the gate merges it unreviewed.
+//   - The second opinion is consistent with absent: resubmit, as shipped.
+//   - Anything else — unmeasured, unavailable, partly present, suggests landed:
+//     check by hand first, with the submit line kept but made conditional. The
+//     row rests on `git cherry` alone there, and #174's reader was handed an
+//     imperative resubmit for a branch whose content was 90% on the target.
+//
+// The command is provenance-aware (mg-bfe0): `pogo refinery submit` REFUSES a
+// branch that is not on origin (mg-586d), and this mail's whole point is that it
+// reaches a reader who will act on it. The paragraph below already told unpushed
+// readers to push — but it sits AFTER the command block, and a pasteable command
+// beats a paragraph that qualifies it.
+func (a StrandedAlert) writeRemedy(b *strings.Builder) {
+	if rc := a.rescueCommit(); rc != nil {
+		// The command's name is deliberately absent from this cell, explanation
+		// included: naming it is how strandwatch's first draft put it back on the
+		// row it was being kept off (mg-aed4).
+		fmt.Fprintf(b, "WHAT TO DO — do not dispatch, and do not submit this branch as it stands:\n\n")
+		fmt.Fprintf(b, "    git -C %s log -p %s..%s\n\n", a.Repo, a.Finding.Target, orRef(a.Finding))
+		fmt.Fprintf(b, "%s\n\n", wrapAt(fmt.Sprintf("%s %q is a RESCUE COMMIT — UNREVIEWED AND NEVER BUILT. "+
+			"It was recovered from a dead polecat's worktree with the pre-commit hook bypassed. READ IT, "+
+			"THEN BUILD IT. No submit command is printed here on purpose: if the gate passed it, it would "+
+			"merge unreviewed work to %s.", shortSHA(rc.SHA), rc.Subject, a.Finding.Target), 88))
+		return
+	}
+	submit := strandedwork.SubmitRemedy(a.Repo, a.Finding.Branch, a.WorkItemID, a.Finding.Pushed)
+	if a.remedyIsResubmit() {
+		fmt.Fprintf(b, "WHAT TO DO — resubmit, do not dispatch:\n\n")
+		fmt.Fprintf(b, "    %s\n\n", submit)
+		return
+	}
+	fmt.Fprintf(b, "WHAT TO DO — check by hand first, do not dispatch:\n\n")
+	fmt.Fprintf(b, "%s\n\n", wrapAt(fmt.Sprintf("The second opinion does not confirm that this work is missing "+
+		"from %s, so establish whether it already landed before submitting it: look for a merged pull "+
+		"request for %s, and for the same commit subject on %s under another sha.",
+		a.Finding.Target, a.Finding.Branch, a.Finding.Target), 88))
+	if a.WorkItemID != "" {
+		fmt.Fprintf(b, "    git -C %s log --oneline --fixed-strings --grep=%s %s\n\n",
+			a.Repo, a.WorkItemID, a.Finding.Target)
+	}
+	fmt.Fprintf(b, "Only if it did NOT land:\n\n")
+	fmt.Fprintf(b, "    %s\n\n", submit)
+}
+
+// remedyIsResubmit reports whether writeRemedy prints the unconditional
+// resubmit: no rescue commit, and a second opinion consistent with absent.
+func (a StrandedAlert) remedyIsResubmit() bool {
+	return a.rescueCommit() == nil && a.Presence.ConsistentWithAbsent()
+}
+
+// orRef names the branch by its ref when the finding has one, so the log range
+// reads what the detector read.
+func orRef(f strandedwork.Finding) string {
+	if f.Ref != "" {
+		return f.Ref
+	}
+	return f.Branch
 }
 
 // wrapAt greedily wraps s to at most width columns, on spaces.

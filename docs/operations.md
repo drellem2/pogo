@@ -2295,6 +2295,21 @@ shows the item as `available` and priority-wake will advertise it as ready; that
 advice is wrong for as long as the branch is unmerged and nothing on the board
 says so.
 
+**The remedy follows the content second opinion (drellem2/pogo#174).** The mail
+prints the plain `resubmit` remedy only when the second opinion was measured and
+scored below 50% — reported as "N of M lines (P%) present — consistent with
+absent", never as agreement that the work is absent, because nothing has measured
+where absent work scores. Unmeasured, unavailable, 50–95% ("partly present — not
+corroborated", the band where the measured landed branches at 0.88/0.91/0.94
+sit) and ≥95% all get **check by hand first**: look for a merged PR and for the
+same subject on the target, with the submit line kept only under "Only if it did
+NOT land". The 0.5 is `strandedwork.ContentAbsentRatio`, an unmeasured guess
+labelled as one. If any unmerged commit is a **rescue** commit, the mail prints
+no submit command at all — it names the commit as unreviewed and never built, as
+`pogo check-stranded`'s `rescue_unbuilt` row does. "Do not dispatch" is
+imperative in every case. `pogo check-stranded` does not yet share the 50% tier
+(mg-8cda).
+
 Neither reporter submits and neither closes. A wrong auto-submit lands unreviewed
 work; a wrong auto-close discards a branch.
 
