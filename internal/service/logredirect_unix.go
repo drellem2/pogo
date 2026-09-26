@@ -9,9 +9,9 @@ import (
 
 // stderrIsSameFile reports whether this process's stderr is the file at
 // path (same device+inode). True only under the launchd
-// StandardErrorPath redirect — a tty (foreground run) or a pipe
-// (`pogo server start` output capture) never matches, which is what makes
-// startup log rotation safe to call unconditionally.
+// StandardErrorPath redirect (or the same file reached another way) — a tty
+// (foreground run) never matches, which is what makes startup log rotation
+// safe to call unconditionally.
 func stderrIsSameFile(path string) bool {
 	return sameFile(os.Stderr, path)
 }

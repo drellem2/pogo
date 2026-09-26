@@ -1458,13 +1458,27 @@ Flags:
 
 	startTime = time.Now()
 
+	// mg-a7a1 — before ANY write: if a parent handed us stdout/stderr on a
+	// pipe, re-point both at the log file. Once that parent stops reading,
+	// the next write to fd 1 or 2 kills this process with SIGPIPE, and every
+	// agent whose PTY it owns goes with it. Observed before the redirect and
+	// reported after it, because a line written to the pipe could be the one
+	// that kills us. See internal/service/pipedstdio.go.
+	pipedStdio := service.ObservePipedStdio()
+	var pipedStdioPath string
+	var pipedStdioErr error
+	if pipedStdio.Any() {
+		pipedStdioPath = service.PipedStdioLogPath()
+		pipedStdioErr = service.RepointStdioAt(pipedStdioPath)
+	}
+
 	// Rotate the launchd-managed log before anything writes to it, then mark
 	// the run boundary. launchd appends across restarts (so prior-run crash
 	// evidence survives), and this startup rotation keeps the file bounded
 	// while guaranteeing the previous run's tail is in pogod.log or
 	// pogod.log.1 when a post-mortem needs it (mg-6d02). No-op unless
-	// stderr actually is pogod.log — dev runs and pipe-captured spawns are
-	// untouched.
+	// stderr actually is pogod.log — dev runs are untouched. A piped spawn
+	// was already re-pointed at the log just above, so it rotates too.
 	rotated, logPath, rotErr := service.RotatePogodLogIfNeeded()
 	if rotErr != nil {
 		log.Printf("pogod: log rotation failed (continuing): %v", rotErr)
@@ -1473,6 +1487,9 @@ Flags:
 		log.Printf("pogod: rotated %s (previous run's log is %s.1)", logPath, logPath)
 	}
 	log.Printf("pogod: starting (pid=%d)", os.Getpid())
+	if pipedStdio.Any() {
+		logPipedStdio(pipedStdio, pipedStdioPath, pipedStdioErr)
+	}
 
 	// Repair PATH before spawning anything. Under launchd/systemd pogod inherits
 	// a minimal or empty PATH, which breaks bare-name subprocess lookups such as

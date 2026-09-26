@@ -177,8 +177,7 @@ func pogoHome() string {
 // file from another tool) and to follow the platform convention so Console.app
 // surfaces the daemon's output naturally.
 func logDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "Logs", "pogo")
+	return config.PogodLogDir()
 }
 
 // launchdPath builds a PATH that includes the directories where pogod's

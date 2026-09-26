@@ -45,8 +45,9 @@ func PogodLogPath() string {
 //
 // It is a strict no-op unless the process's stderr is pogod.log itself
 // (same device+inode) — i.e. unless we are actually running under the
-// launchd redirect. A foreground dev run (stderr = tty) or a
-// `pogo server start` spawn (stderr = capture pipe) is never redirected.
+// launchd redirect, the log file `pogo server start` now spawns onto, or a
+// piped stdio pogod re-pointed at the log (mg-a7a1). A foreground dev run
+// (stderr = tty) is never redirected.
 //
 // Returns whether a rotation happened and the log path, for the caller's
 // startup marker. Errors are advisory: the daemon must start even if
