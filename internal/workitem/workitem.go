@@ -22,6 +22,15 @@ type WorkItem struct {
 	// belongs to. Read by the dispatch-pairing gate, which routes on the repo an
 	// item names rather than on anything a filer has to remember to set.
 	Repo string `json:"repo,omitempty"`
+	// Branch is the `branch:` frontmatter value — the branch the item's work
+	// targets (`mg new --branch`). Empty means the item names none, and the
+	// repo's default branch applies.
+	//
+	// Read by spawn-polecat to default --branch (drellem2/pogo#176). Until then
+	// the field reached a worker only if the dispatcher copied it by hand, and
+	// one forgotten flag based the worktree, the submit target and the PR base
+	// on the default branch all at once.
+	Branch string `json:"branch,omitempty"`
 	// Depends is the raw `depends:` frontmatter value, kept verbatim exactly as
 	// Tags is. mg writes it as an inline YAML sequence — `depends: [mg-1234]`.
 	// Use DependsList for the split form.
@@ -499,6 +508,8 @@ func parseWorkItem(path, status string) (WorkItem, error) {
 			item.Tags = val
 		case "repo":
 			item.Repo = val
+		case "branch":
+			item.Branch = val
 		case "depends":
 			item.Depends = val
 		case "created":

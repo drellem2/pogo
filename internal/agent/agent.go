@@ -626,6 +626,11 @@ type Registry struct {
 	// above, the routing holds without any wiring. See templateroute.go.
 	workItemTyper WorkItemTyper
 
+	// workItemBrancher reads a work item's `branch:` field so handleSpawnPolecat
+	// can default --branch from it (drellem2/pogo#176). Nil means the default
+	// MGWorkItemBrancher. See spawntarget.go.
+	workItemBrancher WorkItemBrancher
+
 	// draining, when true, makes handleSpawnPolecat refuse to dispatch new
 	// polecats — the drain half of the pogo self-deploy path (mg-cae1 /
 	// mg-6afa). Only pogod knows its children and controls dispatch, so the

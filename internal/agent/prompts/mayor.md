@@ -296,7 +296,6 @@ pogo agent spawn-polecat <short-id> \
   --task="<work item title>" \
   --id="<work item id>" \
   --repo="<target repo path>" \
-  --branch="<target branch, if specified on work item>" \
   --body-file - <<'EOF'
 <work item body>
 EOF
@@ -306,7 +305,7 @@ EOF
 
 **pogod also refuses a dispatch whose item has an unmet `depends:` (mg-e7ff).** Same 409, same gate, naming each outstanding parent and what it is doing (`mg-12aa (claimed)`). Unmet depends is the third "deliberately not ready" condition alongside the gated assignee and `stage: gated`, and it was the only one with no check at the spawn point — the gate was keyed on **status**, and status is what the claim-release path used to get wrong: releasing a claim returned an item to `available/` without reading its `depends`, so an item with a deliberately unmet dependency became dispatchable and priority-wake advertised it as ready. **If you see this refusal, the store is also inconsistent** — mg parks a gated dependent in `pending/`, so an item that is both gated and in `available/` was placed there by some path that did not consult the edge. Run `mg schedule`: it reports every item in that state, and you are the first person in a position to notice. The gate fails OPEN on a parent it cannot find, because pogo does not read the archive and completed work is archived within minutes — so it stops the case above, and is not proof that no dispatch can reach dependent work.
 
-The {{.Worker}}'s name should be a short identifier derived from the work item ID. One {{.Worker}} per work item — don't spawn duplicates. If the work item has a `branch` field (visible in `mg show` or the work item frontmatter), pass it via `--branch`. This makes the refinery merge the {{.Worker}}'s work **into that branch** (not `main`). If no branch is specified, omit the flag and the refinery merges to `main`.
+The {{.Worker}}'s name should be a short identifier derived from the work item ID. One {{.Worker}} per work item — don't spawn duplicates. **You do not need `--branch`: pogod reads the item's `branch:` field itself** (drellem2/pogo#176) and uses it as the target — the worktree base, the refinery submit target and the PR base. An item with no `branch:` targets the repo's default branch. Passing the item's own value is harmless; a `--branch` that contradicts it is refused with a 409 — fix the item, not the flag. The spawn output prints the resolved base, and warns when the target is not on origin yet (the worktree then starts from the default branch and the refinery creates the target at submit).
 
 Work items whose body starts with `workflow: gh-issue` are issue-track tickets: dispatch them with the stage-specific template — `--template=polecat-triage`, `--template=polecat-build-pr`, or `--template=polecat-review` — per the GH-Issue Workflow playbook below. They are never routed on `type`; an explicit stage `--template` is always required.
 
