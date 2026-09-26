@@ -464,16 +464,26 @@ func SubmitRemedy(repo, branch, author string, pushed bool) string {
 // without reading this package. It always names the remedy, because a report
 // that only names the problem is what the pre-registration case cannot survive.
 func (f Finding) Summary() string {
+	return f.SummaryIn(CellResubmit)
+}
+
+// SummaryIn is Summary with its remedy clause taken from cell c of the one
+// decision table (see Cell), rather than always "get the branch merged". Summary
+// alone is the pre-mg-8cda wording and stays what the event payloads carry; a
+// surface that TELLS A READER WHAT TO DO passes the cell it measured, or it hands
+// an imperative submit to a branch the table says to check by hand first.
+func (f Finding) SummaryIn(c Cell) string {
+	remedy := RemedyPhrase(c, f, "")
 	switch f.Disposition {
 	case DispositionPreRegistration:
 		return fmt.Sprintf(
 			"%s has %d unmerged commit(s) on %s, they are %s, and %s is a PRE-REGISTRATION commit (%q). "+
 				"Do NOT dispatch a worker that branches from %s: it would write its predictions after "+
 				"seeing the results, and the artifact would be indistinguishable from a valid one. "+
-				"Either get %s merged (`%s`), or dispatch FROM %s and leave that commit unamended%s",
+				"Either %s, or dispatch FROM %s and leave that commit unamended%s",
 			f.Branch, len(f.Unmerged), f.Target, Provenance(f.Pushed),
 			shortSHA(f.PreRegistration.SHA), f.PreRegistration.Subject,
-			f.Target, f.Branch, SubmitRemedy(f.Repo, f.Branch, "", f.Pushed),
+			f.Target, strings.Replace(remedy, "the branch", f.Branch, 1),
 			shortSHA(f.PreRegistration.SHA), localOnlyNote(f.Pushed))
 	case DispositionCarried:
 		return fmt.Sprintf(
@@ -492,17 +502,25 @@ func (f Finding) Summary() string {
 		// do it). The warning is kept and made true by naming the base ref it is
 		// about: it is starting FROM THE TARGET that re-derives.
 		return fmt.Sprintf(
-			"%s has %d unmerged commit(s) on %s (%s), and they are %s. Get the branch merged (`%s`); "+
+			"%s has %d unmerged commit(s) on %s (%s), and they are %s. %s; "+
 				"a worker dispatched at this item FROM %s would re-derive work that already exists, "+
 				"so send one only to continue %s%s",
 			f.Branch, len(f.Unmerged), f.Target, shortSHA(f.Unmerged[0].SHA), Provenance(f.Pushed),
-			SubmitRemedy(f.Repo, f.Branch, "", f.Pushed), f.Target, f.Branch, localOnlyNote(f.Pushed))
+			capitalize(remedy), f.Target, f.Branch, localOnlyNote(f.Pushed))
 	default:
 		if !f.Found {
 			return fmt.Sprintf("no branch %s exists in %s", f.Branch, f.Repo)
 		}
 		return fmt.Sprintf("%s has nothing the target %s does not already have", f.Branch, f.Target)
 	}
+}
+
+// capitalize upper-cases the first byte of an ASCII clause.
+func capitalize(s string) string {
+	if s == "" || s[0] < 'a' || s[0] > 'z' {
+		return s
+	}
+	return string(s[0]-'a'+'A') + s[1:]
 }
 
 func shortSHA(sha string) string {
