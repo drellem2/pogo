@@ -367,11 +367,13 @@ func TestStandardStallCategoryIsAlsoPerItem(t *testing.T) {
 	}
 }
 
-// TestMailCategoryStaysPerCategory: unread mail is a single aggregate condition
-// with no per-item identity to key on, so it keeps the flat category cooldown.
-// This is scope discipline, recorded as a test so the asymmetry is deliberate
-// rather than an oversight.
-func TestMailCategoryStaysPerCategory(t *testing.T) {
+// TestMailCategoryEscalates: unread mail keeps ONE cooldown key for the whole
+// category — it has no per-item identity — but that key now escalates like the
+// item keys do. It used to stay flat, and this test pinned the flat cadence as
+// deliberate scope discipline; gh drellem2/pogo#190 is what that cost (156
+// notices in 13h to a stopped recipient). The reset rule that replaces
+// per-item identity for mail is pinned in unreadmail_test.go.
+func TestMailCategoryEscalates(t *testing.T) {
 	w, rec, workRoot, mailRoot := testEnv(t, backoffConfig(4*time.Hour))
 	now := time.Now()
 	// No work items at all, so only the mail category can fire.
@@ -383,15 +385,19 @@ func TestMailCategoryStaysPerCategory(t *testing.T) {
 	if rec.nudgeCount() != 1 {
 		t.Fatalf("mail cooldown should suppress the repeat, got %d", rec.nudgeCount())
 	}
-	// Flat, not escalating: the second notice comes one NudgeCooldown later and
-	// so does the third.
+	// The second notice comes one NudgeCooldown later...
 	w.Check(now.Add(5*time.Minute + time.Second))
 	if rec.nudgeCount() != 2 {
 		t.Fatalf("want 2 mail notices after one cooldown, got %d", rec.nudgeCount())
 	}
+	// ...and the third waits twice that, not one more NudgeCooldown.
 	w.Check(now.Add(10*time.Minute + 2*time.Second))
+	if rec.nudgeCount() != 2 {
+		t.Errorf("mail category must escalate: 3rd notice fired after a flat cooldown (%d notices)", rec.nudgeCount())
+	}
+	w.Check(now.Add(15*time.Minute + 2*time.Second))
 	if rec.nudgeCount() != 3 {
-		t.Errorf("mail category must stay flat (no backoff), got %d notices", rec.nudgeCount())
+		t.Errorf("want the 3rd notice after the doubled 10m gap, got %d", rec.nudgeCount())
 	}
 }
 

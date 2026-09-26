@@ -53,6 +53,7 @@ package stallwatch
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -183,7 +184,23 @@ type Options struct {
 	// ready while pogod's own [stranded-push] mail says the opposite, and the
 	// recommendation wins because it is the one that repeats.
 	Stranded Stranded
+	// Paused, when set, is asked at the top of every Check. While it reports
+	// true the watcher sends nothing at all — no notice of any category, and no
+	// notice on entering the pause either (gh drellem2/pogo#190). pogod wires it
+	// to "the server is in index-only mode": that is a stop the user chose, it
+	// stops the coordinator these notices are addressed to, and the notices
+	// then land in a mailbox nobody drains and that this watcher itself counts.
+	// Every backoff is forgotten when the pause ends, so the first tick after a
+	// resume fires fresh — see Check. Left nil the watcher never pauses.
+	Paused func() bool
 }
+
+// Sender is the From: every stall-watch mail carries. pogod's nudger passes it
+// to `mg mail send`, and checkUnreadMail reads it back to leave the watcher's
+// own notices out of the backlog it measures (gh drellem2/pogo#190). It is one
+// constant for both ends because the two ends drifting apart is exactly how the
+// self-counting loop would come back, silently.
+const Sender = "stall-watch"
 
 // Watcher samples macguffin state and nudges the watched agent on stall.
 type Watcher struct {
@@ -197,8 +214,17 @@ type Watcher struct {
 	workers   Workers
 	preserved Preserved
 	stranded  Stranded
+	paused    func() bool
 
 	mu sync.Mutex
+	// wasPaused records that the previous Check saw the pause, so the first
+	// Check after it can forget every backoff (gh drellem2/pogo#190).
+	wasPaused bool
+	// selfMail caches, per filename in the watched new/ maildir, whether that
+	// message is one of the watcher's own notices. Maildir files are immutable
+	// once delivered, so a name's answer never changes; the cache is pruned to
+	// the directory's current listing on every sample, which bounds it.
+	selfMail map[string]bool
 	// lastNudge records when each cooldown key last fired and how many times it
 	// has fired. Work-item categories key it per (category, item id) so a
 	// deliberately-held item cannot hold the whole category's cooldown; the
@@ -214,6 +240,11 @@ type Watcher struct {
 type fireRecord struct {
 	last  time.Time
 	count int
+	// oldest is used by the unread-mail key only: the filename of the oldest
+	// unread message when the key last fired. The mail backoff resets when that
+	// message leaves new/ — i.e. when something was READ — and at no other
+	// time. See checkUnreadMail.
+	oldest string
 }
 
 // New builds a Watcher from cfg and opts, applying defaults for any zero
@@ -295,7 +326,9 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		workers:   opts.Workers,
 		preserved: opts.Preserved,
 		stranded:  opts.Stranded,
+		paused:    opts.Paused,
 		lastNudge: make(map[string]fireRecord),
+		selfMail:  make(map[string]bool),
 	}
 }
 
@@ -308,8 +341,39 @@ func (w *Watcher) Check(now time.Time) {
 	if w == nil || !w.cfg.Enabled || w.nudge == nil {
 		return
 	}
+	if w.pausedNow() {
+		return
+	}
 	w.checkUnclaimedItems(now)
 	w.checkUnreadMail(now)
+}
+
+// pausedNow reports whether this sample must send nothing, and forgets every
+// backoff on the first sample after a pause ends (gh drellem2/pogo#190).
+//
+// Silence while paused is total and unannounced: index-only is a stop the user
+// chose, the coordinator is stopped with it, and there is nobody to act on a
+// notice — while the notices themselves would pile up in the mailbox the
+// unread-mail check measures. The backlog is still there on resume.
+//
+// Forgetting on resume is the restart semantics selectDue already documents,
+// for the same reason: a resume restarts the coordinator, whose in-memory
+// picture of what it was holding is gone with the old process, so each still-
+// standing condition is reported once, fresh, rather than from deep inside a
+// backoff the new process never saw.
+func (w *Watcher) pausedNow() bool {
+	paused := w.paused != nil && w.paused()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if paused {
+		w.wasPaused = true
+		return true
+	}
+	if w.wasPaused {
+		w.wasPaused = false
+		w.lastNudge = make(map[string]fireRecord)
+	}
+	return false
 }
 
 // checkUnclaimedItems fires when one or more available work items the watched
@@ -640,6 +704,30 @@ func (w *Watcher) isFastPriority(priority string) bool {
 
 // checkUnreadMail fires when the watched agent's new/ maildir holds a message
 // older than the age threshold, or has accumulated more than the count ceiling.
+//
+// Three properties keep it from becoming the alarm gh drellem2/pogo#190
+// reported — 156 repeats in 13h to a stopped mayor, every one of them counting
+// the ones before it:
+//
+//   - Its own notices are not part of the backlog. A message whose From: is
+//     Sender is left out of the count and the oldest age, so a mailbox holding
+//     ONLY stall-watch notices never fires. When the recipient is not running,
+//     pogod's nudger mails every notice into the very maildir this reads;
+//     counting them made the alarm its own evidence, and the subject climbed
+//     "2 unread" to "162 unread" on nothing but itself.
+//   - Repeats escalate. The same doubling the item categories use
+//     (repeatCooldown): NudgeCooldown, then twice that, out to
+//     RepeatBackoffCap — not one notice per NudgeCooldown forever.
+//   - Only a READ resets the escalation. The backoff is keyed on the identity
+//     of the oldest unread message when it last fired, and the count returns to
+//     zero only when that message has left new/. A new arrival must NOT reset
+//     it: arrivals are exactly what an unattended mailbox keeps receiving, so a
+//     reset keyed on the count or the newest message would restore the flat
+//     cadence in precisely the case the backoff exists for.
+//
+// A reset returns the count to zero but keeps the last-fire time, so the next
+// notice still waits one base cooldown — the floor the flat cooldown always
+// had — rather than firing on the tick after every single read.
 func (w *Watcher) checkUnreadMail(now time.Time) {
 	newDir := filepath.Join(w.mailRoot, w.cfg.Agent, "new")
 	entries, err := os.ReadDir(newDir)
@@ -650,9 +738,18 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 	}
 
 	count := 0
+	selfCount := 0
 	var oldestAge time.Duration
+	oldestName := ""
+	live := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		live[name] = true
+		if w.isSelfMail(newDir, name) {
+			selfCount++
 			continue
 		}
 		count++
@@ -660,10 +757,29 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 		if err != nil {
 			continue
 		}
-		if age := now.Sub(info.ModTime()); age > oldestAge {
+		age := now.Sub(info.ModTime())
+		// Ties break on the name so the oldest message's identity is stable
+		// across ticks: the reset rule below keys on it.
+		if oldestName == "" || age > oldestAge || (age == oldestAge && name < oldestName) {
 			oldestAge = age
+			oldestName = name
 		}
 	}
+	w.pruneSelfMail(live)
+
+	w.mu.Lock()
+	key := fireKey(categoryUnreadMail, "")
+	rec, seen := w.lastNudge[key]
+	if seen && rec.oldest != "" && !live[rec.oldest] {
+		// The message that was oldest at the last fire has been read (or
+		// otherwise left new/): the recipient is draining. Reset the
+		// escalation; keep the last-fire time as the base-cooldown floor.
+		rec.count = 0
+		rec.oldest = ""
+		w.lastNudge[key] = rec
+	}
+	w.mu.Unlock()
+
 	if count == 0 {
 		return
 	}
@@ -674,9 +790,28 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 		return
 	}
 
-	if !w.tryFire(categoryUnreadMail, now, w.cfg.NudgeCooldown) {
+	w.mu.Lock()
+	rec = w.lastNudge[key]
+	if !rec.last.IsZero() && now.Sub(rec.last) < repeatCooldown(w.cfg.NudgeCooldown, w.cfg.RepeatBackoffCap, rec.count) {
+		w.mu.Unlock()
 		return
 	}
+	// Recorded before the nudge attempt, so a failed delivery still counts
+	// toward the backoff and a wedged recipient is not hammered every tick. Be
+	// precise about what that costs: THERE IS NO RETRY (mg-79dc). A failed
+	// nudge is never re-sent; after the backoff the condition is sampled again
+	// from scratch, and only if it still holds is a fresh notice composed. The
+	// backoff is a rate limiter, not a retry queue — which is why the mail
+	// fallback in pogod's nudger has to succeed on the first attempt.
+	rec.last = now
+	rec.count++
+	if rec.oldest == "" {
+		rec.oldest = oldestName
+	}
+	w.lastNudge[key] = rec
+	notice := rec.count
+	next := repeatCooldown(w.cfg.NudgeCooldown, w.cfg.RepeatBackoffCap, rec.count)
+	w.mu.Unlock()
 
 	var reason string
 	switch {
@@ -690,12 +825,16 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 	}
 
 	msg := fmt.Sprintf("stall-watch: unread mail piling up — %s. Check your mail and process it.", reason)
+	if notice > 1 {
+		msg += fmt.Sprintf(" [repeat] notice #%d about this backlog — backing off, next notice no sooner than %s unless the oldest message is read.",
+			notice, next)
+	}
 
 	// The one category with no item ids to name, so its whole discriminator is
 	// the count and the age. Both move as the backlog does.
 	subj := subject(fmt.Sprintf("%d unread mail", count), oldestAge, nil)
 
-	w.fire(categoryUnreadMail, Notice{Subject: subj, Message: msg}, map[string]any{
+	details := map[string]any{
 		"category":           categoryUnreadMail,
 		"watched_agent":      w.cfg.Agent,
 		"unread_count":       count,
@@ -704,7 +843,73 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 		"age_threshold":      w.cfg.UnreadMailAgeThreshold.String(),
 		"over_count":         overCount,
 		"over_age":           overAge,
-	})
+		"notice_count":       notice,
+		"next_backoff":       next.String(),
+	}
+	// Countable, so "how much of this inbox is the watcher talking to itself"
+	// is answerable from events.log alone.
+	if selfCount > 0 {
+		details["self_notices_excluded"] = selfCount
+	}
+	w.fire(categoryUnreadMail, Notice{Subject: subj, Message: msg}, details)
+}
+
+// selfMailHeaderLimit bounds how much of a message isSelfMail reads. The From:
+// header is in the first few lines of every mg-written message; nothing past
+// the header block is ever needed.
+const selfMailHeaderLimit = 4096
+
+// isSelfMail reports whether the message name in dir was sent by this watcher
+// (From: Sender). The answer is cached per filename — maildir messages are
+// immutable once delivered — so a large backlog is read once, not every tick.
+// An unreadable message is NOT cached and counts as someone else's: excluding
+// mail on a guess would hide a real backlog, which is the worse error.
+func (w *Watcher) isSelfMail(dir, name string) bool {
+	w.mu.Lock()
+	v, ok := w.selfMail[name]
+	w.mu.Unlock()
+	if ok {
+		return v
+	}
+	f, err := os.Open(filepath.Join(dir, name))
+	if err != nil {
+		return false
+	}
+	buf := make([]byte, selfMailHeaderLimit)
+	n, _ := io.ReadFull(f, buf)
+	f.Close()
+	v = headerFromIs(string(buf[:n]), Sender)
+	w.mu.Lock()
+	w.selfMail[name] = v
+	w.mu.Unlock()
+	return v
+}
+
+// pruneSelfMail forgets cached answers for messages no longer in new/.
+func (w *Watcher) pruneSelfMail(live map[string]bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for name := range w.selfMail {
+		if !live[name] {
+			delete(w.selfMail, name)
+		}
+	}
+}
+
+// headerFromIs reports whether the header block of msg (everything before the
+// first blank line) carries a From: header equal to sender.
+func headerFromIs(msg, sender string) bool {
+	for _, line := range strings.Split(msg, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			return false
+		}
+		k, v, ok := strings.Cut(line, ":")
+		if ok && strings.EqualFold(strings.TrimSpace(k), "From") {
+			return strings.TrimSpace(v) == sender
+		}
+	}
+	return false
 }
 
 // watchedForDispatch reports whether an available item is the watched agent's
@@ -991,40 +1196,6 @@ func (w *Watcher) selectDue(category string, candidates []workitem.WorkItem, now
 		sel.repeats = nil
 	}
 	return due, sel
-}
-
-// tryFire enforces a per-category cooldown. It is used only by the unread-mail
-// check, which watches a single aggregate condition with no per-item identity
-// to key on — the two work-item categories use selectDue's per-item cooldown
-// instead (mg-1693).
-//
-// Recording before the nudge attempt means a failed delivery still counts
-// toward the cooldown, so a wedged recipient is not hammered every tick. Be
-// precise about what that costs, because mg-79dc's ticket asked and the
-// answer is not what the cooldown's existence suggests: THERE IS NO RETRY. A
-// failed nudge is not queued and never re-sent. What happens after the
-// cooldown is that the CONDITION is sampled again from scratch — and only if
-// it still holds does a fresh message get composed. So a stall that resolves
-// inside the cooldown window takes its undelivered notice with it, silently,
-// and a stall that resolves-then-recurs reports the recurrence as if it were
-// the first (the original is neither re-sent nor referenced).
-//
-// This is why delivery must succeed on the FIRST attempt rather than lean on
-// the cooldown as a safety net: the cooldown is a rate limiter, not a retry
-// queue, and treating it as one is what left ~38% of a day's fires unheard.
-// The mail fallback in newStallNudger is that first-attempt guarantee.
-func (w *Watcher) tryFire(category string, now time.Time, cooldown time.Duration) bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	key := fireKey(category, "")
-	if rec, ok := w.lastNudge[key]; ok && now.Sub(rec.last) < cooldown {
-		return false
-	}
-	rec := w.lastNudge[key]
-	rec.last = now
-	rec.count++
-	w.lastNudge[key] = rec
-	return true
 }
 
 // fire delivers the nudge and appends the stall_watch_fired event.

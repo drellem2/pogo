@@ -1266,7 +1266,7 @@ func newStallNudgerWithTimeoutAndDamper(reg *agent.Registry, mail func(to, from,
 						"so it was sent as mail instead. It may therefore be older than it looks — "+
 						"re-check the current state before acting on it.",
 					message, err)
-				if mailErr := mail(agentName, "stall-watch", stallSubject(notice)+" (undelivered to terminal)", body); mailErr != nil {
+				if mailErr := mail(agentName, stallwatch.Sender, stallSubject(notice)+" (undelivered to terminal)", body); mailErr != nil {
 					// Both channels are down. This is the genuine hard failure:
 					// nothing carried the message. Log loudly — a stall notice
 					// that reaches nobody is the failure this watcher exists to
@@ -1302,11 +1302,18 @@ func newStallNudgerWithTimeoutAndDamper(reg *agent.Registry, mail func(to, from,
 		if damper != nil {
 			damper.reset(agentName)
 		}
-		if err := mail(agentName, "stall-watch", stallSubject(notice), message); err != nil {
+		if err := mail(agentName, stallwatch.Sender, stallSubject(notice), message); err != nil {
 			return stallwatch.Delivery{}, err
 		}
 		return stallwatch.Delivery{Channel: stallwatch.DeliveryMail}, nil
 	}
+}
+
+// stallWatchPaused reports whether the stall watcher must stay silent: true
+// while the server is in index-only mode (gh drellem2/pogo#190). A daemon
+// whose server is not built yet is not paused — there is no mode to honour.
+func stallWatchPaused() bool {
+	return srv != nil && srv.Mode() == config.ModeIndexOnly
 }
 
 // stallSubjectFallback is the subject a notice gets when it carries none. It is
@@ -2324,6 +2331,12 @@ Flags:
 			// paste-ready `pogo refinery submit` at a running merge, and the
 			// refinery has no dedup.
 			Stranded: newStallStranded(func() *refinery.Refinery { return mergeQueue }),
+			// Send nothing while the server is index-only (gh drellem2/pogo#190).
+			// That is a stop the user chose and it stops the coordinator, so
+			// every notice would land in a mailbox nobody drains — the one the
+			// unread-mail check counts. Resolved late through the closure for
+			// the same reason orchResume's is: srv is built after this.
+			Paused: stallWatchPaused,
 		})
 		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s fallback_cap=%d priority_wake=%t wake_delay=%s wake_cooldown=%s fast_priorities=%s non_dispatchable=%s indefinite_hold=%t hold_age=%s hold_cooldown=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,
