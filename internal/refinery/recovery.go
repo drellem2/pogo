@@ -133,8 +133,11 @@ func (r *Refinery) resolveRecoveredOne(mr *MergeRequest) {
 // could not answer (branch deleted, remote unreachable) — recovery moves the
 // MR to the lost list; processMerge falls through to the normal pipeline,
 // which surfaces the real error.
+//
+// The worktree comes from ensureGateWorktree, so a gate the previous pogod left
+// running in it is reaped BEFORE the reset below, not under it (mg-58f3).
 func (r *Refinery) probeAlreadyMerged(mr *MergeRequest) (bool, string, error) {
-	wtDir, err := r.ensureWorktree(mr.RepoPath)
+	wtDir, err := r.ensureGateWorktree(mr)
 	if err != nil {
 		return false, "", fmt.Errorf("worktree setup: %w", err)
 	}

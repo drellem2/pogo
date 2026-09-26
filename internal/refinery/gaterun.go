@@ -221,7 +221,17 @@ func runGate(ctx context.Context, wtDir, command string, timeout time.Duration, 
 	var err error
 	if err = cmd.Start(); err == nil {
 		w.setPID(cmd.Process.Pid)
+		// Record the tree's occupant before anything can outlive this
+		// process: a pogod restart leaves the gate running (it is in its own
+		// group), and the lock is how the next pogod finds it instead of
+		// starting a second gate beside it (mg-58f3, see gatelock.go).
+		lock := gateLock{PGID: cmd.Process.Pid, PogodPID: os.Getpid(), Gate: command, Started: start}
+		if w != nil && w.mr != nil {
+			lock.MRID, lock.Branch, lock.Repo = w.mr.ID, w.mr.Branch, w.mr.RepoPath
+		}
+		writeGateLock(wtDir, lock)
 		err = cmd.Wait()
+		releaseGateLock(wtDir, cmd.Process.Pid)
 	}
 	output := out.buf.String()
 

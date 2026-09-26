@@ -1065,6 +1065,8 @@ whole group is killed: `sh -c` forks rather than execs for anything compound, so
 killing the shell alone would leave the real work running and holding the output
 pipe, stalling the very runner that carries the heartbeat.
 
+**Gates outlive pogod, so every worktree records its occupant.** A gate's own process group is also out of reach of any signal aimed at pogod's group. A pogod restart therefore leaves the in-flight gate running, reparented to launchd, and nothing is left to collect its result. On 2026-09-26 the next pogod recovered that MR, `git reset --hard` the worktree under the orphan, and started a second `go test ./...` in the same directory (mg-58f3). `runGate` now writes `<worktree>/.git/pogo-gate.lock` naming the gate's process group, its pogod's pid and its MR. The lock lives in `.git` so reset and clean cannot remove it. It is released only once the whole group is gone, because a shell that exits while a descendant runs has not freed the tree. `Start` checks every worktree against its lock before recovery runs, and `ensureGateWorktree` checks again before recovery or a merge uses a tree. A group whose pogod is gone gets reaped (SIGTERM, then SIGKILL), logged by pid, and recorded as `refinery_orphan_gate_reaped`. A group owned by a live daemon, or by another in-flight MR of this one (two repos with one basename share a clone), gets a refusal naming it, never a kill. A leader pid younger than the lock is a reused number and is left alone.
+
 **Gates that write tracked files.** A gate is an arbitrary command run inside the
 refinery's own clone, and nothing stops it writing tracked files — a regenerated
 JSON record, a lockfile, a coverage report, a checked-in generated fixture.

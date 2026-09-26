@@ -1109,6 +1109,26 @@ Restart recovery could not carry an in-flight merge request forward (branch dele
 {"schema_version":1,"timestamp":"2026-07-02T09:14:02.000000000Z","event_type":"refinery_mr_lost","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","author":"cat-mg-0241","reason":"branch \"polecat-mg-0241\" not found on origin"}}
 ```
 
+#### `refinery_orphan_gate_reaped`
+
+A gate was found still running in a refinery worktree it no longer owns, and the refinery tried to end it (mg-58f3). Gates run in their own process group, so they survive a pogod restart. Every gate records its process group, its pogod's pid and its MR in `<worktree>/.git/pogo-gate.lock`. Before a worktree is used, and once over every worktree at startup, the refinery reaps a group the lock names when its pogod is gone (`ORPHANED`), or when its own finished gate left it behind. A group that another live gate owns is refused with an error naming it, and emits nothing.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **Optional envelope:** `repo` (absent on locks written before the field existed)
+- **`details` fields:**
+  - `worktree` (string, required): the refinery clone the gate occupied
+  - `pgid` (int, required): the reaped process group
+  - `pogod_pid` (int, required): the pogod that started the gate
+  - `merge_request_id`, `branch`, `gate` (string, optional): what the gate was running for
+  - `gate_started` (string, required): RFC 3339 time the gate started
+  - `reason` (string, required): why it was reaped
+  - `outcome` (string, required on success): `ended by SIGTERM`, or `ended by SIGKILL after ignoring SIGTERM for 5s`
+  - `error` (string, present on failure): why the group could not be ended; the merge that wanted the tree then fails, naming the group
+
+```json
+{"schema_version":1,"timestamp":"2026-09-26T00:56:30.000000000Z","event_type":"refinery_orphan_gate_reaped","agent":"refinery","repo":"/Users/daniel/dev/pogo","details":{"worktree":"/Users/daniel/.pogo/refinery/worktrees/pogo","pgid":27691,"pogod_pid":41203,"merge_request_id":"mr-dag4ms2tjv1hjkm214r0","branch":"polecat-t4d59","gate":"./build.sh","gate_started":"2026-09-26T00:55:35Z","reason":"ORPHANED: the pogod that started it is gone, so nothing can ever consume its result","outcome":"ended by SIGTERM"}}
+```
+
 ### Daemon robustness
 
 #### `goroutine_panic`
