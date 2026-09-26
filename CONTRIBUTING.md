@@ -638,6 +638,13 @@ Versioning is semver: **patch** for CI / docs / chore-only changes, **minor**
 otherwise; reserve major for breaking CLI changes. Prereleases use a
 `vX.Y.Z-<suffix>` form and surface as GitHub prereleases automatically.
 
+**Releases are soaked first, then cut from `release/vX.Y.Z` (mg-8382).** The
+tag goes on the SHA that ran on this box for ~24h, not on main's tip. For the
+policy and the exact commands, see [`docs/release-process.md`](docs/release-process.md):
+the release branch is created at the candidate, the bump is merged into it with
+`--post-merge-tag`, and the bump is then carried back to main. The two recipes
+below predate the soak.
+
 **Cutting a release from a clean `main`.** With the change you want to ship:
 
 ```bash
