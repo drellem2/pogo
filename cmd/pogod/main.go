@@ -2630,8 +2630,8 @@ Flags:
 			// The cache lives as long as this watcher, so a pass forks `mg show`
 			// only for items whose file changed since the last one (#179). It is a
 			// pointer, which is what lets it survive src.Carriers being bound off
-			// this struct value below.
-			src := ghintake.MGSource{Cache: ghintake.NewRefCache()}
+			// this struct value below. See newIntakeCarrierSource.
+			src := newIntakeCarrierSource()
 			// The credential predicate is fixed at arm time, deliberately: it is
 			// one global fact, and re-deciding it per sample would mean a `gh auth
 			// token` subprocess every fifteen minutes on every healthy scan. What

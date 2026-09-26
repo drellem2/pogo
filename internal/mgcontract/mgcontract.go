@@ -95,6 +95,7 @@ const (
 	DoneRefusalPreservesTheResultSidecar    = "done/refusal-preserves-the-result-sidecar"
 	DoneRefusesAnUnknownSuccessor           = "done/refuses-an-unknown-successor"
 	ListJSONCarriesThePredecessorEdge       = "list/json-carries-the-predecessor-edge"
+	ListJSONMtimeIsStableAndAnEditMovesIt   = "list/json-mtime-is-stable-and-an-edit-moves-it"
 	MailSendRefusesAnUnknownRecipient       = "mail/send-refuses-an-unknown-recipient"
 	MailSendCreateRegistersANewMailbox      = "mail/send-create-registers-a-new-mailbox"
 	MailListJSONReportsUnreadCounts         = "mail/list-json-reports-unread-counts"
@@ -475,6 +476,79 @@ var clauses = []Clause{
 			}
 			if !found {
 				return fmt.Errorf("`mg list --all --json` did not list %s at all, so the resolver's scan cannot see it:\n%s", child, listed)
+			}
+			return nil
+		},
+	},
+	{
+		Name: ListJSONMtimeIsStableAndAnEditMovesIt,
+		Why: "pogod's whole-store carrier scan caches each item's refs keyed on the `mtime` field of `mg list --json` and forks " +
+			"`mg show` only when it moves (drellem2/pogo#179); if mg drops the field the cache never hits, and if an edit stops " +
+			"moving it the cache serves a stale body — either way with no alarm, because a miss and a stale hit both look like a scan",
+		Dependents: []string{
+			"internal/mgscan (Row.Mtime, Cache)",
+			"internal/ghintake (MGSource.Cache, cachedRefsFor)",
+			"internal/ghintake/cache_test.go (TestRealStoreEditIsPickedUpAndUnchangedCostsNothing)",
+		},
+		probe: func(s *store) error {
+			id, err := s.newItem("contract probe", "a body")
+			if err != nil {
+				return err
+			}
+			// The scan lists per status, so the probe asks the same shape it
+			// does rather than --all.
+			mtime := func() (string, error) {
+				out, code, err := s.run("list", "--status=available", "--json")
+				if err != nil {
+					return "", err
+				}
+				if code != 0 {
+					return "", fmt.Errorf("`mg list --status=available --json` exited %d:\n%s", code, out)
+				}
+				for _, line := range strings.Split(out, "\n") {
+					if strings.TrimSpace(line) == "" {
+						continue
+					}
+					var row map[string]any
+					if jerr := json.Unmarshal([]byte(line), &row); jerr != nil {
+						return "", fmt.Errorf("`mg list --status=available --json` emitted a line that is not JSON: %v\n%s", jerr, line)
+					}
+					if row["id"] != id {
+						continue
+					}
+					m, ok := row["mtime"].(string)
+					if !ok || m == "" {
+						return "", fmt.Errorf("`mg list --json` reports %s with no string `mtime` (keys %v); the carrier "+
+							"scan's cache can never hit, so every pass re-forks `mg show` for the whole store", id, sortedKeys(row))
+					}
+					return m, nil
+				}
+				return "", fmt.Errorf("`mg list --status=available --json` did not list %s:\n%s", id, out)
+			}
+			first, err := mtime()
+			if err != nil {
+				return err
+			}
+			again, err := mtime()
+			if err != nil {
+				return err
+			}
+			if again != first {
+				return fmt.Errorf("`mg list --json` reported %s's mtime as %q and then %q with no write in between; a key "+
+					"that moves on its own never hits", id, first, again)
+			}
+			if out, code, err := s.run("edit", id, "--body=an edited body"); err != nil {
+				return err
+			} else if code != 0 {
+				return fmt.Errorf("`mg edit --body` exited %d:\n%s", code, out)
+			}
+			edited, err := mtime()
+			if err != nil {
+				return err
+			}
+			if edited == first {
+				return fmt.Errorf("`mg edit --body` left %s's listed mtime at %q; the carrier scan's cache would keep "+
+					"serving the refs of the body it replaced", id, first)
 			}
 			return nil
 		},

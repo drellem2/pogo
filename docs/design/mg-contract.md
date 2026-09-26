@@ -142,6 +142,14 @@ this by putting a deliberately-drifted `mg` first on `PATH` and reading back
 what the clause says about it; the three shapes there are the two real outages
 and the doctor's empty-store miscount.
 
+A clause is also the place for a **production** dependency on mg whose failure
+would be silent. `list/json-mtime-is-stable-and-an-edit-moves-it` is the example:
+pogod's carrier scan caches each item's refs on the `mtime` that `mg list --json`
+reports (drellem2/pogo#179), so if mg dropped that field the cache would simply
+never hit. Every pass would go back to forking `mg show` for the whole store, and
+nothing would fail. The clause makes that red at the gate, not a cost someone
+finds later in a profile.
+
 ## What this does not claim
 
 It does not make the dependent tests hermetic, and it is not a version pin:

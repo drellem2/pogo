@@ -205,3 +205,59 @@ exit 0`)
 		t.Errorf("the caller's store was written to by a probe: %v", entries)
 	}
 }
+
+// TestTheMtimeClauseCatchesEachWayTheCarrierCacheGoesQuiet drives the mtime
+// clause against three drifted `mg`s, one per way pogod's carrier-scan cache
+// (drellem2/pogo#179) would fail WITHOUT an alarm: the field is gone (the cache
+// never hits and every pass re-forks the whole store), the field moves on its
+// own (the same, more quietly), and an edit leaves it where it was (the cache
+// serves the body the edit replaced). None of the three changes an exit code.
+func TestTheMtimeClauseCatchesEachWayTheCarrierCacheGoesQuiet(t *testing.T) {
+	clause, ok := Lookup(ListJSONMtimeIsStableAndAnEditMovesIt)
+	if !ok {
+		t.Fatalf("clause %q is not declared", ListJSONMtimeIsStableAndAnEditMovesIt)
+	}
+	for _, tc := range []struct {
+		name, list, want string
+	}{
+		{"field dropped", `echo '{"id":"mg-abcd","status":"available"}'`, "no string `mtime`"},
+		{"moves on its own", `n=$(cat "$root/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$root/n"
+  echo "{\"id\":\"mg-abcd\",\"status\":\"available\",\"mtime\":\"t$n\"}"`, "with no write in between"},
+		{"edit does not move it", `echo '{"id":"mg-abcd","status":"available","mtime":"2026-09-26T10:00:00Z"}'`, "left mg-abcd's listed mtime"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubMg(t, rootOf+`
+case "$1" in
+  init) mkdir -p "$root/work"; exit 0 ;;
+  new)  echo "Created mg-abcd: stub"; exit 0 ;;
+  list) `+tc.list+`; exit 0 ;;
+  edit) exit 0 ;;
+esac
+exit 0`)
+			err := probe(clause)
+			if err == nil {
+				t.Fatal("the clause held against an mg whose `mg list --json` mtime cannot key the carrier cache")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the break is reported as %q; want it to say %q", err, tc.want)
+			}
+		})
+	}
+
+	// Positive control for the stub itself: an mg whose mtime is stable and
+	// moves on edit must pass, or the three failures above prove only that the
+	// stub is broken.
+	t.Run("a well-behaved mg holds", func(t *testing.T) {
+		stubMg(t, rootOf+`
+case "$1" in
+  init) mkdir -p "$root/work"; echo t0 > "$root/m"; exit 0 ;;
+  new)  echo "Created mg-abcd: stub"; exit 0 ;;
+  list) echo "{\"id\":\"mg-abcd\",\"status\":\"available\",\"mtime\":\"$(cat "$root/m")\"}"; exit 0 ;;
+  edit) echo t1 > "$root/m"; exit 0 ;;
+esac
+exit 0`)
+		if err := probe(clause); err != nil {
+			t.Fatalf("the clause failed against a well-behaved stub: %v", err)
+		}
+	})
+}

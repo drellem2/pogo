@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/drellem2/pogo/internal/mgcontract"
 	"github.com/drellem2/pogo/internal/mgscan"
 )
 
@@ -295,6 +296,10 @@ func TestRealStoreEditIsPickedUpAndUnchangedCostsNothing(t *testing.T) {
 	if !mgAvailable(t) {
 		t.Skip("mg binary not on PATH")
 	}
+	// This test's premise is that the real store's listed mtime keys the cache.
+	// If mg stops providing that, the red belongs to internal/mgcontract, which
+	// names the change — not to an unexplained "forked N shows" here.
+	mgcontract.Require(t, mgcontract.ListJSONMtimeIsStableAndAnEditMovesIt)
 	real, err := exec.LookPath("mg")
 	if err != nil {
 		t.Fatal(err)
