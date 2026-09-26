@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/ghteardown"
+	"github.com/drellem2/pogo/internal/mgscan"
 	"github.com/drellem2/pogo/internal/testtmp"
 )
 
@@ -126,12 +126,6 @@ func ParseRef(ref string) (repo string, number int, err error) {
 	return repo, number, nil
 }
 
-// mgListItem is the subset of `mg list --json` (NDJSON) this package reads.
-type mgListItem struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-}
-
 // mgShowItem is the subset of `mg show --json` this package reads. `mg list`
 // does not emit bodies, which is why finding the carriers costs one `mg show`
 // per live item.
@@ -157,7 +151,46 @@ type MGSource struct {
 	// Workers bounds concurrent `mg show` calls. Zero picks a default from the
 	// CPU count.
 	Workers int
+	// Cache, when set, remembers each item's parse keyed on the mtime `mg list`
+	// reports, so a later pass forks `mg show` only for items that are new or
+	// whose file changed — ghintake's fix for drellem2/pogo#179, applied to the
+	// sibling scan (mg-e353). It is a POINTER on purpose: pogod binds
+	// src.Carriers off a struct value, and an embedded cache would be copied and
+	// never hit. Nil caches nothing — right for the one-shot `pogo
+	// check-carriers`, which has no second pass to serve.
+	Cache *ItemCache
 }
+
+// ItemCache is the per-item cache MGSource.Cache holds: what carrier() decided
+// about one item, with Status blank, because status is taken from the current
+// list row (see mgscan.Cache on why a rename keeps the mtime). Non-carriers are
+// cached too — they are nearly every item the scan lists.
+//
+// It is NOT shared with ghintake's RefCache, although both scans list the same
+// store through the same mgscan code. Three reasons, the first decisive:
+//
+//   - Retain would fight. Each scan prunes the cache to the ids IT just listed,
+//     and the two list different populations (ghintake every status, this
+//     package the live ones), so one watcher's prune would evict the other's
+//     archived entries every pass — 88% of the store re-forked on alternate
+//     passes, which is #179 back again.
+//   - The values differ. ghintake keeps every `gh:` ref ParseBodyRefs finds; this
+//     package keeps ParseBody's gated carrier projection plus title and created.
+//     A shared value would have to be the raw body, which moves ~4,000 bodies
+//     into pogod's heap to save forks the per-scan caches already save.
+//   - The saving is one fork per EDITED live item. With a cache on each side an
+//     unchanged item already costs no fork in either scan; sharing would only
+//     spare the second scan's read of an item the first had just re-read.
+type ItemCache = mgscan.Cache[cachedItem]
+
+// cachedItem is carrier()'s answer for one successfully read item.
+type cachedItem struct {
+	c  Carrier
+	ok bool
+}
+
+// NewItemCache returns an empty ItemCache for a long-lived MGSource.
+func NewItemCache() *ItemCache { return mgscan.NewCache[cachedItem]() }
 
 // testRootOnce memoises one temp directory per test binary, so every test-binary
 // call resolves to the same empty scratch store.
@@ -204,14 +237,7 @@ func (s MGSource) workers() int {
 	if s.Workers > 0 {
 		return s.Workers
 	}
-	n := runtime.NumCPU()
-	if n > 8 {
-		n = 8
-	}
-	if n < 1 {
-		n = 1
-	}
-	return n
+	return mgscan.DefaultWorkers()
 }
 
 func (s MGSource) run(args ...string) ([]byte, error) {
@@ -256,33 +282,33 @@ func (s MGSource) Statuses() []string {
 // error is safe here — an item whose body we cannot read is an item we cannot
 // tell is a carrier, so the worst it can cause is a MISSED finding on that one
 // item, and StoreItems reports the shortfall.
+//
+// With a Cache set, an item listed at the same mtime as last pass is answered
+// from the cache without forking `mg show`. Status on a cached answer comes from
+// this pass's list row. Ids listed more than once always bypass the cache.
 func (s MGSource) Carriers() ([]Carrier, int, error) {
-	ids, err := s.ids()
+	rows, err := s.rows()
 	if err != nil {
 		return nil, 0, err
 	}
-	if len(ids) == 0 {
+	if s.Cache != nil {
+		listed := make(map[string]bool, len(rows))
+		for _, r := range rows {
+			listed[r.ID] = true
+		}
+		s.Cache.Retain(listed)
+	}
+	if len(rows) == 0 {
 		return nil, 0, nil
 	}
 
-	type result struct {
-		c  Carrier
-		ok bool
-	}
-	results := make([]result, len(ids))
-	sem := make(chan struct{}, s.workers())
-	var wg sync.WaitGroup
-	for i, id := range ids {
-		wg.Add(1)
-		go func(i int, id string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			c, ok := s.carrier(id)
-			results[i] = result{c: c, ok: ok}
-		}(i, id)
-	}
-	wg.Wait()
+	results := make([]cachedItem, len(rows))
+	// A fixed pool, not a goroutine per item: the latter is the shape
+	// drellem2/pogo#179 profiled in ghintake's identical scan (mg-e353).
+	mgscan.Pool(len(rows), s.workers(), func(i int) {
+		c, ok := s.cachedCarrier(rows[i])
+		results[i] = cachedItem{c: c, ok: ok}
+	})
 
 	var out []Carrier
 	scanned := 0
@@ -296,6 +322,33 @@ func (s MGSource) Carriers() ([]Carrier, int, error) {
 		}
 	}
 	return out, scanned, nil
+}
+
+// cachedCarrier answers one listed item from the cache when its mtime is
+// unchanged, and otherwise reads it with carrier and caches the answer.
+//
+// Only successful reads are cached (an empty ID is carrier's read-failure
+// signal): a transient failure cached at an unchanged mtime would otherwise
+// leave that item unexamined for as long as nobody edits it.
+func (s MGSource) cachedCarrier(r listRow) (Carrier, bool) {
+	if r.twin {
+		s.Cache.Forget(r.ID)
+		return s.carrier(r.ID)
+	}
+	if hit, ok := s.Cache.Lookup(r.ID, r.Mtime); ok {
+		c := hit.c
+		if hit.ok {
+			c.Status = r.Status
+		}
+		return c, hit.ok
+	}
+	c, ok := s.carrier(r.ID)
+	if c.ID != "" && s.Cache != nil {
+		stored := c
+		stored.Status = ""
+		s.Cache.Store(r.ID, r.Mtime, cachedItem{c: stored, ok: ok})
+	}
+	return c, ok
 }
 
 // carrier loads one item and decides whether it is a live gh-issue carrier. A
@@ -356,29 +409,39 @@ func parseTime(s string) time.Time {
 	return time.Time{}
 }
 
-// ids lists every work-item id across the live statuses.
-func (s MGSource) ids() ([]string, error) {
-	seen := map[string]bool{}
-	var out []string
+// listRow is one distinct id from the listing. twin is set when the id was
+// listed more than once in this pass — most often an item that moved between two
+// live statuses between two `mg list` calls — and such a row is never answered
+// from the cache: one slot keyed on one mtime cannot describe two files.
+type listRow struct {
+	mgscan.Row
+	twin bool
+}
+
+// rows lists every work item across the live statuses, one row per distinct id,
+// in first-seen order.
+func (s MGSource) rows() ([]listRow, error) {
+	at := map[string]int{}
+	var out []listRow
 	for _, status := range s.Statuses() {
 		listed, err := s.run("list", "--status="+status, "--json")
 		if err != nil {
 			return nil, fmt.Errorf("listing %s work items: %w", status, err)
 		}
-		for _, line := range strings.Split(string(listed), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
+		parsed, err := mgscan.ParseList(listed)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range parsed {
+			if r.ID == "" {
 				continue
 			}
-			var item mgListItem
-			if err := json.Unmarshal([]byte(line), &item); err != nil {
-				return nil, fmt.Errorf("parsing mg list output: %w", err)
-			}
-			if item.ID == "" || seen[item.ID] {
+			if i, ok := at[r.ID]; ok {
+				out[i].twin = true
 				continue
 			}
-			seen[item.ID] = true
-			out = append(out, item.ID)
+			at[r.ID] = len(out)
+			out = append(out, listRow{Row: r})
 		}
 	}
 	return out, nil
@@ -593,19 +656,13 @@ func Prefetch(carriers []Carrier, snap SnapshotFunc, workers int) SnapshotFunc {
 	}
 
 	answers := make([]answer, len(order))
-	sem := make(chan struct{}, workers)
-	var wg sync.WaitGroup
-	for i, k := range order {
-		wg.Add(1)
-		go func(i int, k key) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			s, err := snap(k.repo, k.number)
-			answers[i] = answer{snap: s, err: err}
-		}(i, k)
-	}
-	wg.Wait()
+	// The same fixed pool as the store scan: the ref set is small today, but a
+	// goroutine per ref parked on a semaphore is the shape #179 reported.
+	mgscan.Pool(len(order), workers, func(i int) {
+		k := order[i]
+		s, err := snap(k.repo, k.number)
+		answers[i] = answer{snap: s, err: err}
+	})
 
 	cache := make(map[key]answer, len(order))
 	for i, k := range order {

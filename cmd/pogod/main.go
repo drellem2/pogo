@@ -2726,7 +2726,8 @@ Flags:
 			log.Printf("pogod: gh-issue carrier re-read NOT armed — no GitHub credential (%s); "+
 				"live carriers will not be checked against their issues", ghCredential)
 		default:
-			src := carrierdrift.MGSource{IncludeShelved: cfg.CarrierDrift.IncludeShelved}
+			// Cached across passes (mg-e353): see newCarrierDriftSource.
+			src := newCarrierDriftSource(cfg.CarrierDrift.IncludeShelved)
 			carrierDriftWatcher = carrierdrift.New(carrierdrift.Options{
 				Enabled: true,
 				Source:  src.Carriers,

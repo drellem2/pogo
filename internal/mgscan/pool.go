@@ -1,7 +1,9 @@
 // Package mgscan holds the plumbing shared by pogod's whole-store work-item
-// scans — ghintake's carrier census today, carrierdrift's next (mg-e353).
+// scans — ghintake's carrier census and carrierdrift's live-carrier re-read
+// (mg-e353). Each scan holds its OWN Cache; see carrierdrift.ItemCache for why
+// the two do not share one.
 //
-// Both scans do the same thing: list every work item with `mg list --json`, then
+// Both scans do the same thing: list the items they cover with `mg list --json`, then
 // fork `mg show <id> --json` per item to read a body `mg list` does not emit. On
 // a store of a few thousand items that is a few thousand processes per pass, and
 // drellem2/pogo#179 measured what the original shape of that fan-out cost: one
