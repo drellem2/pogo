@@ -38,6 +38,11 @@ const (
 	// form is used here because matchesTrustDialog collapses before matching, so
 	// either form must work and the readable one is the better test input.
 	dialogLine = "Working with untrusted contents comes with higher risk of prompt injection."
+	// dialogRows is the dialog's option rows with the default highlight, as
+	// Codex 0.132.0 draws them. The hook answers only a highlight it can read
+	// by label (mg-7511), so a fixture without this line is a dialog the hook
+	// correctly refuses to touch.
+	dialogRows = "› 1. Yes, continue  2. No, quit  Press enter to continue"
 	// composerLine is the status-box row carrying promptReadySentinel, as Codex
 	// draws it once the composer is up.
 	composerLine = "model:       gpt-5.5   " + promptReadySentinel
@@ -112,8 +117,12 @@ func sawWithin(a *agent.Agent, want string, timeout time.Duration) bool {
 func lateDialogScript(delay string) string {
 	return "sleep " + delay + "\n" +
 		"printf '" + dialogLine + "\\n'\n" +
+		"printf '" + dialogRows + "\\n'\n" +
 		"read _ignored\n" +
 		"printf '" + answeredMarker + "\\n'\n" +
+		// Codex draws its composer once the dialog is accepted; the hook now
+		// waits for it before calling the watch confirmed.
+		"printf '" + composerLine + "\\n'\n" +
 		"sleep 30\n"
 }
 
@@ -299,7 +308,7 @@ func TestSpentBudgetBeatsAReadyTicker(t *testing.T) {
 func TestSpentBudgetPrefersAnExitedAgentOverADriftSample(t *testing.T) {
 	exited := make(chan struct{})
 	close(exited)
-	if got := spentBudgetOutcome(exited); got != trustWatchInconclusive {
+	if got := spentBudgetOutcome(exited, false); got != trustWatchInconclusive {
 		t.Errorf("spentBudgetOutcome(closed) = %v, want %v: an agent that has "+
 			"already exited must not become a drift sample", got, trustWatchInconclusive)
 	}
@@ -307,7 +316,7 @@ func TestSpentBudgetPrefersAnExitedAgentOverADriftSample(t *testing.T) {
 	// And the live-agent side, so the test cannot pass by always answering
 	// inconclusive — which would silence the drift detector entirely.
 	live := make(chan struct{})
-	if got := spentBudgetOutcome(live); got != trustWatchDrift {
+	if got := spentBudgetOutcome(live, false); got != trustWatchDrift {
 		t.Errorf("spentBudgetOutcome(open) = %v, want %v: a spent budget on a live "+
 			"agent IS the drift signature and has to be recorded", got, trustWatchDrift)
 	}
