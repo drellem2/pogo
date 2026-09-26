@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -134,19 +135,7 @@ func StartAgent(name string) (*agent.AgentInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	r, err := http.Post(serverURL+"/agents/start", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	defer r.Body.Close()
-	if r.StatusCode != http.StatusCreated {
-		return nil, interpretSpawnFailure("start", r)
-	}
-	var info agent.AgentInfo
-	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
-		return nil, err
-	}
-	return &info, nil
+	return postSpawn("start", "/agents/start", body)
 }
 
 // StopAgent asks pogod to stop an agent.
@@ -283,19 +272,79 @@ func SpawnPolecat(req agent.SpawnPolecatAPIRequest) (*agent.AgentInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	r, err := http.Post(serverURL+"/agents/spawn-polecat", "application/json", bytes.NewReader(body))
+	return postSpawn("spawn-polecat", "/agents/spawn-polecat", body)
+}
+
+// SpawnOutcomeUnknownError reports a spawn request that REACHED pogod and
+// whose outcome the client could not establish (mg-c252). It is deliberately
+// not a failure: either pogod answered 202 still-running because the spawn
+// outlived its response deadline, or the connection died after the request was
+// sent — the shape a spawn past http.Server's WriteTimeout used to produce. In
+// both cases the spawn may well be running, and dispatching again would put a
+// second worker on the same name, which is drellem2/pogo#167.
+//
+// The CLI exits cli.ExitUnknown (3) on it, never cli.ExitError.
+type SpawnOutcomeUnknownError struct {
+	Op string
+	// StillRunning is true when pogod said so explicitly (202), false when the
+	// transport failed after the request was sent and nothing was said at all.
+	StillRunning bool
+	Detail       string
+}
+
+func (e *SpawnOutcomeUnknownError) Error() string {
+	if e.StillRunning {
+		return fmt.Sprintf("%s: outcome not yet known — %s", e.Op, e.Detail)
+	}
+	return fmt.Sprintf("%s: outcome UNKNOWN — the request reached pogod and the connection failed before an answer (%s). "+
+		"The spawn may be running: do NOT dispatch again (drellem2/pogo#167); check `pogo agent list` and pogod's log first", e.Op, e.Detail)
+}
+
+// IsSpawnOutcomeUnknown reports whether err is a SpawnOutcomeUnknownError.
+func IsSpawnOutcomeUnknown(err error) bool {
+	var u *SpawnOutcomeUnknownError
+	return errors.As(err, &u)
+}
+
+// postSpawn sends a spawn request and classifies the answer three ways:
+// created (the agent), refused (an error — pogod said no, or the request never
+// left: a dial failure), and unknown (a *SpawnOutcomeUnknownError). The third
+// is the one that matters: before mg-c252 a transport error after the request
+// was sent came back as a plain error indistinguishable from a refusal.
+func postSpawn(op, path string, body []byte) (*agent.AgentInfo, error) {
+	r, err := http.Post(serverURL+path, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		if requestNeverSent(err) {
+			return nil, err
+		}
+		return nil, &SpawnOutcomeUnknownError{Op: op, Detail: err.Error()}
 	}
 	defer r.Body.Close()
+	if r.StatusCode == http.StatusAccepted {
+		raw, _ := io.ReadAll(r.Body)
+		var se agent.StartErrorResponse
+		if json.Unmarshal(raw, &se) == nil && se.Reason == agent.SpawnStillRunningReason {
+			return nil, &SpawnOutcomeUnknownError{Op: op, StillRunning: true, Detail: se.Message}
+		}
+		return nil, &SpawnOutcomeUnknownError{Op: op, StillRunning: true, Detail: "pogod answered 202 Accepted: " + strings.TrimSpace(string(raw))}
+	}
 	if r.StatusCode != http.StatusCreated {
-		return nil, interpretSpawnFailure("spawn-polecat", r)
+		return nil, interpretSpawnFailure(op, r)
 	}
 	var info agent.AgentInfo
 	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
-		return nil, err
+		// pogod said 201 and the body did not arrive intact: the agent exists.
+		return nil, &SpawnOutcomeUnknownError{Op: op, Detail: "201 Created, then reading the answer failed: " + err.Error()}
 	}
 	return &info, nil
+}
+
+// requestNeverSent reports whether a transport error proves the request did
+// not reach pogod — a failed dial (pogod down, wrong port). Anything else
+// (EOF, reset, timeout) may have come after pogod read the request.
+func requestNeverSent(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
 // interpretSpawnFailure converts a non-2xx response from an agent-spawn

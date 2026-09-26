@@ -4357,15 +4357,21 @@ Flags:
 	// Serve HTTP (blocks until shutdown). Explicit server instead of bare
 	// http.Serve so a slow or hung client can't pin a goroutine forever,
 	// with a connection cap for backpressure (gh #38). Localhost-only
-	// today, so the values are generous; WriteTimeout must cover the
-	// slowest handler (/agents/spawn-polecat does a git worktree add plus
-	// agent startup).
+	// today, so the values are generous.
+	//
+	// WriteTimeout is a hard cut: a handler still running when it expires has
+	// its connection closed under it, and the client reads a bare EOF while the
+	// work carries on. For a spawn that EOF read as "failed" and invited a
+	// retry into drellem2/pogo#167 (mg-c252). So the spawn routes do not rely
+	// on this value covering them — they answer by a deadline DERIVED from it,
+	// with an explicit 202 still-running when the spawn is slower.
 	httpServer := &http.Server{
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       1 * time.Minute,
 		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 	}
+	agent.SetSpawnResponseDeadline(agent.ResponseDeadlineFor(httpServer.WriteTimeout))
 	log.Fatal(httpServer.Serve(netutil.LimitListener(ln, maxHTTPConns)))
 }
 

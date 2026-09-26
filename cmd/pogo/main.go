@@ -2031,7 +2031,7 @@ The agent runs as a persistent crew process that pogod monitors and restarts on 
 		Run: func(cmd *cobra.Command, args []string) {
 			info, err := client.StartAgent(args[0])
 			if err != nil {
-				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				cli.ExitWithError(jsonOutput, err.Error(), spawnErrExitCode(err))
 			}
 			if jsonOutput {
 				cli.PrintJSON(info)
@@ -2826,7 +2826,14 @@ as intentional. --body-file puts no shell in the path at all.
 --body remains supported and is not deprecated: it is the inline shortcut, fine
 for any body that carries no metacharacters.
 
-A --body-file that cannot be read is an error, never an empty body.`,
+A --body-file that cannot be read is an error, never an empty body.
+
+Exit status: 0 spawned, 1 refused or failed, 3 OUTCOME UNKNOWN. Exit 3 means
+the request reached pogod and no final answer came back — pogod said the spawn
+is still running (it answers before its own write deadline rather than letting
+the connection die), or the connection failed after the request was sent. The
+spawn may be live: do NOT dispatch again on exit 3 — a second dispatch onto a
+live spawn is drellem2/pogo#167. Check 'pogo agent list' instead.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			body, err := bodyFromFlags(cmd, spawnPolecatBody, spawnPolecatBodyFile)
@@ -2853,7 +2860,7 @@ A --body-file that cannot be read is an error, never an empty body.`,
 				MergedOverride:    spawnPolecatMergedOverride,
 			})
 			if err != nil {
-				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				cli.ExitWithError(jsonOutput, err.Error(), spawnErrExitCode(err))
 			}
 			if jsonOutput {
 				cli.PrintJSON(info)
@@ -5671,4 +5678,16 @@ JSONL line so the output is machine-parseable.`,
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(cli.ExitError)
 	}
+}
+
+// spawnErrExitCode maps a spawn/start error to an exit code. A spawn whose
+// outcome is unknown — pogod answered 202 still-running, or the connection died
+// after the request was sent — exits cli.ExitUnknown (3), not cli.ExitError, so
+// a caller that retries on failure does not retry into a spawn that may be
+// running: that retry is drellem2/pogo#167 (mg-c252).
+func spawnErrExitCode(err error) int {
+	if client.IsSpawnOutcomeUnknown(err) {
+		return cli.ExitUnknown
+	}
+	return cli.ExitError
 }

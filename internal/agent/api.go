@@ -662,8 +662,11 @@ type route struct {
 func (r *Registry) routes() []route {
 	return []route{
 		{"/agents", r.handleAgents},
-		{"/agents/start", r.handleStart},
-		{"/agents/spawn-polecat", r.handleSpawnPolecat},
+		// The two spawn routes answer inside the server's write deadline, with an
+		// explicit 202 still-running when the spawn outlives it (mg-c252) — see
+		// responsedeadline.go.
+		{"/agents/start", WithSpawnResponseDeadline("/agents/start", r.handleStart)},
+		{"/agents/spawn-polecat", WithSpawnResponseDeadline("/agents/spawn-polecat", r.handleSpawnPolecat)},
 		{"/agents/drain", r.handleDrain},
 		{"/agents/hostload", r.handleHostLoad},
 		{"/agents/prompts", r.handlePrompts},
