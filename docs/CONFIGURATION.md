@@ -2849,6 +2849,52 @@ notify_to = "mayor"        # SINGLE-agent findings go here (default mayor); the
 
 Source of truth: `internal/firstturn/`.
 
+## Switching off synthwatch, refusal-watch and turn-watch
+
+Three pogod detectors — the synthetic-failure-turn detector (synthwatch), the
+consecutive-refusal alarm (refusal-watch) and the turn-completion reader
+(turn-watch) — each have an `enabled` key. All three **default to `true`**; a
+config that does not mention them behaves exactly as pogod did before the keys
+existed (drellem2/pogo#185).
+
+```toml
+[synth_watch]
+enabled = true    # default true. false = PAGE-ONLY off: the respawn gate stays
+
+[refusal_watch]
+enabled = true    # default true. false = the alarm is not built or ticked
+
+[turn_watch]
+enabled = true    # default true. false = no pogod-resident turn-completion reader
+```
+
+**`[synth_watch] enabled = false` silences the page, not the respawn gate.**
+synthwatch does two jobs: it pages `human` when an agent answers every nudge
+locally and fails it, and it is what `ShouldRespawnAgent` consults before any
+`restart_on_crash` respawn. Only the first is switched off. The transcript
+scanner stays installed, so an agent failing every turn is still **not**
+restarted, and `pogo agent diagnose` still reports the verdict. Dropping the gate
+with the page would re-open mg-18d0's restart loop — ~66 restarts over 23.5h that
+recovered nothing and overwrote the transcript the diagnosis depended on. A switch
+that also removes the gate would be a separate key; none exists today.
+
+**Off is said loudly.** A disabled detector is the only signal for its failure
+class gone, and one that is silently off reads exactly like one running and
+finding nothing. So each logs a startup line naming the key that did it:
+
+```
+pogod: synthetic-failure-turn detector pager NOT armed (config: [synth_watch] enabled = false) — ... The RESPAWN GATE IS STILL ACTIVE: ...
+pogod: consecutive-refusal alarm NOT armed (config: [refusal_watch] enabled = false) — ...
+pogod: turn-watch NOT armed (config: [turn_watch] enabled = false) — ...
+```
+
+With synthwatch's pager off, a suppressed respawn logs `Nobody was paged:
+[synth_watch] enabled = false.` in place of `A human has been paged.` With
+refusal-watch off, `pogo check-refusals` still answers on demand.
+
+Source of truth: `internal/config/config.go` (`SynthWatchConfig`,
+`RefusalWatchConfig`, `TurnWatchConfig`), `cmd/pogod/detectorswitch.go`.
+
 ### `pogo check-strandedmail` — mail in a mailbox nobody reads
 
 A third disjoint question, and the one neither of the above can ask. deaf-watch
