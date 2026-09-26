@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/gitgc"
@@ -40,8 +41,9 @@ type StrandedWorkGate interface {
 	StrandedFindings(workItemID, repo, target string) ([]strandedwork.Finding, error)
 }
 
-// GitStrandedWorkGate is the production StrandedWorkGate: it scans repo's
-// polecat branches and keeps the ones attributable to the work item.
+// GitStrandedWorkGate is the production StrandedWorkGate: it inspects the
+// polecat branches that could be attributed to the work item (see
+// strandedwork.ItemCandidates) and keeps the stranded ones that are.
 type GitStrandedWorkGate struct{}
 
 // StrandedFindings implements StrandedWorkGate.
@@ -82,7 +84,25 @@ func (GitStrandedWorkGate) StrandedFindings(workItemID, repo, target string) ([]
 		log.Printf("stranded-work gate: could not refresh %s (%v) — checking %s against refs "+
 			"this clone last saw, which may be stale in both directions", repo, err, workItemID)
 	}
-	findings, errs := strandedwork.Scan(repo, target)
+	// Inspect only the branches that could be attributed to this item, not every
+	// polecat branch in the repo (mg-110b, drellem2/pogo#175). The prefilter is
+	// exact — see strandedwork.ItemCandidates for the argument — so the refusal
+	// is the one Scan-then-filter would have given, at 0.1-2.4s instead of
+	// minutes on a repo with ~970 polecat branches. AttributableTo below still
+	// makes the final call; the candidates only decide what is worth a
+	// `git cherry`.
+	start := time.Now()
+	targetRef, err := strandedwork.ResolveTarget(repo, target)
+	if err != nil {
+		return nil, fmt.Errorf("scanning %s for stranded polecat branches: %v", repo, err)
+	}
+	candidates, total, err := strandedwork.ItemCandidates(repo, targetRef, workItemID)
+	if err != nil {
+		return nil, fmt.Errorf("scanning %s for stranded polecat branches: %v", repo, err)
+	}
+	// targetRef is a full ref, and ResolveTarget only accepts a branch name, so
+	// the scan is handed the caller's target and resolves it once itself.
+	findings, errs := strandedwork.ScanBranches(repo, target, candidates)
 	if len(errs) > 0 && len(findings) == 0 {
 		return nil, fmt.Errorf("scanning %s for stranded polecat branches: %v", repo, errs[0])
 	}
@@ -95,6 +115,12 @@ func (GitStrandedWorkGate) StrandedFindings(workItemID, repo, target string) ([]
 			mine = append(mine, f)
 		}
 	}
+	// One line per dispatch, so the gate's cost is visible in pogod.log rather
+	// than inferred from a slow spawn (drellem2/pogo#175 was diagnosed from the
+	// outside because this line did not exist).
+	log.Printf("stranded-work gate: %s in %s: inspected %d candidate(s) of %d polecat branch(es) "+
+		"against %s, %d attributable stranded finding(s), took %s",
+		workItemID, repo, len(candidates), total, targetRef, len(mine), time.Since(start).Round(time.Millisecond))
 	return mine, nil
 }
 

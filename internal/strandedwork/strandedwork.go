@@ -534,13 +534,23 @@ var workItemRe = regexp.MustCompile(`\(((?:mg|gh)-[A-Za-z0-9]{3,})\)`)
 // `git cherry` compares by patch id, so a rebase-rewritten commit reports as
 // present.
 func Inspect(repo, branch, target string) (Finding, error) {
-	f := Finding{Repo: repo, Branch: branch, Disposition: DispositionClean}
-
 	targetRef, err := ResolveTarget(repo, target)
 	if err != nil {
-		return f, err
+		return Finding{Repo: repo, Branch: branch, Disposition: DispositionClean}, err
 	}
-	f.Target = targetRef
+	return inspectResolved(repo, branch, targetRef)
+}
+
+// inspectResolved is Inspect against a target ref that is ALREADY resolved.
+//
+// It exists so a caller inspecting many branches resolves the target once and
+// not once per branch (mg-110b): ResolveTarget is up to six git processes, and
+// Scan used to pay them on every one of ~970 branches to get the same answer
+// every time. targetRef is a full ref ("refs/remotes/origin/main"), not a
+// branch name — passing it back through ResolveTarget would look for
+// "refs/remotes/origin/refs/remotes/origin/main".
+func inspectResolved(repo, branch, targetRef string) (Finding, error) {
+	f := Finding{Repo: repo, Branch: branch, Disposition: DispositionClean, Target: targetRef}
 
 	ref, pushed, found, err := resolveBranchRef(repo, branch)
 	if err != nil {
@@ -744,10 +754,30 @@ func Scan(repo, target string) ([]Finding, []error) {
 	if err != nil {
 		return nil, []error{err}
 	}
+	return ScanBranches(repo, target, branches)
+}
+
+// ScanBranches is Scan over a caller-chosen list of branch names instead of
+// every polecat branch in the repo — the second half of the dispatch gate's
+// prefilter (see ItemCandidates). Same contract as Scan: stranded findings
+// only, and a branch whose inspection fails is an entry in errs rather than an
+// abort.
+//
+// The target is resolved ONCE, before any branch is read. A target that will
+// not resolve is therefore one error rather than one per branch; the verdict is
+// the same, since no branch could have been judged against it.
+func ScanBranches(repo, target string, branches []string) ([]Finding, []error) {
+	if len(branches) == 0 {
+		return nil, nil
+	}
+	targetRef, err := ResolveTarget(repo, target)
+	if err != nil {
+		return nil, []error{err}
+	}
 	var findings []Finding
 	var errs []error
 	for _, b := range branches {
-		f, err := Inspect(repo, b, target)
+		f, err := inspectResolved(repo, b, targetRef)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("inspect %s: %w", b, err))
 			continue
@@ -757,6 +787,97 @@ func Scan(repo, target string) ([]Finding, []error) {
 		}
 	}
 	return findings, errs
+}
+
+// ItemCandidates returns the polecat branches that COULD be attributed to
+// workItemID once inspected, and how many polecat branches the repo has in all.
+//
+// WHY IT EXISTS (mg-110b, drellem2/pogo#175). The dispatch gate used to run Scan
+// — Inspect on every polecat branch, four to six git processes each including a
+// `git cherry` — and then throw away every finding not attributable to the one
+// item being dispatched. On a 971-branch repo that was 2m23s per spawn to keep
+// one or two branches. The candidates here are what Inspect is then run on.
+//
+// IT IS EXACT, NOT A HEURISTIC, and the argument is short enough to keep here.
+// A finding is attributable (agent.AttributableTo) by one of two routes:
+//
+//   - the BRANCH NAME (BranchMatchesItem). Every such branch is a candidate by
+//     the same function over the same branch list Scan reads.
+//   - the COMMIT SUBJECT. Finding.WorkItemID is captured by workItemRe from the
+//     subject of one of the branch's `git cherry` "+" commits, and matched with
+//     strings.EqualFold. Every "+" commit is reachable from the branch's ref and
+//     NOT from targetRef, so it is in the single walk below (every polecat ref,
+//     local and origin, minus targetRef). Each walked subject is matched with the
+//     SAME regex and the SAME EqualFold — every occurrence in the subject, not
+//     only the first, so this can only over-select — and the branches containing
+//     a matching commit are candidates.
+//
+// So every branch Scan+AttributableTo would keep is a candidate, and whether a
+// candidate is really stranded is still decided by Inspect: the walk is plain
+// reachability and says nothing about mergedness (a rebase-merged commit is in
+// the walk and `git cherry` still drops it), which is why it only SELECTS.
+//
+// targetRef is a resolved ref, as ResolveTarget returns it.
+func ItemCandidates(repo, targetRef, workItemID string) (candidates []string, total int, err error) {
+	refs, err := polecatRefs(repo)
+	if err != nil {
+		return nil, 0, err
+	}
+	names := branchNames(refs)
+	if workItemID == "" || len(refs) == 0 {
+		return nil, len(names), nil
+	}
+	selected := map[string]bool{}
+	for _, b := range names {
+		if BranchMatchesItem(b, workItemID) {
+			selected[b] = true
+		}
+	}
+
+	// One walk over all unmerged polecat history. The tips go on stdin — the
+	// EXACT refnames polecatRefs listed — rather than as --branches/--remotes
+	// globs, so the walk's namespace is Scan's by construction and not by two
+	// glob dialects agreeing.
+	stdin := "^" + targetRef + "\n" + strings.Join(refs, "\n") + "\n"
+	out, err := gitStdin(repo, stdin, "log", "--format=%H %s", "--stdin")
+	if err != nil {
+		return nil, 0, fmt.Errorf("walk unmerged polecat history in %s: %w", repo, err)
+	}
+	var shas []string
+	for _, line := range strings.Split(out, "\n") {
+		sha, subject, _ := strings.Cut(strings.TrimSpace(line), " ")
+		if sha == "" {
+			continue
+		}
+		for _, m := range workItemRe.FindAllStringSubmatch(subject, -1) {
+			if strings.EqualFold(m[1], workItemID) {
+				shas = append(shas, sha)
+				break
+			}
+		}
+	}
+	if len(shas) > 0 {
+		// Repeated --contains is a union: a ref is listed if it contains ANY of them.
+		args := []string{"for-each-ref", "--format=%(refname)"}
+		for _, sha := range shas {
+			args = append(args, "--contains", sha)
+		}
+		args = append(args, "refs/heads/"+BranchPrefix+"*", "refs/remotes/origin/"+BranchPrefix+"*")
+		out, err := git(repo, args...)
+		if err != nil {
+			return nil, 0, fmt.Errorf("list polecat branches carrying %s's commits in %s: %w", workItemID, repo, err)
+		}
+		for _, b := range branchNames(strings.Split(out, "\n")) {
+			selected[b] = true
+		}
+	}
+
+	for _, b := range names {
+		if selected[b] {
+			candidates = append(candidates, b)
+		}
+	}
+	return candidates, len(names), nil
 }
 
 // BranchPrefix is the prefix every polecat branch carries. It duplicates
@@ -774,14 +895,36 @@ const BranchPrefix = "polecat-"
 // git-gc reaps once the agent is gone, so local-only work is the more urgent of
 // the two, not the lesser one.
 func polecatBranches(repo string) ([]string, error) {
+	refs, err := polecatRefs(repo)
+	if err != nil {
+		return nil, err
+	}
+	return branchNames(refs), nil
+}
+
+// polecatRefs lists the full refnames behind polecatBranches, in for-each-ref's
+// (sorted) order.
+func polecatRefs(repo string) ([]string, error) {
 	out, err := git(repo, "for-each-ref", "--format=%(refname)",
 		"refs/heads/"+BranchPrefix+"*", "refs/remotes/origin/"+BranchPrefix+"*")
 	if err != nil {
 		return nil, fmt.Errorf("list polecat branches in %s: %w", repo, err)
 	}
+	var refs []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			refs = append(refs, line)
+		}
+	}
+	return refs, nil
+}
+
+// branchNames turns polecat refnames into deduplicated branch names, in input
+// order.
+func branchNames(refs []string) []string {
 	seen := map[string]bool{}
 	var names []string
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range refs {
 		line = strings.TrimSpace(line)
 		switch {
 		case line == "":
@@ -801,7 +944,7 @@ func polecatBranches(repo string) ([]string, error) {
 		seen[line] = true
 		names = append(names, line)
 	}
-	return names, nil
+	return names
 }
 
 // BranchMatchesItem reports whether a polecat branch name plausibly belongs to
@@ -1057,7 +1200,15 @@ func refExists(repo, ref string) (bool, error) {
 }
 
 func git(repo string, args ...string) (string, error) {
+	return gitStdin(repo, "", args...)
+}
+
+// gitStdin is git with stdin fed from a string (ignored when empty).
+func gitStdin(repo, stdin string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
