@@ -136,9 +136,9 @@ type SpawnBase struct {
 	// (no usable origin), or no worktree at all when NoWorktree is set.
 	BaseRef string `json:"base_ref,omitempty"`
 	// Warning is set when the base is NOT the target: the target is not on
-	// origin, so the worktree fell back to the default branch. That fallback
-	// is correct — the refinery creates the target at submit — but it must
-	// not be silent.
+	// origin, so the worktree fell back to the default branch (correct — the
+	// refinery creates the target at submit — but it must not be silent), or
+	// origin was unusable and the worktree is based on local HEAD.
 	Warning string `json:"warning,omitempty"`
 }
 
@@ -150,13 +150,22 @@ type SpawnPolecatAPIResponse struct {
 	Base *SpawnBase `json:"base,omitempty"`
 }
 
-// polecatBaseWarning returns the not-on-origin warning, or "" when the base is
-// what the target asked for. It says nothing about an adopted base (that is
-// the point of adopting) nor about a missing origin (baseRef "", where there
-// is no default branch to have fallen back to either).
+// polecatBaseWarning returns a warning when the base is not what the target
+// asked for, or "" when it is. It says nothing about an adopted base (that is
+// the point of adopting).
+//
+// baseRef "" means resolvePolecatBaseRef found no usable origin — none
+// configured, a fetch that failed or timed out, or no default branch found
+// on it — and the worktree was based on local HEAD. That is also not the
+// target, and a --json consumer sees only this field, so it is warned about
+// too.
 func polecatBaseWarning(target, baseRef string, adopted bool) string {
-	if target == "" || baseRef == "" || adopted || baseRef == "origin/"+target {
+	if target == "" || adopted || baseRef == "origin/"+target {
 		return ""
+	}
+	if baseRef == "" {
+		return fmt.Sprintf("target %s not honoured — origin was unusable (no remote, a failed fetch, or no default branch on it), "+
+			"so the worktree is based on local HEAD", target)
 	}
 	return fmt.Sprintf("target %s not on origin — based on %s; the refinery will create %s at submit",
 		target, baseRef, target)

@@ -76,9 +76,11 @@ EOF
 
 - **Pass `--branch` explicitly.** With it, the worktree is based on
   `origin/release/vX.Y.Z`, and the template's submit line renders
-  `--target=release/vX.Y.Z`. If you omit it, the worktree is based on main's
-  tip. Nothing reads the item's own `branch:` field yet. That is `mg-bb0d`, the
-  build for drellem2/pogo#176, which is unmerged as of this writing.
+  `--target=release/vX.Y.Z`. Since mg-bb0d (drellem2/pogo#176), pogod also
+  defaults `--branch` from the item's own `branch:` field and refuses a
+  `--branch` that contradicts it. A pogod built before that ignores the field
+  and bases the worktree on main's tip, so the explicit flag is the form that
+  is safe on every daemon.
 - **`--post-merge-tag` is not in the template.** Put it in the body, as above.
 - Run `bump-version.sh` on the release branch. It computes the changelog
   coverage range from the most recent tag reachable from `HEAD` to the

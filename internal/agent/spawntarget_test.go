@@ -254,3 +254,25 @@ func TestResolveSpawnTarget(t *testing.T) {
 		}
 	}
 }
+
+// TestPolecatBaseWarning covers the cases the spawn tests do not reach,
+// including a worktree based on local HEAD because origin was unusable: that
+// is not the target either, and a --json consumer sees only this field.
+func TestPolecatBaseWarning(t *testing.T) {
+	for _, tc := range []struct {
+		target, baseRef string
+		adopted         bool
+		want            string
+	}{
+		{"integ", "origin/integ", false, ""},
+		{"", "origin/main", false, ""},
+		{"", "", false, ""},
+		{"integ", "origin/polecat-x", true, ""},
+		{"integ", "origin/main", false, "target integ not on origin — based on origin/main; the refinery will create integ at submit"},
+		{"integ", "", false, "target integ not honoured — origin was unusable (no remote, a failed fetch, or no default branch on it), so the worktree is based on local HEAD"},
+	} {
+		if got := polecatBaseWarning(tc.target, tc.baseRef, tc.adopted); got != tc.want {
+			t.Errorf("polecatBaseWarning(%q, %q, %v) = %q, want %q", tc.target, tc.baseRef, tc.adopted, got, tc.want)
+		}
+	}
+}
