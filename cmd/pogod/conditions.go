@@ -26,6 +26,27 @@ import "fmt"
 // polecat, and escalate to a human deliberately with context. "Alarm the agent
 // that can act" is mg-c3f0's measured constraint, and for a platform fault on
 // this fleet that agent is the coordinator.
+//
+// ONE EXCEPTION, and it is to the addressee SET, not to To (mg-875d). A row
+// whose trigger means pogod is unhealthy or the coordinator is down sets
+// OutOfBand, and is then ALSO copied to `[agents] escalation_box`. Addressed to
+// the coordinator alone, those rows are circular: the reader is an agent this
+// daemon runs, and the condition is that it is not there. The rows that set it:
+//
+//   A2  scheduler_load_failed, scheduler_disabled_no_home — nothing can wake
+//       the coordinator to read its mail
+//   A5  autostart_failed:<coordinator> — the addressee is the casualty
+//   A6  restart_failed:<coordinator>   — likewise (about any OTHER agent, no)
+//   A11 pogod_heartbeat_write_failed   — every outside check reads pogod as dead
+//   mg-a19a pogod_log_not_written      — its unread-pipe case kills pogod ~30s
+//       after every boot, and the coordinator with it
+//   mg-5af1 orchestration_left_stopped — the stop took the coordinator down too
+//
+// A3 (ackwatch_not_armed) does not: it is a consequence of A2 on the same boot,
+// and A2 already reaches the box. The "never `human`" above predates the
+// deadman bypass (pogo-reminders com.pogo.deadman, mg-65d2): the box is now
+// read by a launchd job whether or not any agent is alive, which is exactly the
+// property the out-of-band copy needs and the coordinator's box cannot have.
 
 const (
 	rowA2SchedulerLoad     = "scheduler_load_failed"
@@ -57,11 +78,12 @@ const (
 // conditionWaker for why the nudge is not dead by the same fault.
 func conditionSchedulerLoadFailed(to, schedPath, detail string) pogodCondition {
 	return pogodCondition{
-		ID:     rowA2SchedulerLoad,
-		Row:    "A2",
-		To:     to,
-		Detail: fmt.Sprintf("scheduler.New(%s): %s", schedPath, detail),
-		Wake:   true,
+		ID:        rowA2SchedulerLoad,
+		Row:       "A2",
+		To:        to,
+		Detail:    fmt.Sprintf("scheduler.New(%s): %s", schedPath, detail),
+		Wake:      true,
+		OutOfBand: true,
 		Subject: "[pogod] SCHEDULER DID NOT LOAD — no mail-check fires for anyone, " +
 			"fleet-wide proactive channel is down",
 		Body: conditionBody("A2",
@@ -92,11 +114,12 @@ func conditionSchedulerLoadFailed(to, schedPath, detail string) pogodCondition {
 // other) and the same severity.
 func conditionSchedulerNoHome(to, detail string) pogodCondition {
 	return pogodCondition{
-		ID:     rowA2SchedulerNoHome,
-		Row:    "A2",
-		To:     to,
-		Detail: detail,
-		Wake:   true,
+		ID:        rowA2SchedulerNoHome,
+		Row:       "A2",
+		To:        to,
+		Detail:    detail,
+		Wake:      true,
+		OutOfBand: true,
 		Subject: "[pogod] SCHEDULER DISABLED (cannot resolve its state path) — " +
 			"no mail-check fires for anyone",
 		Body: conditionBody("A2",
@@ -191,14 +214,15 @@ func conditionPromptRefreshFailed(to, detail string) pogodCondition {
 //     information becomes actionable. Then say so in the subject and body rather
 //     than pretending it was delivered to a live reader.
 //
-// What this deliberately does NOT do is fall back to `human` (988 unread — it
-// would look like escalation and be silence) or synthesise a second addressee
-// (mail to a name no agent reads is accepted into a phantom mailbox and lost).
-// The honest residue is: a coordinator that never starts, on a box nobody looks
-// at, is not detectable from inside the fleet — that needs an out-of-process
-// instrument, and it is the same instrument A2's whole failure class needs. Both
-// are argued in §3 and §4 of
-// docs/investigations/pogod-condition-annunciation-2026-07-30.md.
+// It does not REPLACE the coordinator with `human` (988 unread when this was
+// written — it would have looked like escalation and been silence), and it does
+// not synthesise an addressee (mail to a name no agent reads is accepted into a
+// phantom mailbox and lost). Since mg-875d it does ADD one: the coordinator case
+// sets OutOfBand, so the notice is also copied to `[agents] escalation_box`,
+// which a launchd job (not the fleet) reads. That is the out-of-process
+// instrument §3 and §4 of
+// docs/investigations/pogod-condition-annunciation-2026-07-30.md said this row
+// needed; it did not exist in-tree then.
 func conditionAutoStartFailed(to, failedAgent, detail string, isCoordinator bool) pogodCondition {
 	c := pogodCondition{
 		ID:     rowA5AutoStartPrefix + failedAgent,
@@ -207,6 +231,7 @@ func conditionAutoStartFailed(to, failedAgent, detail string, isCoordinator bool
 		Detail: fmt.Sprintf("auto-start of %s failed: %s", failedAgent, detail),
 	}
 	if isCoordinator {
+		c.OutOfBand = true
 		c.Subject = fmt.Sprintf("[pogod] THE COORDINATOR (%s) FAILED TO AUTO-START — "+
 			"nothing was coordinating the fleet after this boot", failedAgent)
 		c.Body = conditionBody("A5",
@@ -257,6 +282,9 @@ func conditionRestartFailed(to, agentName, detail string) pogodCondition {
 		Row:    "A6",
 		To:     to,
 		Detail: fmt.Sprintf("respawn of %s after an unexpected exit failed: %s", agentName, detail),
+		// Out of band only when the agent that is gone IS the addressee
+		// (mg-875d). About any other agent, the coordinator is alive to act.
+		OutOfBand: agentName == to,
 		Subject: fmt.Sprintf("[pogod] %s CRASHED and its restart FAILED — that agent is gone",
 			agentName),
 		Body: conditionBody("A6",
@@ -407,10 +435,11 @@ func conditionRolePinFailed(to, detail string) pogodCondition {
 // cannot supervise its own parent.
 func conditionHeartbeatWriteFailed(to, path, detail string) pogodCondition {
 	return pogodCondition{
-		ID:     rowA11HeartbeatWrite,
-		Row:    "A11",
-		To:     to,
-		Detail: fmt.Sprintf("%s: %s", path, detail),
+		ID:        rowA11HeartbeatWrite,
+		Row:       "A11",
+		To:        to,
+		OutOfBand: true,
+		Detail:    fmt.Sprintf("%s: %s", path, detail),
 		Subject: "[pogod] cannot write its OWN heartbeat — pogod is now undetectably alive or dead " +
 			"to every external check",
 		Body: conditionBody("A11",

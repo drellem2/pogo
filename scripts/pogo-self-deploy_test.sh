@@ -3301,6 +3301,30 @@ PATH="$LCDIR:$PATH" launchctl bootout gui/0 /tmp/nonexistent.plist >/dev/null 2>
 rm -rf "$ACT_STUB" "$ALERTS" "$CALLS" "$LCDIR"
 unset -f alert_external mk_activation_stub
 
+# --- alert_external: the out-of-band copy (mg-875d) ---------------------------
+# The coordinator's maildir is a FILE, so a mail to it verifies perfectly with
+# pogod down — and the `human` fallback, reached only on an unverifiable
+# coordinator mail, never fired. A stall whose state is UNKNOWN (pogod may have
+# stopped answering) must also reach a box outside the fleet; a routine
+# busy-fleet stall must not, or the copy stops meaning anything.
+OOB_LOG="$(mktemp)"
+(
+    # The block above `unset -f alert_external`, which deletes the real one —
+    # re-source for the real functions, then stub only the mail seam.
+    source "$HERE/pogo-self-deploy"
+    mail_alert() { printf '%s\n' "$1" >> "$OOB_LOG"; return 0; }
+    pogo() { return 0; }
+    COORDINATOR=mayor DRAIN_TIMEOUT=1800 DEPLOY_REF=origin/main
+    alert_drain_stalled unknown "?" >/dev/null 2>"$OOB_LOG.err"
+    echo --- >> "$OOB_LOG"
+    alert_drain_stalled timeout 2 >/dev/null 2>&1
+)
+OOB_GOT="$(tr '\n' ' ' < "$OOB_LOG")"
+[ "$OOB_GOT" = "mayor human --- mayor " ] \
+    && pass "alert_drain_stalled: an UNKNOWN fleet state is also mailed to 'human' out of band; a routine stall goes to the coordinator alone" \
+    || fail "alert_drain_stalled recipients: [$OOB_GOT], want [mayor human --- mayor ]; stderr: $(tr '\n' ';' < "$OOB_LOG.err" | cut -c1-600)"
+rm -f "$OOB_LOG" "$OOB_LOG.err"
+
 # Wiring, for the same reason report_supervision has the assertion: the reader
 # can be perfect while nothing ever calls it.
 grep -q '^    report_activation$' "$HERE/pogo-self-deploy" \

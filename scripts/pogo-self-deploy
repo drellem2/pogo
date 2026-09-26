@@ -1497,10 +1497,17 @@ mail_alert() {
     return 1
 }
 
-# alert_external EVENT_TYPE SUBJECT BODY [DETAILS_JSON]
+# alert_external EVENT_TYPE SUBJECT BODY [DETAILS_JSON] [OUT_OF_BAND]
 # Returns 0 iff a mail was VERIFIED into a real mailbox, by any recipient.
+#
+# OUT_OF_BAND (mg-875d) is a box that is ALSO mailed after a verified
+# coordinator delivery, for the alerts whose cause may be that pogod — and so
+# the coordinator, an agent pogod runs — is not there. Without it the `human`
+# fallback below is reached only when the coordinator's MAILDIR cannot be
+# written, which is never the case when pogod is down: `mg` writes files, so
+# the coordinator copy verifies perfectly into an inbox nobody is alive to read.
 alert_external() {
-    local event_type="$1" subject="$2" body="$3" details="${4:-}"
+    local event_type="$1" subject="$2" body="$3" details="${4:-}" oob="${5:-}"
     local bf rc=1
     local -a ev
 
@@ -1526,6 +1533,13 @@ alert_external() {
     if [ -n "$bf" ] && mail_alert "$COORDINATOR" "$subject" "$bf"; then
         log "sink: alerted '$COORDINATOR' and read the message back out of the mailbox"
         rc=0
+        if [ -n "$oob" ] && [ "$oob" != "$COORDINATOR" ]; then
+            if mail_alert "$oob" "$subject" "$bf"; then
+                log "sink: also alerted '$oob' out of band — the cause may be that '$COORDINATOR' is not running"
+            else
+                err "sink: the out-of-band copy to '$oob' could not be verified — only '$COORDINATOR' holds this alert"
+            fi
+        fi
     elif [ -n "$bf" ] && mail_alert human "$subject" "$bf"; then
         err "sink: could not verify a mail to coordinator '$COORDINATOR' — escalated to 'human' instead"
         rc=0
@@ -1652,7 +1666,8 @@ $todo
 
 Redeploy by hand when the fleet is idle:
   scripts/pogo-self-deploy redeploy --yes" \
-        "{\"leftover\":\"${leftover}\",\"reason\":\"${reason}\",\"drain_timeout\":${DRAIN_TIMEOUT},\"deploy_ref\":\"${DEPLOY_REF}\",\"outcome\":\"no_deploy\"}"
+        "{\"leftover\":\"${leftover}\",\"reason\":\"${reason}\",\"drain_timeout\":${DRAIN_TIMEOUT},\"deploy_ref\":\"${DEPLOY_REF}\",\"outcome\":\"no_deploy\"}" \
+        "$([ "$reason" = unknown ] && echo human)"
 }
 
 # Pure decision function (unit-tested): map the POST /agents/drain HTTP status

@@ -325,9 +325,16 @@ func (w *Watcher) announce(rep Report, now time.Time) {
 	// mailed exactly one recipient, `mayor`, an agent carrying the same 27
 	// unacked fires. A fleet that has never completed a turn cannot restart
 	// itself, so the only useful recipient is outside it.
+	//
+	// The same holds when the fleet is NOT all dark but the dark agent is the
+	// one this notice is addressed to (mg-875d): a coordinator that never came
+	// up, mailed only to itself, is a circular route. Compared against
+	// notifyTo — the actual addressee — rather than a coordinator name, so a
+	// deployment that points notify_to elsewhere is judged on what it did.
 	recipients := []string{w.notifyTo}
 	escalated := false
-	if rep.Fleet && w.escalateTo != w.notifyTo {
+	selfAddressed := !rep.Fleet && inRoster(w.notifyTo, names)
+	if (rep.Fleet || selfAddressed) && w.escalateTo != w.notifyTo {
 		recipients = append(recipients, w.escalateTo)
 		escalated = true
 	}
@@ -458,7 +465,14 @@ func mailSubject(rep Report, now, openedAt time.Time) string {
 func mailBody(rep Report, now, openedAt time.Time, p Params, notifyTo, escalateTo string, escalated bool) string {
 	var b strings.Builder
 
-	if escalated {
+	if escalated && !rep.Fleet {
+		fmt.Fprintf(&b,
+			"ESCALATED IMMEDIATELY, NOT ON A TIMER: %s — the mailbox this notice\n"+
+				"normally goes to — is one of the agents below that has never completed a\n"+
+				"turn, so it will not be reading this. An addressee inside the failure it is\n"+
+				"being told about is a circular route, which is why this is also addressed to\n"+
+				"%s (mg-875d).\n\n", notifyTo, escalateTo)
+	} else if escalated {
 		fmt.Fprintf(&b,
 			"ESCALATED IMMEDIATELY, NOT ON A TIMER: every crew agent pogod is running has\n"+
 				"completed zero turns since it was spawned. %s — the mailbox this notice\n"+

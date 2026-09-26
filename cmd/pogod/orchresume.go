@@ -251,6 +251,8 @@ func conditionOrchestrationLeftStopped(to string, ob server.ResumeObligation, do
 		ID:  orchResumeConditionID,
 		Row: "mg-5af1",
 		To:  to,
+		// Out of band (mg-875d): a stopped fleet stopped the coordinator too.
+		OutOfBand: true,
 		Detail: fmt.Sprintf("orchestration stopped %s by %s, overdue at %s, restore_err=%v",
 			ob.Since.UTC().Format(time.RFC3339), who, ob.Due.UTC().Format(time.RFC3339), err),
 		// Fingerprinted on the STOP, not on the elapsed time: a failed restore

@@ -197,6 +197,15 @@ The default is `human` — the same box the whole fleet already writes — so an
 install that has never heard of this setting escalates exactly where it always
 did. **Most deployments should leave it alone.**
 
+The same box is also copied, immediately and with no age gate, on every alarm
+whose trigger means **pogod is unhealthy or the coordinator is down** (mg-875d):
+pogod's own conditions for a scheduler that did not load, a coordinator that
+failed to auto-start or restart, an unwritable heartbeat, a log that is not
+being written, and orchestration left stopped; `firstturn` when the dark agent
+is its own addressee; and `midsessionwedge` when the wedged agent is. Addressed
+to the coordinator alone, each of those is a circular route. See
+`docs/investigations/alarm-routing-audit-2026-09-26.md`.
+
 **When to change it: you have put a RELAY in front of `human`.** pogo supports a
 *representative* pattern (designed in mg-b17b, built in mg-65d2) in which a crew
 agent owns `human` as its inbox, reads it, and rewrites what matters into a

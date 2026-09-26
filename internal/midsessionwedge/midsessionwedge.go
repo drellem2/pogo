@@ -322,6 +322,11 @@ type Options struct {
 	Mail MailFunc
 	// NotifyTo is the mailbox for an exhausted recovery. Empty means no mail.
 	NotifyTo string
+	// EscalateTo also receives the notice when the wedged agent IS NotifyTo
+	// (mg-875d): a coordinator parked at its own composer is not reading its
+	// mail, so a notice addressed only to it is a circular route. pogod passes
+	// `[agents] escalation_box`. Empty, or equal to NotifyTo, adds nobody.
+	EscalateTo string
 	// From is the sender name on that mail.
 	From string
 	// Emit writes midsession_wedge_* events. Defaults to events.Emit.
@@ -374,6 +379,7 @@ type Watcher struct {
 	settle        time.Duration
 	renotifyAfter time.Duration
 	notifyTo      string
+	escalateTo    string
 	from          string
 	startedAt     time.Time
 
@@ -450,6 +456,7 @@ func New(opts Options) *Watcher {
 		settle:        pick(opts.Settle, DefaultSettle),
 		renotifyAfter: renotify,
 		notifyTo:      opts.NotifyTo,
+		escalateTo:    opts.EscalateTo,
 		from:          opts.From,
 		startedAt:     opts.StartedAt,
 		source:        opts.Source,
@@ -786,12 +793,22 @@ this owed submit. What is NOT known from here is why the harness will not
 submit — that needs a look at the session. A restart destroys the transcript
 that would answer it, so read before bouncing.
 `, r.Name, r.Kind, quiet, r.OwedAt.Format(time.RFC3339), now.Sub(r.OwedAt), r.Submits, attempt, w.maxAttempts)
-	if err := w.mail(w.notifyTo, w.from, subject, body); err != nil {
-		w.emit(events.Event{
-			EventType: EventError,
-			Agent:     r.Name,
-			Details:   map[string]any{"error": err.Error(), "note": "exhausted-recovery notice could not be delivered"},
-		})
+	recipients := []string{w.notifyTo}
+	if r.Name == w.notifyTo && w.escalateTo != "" && w.escalateTo != w.notifyTo {
+		recipients = append(recipients, w.escalateTo)
+		body += fmt.Sprintf(`
+Also sent to %s: the wedged agent is %s itself, the mailbox this notice
+normally goes to, so it will not be read there (mg-875d).
+`, w.escalateTo, w.notifyTo)
+	}
+	for _, to := range recipients {
+		if err := w.mail(to, w.from, subject, body); err != nil {
+			w.emit(events.Event{
+				EventType: EventError,
+				Agent:     r.Name,
+				Details:   map[string]any{"error": err.Error(), "to": to, "note": "exhausted-recovery notice could not be delivered"},
+			})
+		}
 	}
 }
 

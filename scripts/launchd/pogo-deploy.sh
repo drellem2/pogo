@@ -3683,9 +3683,22 @@ fleet_is_down() {
     esac
 }
 
-# alert_subject RC — the one line a skim-reader gets.
+# alert_subject RC [POGOD_DOWN] — the one line a skim-reader gets.
+#
+# POGOD_DOWN is a MEASUREMENT taken at alert time (daemon_answering), not a
+# reading of the code, and when it is `true` it wins over whatever the code
+# says (mg-875d). The 18-day outage of 2026-09-08 -> 09-26 went out as
+# "[pogo-deploy] RED: nightly redeploy exited 6" on 17 consecutive nights —
+# delivered every one of them (com.pogo.deadman logged each) — because exit 6's
+# `down` disposition ("pogod is not answering POST /agents/drain") shares its
+# code with three refusals where the old pogod IS up, so fleet_is_down rightly
+# cannot call 6 an outage by its code alone. The code cannot tell them apart;
+# one hop to the port can. It is taken for every code because "is pogod up" is
+# never a property of an exit code.
 alert_subject() {
-    if fleet_is_down "$1"; then
+    if [ "${2:-false}" = true ]; then
+        echo "[pogo-deploy] POGOD IS DOWN: nothing is answering $LIVENESS_URL — nightly redeploy exited $1"
+    elif fleet_is_down "$1"; then
         echo "[pogo-deploy] FLEET DOWN: nightly redeploy exited $1 and pogod is NOT serving the fleet"
     else
         echo "[pogo-deploy] RED: nightly redeploy exited $1"
@@ -3973,11 +3986,21 @@ EOF
 # bookkeeping is how the 08-07 alert managed to be sent, delivered, and still
 # cost 10h39m.
 red_alert_body() {
-    local rc="$1" elapsed="$2" today="$3" budget="$4" file="${5:-}"
+    local rc="$1" elapsed="$2" today="$3" budget="$4" file="${5:-}" pogod_down="${6:-false}"
     local changed detail
     changed="$(what_the_run_changed "$file")"
     detail="$(deploy_reason_detail "$file")"
-    if fleet_is_down "$rc"; then
+    if [ "$pogod_down" = true ]; then
+        printf '%s\n\n' "POGOD IS DOWN. Nothing answered $LIVENESS_URL/version when this alert was
+written, so no agent is running on this box — including the coordinator this
+alert is also addressed to. This is an outage, not a missed deploy, and it will
+not end on its own: every automatic recovery path is downstream of pogod.
+Re-register the launchd job (a shell-started pogod is owned by nothing — mg-bead;
+kickstart alone ran 18 days against a job that never stayed up — mg-716a):
+  launchctl bootout gui/\$(id -u)/com.pogo.daemon
+  launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.pogo.daemon.plist
+then confirm with \`curl -s $LIVENESS_URL/version\`."
+    elif fleet_is_down "$rc"; then
         printf '%s\n\n' 'THE FLEET IS NOT DISPATCHING RIGHT NOW. This is an outage, not a missed deploy —
 no polecat will start and no merge will run until pogod is serving the fleet
 again. The remedy is below; everything between here and it is context.'
@@ -4986,11 +5009,16 @@ $check_out"
         # `$(fleet_is_down ... && echo true)` would put on the callsite's last
         # line is invisible to a reader and indistinguishable, to the probe that
         # guards this file, from an `|| rc=1` cascade on alert's return value.
-        local fleet_down=false
+        #
+        # pogod_down is measured HERE, at alert time, because it is what the
+        # code cannot say (mg-875d — see alert_subject).
+        local fleet_down=false pogod_down=false
         fleet_is_down "$rc" && fleet_down=true
-        alert "$(alert_subject "$rc")" \
-            "$(red_alert_body "$rc" "$elapsed" "$today" "$budget" "$reason_file")" \
-            "\"exit\":$rc,\"fleet_down\":$fleet_down"
+        daemon_answering || pogod_down=true
+        [ "$pogod_down" = true ] && fleet_down=true
+        alert "$(alert_subject "$rc" "$pogod_down")" \
+            "$(red_alert_body "$rc" "$elapsed" "$today" "$budget" "$reason_file" "$pogod_down")" \
+            "\"exit\":$rc,\"fleet_down\":$fleet_down,\"pogod_down\":$pogod_down"
         exit "$rc"
     fi
 

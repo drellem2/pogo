@@ -330,3 +330,52 @@ func TestWatcher_ARosterThatGrowsDoesNotResetTheLadder(t *testing.T) {
 			w.repageAfter, DefaultFirstRepage)
 	}
 }
+
+// darkAmongHealthy reports `dark` never completing anything beside two healthy
+// peers, so the finding is NOT a fleet claim.
+func darkAmongHealthy(spawn time.Time, dark string) SourceFunc {
+	return func(now time.Time) Snapshot {
+		as := []Agent{{Name: dark, Identity: "crew-" + dark, StartedAt: spawn, Delivered: 12}}
+		for _, n := range []string{"architect", "pm-pogo"} {
+			as = append(as, Agent{Name: n, Identity: "crew-" + n, StartedAt: spawn, Delivered: 12, FirstCompletion: spawn.Add(time.Minute)})
+		}
+		return Snapshot{Now: now, Agents: as, Scanned: 3, Lookback: DefaultLookback}
+	}
+}
+
+// TestWatcher_DarkAddresseeAloneEscalatesOutOfBand (mg-875d). A coordinator
+// that never came up among healthy peers is not a fleet claim, but mailing the
+// finding only to that coordinator is a circular route: the addressee is the
+// casualty.
+func TestWatcher_DarkAddresseeAloneEscalatesOutOfBand(t *testing.T) {
+	spawn := at("2026-08-11T02:01:33Z")
+	r := &recorder{}
+	w := newTestWatcher(r, darkAmongHealthy(spawn, "mayor"), Options{NotifyTo: "mayor", EscalateTo: "operator-pager"})
+	w.Check(spawn.Add(DefaultGrace))
+
+	pages := r.toed("operator-pager")
+	if len(pages) != 1 {
+		t.Fatalf("escalation mails = %d, want 1 — the dark agent IS the addressee; mails=%v", len(pages), r.mails)
+	}
+	if !strings.Contains(pages[0].body, "circular route") {
+		t.Errorf("body does not say why it escalated:\n%s", pages[0].body)
+	}
+	if strings.Contains(pages[0].body, "every crew agent pogod is running") {
+		t.Error("body claims a fleet-wide outage for a single dark agent")
+	}
+}
+
+// ...and a single dark agent that is NOT the addressee stays the addressee's to
+// fix: it is alive to read it.
+func TestWatcher_DarkNonAddresseeAloneDoesNotEscalate(t *testing.T) {
+	spawn := at("2026-08-11T02:01:33Z")
+	r := &recorder{}
+	w := newTestWatcher(r, darkAmongHealthy(spawn, "pa"), Options{NotifyTo: "mayor", EscalateTo: "operator-pager"})
+	w.Check(spawn.Add(DefaultGrace))
+	if len(r.toed("mayor")) != 1 {
+		t.Fatalf("mayor mails = %d, want 1; mails=%v", len(r.toed("mayor")), r.mails)
+	}
+	if got := len(r.toed("operator-pager")); got != 0 {
+		t.Fatalf("escalation mails = %d, want 0 for a dark non-addressee", got)
+	}
+}

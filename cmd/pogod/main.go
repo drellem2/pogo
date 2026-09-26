@@ -1809,6 +1809,10 @@ Flags:
 			return a.Nudge(message)
 		},
 	)
+	// mg-875d: the rows whose trigger means pogod is unhealthy or the
+	// coordinator is down are ALSO copied here, because the coordinator is an
+	// agent this daemon runs and in those states it is not there to read them.
+	conditions.setOutOfBandBox(escalationBox)
 
 	// A14 — log rotation. Deferred from main's first statement (see rotErr
 	// above), because rotation runs before config is even loaded.
@@ -3437,6 +3441,7 @@ Flags:
 			Worktree:      midsessionwedge.RegistryWorktree(agentRegistry),
 			Mail:          client.SendMGMail,
 			NotifyTo:      notifyTo,
+			EscalateTo:    escalationBox,
 			From:          "pogod",
 			Interval:      cfg.MidSessionWedge.Interval,
 			Quiescence:    cfg.MidSessionWedge.Quiescence,
@@ -4268,8 +4273,8 @@ Flags:
 					// reader by construction — the mail still goes to its
 					// maildir, where it is read on the first mail-check after the
 					// coordinator next starts, and the notice says plainly that
-					// nobody read it at the time. See conditionAutoStartFailed
-					// for why the answer is NOT to fall back to `human`.
+					// nobody read it at the time — and, since mg-875d, it is ALSO
+					// copied out of band. See conditionAutoStartFailed.
 					conditions.Raise(conditionAutoStartFailed(
 						coordinator, res.Name, res.Error, res.Name == coordinator), time.Now())
 				}

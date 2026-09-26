@@ -2372,6 +2372,49 @@ grep -q 'alert_subject "$rc"' "$RUNNER" \
     || fail "the RED alert site still hard-codes its subject — the banner would never fire"
 
 # ---------------------------------------------------------------------------
+# POGOD IS DOWN — measured at alert time, not read off the code (mg-875d)
+# ---------------------------------------------------------------------------
+# THE INCIDENT. 2026-09-09 .. 09-25: 17 consecutive nights of
+#     [pogo-deploy] RED: nightly redeploy exited 6
+# every one DELIVERED to a screen (com.pogo.deadman logged each), over an
+# 18-day pogod outage. Exit 6's `down` disposition is "pogod is not answering",
+# and it shares the code with three refusals where the old pogod IS up — so the
+# code alone cannot say it, and fleet_is_down 6 correctly stays false (above).
+# One hop to the port can, and when it says down, it wins.
+S6DOWN="$(alert_subject 6 true)"; S6UP="$(alert_subject 6 false)"; S6DEF="$(alert_subject 6)"
+case "$S6DOWN" in
+    *"POGOD IS DOWN"*6*) pass "alert_subject(6, pogod down): the subject says POGOD IS DOWN and keeps the code" ;;
+    *) fail "alert_subject(6, pogod down) does not lead with the outage: $S6DOWN" ;;
+esac
+case "$S6UP" in
+    *"POGOD IS DOWN"*|*"FLEET DOWN"*) fail "alert_subject(6, pogod up) shouts an outage over a live daemon: $S6UP" ;;
+    *"RED"*) pass "alert_subject(6, pogod up) stays RED — the measurement, not the code, is what earns the banner" ;;
+    *) fail "alert_subject(6, pogod up): $S6UP" ;;
+esac
+[ "$S6DEF" = "$S6UP" ] \
+    && pass "alert_subject with no measurement behaves as before — callers that do not probe are unchanged" \
+    || fail "alert_subject(6) with no second argument changed: $S6DEF"
+case "$(alert_subject 7 true)" in
+    *"POGOD IS DOWN"*) pass "the measurement wins for EVERY code — 'is pogod up' is never a property of an exit code" ;;
+    *) fail "alert_subject(7, pogod down) ignored the measurement: $(alert_subject 7 true)" ;;
+esac
+BODY_POGOD_DOWN="$(SRC="$WORK" GIT=/usr/bin/git ATTEMPT_N=0 red_alert_body 6 0 2026-09-25 5400 "$WORK/no-such-record" true)"
+case "$(printf '%s' "$BODY_POGOD_DOWN" | head -1)" in
+    "POGOD IS DOWN."*) pass "red_alert_body leads with POGOD IS DOWN when the daemon did not answer" ;;
+    *) fail "red_alert_body does not lead with the outage: $(printf '%s' "$BODY_POGOD_DOWN" | head -3)" ;;
+esac
+printf '%s' "$BODY_POGOD_DOWN" | grep -q 'launchctl bootstrap' \
+    && pass "the pogod-down banner gives the re-registration that ends it (mg-716a), not a shell start (mg-bead)" \
+    || fail "the pogod-down banner has no remedy"
+# The call site must take the measurement. Without it the two arguments above
+# are never passed and the banner can never fire — the defect with extra steps.
+{ grep -q 'daemon_answering || pogod_down=true' "$RUNNER" \
+    && grep -q 'alert_subject "$rc" "$pogod_down"' "$RUNNER" \
+    && grep -q '"$reason_file" "$pogod_down"' "$RUNNER"; } \
+    && pass "the RED call site measures pogod at alert time and threads it into subject AND body" \
+    || fail "the RED call site does not measure pogod before alerting"
+
+# ---------------------------------------------------------------------------
 # dispatch_freeze_note — the cost of waiting, as a number
 # ---------------------------------------------------------------------------
 # `draining=true` refuses ALL new polecat dispatch, so a drain is an interval in
