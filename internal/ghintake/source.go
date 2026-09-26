@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drellem2/pogo/internal/mgscan"
 	"github.com/drellem2/pogo/internal/testtmp"
 )
 
@@ -133,8 +133,8 @@ type MGSource struct {
 	Root string
 	// Bin is the mg binary. Empty means "mg" on PATH.
 	Bin string
-	// Workers bounds concurrent `mg show` calls. Zero picks a default from the
-	// CPU count.
+	// Workers is the size of the pool that runs `mg show` calls (see
+	// mgscan.Pool). Zero picks a default from the CPU count.
 	//
 	// Concurrency is here for a specific reason: unlike ghteardown, which scans
 	// only `status=done` carriers, this scan must cover EVERY status — an
@@ -202,14 +202,7 @@ func (s MGSource) workers() int {
 	if s.Workers > 0 {
 		return s.Workers
 	}
-	n := runtime.NumCPU()
-	if n > 8 {
-		n = 8
-	}
-	if n < 1 {
-		n = 1
-	}
-	return n
+	return mgscan.DefaultWorkers()
 }
 
 func (s MGSource) run(args ...string) ([]byte, error) {
@@ -268,19 +261,12 @@ func (s MGSource) Carriers() ([]CarrierRef, int, []ItemError, error) {
 		bad  *ItemError
 	}
 	results := make([]result, len(ids))
-	sem := make(chan struct{}, s.workers())
-	var wg sync.WaitGroup
-	for i, id := range ids {
-		wg.Add(1)
-		go func(i int, id string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			refs, bad := s.refsFor(id)
-			results[i] = result{refs: refs, bad: bad}
-		}(i, id)
-	}
-	wg.Wait()
+	// A fixed pool, not a goroutine per item: the latter parked ~4,000 stacks on
+	// a semaphore every pass on a real store (drellem2/pogo#179).
+	mgscan.Pool(len(ids), s.workers(), func(i int) {
+		refs, bad := s.refsFor(ids[i])
+		results[i] = result{refs: refs, bad: bad}
+	})
 
 	var out []CarrierRef
 	var bad []ItemError
