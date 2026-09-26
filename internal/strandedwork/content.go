@@ -235,11 +235,19 @@ func Corroborate(repo string, f Finding) (Presence, string) {
 		return Presence{}, fmt.Sprintf("SECOND OPINION UNAVAILABLE: the content check could not run (%v). "+
 			"That is not a low score and not a clean verdict — this row rests on `git cherry` alone.", err)
 	}
+	return p, SecondOpinion(p)
+}
+
+// SecondOpinion renders a TAKEN measurement as the sentence a report carries. It
+// is Corroborate minus the measuring, so that a surface holding a Presence it
+// measured itself (`pogo check-stranded`) prints the same words as the pogod
+// surfaces that go through Corroborate (mg-8cda).
+func SecondOpinion(p Presence) string {
 	if !p.Measured {
-		return p, fmt.Sprintf("Second opinion: %s.", p.Describe())
+		return fmt.Sprintf("Second opinion: %s.", p.Describe())
 	}
 	if p.SuggestsLanded() {
-		return p, fmt.Sprintf("SECOND OPINION SAYS THIS MAY ALREADY HAVE LANDED UNDER A DIFFERENT SHA: %s. "+
+		return fmt.Sprintf("SECOND OPINION SAYS THIS MAY ALREADY HAVE LANDED UNDER A DIFFERENT SHA: %s. "+
 			"`git cherry` compares PATCH IDS, and an ordinary clean refinery rebase can rewrite one — by "+
 			"replaying a hunk into moved context, or by dropping a hunk the target already had — so a branch "+
 			"that DID merge reads as unmerged forever (mg-5ec6). This is NOT a merge verdict and it does not "+
@@ -250,14 +258,14 @@ func Corroborate(repo string, f Finding) (Presence, string) {
 		// NOT "agrees the work is absent" — that was drellem2/pogo#174: a 90%
 		// overlap printed under a sentence saying the work was missing. This band
 		// is where the measured landed branches (0.88, 0.91, 0.94) sit.
-		return p, fmt.Sprintf("Second opinion: PARTLY PRESENT — NOT CORROBORATED: %s. That is too much "+
+		return fmt.Sprintf("Second opinion: PARTLY PRESENT — NOT CORROBORATED: %s. That is too much "+
 			"to call absent and too little to call landed; a squash or rebase merge can leave a branch "+
 			"that DID land scoring here. Check by hand whether it landed before submitting it.",
 			p.Describe())
 	}
 	// Say what was measured, not that the work is absent: nothing has measured
 	// where absent work scores (see ContentAbsentRatio).
-	return p, fmt.Sprintf("Second opinion: %d of %d added line(s) present in the target (%.0f%%) — "+
+	return fmt.Sprintf("Second opinion: %d of %d added line(s) present in the target (%.0f%%) — "+
 		"consistent with absent.", p.Present, p.Added, 100*p.Ratio())
 }
 

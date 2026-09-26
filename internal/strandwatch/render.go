@@ -223,6 +223,13 @@ func Render(rep Report, all bool) string {
 			for _, s := range r.Subjects {
 				fmt.Fprintf(&b, "      %s\n", truncateSubject(s, 92))
 			}
+			if r.Presence.PartlyPresent() {
+				// The same sentence pogod's stranded mail carries for this band
+				// (strandedwork.SecondOpinion), so the two surfaces word it alike.
+				for _, line := range wrap(strandedwork.SecondOpinion(r.Presence), 84) {
+					fmt.Fprintf(&b, "    %s\n", line)
+				}
+			}
 		}
 		if r.PreRegistration != nil {
 			fmt.Fprintf(&b, "    PRE-REGISTRATION commit %s is unmerged — a worker branching from %s would\n"+

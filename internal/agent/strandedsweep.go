@@ -245,8 +245,12 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 		// exactly where `git cherry`'s patch-id over-report has had the most time
 		// to accumulate.
 		presence, note := strandedwork.Corroborate(c.SourceRepo, f)
+		// The shared table's cell words the summary (mg-8cda): Summary() alone
+		// is an unconditional submit, printed beside a second opinion that may
+		// say "check by hand first".
+		summary := f.SummaryIn(f.Cell(presence))
 		log.Printf("strandedwork: STARTUP SWEEP found pushed work behind unadoptable polecat %s "+
-			"(work item %s, %s). %s. %s", c.Name, c.WorkItemID, reason, f.Summary(), note)
+			"(work item %s, %s). %s. %s", c.Name, c.WorkItemID, reason, summary, note)
 		details := map[string]any{
 			"branch":       f.Branch,
 			"ref":          f.Ref,
@@ -255,7 +259,7 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 			"disposition":  string(f.Disposition),
 			"unmerged":     len(f.Unmerged),
 			"reason":       reason,
-			"summary":      f.Summary(),
+			"summary":      summary,
 			"route":        RouteRestartSweep,
 			"polecat_pid":  c.PID,
 			"still_alive":  c.Alive,

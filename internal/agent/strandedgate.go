@@ -236,8 +236,17 @@ func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strande
 
 	// Pre-registration first, whatever the scan order: it is the disposition
 	// whose advice must not be crowded out.
+	//
+	// THE REMEDY CLAUSE COMES FROM THE SHARED TABLE (mg-8cda). Both messages
+	// below used to end in an unconditional "Get the branch merged instead
+	// (`pogo refinery submit ...`)" whatever the second opinion appended after
+	// it — so from #174 on, this refusal printed "PARTLY PRESENT — check by hand"
+	// and an imperative submit in one breath, the contradiction the mail had just
+	// been cured of. The cell is measured first and chooses the clause.
 	for _, f := range findings {
 		if f.Disposition == strandedwork.DispositionPreRegistration {
+			presence, note := strandedwork.Corroborate(f.Repo, f)
+			cell := f.Cell(presence)
 			// The remedy names only mechanisms that exist. That used to rule OUT a
 			// re-dispatch here — a spawn always based its worktree on
 			// origin/<target> (resolvePolecatBaseRef) and no flag based it on a
@@ -249,23 +258,29 @@ func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strande
 			// longer spelled out here — Summary() above already names the
 			// dispatch-from-the-sha route for a reader working outside pogod — and
 			// the flag is what this refusal is in a position to offer.
-			return findings, fmt.Sprintf("work item %s already has %s, UNMERGED work, and it includes a "+
+			msg := fmt.Sprintf("work item %s already has %s, UNMERGED work, and it includes a "+
 				"PRE-REGISTRATION commit: %s. A polecat spawned now would base its worktree on %s and write "+
 				"its predictions AFTER seeing the results — the artifact would look identical to a valid "+
-				"one, so nothing downstream could catch it. Get the branch merged instead (`%s`). "+
+				"one, so nothing downstream could catch it. Instead, %s. "+
 				"%s Either way %s already carries %s, and never amend that commit",
-				workItemID, strandedwork.Provenance(f.Pushed), f.Summary(), f.Target,
-				strandedwork.SubmitRemedy(f.Repo, f.Branch, workItemID, f.Pushed),
+				workItemID, strandedwork.Provenance(f.Pushed), f.SummaryIn(cell), f.Target,
+				strandedwork.RemedyPhrase(cell, f, workItemID),
 				strandedExits(f)+".",
 				f.Branch, f.PreRegistration.SHA[:min(12, len(f.PreRegistration.SHA))])
+			if note != "" {
+				msg += ". " + note
+			}
+			return findings, msg
 		}
 	}
 	f := findings[0]
+	presence, note := strandedwork.Corroborate(f.Repo, f)
+	cell := f.Cell(presence)
 	msg := fmt.Sprintf("work item %s already has %s, UNMERGED work: %s. A worker dispatched FROM THE "+
-		"TARGET at it re-derives work that already exists — mg-9a19 lost 1026 lines that way. Get the "+
-		"branch merged instead (`%s`). %s",
-		workItemID, strandedwork.Provenance(f.Pushed), f.Summary(),
-		strandedwork.SubmitRemedy(f.Repo, f.Branch, workItemID, f.Pushed), strandedExits(f))
+		"TARGET at it re-derives work that already exists — mg-9a19 lost 1026 lines that way. Instead, "+
+		"%s. %s",
+		workItemID, strandedwork.Provenance(f.Pushed), f.SummaryIn(cell),
+		strandedwork.RemedyPhrase(cell, f, workItemID), strandedExits(f))
 	// The second opinion travels WITH the refusal and never instead of it
 	// (mg-5ec6). `git cherry` over-reports on a branch that landed through an
 	// ordinary clean rebase, and this refusal is where that costs the most: told
@@ -273,7 +288,7 @@ func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strande
 	// main learns that the gate is wrong and reaches for --stranded-override on
 	// reflex. Told the ratio, they can tell THIS refusal from the next one.
 	// Deliberately not a suppression — see strandedwork.Corroborate.
-	if _, note := strandedwork.Corroborate(f.Repo, f); note != "" {
+	if note != "" {
 		msg += ". " + note
 	}
 	return findings, msg
@@ -394,8 +409,12 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 		return
 	}
 	presence, note := strandedwork.Corroborate(a.SourceRepo, f)
+	// The shared table's cell words the summary (mg-8cda): Summary() alone
+	// is an unconditional submit, printed beside a second opinion that may
+	// say "check by hand first".
+	summary := f.SummaryIn(f.Cell(presence))
 	log.Printf("agent %s: work item %s went back to available/ WITH PUSHED WORK BEHIND IT (%s). %s. %s",
-		a.Name, a.WorkItemID, reason, f.Summary(), note)
+		a.Name, a.WorkItemID, reason, summary, note)
 	details := map[string]any{
 		"branch":      f.Branch,
 		"ref":         f.Ref,
@@ -404,7 +423,7 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 		"disposition": string(f.Disposition),
 		"unmerged":    len(f.Unmerged),
 		"reason":      reason,
-		"summary":     f.Summary(),
+		"summary":     summary,
 		"route":       RouteRelease,
 	}
 	addPresenceDetails(details, presence, note)

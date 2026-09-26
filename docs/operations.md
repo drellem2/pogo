@@ -1849,10 +1849,10 @@ Exit 0 clean, 1 at least one finding, 2 usage, 3 this run measured nothing.
 |---|---|---|
 | `rescue_unbuilt` | stranded, **and** the unmerged work is a `RESCUE` commit: recovered from a dead polecat's worktree with the pre-commit hook bypassed | read it, then build it. **No submit command is printed for these rows** |
 | `refused_before` | stranded, **and** the refinery has already been given this branch and refused it, with a failure its own class table commits to reproducing | the branch has to **change** first. **No submit command is printed for these rows** |
-| `stranded` | the branch has commits the target does not | `pogo refinery submit`; do **not** dispatch |
+| `stranded` | the branch has commits the target does not | `pogo refinery submit` when the content check found under 50% of the work on the target; otherwise **check by hand first** (the line runs `git log --grep=<item>` and carries the submit in its comment, "only if it did NOT land"). Do **not** dispatch either way. See [One decision table](#one-decision-table-for-all-three-surfaces-mg-8cda) |
 | `in_flight` | the branch has unmerged commits **and** is already in the refinery queue, while the item is **not** claimed | `pogo refinery show <mr>` — do **not** dispatch and do **not** resubmit. **No submit command is printed for these rows** |
 | `landed_not_closed` | the branch is fully merged, the item still asks for it | `mg done` |
-| `conflict_suspect` | the two instruments below disagree | read it yourself; **neither** command |
+| `conflict_suspect` | the two instruments below disagree | check by hand (`git log --grep=<item>`); **neither** command |
 | `unjudged` | the branch could not be read | re-run; this is not a clean row |
 | `repo_unreadable` | the item's repo could not be listed, so no branch was looked for | fix the item's repo field; not a clean row |
 | `orphan_branch` | a polecat worktree on this host whose branch holds commits **no remote ref has**, named by no open item | `git push origin <branch>` — there is no owner to ask and nothing to submit under |
@@ -2301,14 +2301,48 @@ scored below 50% — reported as "N of M lines (P%) present — consistent with
 absent", never as agreement that the work is absent, because nothing has measured
 where absent work scores. Unmeasured, unavailable, 50–95% ("partly present — not
 corroborated", the band where the measured landed branches at 0.88/0.91/0.94
-sit) and ≥95% all get **check by hand first**: look for a merged PR and for the
-same subject on the target, with the submit line kept only under "Only if it did
-NOT land". The 0.5 is `strandedwork.ContentAbsentRatio`, an unmeasured guess
-labelled as one. If any unmerged commit is a **rescue** commit, the mail prints
-no submit command at all — it names the commit as unreviewed and never built, as
-`pogo check-stranded`'s `rescue_unbuilt` row does. "Do not dispatch" is
-imperative in every case. `pogo check-stranded` does not yet share the 50% tier
-(mg-8cda).
+sit) get **check by hand first**: look for a merged PR and for the same subject
+on the target, with the submit line kept only under "Only if it did NOT land".
+At ≥95% the mail prints **no submit at all**, even conditionally — the work most
+likely landed, so it says check by hand and "neither submit nor close blind". The
+0.5 is `strandedwork.ContentAbsentRatio`, an unmeasured guess labelled as one. If
+any unmerged commit is a **rescue** commit, the mail prints no submit command at
+all — it names the commit as unreviewed and never built. "Do not dispatch" is
+imperative in every case.
+
+### One decision table for all three surfaces (mg-8cda)
+
+`pogo check-stranded`, the `[stranded-push]` mail and the dispatch refusal all
+choose their remedy from **`strandedwork.Decide`** — one table over the content
+second opinion and whether an unmerged commit is a rescue:
+
+| Cell | When | check-stranded row | Remedy on every surface |
+|---|---|---|---|
+| `resubmit` | measured, < 50% present, no rescue | `stranded` | paste-ready submit |
+| `check_by_hand` | unmeasured, unavailable, or 50–95% | `stranded` | hand check (`git log --grep=<item>`), submit only if it did NOT land |
+| `suggests_landed` | ≥ 95% (rescue or not) | `conflict_suspect` | hand check; no submit, no close — do neither blind |
+| `rescue_unbuilt` | a rescue commit, < 95% | `rescue_unbuilt` | `git log -p` to read it; no submit |
+
+Before this, each surface had its own table and they drifted: #174 fixed the
+50–95% band in the mail only, so `check-stranded` still printed a paste-ready
+submit for a branch the mail said to check by hand, and the dispatch refusal
+printed "PARTLY PRESENT — check by hand" followed by an unconditional "Get the
+branch merged instead". `TestStrandedSurfacesAgreeOnEveryBand`
+(internal/agent/strandedparity_test.go) runs all three surfaces over one real
+branch per band and fails when any two disagree.
+
+**What the table does not cover yet.** `check-stranded` has two more cells built
+from facts outside the branch: `refused_before` (refinery history says an
+unchanged resubmit repeats a failure) and `in_flight` (the branch is already in
+the queue). Both only *withhold* a submit the table would print. The pogod
+surfaces cannot see them, so for a refused or queued branch the mail and the
+refusal still print the table's submit while `check-stranded` does not. pogod
+hosts the refinery, so the data exists. Closing the gap would take four steps:
+move `cmd/pogo`'s history and queue conversion into a package both binaries
+import; export strandwatch's `historyView.forBranch`, because the stale-refusal
+and aged-out-window logic must not be written twice; inject a history source into
+`agent.Registry` the way `SetStrandedWorkGate` injects the scan; and give the
+mail and the refusal a refused cell and an in-flight cell.
 
 Neither reporter submits and neither closes. A wrong auto-submit lands unreviewed
 work; a wrong auto-close discards a branch.

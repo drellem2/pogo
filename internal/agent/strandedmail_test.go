@@ -493,7 +493,6 @@ func TestStrandedAlertRemedyFollowsTheSecondOpinion(t *testing.T) {
 	}{
 		{"consistent with absent", strandedwork.Presence{Added: 345, Present: 20, Measured: true}, true},
 		{"partly present (#174's 309/345)", strandedwork.Presence{Added: 345, Present: 309, Measured: true}, false},
-		{"suggests landed", strandedwork.Presence{Added: 2063, Present: 2008, Measured: true}, false},
 		{"unmeasured", strandedwork.Presence{Added: 5, Present: 0, Measured: false}, false},
 		{"unavailable", strandedwork.Presence{}, false},
 	} {
@@ -523,11 +522,56 @@ func TestStrandedAlertRemedyFollowsTheSecondOpinion(t *testing.T) {
 				t.Errorf("an uncorroborated row still asserts the target lacks the work:\n%s", body)
 			}
 			only := strings.Index(body, "Only if it did NOT land")
+			if !strings.Contains(body, "check by hand first") {
+				t.Errorf("an uncorroborated row does not say check by hand first:\n%s", body)
+			}
 			if only < 0 || only > strings.Index(body, submit) {
 				t.Errorf("the submit line is not conditional on the hand check:\n%s", body)
 			}
 			if !strings.Contains(body, "git -C /repo log --oneline --fixed-strings --grep=mg-a174 refs/remotes/origin/main") {
 				t.Errorf("the hand check names nothing runnable:\n%s", body)
+			}
+		})
+	}
+}
+
+// TestStrandedAlertSuggestsLandedNamesNeitherAction is the shared table's
+// suggests-landed cell as the mail renders it (mg-8cda): the target holds
+// essentially every line, so — as on check-stranded's conflict_suspect row — no
+// submit is printed even conditionally, the hand check is, and "do not
+// dispatch" stays imperative. A rescue commit here keeps this cell (it prints
+// no submit either) and is named rather than lost.
+func TestStrandedAlertSuggestsLandedNamesNeitherAction(t *testing.T) {
+	landed := strandedwork.Presence{Added: 2063, Present: 2008, Measured: true}
+	for _, c := range []struct {
+		name    string
+		commits []strandedwork.Commit
+		rescue  bool
+	}{
+		{"ordinary", nil, false},
+		{"with a rescue commit", []strandedwork.Commit{
+			{SHA: "9f1e2d3c4b5a6978", Subject: "RESCUE(mg-a174): recovered from preserved worktree — UNREVIEWED"}}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			subject, raw := strandedAlertWith(landed, c.commits...).Message()
+			body := strings.Join(strings.Fields(raw), " ")
+			if strings.Contains(body, "refinery submit") {
+				t.Errorf("the suggests-landed cell printed a submit:\n%s", raw)
+			}
+			for _, want := range []string{
+				"check by hand first, do not dispatch, and neither submit nor close blind",
+				"git -C /repo log --oneline --fixed-strings --grep=mg-a174 refs/remotes/origin/main",
+				"DO NOT DISPATCH A WORKER AT mg-a174",
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("body missing %q:\n%s", want, raw)
+				}
+			}
+			if strings.Contains(body, "ALSO a RESCUE COMMIT") != c.rescue {
+				t.Errorf("rescue named = %t, want %t:\n%s", !c.rescue, c.rescue, raw)
+			}
+			if !strings.Contains(subject, "do NOT dispatch") || strings.Contains(body, "safe to submit") {
+				t.Errorf("subject/footer disagree with the cell:\n%s\n%s", subject, raw)
 			}
 		})
 	}

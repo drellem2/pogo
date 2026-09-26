@@ -648,6 +648,13 @@ type Row struct {
 	// were unmerged commits to measure.
 	Presence strandedwork.Presence `json:"presence"`
 
+	// Cell is this row's cell in strandedwork's ONE decision table — the same
+	// table pogod's stranded mail and dispatch refusal read, so the three cannot
+	// disagree about what to do with one branch (mg-8cda). Set whenever there
+	// were unmerged commits to judge; the Kind is derived from it, and a
+	// KindStranded row renders CellResubmit and CellCheckByHand differently.
+	Cell strandedwork.Cell `json:"cell,omitempty"`
+
 	// PreRegistration is the oldest unmerged pre-registration commit, when the
 	// branch carries one. A re-dispatch must branch FROM it and never amend it.
 	PreRegistration *strandedwork.Commit `json:"pre_registration,omitempty"`
@@ -900,8 +907,34 @@ func (r Row) remedy() string {
 			"request",
 			r.Prior.MR, r.priorWhere(), r.priorWhy(), r.Target)
 	case KindStranded:
-		return fmt.Sprintf("%s   # do NOT dispatch at %s",
-			strandedwork.SubmitRemedy(r.Item.Repo, r.Branch, r.Item.ID, r.Pushed), r.Item.ID)
+		submit := strandedwork.SubmitRemedy(r.Item.Repo, r.Branch, r.Item.ID, r.Pushed)
+		if r.Cell != strandedwork.CellCheckByHand {
+			return fmt.Sprintf("%s   # do NOT dispatch at %s", submit, r.Item.ID)
+		}
+		// CHECK BY HAND FIRST, as pogod's stranded mail says for the same cell
+		// (drellem2/pogo#174, mg-8cda). The command that leads the line — the one
+		// a paste runs — is the hand check; the submit rides in the comment,
+		// conditional on it. Before this, a 90%-present branch was handed the
+		// submit as the line's command while the mail for the same branch said
+		// "check by hand first".
+		check := strandedwork.HandCheckCommand(r.Item.Repo, r.Item.ID, r.Target)
+		if check == "" {
+			check = fmt.Sprintf("git -C %s log --oneline %s..%s", r.Item.Repo, r.Target, orDefault(r.Ref, r.Branch))
+		}
+		return fmt.Sprintf("%s   # CHECK BY HAND FIRST — %s; only if it did NOT land: %s; do NOT dispatch at %s",
+			check, r.checkWhy(), submit, r.Item.ID)
+	case KindConflictSuspect:
+		// NEITHER ACTION IS NAMED, as before — but the command that leads the line
+		// is now the same hand check pogod's mail and dispatch refusal print for
+		// this cell of the shared table (mg-8cda), instead of a bare log range
+		// that could not answer "did it land under another sha".
+		check := strandedwork.HandCheckCommand(r.Item.Repo, r.Item.ID, r.Target)
+		if check == "" {
+			check = fmt.Sprintf("git -C %s log --oneline %s..%s", r.Item.Repo, r.Target, orDefault(r.Ref, r.Branch))
+		}
+		return fmt.Sprintf("%s   # CHECK BY HAND FIRST — second opinion says this MAY ALREADY HAVE LANDED "+
+			"(%d of %d lines, %.0f%%); then submit OR close; do neither blind; do NOT dispatch at %s",
+			check, r.Presence.Present, r.Presence.Added, 100*r.Presence.Ratio(), r.Item.ID)
 	case KindInFlight:
 		// NO SUBMIT LINE — the branch is in the queue and a second request is a
 		// duplicate MR the refinery will not deduplicate. And no `mg done`:
@@ -949,6 +982,16 @@ func (r Row) remedy() string {
 		return fmt.Sprintf("git -C %s log --oneline %s..%s   # then submit OR close; do neither blind",
 			r.Item.Repo, r.Target, r.Ref)
 	}
+}
+
+// checkWhy is why a stranded row's second opinion does not back a resubmit, in
+// the fewest words that say which cell of the table it fell in.
+func (r Row) checkWhy() string {
+	if r.Presence.PartlyPresent() {
+		return fmt.Sprintf("second opinion PARTLY PRESENT, NOT CORROBORATED (%d of %d lines, %.0f%%)",
+			r.Presence.Present, r.Presence.Added, 100*r.Presence.Ratio())
+	}
+	return "second opinion not conclusive, so this row rests on `git cherry` alone"
 }
 
 // queuedMR names the in-flight request, and degrades rather than panicking.
@@ -1728,9 +1771,18 @@ func classify(repo, branch string, it Item, target string, hv historyView) (*Row
 	if p, perr := strandedwork.MeasurePresence(repo, f); perr == nil {
 		row.Presence = p
 	}
-	row.Kind = KindStranded
-	if row.Presence.SuggestsLanded() {
+	// THE CELL COMES FROM THE SHARED TABLE (mg-8cda), and the Kinds below are
+	// this report's names for its cells. The precedence argued in the comments
+	// that follow — suggests-landed keeps its Kind over a rescue — is the table's
+	// own; see strandedwork.CellSuggestsLanded.
+	row.Cell = f.Cell(row.Presence)
+	switch row.Cell {
+	case strandedwork.CellSuggestsLanded:
 		row.Kind = KindConflictSuspect
+	case strandedwork.CellRescueUnbuilt:
+		row.Kind = KindRescueUnbuilt
+	default:
+		row.Kind = KindStranded
 	}
 	// THE RESCUE KIND DISPLACES ONLY KindStranded, and the narrowness is the
 	// point (mg-aed4). KindStranded is the one whose remedy is a paste-ready
@@ -1757,9 +1809,8 @@ func classify(repo, branch string, it Item, target string, hv historyView) (*Row
 	// survive: its failure mode is a PASSING gate merging unreviewed code, which
 	// is worse than a wasted gate run, and its remedy (read it, build it) is a
 	// prerequisite of the refused row's remedy anyway.
-	if (row.Kind == KindStranded || row.Kind == KindRefusedBefore) && row.Rescue != nil {
-		row.Kind = KindRescueUnbuilt
-	}
+	// (The table has already put a rescue branch in CellRescueUnbuilt, so a
+	// refused rescue branch never reaches KindRefusedBefore above.)
 	return &row, "", nil
 }
 
