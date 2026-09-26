@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,15 +20,44 @@ import (
 // second exists to hold the claim that a full repo says nothing about any other
 // repo, which is the entire reason this cap is not the fleet-wide count it
 // replaces.
-const (
-	goRepo    = "/Users/daniel/dev/pogo"
-	otherRepo = "/Users/daniel/dev/other"
+//
+// They are REAL directories, made under the package sandbox by TestMain
+// (makeCapRepos), not strings. RepoOccupancyFor reports an EMPTY repository
+// whose path is not a directory as unresolvable and fails open (mg-cd4a), so
+// these once read "/Users/daniel/dev/pogo" and every empty-repo assertion
+// silently depended on that path existing: on the developer's machine it did,
+// on the CI runner it did not, and there an empty goRepo was never capped at
+// all. TestCapOfOneSaysAFlowCanNeverFit was the first test to notice — main was
+// red on GitHub Actions and green on every host that had the checkout (mg-47f9).
+var (
+	goRepo    string
+	otherRepo string
 )
+
+// makeCapRepos creates goRepo and otherRepo under root. Called from TestMain,
+// before any test, so no test can observe them unset.
+func makeCapRepos(root string) error {
+	goRepo = filepath.Join(root, "repos", "pogo")
+	otherRepo = filepath.Join(root, "repos", "other")
+	for _, d := range []string{goRepo, otherRepo} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // capRegistry builds a registry with the cap armed at the shipped default and
 // n live workers already in goRepo.
 func capRegistry(t *testing.T, inGoRepo int) *Registry {
 	t.Helper()
+	// The fixture must be a directory, or an empty goRepo is unresolvable and
+	// every cap assertion about it passes or fails for the wrong reason.
+	for _, d := range []string{goRepo, otherRepo} {
+		if !isDirectory(d) {
+			t.Fatalf("cap fixture repo %q is not a directory — makeCapRepos did not run", d)
+		}
+	}
 	sandboxWitness(t)
 	reg := newDrainTestRegistry(t)
 	reg.SetDispatchCap(config.DefaultDispatchCapConfig())
