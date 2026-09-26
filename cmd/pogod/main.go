@@ -2060,6 +2060,14 @@ Flags:
 		log.Print(synthWatchNotArmedLine)
 	}
 
+	// Any successful start retires the rows that say this agent is not
+	// running (A5/A6). Without it, those rows were cleared only by the one
+	// path that raised them, and an agent brought back any other way carried
+	// a "that agent is gone" condition for as long as it ran (mg-f474).
+	agentRegistry.SetOnStart(func(a *agent.Agent) {
+		noteAgentStarted(conditions, a.Name, time.Now())
+	})
+
 	agentRegistry.SetOnExit(func(a *agent.Agent, err error) {
 		// Settle any defer-done backstop for this polecat: its process has
 		// ended, so the slot is free and there is nothing left to reap (gh #81)
@@ -4339,7 +4347,10 @@ Flags:
 					conditions.Clear(rowA5AutoStartPrefix+res.Name, time.Now())
 				case agent.AutoStartStatusSkippedRunning:
 					log.Printf("pogod: %s already running, skipping auto-start", res.Name)
-					conditions.Clear(rowA5AutoStartPrefix+res.Name, time.Now())
+					// Already running is as good as started: neither "failed to
+					// auto-start" nor "crashed and its restart failed" is true of
+					// it. No Spawn ran, so the OnStart hook did not (mg-f474).
+					noteAgentStarted(conditions, res.Name, time.Now())
 				case agent.AutoStartStatusFailed:
 					log.Printf("pogod: auto-start of %s failed: %s", res.Name, res.Error)
 					// A5 (mg-342d), the row the enumeration flagged as genuinely

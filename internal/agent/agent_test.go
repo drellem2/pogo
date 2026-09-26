@@ -1144,3 +1144,61 @@ func TestSpawnProcessGroupIsolation(t *testing.T) {
 		t.Errorf("agent pgid = %d, want %d (agent should lead its own process group)", agentPgid, a.PID)
 	}
 }
+
+// TestOnStartFiresForEverySuccessfulStart pins the hook pogod uses to retire
+// "this agent is gone" conditions (mg-f474): it fires for a fresh Spawn AND for
+// a Respawn, never for a start that failed, and outside the registry lock — the
+// callback below calls back into the registry, which would deadlock under r.mu.
+func TestOnStartFiresForEverySuccessfulStart(t *testing.T) {
+	testsandbox.Isolate(t) // Respawn reads the park flag under $HOME
+	r, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer r.StopAll(2 * time.Second)
+
+	started := make(chan string, 8)
+	r.SetOnStart(func(a *Agent) {
+		_ = r.Get(a.Name) // takes r.mu.RLock: deadlocks if called under r.mu
+		started <- a.Name
+	})
+	next := func(what string) string {
+		t.Helper()
+		select {
+		case n := <-started:
+			return n
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: onStart did not fire (or deadlocked under the registry lock)", what)
+			return ""
+		}
+	}
+
+	a, err := r.Spawn(SpawnRequest{Name: "fresh", Type: TypeCrew, Command: []string{"true"}, RestartOnCrash: true})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if n := next("Spawn"); n != "fresh" {
+		t.Fatalf("onStart after Spawn named %q, want fresh", n)
+	}
+
+	<-a.Done()
+	if _, err := r.Respawn("fresh"); err != nil {
+		t.Fatalf("Respawn: %v", err)
+	}
+	if n := next("Respawn"); n != "fresh" {
+		t.Fatalf("onStart after Respawn named %q, want fresh", n)
+	}
+
+	// Failed starts: no command, and a respawn of an unknown agent.
+	if _, err := r.Spawn(SpawnRequest{Name: "nocmd", Type: TypeCrew}); err == nil {
+		t.Fatal("precondition: Spawn with no command should fail")
+	}
+	if _, err := r.Respawn("ghost"); err == nil {
+		t.Fatal("precondition: Respawn of an unknown agent should fail")
+	}
+	select {
+	case n := <-started:
+		t.Fatalf("onStart fired for %q after a FAILED start", n)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
