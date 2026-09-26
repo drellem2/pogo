@@ -8,7 +8,44 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
+
+// unpopulatedLogInterval is how often the skip line for one unpopulated
+// checkout may be repeated. A tree mid-`git worktree add` is gone within
+// seconds, so it logs once; a crashed add's tree persists, and is named again
+// once per interval rather than once per stall-watch tick.
+const unpopulatedLogInterval = time.Hour
+
+var (
+	unpopulatedLogMu   sync.Mutex
+	unpopulatedLogged  = map[string]time.Time{}
+	unpopulatedLogNow  = time.Now
+	unpopulatedLogFunc = log.Printf
+)
+
+// logUnpopulatedSkip logs the unpopulated-checkout skip for path at most once
+// per unpopulatedLogInterval. Entries older than the interval are pruned on
+// every call, so the map holds only paths skipped within the last interval and
+// a tree that disappears and is re-created later is logged afresh.
+func logUnpopulatedSkip(path string) {
+	unpopulatedLogMu.Lock()
+	now := unpopulatedLogNow()
+	for p, at := range unpopulatedLogged {
+		if now.Sub(at) >= unpopulatedLogInterval {
+			delete(unpopulatedLogged, p)
+		}
+	}
+	if _, recent := unpopulatedLogged[path]; recent {
+		unpopulatedLogMu.Unlock()
+		return
+	}
+	unpopulatedLogged[path] = now
+	unpopulatedLogMu.Unlock()
+	unpopulatedLogFunc("gitgc: preserved-worktree probe skipped %s: no index — unpopulated checkout, not probed "+
+		"(repeated at most once per %s while it stays so)", path, unpopulatedLogInterval)
+}
 
 // PreservedForItems answers, for a named set of work items, whether any of them
 // has a surviving worktree holding work that exists nowhere else — a tree with
@@ -131,8 +168,25 @@ func PreservedForItems(opts PreservedItemOptions) (PreservedItemReport, error) {
 		// same tree is load-bearing (see its doc): it is what stops gc reaping a
 		// tree mid-creation. And the skip is logged, not silent: a crashed add
 		// leaves an index-less tree forever, and it must still show up somewhere.
+		//
+		// This skip ALSO reaches the spawn-time dispatch gate, not just
+		// stall-watch: agent.GitPreservedWorktreeGate calls this function, so an
+		// index-less tree never refuses a dispatch either (mg-fa90). That is safe
+		// because nothing the gate protects is in such a tree, and the two ways
+		// a dispatch could still collide with it are guarded downstream. A
+		// dispatch under the SAME polecat name finds the directory already there:
+		// `git worktree add` refuses it, and the spawn's pre-add directory check
+		// (drellem2/pogo#167) marks it not-ours, so the rollback leaks it with a
+		// logged path rather than removing it. A dispatch under a DIFFERENT name
+		// gets its own tree, and the work-item claim, taken after the add, admits
+		// at most one of the two spawns; the loser removes only the tree it made.
+		//
+		// The log line is rate-limited per path (logUnpopulatedSkip): a crashed
+		// add is re-probed on every stall-watch tick for as long as its item is
+		// available, and one line per tick was noise. The report field is not
+		// rate-limited — every call still lists the tree.
 		if unpopulatedCheckout(path) {
-			log.Printf("gitgc: preserved-worktree probe skipped %s: no index — unpopulated checkout, not probed", path)
+			logUnpopulatedSkip(path)
 			rep.Unpopulated = append(rep.Unpopulated, path)
 			continue
 		}

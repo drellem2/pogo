@@ -2,11 +2,13 @@ package gitgc
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // removeWorktreeIndex puts a registered worktree back into the state
@@ -134,5 +136,66 @@ func TestUnpopulatedCheckoutNeedsPositiveEvidence(t *testing.T) {
 	}
 	if unpopulatedCheckout(dir) {
 		t.Error("unparseable pointer: want false")
+	}
+}
+
+// TestUnpopulatedSkipLogIsRateLimited (mg-fa90): a crashed `git worktree add`
+// leaves an index-less tree that stall-watch re-probes on every tick while its
+// item is available. The skip is named in the report on EVERY call, but the log
+// line appears once per path per unpopulatedLogInterval, not once per tick.
+func TestUnpopulatedSkipLogIsRateLimited(t *testing.T) {
+	var lines []string
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	unpopulatedLogMu.Lock()
+	prevNow, prevFunc, prevLogged := unpopulatedLogNow, unpopulatedLogFunc, unpopulatedLogged
+	unpopulatedLogNow = func() time.Time { return now }
+	unpopulatedLogFunc = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	unpopulatedLogged = map[string]time.Time{}
+	unpopulatedLogMu.Unlock()
+	t.Cleanup(func() {
+		unpopulatedLogMu.Lock()
+		unpopulatedLogNow, unpopulatedLogFunc, unpopulatedLogged = prevNow, prevFunc, prevLogged
+		unpopulatedLogMu.Unlock()
+	})
+
+	r := newTestRepo(t)
+	r.commit("a.txt", "a\n")
+	r.branch("polecat-pf180")
+	wt := r.worktreeOwnedBy("pf180", "polecat-pf180")
+	removeWorktreeIndex(t, wt)
+
+	probe := func() {
+		t.Helper()
+		rep, err := PreservedForItems(PreservedItemOptions{
+			PolecatsDir: r.polecatsDir(),
+			Items:       []string{"mg-f180"},
+		})
+		if err != nil {
+			t.Fatalf("PreservedForItems: %v", err)
+		}
+		if len(rep.Unpopulated) != 1 || rep.Unpopulated[0] != wt {
+			t.Fatalf("every call must still report the skipped tree; Unpopulated = %v", rep.Unpopulated)
+		}
+	}
+
+	for i := 0; i < 5; i++ {
+		probe()
+		now = now.Add(time.Minute)
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], wt) {
+		t.Fatalf("five ticks inside one interval: want exactly one line naming %s, got %q", wt, lines)
+	}
+
+	now = now.Add(unpopulatedLogInterval)
+	probe()
+	if len(lines) != 2 {
+		t.Fatalf("after the interval the still-crashed tree must be named again; got %d lines: %q", len(lines), lines)
+	}
+
+	// Per PATH, not global: a second unpopulated tree logs on its first skip
+	// even while the first is inside its interval.
+	logUnpopulatedSkip("/elsewhere/other-tree")
+	if len(lines) != 3 || !strings.Contains(lines[2], "/elsewhere/other-tree") {
+		t.Fatalf("a different path must log independently; got %q", lines)
 	}
 }

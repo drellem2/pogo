@@ -421,7 +421,13 @@ tree whose per-worktree git dir has no `index` yet is one `git worktree add` is
 still checking out; `git status` reads every tracked file there as a staged
 deletion, so the probe used to report a polecat seconds into its spawn as
 holding thousands of modified files. `PreservedForItems` now skips such a tree
-and logs one `no index — unpopulated checkout, not probed` line per skip.
+and logs a `no index — unpopulated checkout, not probed` line, at most once per
+tree per hour (mg-fa90), because a crashed add leaves such a tree behind and
+stall-watch would otherwise re-log it on every tick. The skip reaches the
+dispatch gate too, since that gate is this same probe. That is safe because no
+agent has run in such a tree. A same-name dispatch still fails at `git worktree
+add` and leaks the directory instead of removing it (the #167 pre-add check). A
+different-name dispatch loses the work-item claim race or wins it cleanly.
 `checkWorktreeRemoval` keeps refusing it: that refusal is what stops gc reaping a
 tree mid-creation.
 
