@@ -204,6 +204,22 @@ func printRepoOccupancy(w io.Writer, occ *agent.RepoOccupancy, hostWouldRefuse b
 		fmt.Fprintf(w, " — %s", strings.Join(occ.Polecats, ", "))
 	}
 	fmt.Fprintln(w)
+	if n := len(occ.ReviewSlotHolds); n > 0 {
+		held := make([]string, n)
+		for i, h := range occ.ReviewSlotHolds {
+			held[i] = h.String()
+		}
+		fmt.Fprintf(w, "Held:       %d slot(s) for the reviewers of live gh-issue builds — %s\n"+
+			"            (a builder stays alive through review, so its reviewer WILL need one; mg-bf42)\n",
+			n, strings.Join(held, ", "))
+	}
+	if occ.ConfiguredCap > 0 {
+		if occ.WouldRefuseGHIssueBuild {
+			fmt.Fprintf(w, "gh-issue:   a new gh-issue BUILD would be refused — it needs 2 slots (builder + reviewer)\n")
+		} else {
+			fmt.Fprintf(w, "gh-issue:   a new gh-issue build fits (2 slots: builder + reviewer)\n")
+		}
+	}
 	if !occ.RefineryKnown {
 		fmt.Fprintf(w, "Refinery:   NOT ASKED — no slot is being reserved. This is missing information,\n"+
 			"            not an idle refinery.\n")

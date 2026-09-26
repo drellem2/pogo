@@ -1753,7 +1753,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	//
 	// Fails OPEN on an unreadable witness store, and reserves nothing when the
 	// refinery cannot be asked — see RepoOccupancyFor for both directions.
-	if refusal := r.repoCapRefusal(spawnReq.Repo); refusal != "" {
+	if refusal := r.repoCapRefusal(spawnReq.Repo, spawnReq.Id); refusal != "" {
 		failPolecatSpawn(w, spawnReq, http.StatusServiceUnavailable, refusal)
 		return
 	}

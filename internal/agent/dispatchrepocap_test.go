@@ -430,7 +430,7 @@ func TestHostLoadOmitsOccupancyWhenNoRepoAsked(t *testing.T) {
 // refusalFor renders the refusal the spawn path would emit for repo.
 func refusalFor(t *testing.T, reg *Registry, repo string) string {
 	t.Helper()
-	msg := reg.repoCapRefusal(repo)
+	msg := reg.repoCapRefusal(repo, "")
 	if msg == "" {
 		t.Fatalf("expected a refusal for %s, got none", repo)
 	}

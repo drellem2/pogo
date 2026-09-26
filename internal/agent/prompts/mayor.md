@@ -1464,6 +1464,8 @@ When deciding whether to spawn a {{.Worker}}:
   pogo host load --repo=<repo path>   # workers in that repo, the cap, and whether a spawn would be refused
   ```
 
+  **A gh-issue flow is TWO {{.Worker}}s, not one.** The build {{.Worker}} stays alive through review (that is what `reviews:` protects), so each flow needs a slot for its builder AND one for its reviewer — **one sustainable gh-issue flow per repo** at the default cap, since the refinery reserve drops it to 2. On 2026-09-08 three gh-issue builds went into one repo inside twenty minutes; the builders held every slot and neither PR's reviewer could ever start (mg-bf42). pogod now charges this for you: a live builder whose reviewer is not running **holds a slot** for it, a gh-issue build is admitted only if both of its slots fit, and the reviewer is always admitted into the slot held for it. Plan several GOs from `would_refuse_gh_issue_build` in `pogo host load --repo=<path> --json`, and dispatch the rest as earlier flows reach `stage: merge`.
+
   A cap refusal is a **503 and a later**, exactly like the host one below — and it is **repo-scoped**: a dispatch into a *different* repo is unaffected, so the right response is usually to dispatch elsewhere rather than to wait.
 
   Two things that made the incident worse, both worth not repeating. **The refinery runs the same `./build.sh` the {{.Worker}}s run**, so {{.Worker}}s verifying their branches starve the process that merges them — which is why a slot is reserved. And **`pogo agent stop` does not kill an agent's compute descendants**: they reparent to launchd and keep running with nobody to collect their results, so shedding load that way keeps the cost and loses the benefit.

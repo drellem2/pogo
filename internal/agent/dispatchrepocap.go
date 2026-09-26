@@ -81,9 +81,23 @@ type RepoOccupancy struct {
 	// WouldRefuse stays false because the cap fails open, so the gate itself is
 	// unchanged.
 	Unresolvable string `json:"unresolvable,omitempty"`
-	// WouldRefuse is what the spawn path would do with a request for this repo
-	// right now.
+	// ReviewSlotHolds are the live gh-issue builders in this repo whose
+	// reviewer is not running yet. Each holds one slot back for that reviewer,
+	// because the builder stays alive through review and the reviewer WILL be
+	// dispatched (mg-bf42). They are not in Count — they are the slots Count
+	// will grow into.
+	ReviewSlotHolds []ReviewSlotHold `json:"review_slot_holds,omitempty"`
+	// WouldRefuse is what the spawn path would do with an ordinary request for
+	// this repo right now: Count plus the held review slots against Cap. The
+	// one exception is the reviewer a hold is FOR, which is admitted into its
+	// held slot whenever Count alone is under Cap.
 	WouldRefuse bool `json:"would_refuse"`
+	// WouldRefuseGHIssueBuild is what the spawn path would do with a gh-issue
+	// BUILD, which needs two slots — itself and its future reviewer. It is the
+	// number to plan a batch of gh-issue dispatches against: with the default
+	// cap of 3 it admits ONE flow per repo, and none while the refinery holds
+	// its reserve and another flow is live (mg-bf42).
+	WouldRefuseGHIssueBuild bool `json:"would_refuse_gh_issue_build"`
 }
 
 // SetDispatchCap installs the per-repo cap policy. The zero value disarms the
@@ -234,7 +248,10 @@ func (r *Registry) RepoOccupancyFor(repo string) RepoOccupancy {
 	if reserving && cfg.Armed() {
 		occ.RefineryReserved = cfg.MaxPolecatsPerRepo - occ.Cap
 	}
-	occ.WouldRefuse = cfg.Armed() && occ.Count >= occ.Cap
+	occ.ReviewSlotHolds = reviewSlotHolds(occ.Polecats, r.polecatWorkItems(), r.getFlowReader())
+	held := len(occ.ReviewSlotHolds)
+	occ.WouldRefuse = cfg.Armed() && occ.Count+held >= occ.Cap
+	occ.WouldRefuseGHIssueBuild = cfg.Armed() && occ.Count+held+2 > occ.Cap
 	return occ
 }
 
@@ -285,10 +302,19 @@ func dedupeSorted(list []string, counted map[string]bool) []string {
 // that self-parallelise outweighed them. A coordinator that took either sentence
 // literally retried twice into a guaranteed refusal, which is exactly the cost
 // a refusal message exists to avoid.
-func (r *Registry) repoCapRefusal(repo string) string {
+//
+// # Two checks, in this order
+//
+// The plain count first: a repo whose LIVE workers already fill the cap
+// refuses everything, the reviewer a slot is held for included — there is no
+// slot to give it. Only under that does the review-slot reserve apply
+// (mg-bf42), which is item-aware: it reads workItemID's carrier to tell a
+// gh-issue build (needs two slots) and the reviewer a hold is for (consumes
+// its hold) from everything else. See dispatchreviewslot.go.
+func (r *Registry) repoCapRefusal(repo, workItemID string) string {
 	occ := r.RepoOccupancyFor(repo)
-	if !occ.WouldRefuse {
-		return ""
+	if occ.Cap == 0 || occ.Count < occ.Cap {
+		return r.reviewSlotRefusal(occ, workItemID)
 	}
 
 	var b strings.Builder

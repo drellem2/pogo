@@ -577,6 +577,9 @@ type Registry struct {
 	// reserve is unenforced — the cap still caps, it simply cannot tell an idle
 	// refinery from one it failed to ask.
 	refineryActivity RefineryActivity
+	// flowReader reads a work item's state carrier for the review-slot
+	// reserve (mg-bf42). Nil means MGFlowReader{}.
+	flowReader FlowReader
 
 	// repoResolver turns a work item's `repo` field into the path the cap
 	// counts workers in, when that field is a bare NAME rather than a path.

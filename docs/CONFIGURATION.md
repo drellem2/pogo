@@ -825,6 +825,43 @@ the only side that can be told "not yet" — the refinery cannot evict a worker
 that is already building. This prevents the starvation from forming; it does not
 cure one that has already formed.
 
+### Why a gh-issue build is charged two slots (mg-bf42)
+
+On the gh-issue track the **build worker stays alive through review** — the
+`reviews:` carrier line exists so the done-reaper does not stop a builder while
+its reviewer runs (mg-aaf6, drellem2/pogo#131). So one gh-issue flow occupies
+**two** slots for its whole review loop, and with the default cap of 3 (2 while
+the refinery has work in the repo) a repository sustains **one** flow at a time.
+
+The cap used to count only live workers, so three gh-issue builds were
+admitted into one repo on 2026-09-08: three builders held all three slots, two
+had PRs open, and no reviewer could ever start — while no builder could finish,
+because finishing is what review unblocks.
+
+The cap now applies the refinery reserve's idea to a second consumer:
+
+- every live gh-issue builder (`workflow: gh-issue`, no `reviews:` line,
+  `stage: build` or `review`) whose reviewer is not yet running **holds one
+  slot** for it; an ordinary dispatch is refused when live + held reaches the cap;
+- a new gh-issue **build** is admitted only when live + held + **2** fits;
+- the **reviewer** a slot is held for (its item's `reviews:` names the builder)
+  consumes that hold, and is admitted whenever the live count alone is under
+  the cap.
+
+A review ticket that omits its `reviews:` line reads exactly like a builder at
+`stage: review`. Arriving at dispatch it is still admitted into a hold (a build
+is dispatched at `stage: build`, never `review`), but once live it holds a slot
+of its own and does not release its builder's — an over-count, never a
+deadlock. Write the line.
+
+A hold ends when the reviewer starts (it is then counted as a live worker), when
+the build ticket moves to `stage: merge`, or when the builder exits. An item
+whose carrier cannot be read holds nothing — the reserve fails open, like the
+cap. `pogo host load --repo=<path>` serves `review_slot_holds` and
+`would_refuse_gh_issue_build`; plan a batch of gh-issue dispatches from the
+latter. With `max_polecats_per_repo = 1` no gh-issue flow can ever fit, and the
+refusal says so.
+
 ### What the count is built from, and where it can be wrong
 
 | Source | Covers | Note |
@@ -845,8 +882,8 @@ hiding it would let an undercount look exact.
 
 A `--no-worktree` dispatch is never capped: it runs no repository's test suite.
 
-Source of truth: `internal/config/dispatchcap.go` and
-`internal/agent/dispatchrepocap.go`.
+Source of truth: `internal/config/dispatchcap.go`,
+`internal/agent/dispatchrepocap.go` and `internal/agent/dispatchreviewslot.go`.
 
 ## Dispatch pairing — items that owe a paired work item
 
