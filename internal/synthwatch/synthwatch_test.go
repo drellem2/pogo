@@ -293,6 +293,45 @@ func TestSuppressRestart_OnlyForFailingAndAlwaysAudited(t *testing.T) {
 	}
 }
 
+// RestartSuppressed audits a suppression decided OUTSIDE this watcher's scan —
+// the respawn gate's direct transcript read. Under [synth_watch] enabled = false
+// the watcher is never Checked and holds no verdicts, so SuppressRestart alone
+// emitted nothing for a respawn the gate really withheld (mg-5dfb).
+func TestRestartSuppressed_AuditsTheGatesVerdictWithoutAScan(t *testing.T) {
+	rec := &recorder{}
+	w := New(Options{Emit: rec.emit, Mail: rec.send}) // never Checked: the pager is off
+
+	if w.SuppressRestart("pm-pogo", "crew-pm-pogo") {
+		t.Fatal("precondition: an unscanned watcher holds no verdict")
+	}
+	if !w.RestartSuppressed("pm-pogo", "crew-pm-pogo", failing(synthfail.ReasonAuthFailed), false) {
+		t.Fatal("RestartSuppressed = false for a failing verdict")
+	}
+	if w.RestartSuppressed("quiet", "crew-quiet", synthfail.Report{State: synthfail.StateQuiet}, false) {
+		t.Error("RestartSuppressed = true for a QUIET verdict — a wedged agent must stay restartable")
+	}
+	if w.RestartSuppressed("unknown", "crew-unknown", synthfail.Report{Unavailable: "no transcript"}, false) {
+		t.Error("RestartSuppressed = true on no evidence")
+	}
+
+	if got := rec.countType(EventRestartSuppressed); got != 1 {
+		t.Fatalf("emitted %d %s events, want exactly 1", got, EventRestartSuppressed)
+	}
+	e := rec.events[0]
+	if e.Agent != "crew-pm-pogo" {
+		t.Errorf("event agent = %q, want the identity", e.Agent)
+	}
+	if armed, ok := e.Details["pager_armed"].(bool); !ok || armed {
+		t.Errorf("pager_armed = %v, want false: nobody was paged and the event must not imply otherwise", e.Details["pager_armed"])
+	}
+	if e.Details["reason"] != string(synthfail.ReasonAuthFailed) {
+		t.Errorf("reason = %v, want %s", e.Details["reason"], synthfail.ReasonAuthFailed)
+	}
+	if len(rec.mails) != 0 {
+		t.Errorf("sent %d mails; RestartSuppressed audits, it never pages", len(rec.mails))
+	}
+}
+
 func TestReapMissing_StoppedAgentClosesTheEpisode(t *testing.T) {
 	rec := &recorder{}
 	targets := []Target{{Name: "pm-pogo", Workdir: "/w/pm-pogo"}}

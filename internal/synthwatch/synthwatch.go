@@ -318,7 +318,28 @@ func (w *Watcher) SuppressRestart(name, identity string) bool {
 	w.mu.Lock()
 	rep, ok := w.failing[name]
 	w.mu.Unlock()
-	if !ok || !rep.SuppressRestart() {
+	if !ok {
+		return false
+	}
+	// A verdict in w.failing exists only because Check ran, and Check runs only
+	// while the pager is armed.
+	return w.RestartSuppressed(name, identity, rep, true)
+}
+
+// RestartSuppressed emits the restart_suppressed audit event for a respawn the
+// caller's gate withheld on rep, and reports whether rep justified withholding
+// it. Unlike SuppressRestart it does not need a verdict from this watcher's own
+// scan: the respawn gate (agent.Registry.ShouldRespawnAgent via synthScanner)
+// falls through to a direct transcript read whenever the watcher holds no
+// verdict — always, under [synth_watch] enabled = false, and for any agent that
+// exited before its first scan. A suppression decided on that read is just as
+// real, and the event is the only machine-readable record of it
+// (drellem2/pogo#185 follow-up, mg-5dfb).
+//
+// pagerArmed is recorded in the event so a reader can tell "suppressed and a
+// human was paged" from "suppressed and nobody was told".
+func (w *Watcher) RestartSuppressed(name, identity string, rep synthfail.Report, pagerArmed bool) bool {
+	if !rep.SuppressRestart() {
 		return false
 	}
 	w.opts.Emit(events.Event{
@@ -330,6 +351,7 @@ func (w *Watcher) SuppressRestart(name, identity string) bool {
 			"failing_turns":     rep.Count,
 			"detail":            rep.Detail,
 			"suppressed_action": "respawn",
+			"pager_armed":       pagerArmed,
 			"why":               "a restart cannot fix a synthetic zero-token failure turn; it discards the session's context and recovers nothing (mg-18d0)",
 		},
 	})

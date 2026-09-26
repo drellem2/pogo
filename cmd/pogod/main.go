@@ -2013,18 +2013,16 @@ Flags:
 	// nothing, and where a harness declares no transcript path every reading is
 	// StateUnavailable, which is not a health claim and produces no alarm.
 	// `[refusal_watch] enabled = false` leaves it unbuilt (drellem2/pogo#185).
-	var refusalWatcher *refusalwatch.Watcher
-	if cfg.RefusalWatch.Enabled {
-		refusalWatcher = refusalwatch.New(refusalwatch.Options{
+	refusalWatcher := armDetector(cfg.RefusalWatch.Enabled, refusalWatchNotArmedLine, logLine, func() *refusalwatch.Watcher {
+		w := refusalwatch.New(refusalwatch.Options{
 			Home:    homeDir(),
 			Targets: func() []refusalwatch.Target { return refusalTargets(agentRegistry) },
 			Globs:   providers.SessionTranscriptGlobs,
 			Sinks:   refusalSinks(),
 		})
-		log.Printf("pogod: consecutive-refusal alarm enabled (%s)", refusalWatcher.Describe())
-	} else {
-		log.Print(refusalWatchNotArmedLine)
-	}
+		log.Printf("pogod: consecutive-refusal alarm enabled (%s)", w.Describe())
+		return w
+	})
 	// The hold and the floor are stated because they are the only two knobs that
 	// can make this channel say LESS than it did, and a reader diagnosing "why
 	// did I not get paged" must be able to read their values off the daemon
@@ -2056,17 +2054,7 @@ Flags:
 		// stand down and say so loudly.
 		respawn, suppressedBy := agentRegistry.ShouldRespawnAgent(a)
 		if !respawn && a.ShouldRespawn() {
-			// "A human has been paged" is true only while the pager is armed;
-			// with [synth_watch] enabled = false the gate still holds and nobody
-			// was told, so the line must not claim otherwise.
-			paged := "A human has been paged."
-			if synthPager == nil {
-				paged = "Nobody was paged: [synth_watch] enabled = false."
-			}
-			log.Printf("agent %s (%s) exited while failing every turn (%s); SUPPRESSING respawn — "+
-				"a restart cannot fix this and destroys the session's context (mg-18d0). %s",
-				a.Name, a.Type, suppressedBy.Reason, paged)
-			synthWatcher.SuppressRestart(a.Name, a.EventAgent())
+			suppressedRespawn(log.Printf, synthWatcher, synthPager != nil, a, suppressedBy)
 		}
 		if respawn {
 			// Restart-on-crash agents: respawn after a short backoff so a
@@ -3253,13 +3241,21 @@ Flags:
 	// The routing rule is in turnwatch.recipients — a finding about the
 	// coordinator goes to the escalation box, never to the coordinator.
 	// REPORT-ONLY: it mails and emits, with no seam to nudge or restart.
-	var turnWatcher *turnwatch.Watcher
-	if !cfg.TurnWatch.Enabled {
-		// drellem2/pogo#185. Checked first so the reason logged is the operator's
-		// switch, not a missing registry that would not have mattered.
-		log.Print(turnWatchNotArmedLine)
-	} else if agentRegistry != nil {
-		turnWatcher = turnwatch.New(turnwatch.Options{
+	//
+	// drellem2/pogo#185: the switch is checked first (inside armDetector) so the
+	// reason logged is the operator's switch, not a missing registry that would
+	// not have mattered.
+	turnWatcher := armDetector(cfg.TurnWatch.Enabled, turnWatchNotArmedLine, logLine, func() *turnwatch.Watcher {
+		if agentRegistry == nil {
+			// Said out loud, because a detector that is silently off is this
+			// package's own subject matter one level up. Without the registry there
+			// is no population, and turnlog.Scan refuses to substitute the file
+			// listing for it — so the honest state is "not armed", not "clean".
+			log.Printf("pogod: turn-watch NOT armed — no agent registry, so there is no population to " +
+				"read turn-completion artifacts against. Nothing is watching whether crew agents complete turns")
+			return nil
+		}
+		w := turnwatch.New(turnwatch.Options{
 			Enabled: cfg.TurnWatch.Enabled,
 			Scan: func(now time.Time) (turnlog.Report, error) {
 				return turnlog.Scan(turnlog.Options{
@@ -3295,14 +3291,8 @@ Flags:
 			"coordinator findings route to %s, never to %s — report-only)",
 			turnwatch.DefaultInterval, turnlog.DefaultMaxAge, turnwatch.DefaultGrace,
 			turnwatch.DefaultHoldDown, escalationBox, coordinator)
-	} else {
-		// Said out loud, because a detector that is silently off is this
-		// package's own subject matter one level up. Without the registry there
-		// is no population, and turnlog.Scan refuses to substitute the file
-		// listing for it — so the honest state is "not armed", not "clean".
-		log.Printf("pogod: turn-watch NOT armed — no agent registry, so there is no population to " +
-			"read turn-completion artifacts against. Nothing is watching whether crew agents complete turns")
-	}
+		return w
+	})
 
 	// The CREW HEARTBEAT reader (mg-d616). Every crew agent refreshes a
 	// heartbeat line in its sweep.log on every mail-check, and the file's mtime

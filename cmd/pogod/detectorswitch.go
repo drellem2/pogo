@@ -1,7 +1,10 @@
 package main
 
 import (
+	"log"
+
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/synthfail"
 	"github.com/drellem2/pogo/internal/synthwatch"
 )
 
@@ -51,4 +54,42 @@ func armSynthWatch(enabled bool, reg transcriptScannerSetter, w *synthwatch.Watc
 		return nil
 	}
 	return w
+}
+
+// logLine is armDetector's production logger.
+func logLine(s string) { log.Print(s) }
+
+// armDetector is the gate every switchable detector passes through in main:
+// build runs only when enabled, and a disabled detector's not-armed line is
+// logged instead. It exists so the gating main.go performs is the gating the
+// tests exercise — the switches were first verified only in a sandbox daemon
+// (mg-5dfb). build may itself return nil (turnwatch without a registry), and
+// then says why on its own.
+func armDetector[T any](enabled bool, notArmedLine string, logLine func(string), build func() *T) *T {
+	if !enabled {
+		logLine(notArmedLine)
+		return nil
+	}
+	return build()
+}
+
+// suppressedRespawn is what pogod does when the respawn gate withholds a
+// restart_on_crash respawn: log it, and emit the restart_suppressed event from
+// the GATE'S verdict. It must not ask the watcher's scan cache instead — with
+// [synth_watch] enabled = false the watcher is never Checked, holds no verdict,
+// and the event silently vanished while the suppression still happened
+// (mg-5dfb). The same was true, pager on, for an agent that exited before its
+// first scan.
+func suppressedRespawn(logf func(string, ...any), w *synthwatch.Watcher, pagerArmed bool, a *agent.Agent, rep synthfail.Report) {
+	// "A human has been paged" is true only while the pager is armed; with
+	// [synth_watch] enabled = false the gate still holds and nobody was told,
+	// so the line must not claim otherwise.
+	paged := "A human has been paged."
+	if !pagerArmed {
+		paged = "Nobody was paged: [synth_watch] enabled = false."
+	}
+	logf("agent %s (%s) exited while failing every turn (%s); SUPPRESSING respawn — "+
+		"a restart cannot fix this and destroys the session's context (mg-18d0). %s",
+		a.Name, a.Type, rep.Reason, paged)
+	w.RestartSuppressed(a.Name, a.EventAgent(), rep, pagerArmed)
 }
