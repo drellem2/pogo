@@ -194,9 +194,12 @@ func Classify(prev *Record, alive bool) string {
 // BootEvent builds the pogod_boot event for this run.
 //
 // prevState is Classify's answer. lastHeartbeat is the mtime of the previous
-// daemon's heartbeat file (zero when unknown); it is read BEFORE this run
+// daemon's heartbeat file (zero when absent); it is read BEFORE this run
 // writes its own first heartbeat, so for an unclean death it bounds the time of
-// death from below to within one heartbeat interval. readErr, when non-nil, is
+// death from below to within one heartbeat interval. When the file cannot speak
+// for the previous run (absent, or older than that run's start) the event
+// carries last_heartbeat: null and a no_heartbeat reason instead — see
+// HeartbeatGap. readErr, when non-nil, is
 // carried so an unreadable record is not mistaken for a first boot.
 func BootEvent(cur Record, prev *Record, prevState string, lastHeartbeat time.Time, readErr error) events.Event {
 	p := map[string]any{"state": prevState}
@@ -212,8 +215,15 @@ func BootEvent(cur Record, prev *Record, prevState string, lastHeartbeat time.Ti
 			p["exit"] = shutdownDetails(*sd)
 		}
 	}
-	if !lastHeartbeat.IsZero() {
+	switch note := HeartbeatGap(prev, lastHeartbeat); {
+	case note == "" && !lastHeartbeat.IsZero():
 		p["last_heartbeat"] = lastHeartbeat.UTC().Format(time.RFC3339Nano)
+	case note != "":
+		// Present and null, not omitted: an absent field reads as "the schema
+		// has no such thing", and this is the one case where its absence IS
+		// the finding (mg-e71d).
+		p["last_heartbeat"] = nil
+		p["no_heartbeat"] = note
 	}
 	if readErr != nil {
 		p["read_error"] = readErr.Error()
@@ -231,6 +241,37 @@ func BootEvent(cur Record, prev *Record, prevState string, lastHeartbeat time.Ti
 		Agent:     "pogod",
 		Details:   d,
 	}
+}
+
+// beatClockSlack is how far a heartbeat mtime may sit BEFORE the run's recorded
+// start and still be that run's beat. The boot writes its first beat
+// microseconds after StartedAt is taken, but a filesystem stamps mtimes from a
+// coarser clock than time.Now (ext4 takes the tick-granular kernel time), so a
+// beat can legitimately read a few milliseconds early. A beat older than this
+// was written by an EARLIER run.
+const beatClockSlack = time.Second
+
+// HeartbeatGap returns why lastHeartbeat bounds nothing about prev's death, or
+// "" when it does (or when there is no previous run to attribute it to).
+//
+// Two ways the file can fail to speak for the previous run: it is absent, or
+// its mtime predates that run's start — the run died before writing a beat, and
+// what the file holds is an older run's last one. Reporting that older mtime
+// as last_heartbeat would put the bound on the dead run's death BEFORE the run
+// was born. Both happened on a Linux runner, where pogod's first beat used to
+// land one full heartbeat interval (~30s) after start (mg-e71d).
+func HeartbeatGap(prev *Record, lastHeartbeat time.Time) string {
+	if prev == nil {
+		return ""
+	}
+	if lastHeartbeat.IsZero() {
+		return "no heartbeat recorded: the heartbeat file does not exist, so nothing bounds this run's death more tightly than started_at"
+	}
+	if !prev.StartedAt.IsZero() && lastHeartbeat.Before(prev.StartedAt.Add(-beatClockSlack)) {
+		return fmt.Sprintf("no heartbeat recorded by this run: the heartbeat file's mtime %s predates the run's start, so an earlier run wrote it; nothing bounds this run's death more tightly than started_at",
+			lastHeartbeat.UTC().Format(time.RFC3339Nano))
+	}
+	return ""
 }
 
 // ShutdownEvent builds the pogod_shutdown event for the run cur ending as sd.
