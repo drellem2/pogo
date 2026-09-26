@@ -1658,6 +1658,7 @@ The log is the durable observability spine: it survives `pogod` restarts, makes 
 Writers:
 
 - **pogod / agent supervisor** emits `agent_spawned`, `agent_stopped`, `agent_crashed`, `agent_restarted`, `polecat_spawned`, `polecat_completed`.
+- **pogod itself** emits `pogod_boot` (naming how the previous daemon ended, from `$POGO_HOME/pogod.lifecycle.json`), `pogod_shutdown` (signal or fatal error) and `pogod_lock_lost`. An unreportable death (SIGKILL, panic, host crash) is a `pogod_boot` with `previous.state = "unclean"` (mg-32f5).
 - **refinery** emits `refinery_merge_attempted`, `refinery_merged`, `refinery_merge_failed`, `refinery_merge_cancelled`.
 - **mg** (via the `pogo events emit` CLI bridge) mirrors `work_item_claimed`, `work_item_completed`, and `mail_sent` from macguffin into the same log so a single tail shows the full system narrative.
 

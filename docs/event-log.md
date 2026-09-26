@@ -1129,6 +1129,86 @@ A gate was found still running in a refinery worktree it no longer owns, and the
 {"schema_version":1,"timestamp":"2026-09-26T00:56:30.000000000Z","event_type":"refinery_orphan_gate_reaped","agent":"refinery","repo":"/Users/daniel/dev/pogo","details":{"worktree":"/Users/daniel/.pogo/refinery/worktrees/pogo","pgid":27691,"pogod_pid":41203,"merge_request_id":"mr-dag4ms2tjv1hjkm214r0","branch":"polecat-t4d59","gate":"./build.sh","gate_started":"2026-09-26T00:55:35Z","reason":"ORPHANED: the pogod that started it is gone, so nothing can ever consume its result","outcome":"ended by SIGTERM"}}
 ```
 
+### Daemon lifecycle
+
+pogod's own starts and exits (mg-32f5). Before these existed the schema had no
+pogod shutdown or exit event at all, and the death that began the 18-day outage
+of 2026-09-08 left nothing in this log: the last line before the hole was an
+unrelated `stall_watch_fired`.
+
+pogod cannot record every death — SIGKILL, an unguarded panic, an OOM kill and
+a host crash run none of its code — so the two events are designed as a pair.
+The dying daemon records what it can observe; the next daemon's boot names how
+the previous one ended, read from `$POGO_HOME/pogod.lifecycle.json`. **An
+unclean death is a `pogod_boot` whose `previous.state` is `"unclean"`**, with no
+`pogod_shutdown` for that pid before it.
+
+#### `pogod_boot`
+
+A pogod acquired the singleton lockfile and started. Emitted once per run,
+before the heartbeat loop writes this run's first beat.
+
+- **`agent`:** `"pogod"`
+- **`details` fields:**
+  - `pid` (int), `revision` (string, when stamped): this run
+  - `previous` (object):
+    - `state`: `"clean"` (the previous run recorded a shutdown), `"unclean"`
+      (it recorded a boot and no shutdown — died on a path it could not
+      report), `"alive"` (its pid is still a live process: the lock was lost or
+      bypassed, or the pid was reused), `"unknown"` (no record: first boot
+      under this code, fresh `POGO_HOME`, or unreadable — see `read_error`)
+    - `pid`, `started_at`, `revision`: the previous run, when recorded
+    - `exit`: the previous run's `pogod_shutdown` details (`cause`, `at`,
+      `signal`/`error`), present only when `state` is `"clean"`
+    - `last_heartbeat`: mtime of `health/pogod.heartbeat` as this run found
+      it — for an unclean death, the previous daemon was alive at this time
+      and dead within roughly one heartbeat interval (~30s) after it
+    - `read_error`: why the previous record could not be read
+
+```json
+{"schema_version":1,"timestamp":"2026-09-26T00:41:10Z","event_type":"pogod_boot","agent":"pogod","details":{"pid":5120,"revision":"8bee46c","previous":{"state":"unclean","pid":881,"started_at":"2026-09-08T03:00:12Z","revision":"4f43cf8","last_heartbeat":"2026-09-08T18:55:03Z"}}}
+```
+
+#### `pogod_shutdown`
+
+pogod is exiting on a path it can observe. Emitted at most once per run.
+
+- **`agent`:** `"pogod"`
+- **`details` fields:**
+  - `cause`: `"signal"` or `"fatal"`
+  - `signal`: `SIGTERM`, `SIGINT`, `SIGHUP` or `SIGQUIT` (cause `signal`)
+  - `error`: the fatal error text (cause `fatal`) — a failed listen, the HTTP
+    server returning, or a startup failure after the lock was taken
+  - `at`, `pid`, `started_at`, `uptime_seconds`, `revision`
+
+The signal handler only RECORDS: after writing the record (bounded at 2s, well
+inside `pogo server stop`'s 5s deadline) it re-delivers the signal at its
+default disposition, so pogod dies exactly as it did without a handler. A signal
+pogod inherited as ignored (nohup's SIGHUP) stays ignored. SIGPIPE is not
+recorded — notifying it would change how a broken stdout pipe behaves — and
+shows up as an unclean boot, as do SIGKILL, panics and host crashes.
+
+```json
+{"schema_version":1,"timestamp":"2026-09-26T03:00:01Z","event_type":"pogod_shutdown","agent":"pogod","details":{"cause":"signal","signal":"SIGTERM","at":"2026-09-26T03:00:01Z","pid":5120,"started_at":"2026-09-26T00:41:10Z","uptime_seconds":8331,"revision":"8bee46c"}}
+```
+
+#### `pogod_lock_lost`
+
+pogod's periodic (1 min) re-read of its lockfile (`$POGO_HOME/pogo.pid`) found
+it no longer names this pid — deleted, rewritten, or pointing at a dead pid — so
+a second pogod could now start. pogod keeps running; one event per transition
+to lost, and a log line when the file names it again.
+
+- **`agent`:** `"pogod"`
+- **`details` fields:** `pid`, `lockfile`, `owner_pid` (when readable),
+  `error` (why it could not be read)
+
+Find the last word from every pogod run:
+
+```bash
+jq -c 'select(.event_type|test("^pogod_(boot|shutdown|lock_lost)$")) | [.timestamp,.event_type,.details.pid,(.details.signal // .details.error // .details.previous.state)]' ~/.pogo/events.log
+```
+
 ### Daemon robustness
 
 #### `goroutine_panic`

@@ -1571,6 +1571,14 @@ Flags:
 		os.Exit(1)
 	}
 
+	// The lock is held: this is now THE pogod for this POGO_HOME, so record the
+	// boot (naming how the previous one ended) and arm the shutdown recorder
+	// before anything else can kill us (mg-32f5). Every fatal exit from here on
+	// goes through fatalf/exitFatalf so it records its cause.
+	pogodLife = bootLifecycle(startTime)
+	pogodLife.installSignalRecorder()
+	pogodLife.watchLock(lock, lockWatchInterval)
+
 	defer func() {
 		if err := lock.Unlock(); err != nil {
 			fmt.Printf("Cannot unlock %q, reason: %v", lock, err)
@@ -1590,8 +1598,7 @@ Flags:
 		// same layout as an existing one. socketDir itself still lands at 0700,
 		// which is what an attach socket wants.
 		if err := os.MkdirAll(agent.PromptDir(), 0755); err != nil {
-			fmt.Printf("Cannot create agent state dir %s: %v\n", agent.PromptDir(), err)
-			os.Exit(1)
+			exitFatalf("Cannot create agent state dir %s: %v\n", agent.PromptDir(), err)
 		}
 	} else {
 		log.Printf("pogod: POGO_HOME %s is too deep to hold unix sockets (sun_path limit); "+
@@ -1605,15 +1612,13 @@ Flags:
 		// used to strand a directory here forever — 3,883 of one $TMPDIR's
 		// 37,083 entries (mg-a997).
 		if err := agent.PrepareFallbackSocketDir(socketDir, config.PogoHome()); err != nil {
-			fmt.Printf("Cannot prepare agent socket dir %s: %v\n", socketDir, err)
-			os.Exit(1)
+			exitFatalf("Cannot prepare agent socket dir %s: %v\n", socketDir, err)
 		}
 	}
 	var initErr error
 	agentRegistry, initErr = agent.NewRegistry(socketDir)
 	if initErr != nil {
-		fmt.Printf("Cannot create agent registry: %v\n", initErr)
-		os.Exit(1)
+		exitFatalf("Cannot create agent registry: %v\n", initErr)
 	}
 	// NO `defer agentRegistry.StopAll(...)` here, deliberately (mg-6b66).
 	//
@@ -1622,10 +1627,11 @@ Flags:
 	//
 	//   - SIGTERM — the routine stop (`pogo server stop` signals it directly,
 	//     see internal/client.stopDaemon; so do launchd and the nightly
-	//     restart) — has no handler here, so it kills at the default
-	//     disposition and skips deferred functions entirely.
-	//   - The only other way out is the bottom of main(): log.Fatal(Serve(...)),
-	//     and log.Fatal is os.Exit(1), which also skips defers.
+	//     restart) — is caught only to RECORD it (mg-32f5, cmd/pogod/lifecycle.go:
+	//     pogod_shutdown), after which it is re-delivered at the default
+	//     disposition, so it still kills and still skips deferred functions.
+	//   - The only other way out is the bottom of main(): fatalf(Serve(...)),
+	//     which records and then os.Exit(1)s, which also skips defers.
 	//   - SIGKILL, panic and host crash skip them too.
 	//
 	// So agents are NOT stopped on the way out. What actually kills them is the
@@ -3602,7 +3608,7 @@ Flags:
 	// check (the digest, or bridget once threading is on) a way to DETECT a
 	// dead pogod. This is detection, not recovery: the known single point of
 	// failure this tier explicitly leaves open. See docs/design/reaper-design.md.
-	pogodHeartbeatPath := filepath.Join(config.PogoHome(), "health", "pogod.heartbeat")
+	pogodHeartbeatPath := pogodHeartbeatFile()
 	hb.OnTick = func(now time.Time) {
 		if err := reaper.WriteHeartbeat(pogodHeartbeatPath); err != nil {
 			log.Printf("pogod: failed to write own heartbeat %s: %v", pogodHeartbeatPath, err)
@@ -4173,7 +4179,7 @@ Flags:
 	addr := cfg.ListenAddr()
 	ln, listenErr := net.Listen("tcp", addr)
 	if listenErr != nil {
-		log.Fatalf("pogod: failed to listen on %s: %v", addr, listenErr)
+		fatalf("pogod: failed to listen on %s: %v", addr, listenErr)
 	}
 	fmt.Printf("pogod listening on %s\n", addr)
 
@@ -4362,7 +4368,8 @@ Flags:
 		IdleTimeout:       2 * time.Minute,
 	}
 	agent.SetSpawnResponseDeadline(agent.ResponseDeadlineFor(httpServer.WriteTimeout))
-	log.Fatal(httpServer.Serve(netutil.LimitListener(ln, maxHTTPConns)))
+	serveErr := httpServer.Serve(netutil.LimitListener(ln, maxHTTPConns))
+	fatalf("pogod: HTTP server exited: %v", serveErr)
 }
 
 // promptRefreshLogLines renders the boot-time report for a prompt refresh into
