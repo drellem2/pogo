@@ -405,7 +405,7 @@ func TestReclaimStalePolecatBranch_RefusesOwnerOnForeignBranch(t *testing.T) {
 		t.Fatal("reclaim deleted the branch of a live polecat working a foreign branch " +
 			"(drellem2/pogo#167): the spawn that follows destroys its worktree")
 	}
-	if !strings.Contains(err.Error(), "still live") {
+	if !strings.Contains(err.Error(), "still has a tree") {
 		t.Errorf("refusal must name the live polecat, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), holder.OwnerTree) {

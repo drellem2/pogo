@@ -304,7 +304,10 @@ adopt path, mg-13a3), and a polecat that outlived the pogod that spawned it is
 exactly the worker nobody remembers is running. Alone among these gates it fails
 **closed** on a witness it cannot read, because `gitgc` already skips its whole
 sweep on that same failure and a gate that dispatched over it would be strictly
-less careful than the reaper it exists to cover for.
+less careful than the reaper it exists to cover for. That same union shapes the
+refusal's exits: a survivor known only from the witness is not in `pogo agent
+list` and `pogo agent stop` answers 404 for it, so its refusal names the pid and
+a kill gated on `pogo agent witness` — the orphan alert's line — instead.
 
 Two guards sit behind it for the populations liveness cannot see. The spawn path
 stats the worktree directory before `git worktree add` and, on the add-failure
