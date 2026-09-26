@@ -386,11 +386,21 @@ func buildBody(entry Entry, fireTime time.Time) string {
 // to say so. A mail-check pays one line of noise; the alternative is the class
 // staying open for every window-bound schedule that has not been patched by
 // hand.
+//
+// # Why the 4h19m is phrased as history
+//
+// The figure is that 2026-08-19 fire's latency, not this fire's: nothing at send
+// time can measure sent→read, since the read has not happened yet. It used to
+// read "(measured gap between sent and read: 4h19m)" — the only duration on the
+// line — so a punctual fire looked 4h19m late to anyone who took it literally
+// (drellem2/pogo#183). It stays, dated, because it is the evidence that the
+// fired= trap is real; the comparison against the current clock remains the
+// line's only instruction.
 func latenessInstruction(entry Entry) string {
 	return fmt.Sprintf(
 		"\nHow late am I: compare due=%s against the CURRENT clock — NOT against fired=, "+
-			"which is when these bytes were sent, not when you are reading them (measured gap "+
-			"between sent and read: 4h19m). Lateness is graded: if any of this work's reads "+
+			"which is when these bytes were sent, not when you are reading them (on 2026-08-19 "+
+			"a fire sent 10s late was not read for 4h19m). Lateness is graded: if any of this work's reads "+
 			"depend on WHEN they run, mark those stale and answer the rest normally.",
 		entry.NextFire.Format(time.RFC3339))
 }

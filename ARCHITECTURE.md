@@ -1508,7 +1508,7 @@ When you receive a nudge that looks like:
 
   Check the research queue and act on any new items.
   [scheduler id=research-poll due=... fired=... ack=9f3c1ab2]
-  How late am I: compare due=... against the CURRENT clock — NOT against fired=, which is when these bytes were sent, not when you are reading them (measured gap between sent and read: 4h19m). Lateness is graded: if any of this work's reads depend on WHEN they run, mark those stale and answer the rest normally.
+  How late am I: compare due=... against the CURRENT clock — NOT against fired=, which is when these bytes were sent, not when you are reading them (on 2026-08-19 a fire sent 10s late was not read for 4h19m). Lateness is graded: if any of this work's reads depend on WHEN they run, mark those stale and answer the rest normally.
   When this fire's work is done, run: pogo schedule ack research-poll --agent crew-research --token 9f3c1ab2
 
 …run your normal processing loop. `due` is when the fire came due; `fired` is
@@ -1619,9 +1619,9 @@ command:
 
     How late am I: compare due=<t> against the CURRENT clock — NOT against
     fired=, which is when these bytes were sent, not when you are reading them
-    (measured gap between sent and read: 4h19m). Lateness is graded: if any of
-    this work's reads depend on WHEN they run, mark those stale and answer the
-    rest normally.
+    (on 2026-08-19 a fire sent 10s late was not read for 4h19m). Lateness is
+    graded: if any of this work's reads depend on WHEN they run, mark those
+    stale and answer the rest normally.
 
 Three deliberate properties:
 

@@ -119,7 +119,7 @@ The scheduler delivers each fire as a nudge (or mail fallback) whose body ends w
 sweep
 
 [scheduler id=sweep-morning due=2026-05-03T09:03:00Z fired=2026-05-03T09:03:14Z ack=9f3c1ab2]
-How late am I: compare due=2026-05-03T09:03:00Z against the CURRENT clock — NOT against fired=, which is when these bytes were sent, not when you are reading them (measured gap between sent and read: 4h19m). Lateness is graded: if any of this work's reads depend on WHEN they run, mark those stale and answer the rest normally.
+How late am I: compare due=2026-05-03T09:03:00Z against the CURRENT clock — NOT against fired=, which is when these bytes were sent, not when you are reading them (on 2026-08-19 a fire sent 10s late was not read for 4h19m). Lateness is graded: if any of this work's reads depend on WHEN they run, mark those stale and answer the rest normally.
 When this fire's work is done, run: pogo schedule ack sweep-morning --agent pm-<your-name> --token 9f3c1ab2
 ```
 
