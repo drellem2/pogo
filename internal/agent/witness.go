@@ -152,8 +152,34 @@ type witnessOnDisk struct {
 // that marshals the actual report and greps it. See TestWitnessAliveGrepMatches
 // (cmd/pogo). Field order here is not incidental — it is the contract, and the
 // test is what keeps it one.
+//
+// THE PID IS TERMINATED (mg-d451). A pid is a decimal prefix of ten other pids,
+// so an unterminated `"pid":7052` also matches `"pid":70527` — the dead orphan's
+// gate passes on an unrelated live polecat that happens to share the name and
+// extend the digits, and the kill fires at 7052, whatever holds it now. The
+// same over-match the name half exists to prevent, one field over. In the
+// compact report the pid is followed by either `,` (a work_item_id follows) or
+// `}` (it was omitted), and nothing else — so the pattern ends in the bracket
+// expression `[,}]`. That makes it a regular expression rather than a fixed
+// string, which is what `grep -q` reads it as anyway (BRE); the name is escaped
+// accordingly so a `.` in it cannot match any character.
 func WitnessAliveGrep(name string, pid int) string {
-	return fmt.Sprintf(`"name":"%s","pid":%d`, name, pid)
+	return fmt.Sprintf(`"name":"%s","pid":%d[,}]`, escapeBRE(name), pid)
+}
+
+// escapeBRE backslash-escapes the characters that are special in a POSIX basic
+// regular expression, so s matches only itself under `grep` without -E or -F.
+// A lone `]` is already literal, and `\]` is undefined in a BRE, so it is left.
+func escapeBRE(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\', '.', '[', '*', '^', '$':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // witnessMu serialises read-modify-write cycles on the witness file. The file
