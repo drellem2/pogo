@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
 )
@@ -64,8 +65,18 @@ func AuthStatus(ctx context.Context, binary string) agent.AuthReading {
 	cmd := exec.CommandContext(ctx, binary, "auth", "status", "--json")
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// CommandContext kills only the direct child at the deadline. A grandchild
+	// that inherited stdout (a wrapper script's `claude`, a node helper) keeps
+	// the pipe open and Run would wait on it past the timeout — the probe's
+	// whole guarantee. WaitDelay closes the pipes and returns after this grace.
+	cmd.WaitDelay = authProbeWaitDelay
 	err := cmd.Run()
 	exit := 0
+	if errors.Is(err, exec.ErrWaitDelay) && ctx.Err() == nil {
+		// The probe exited 0 and its output is in hand; only a grandchild
+		// was still holding the pipe. That is a reading, not a failure.
+		err = nil
+	}
 	if err != nil {
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) || ctx.Err() != nil {
@@ -76,6 +87,11 @@ func AuthStatus(ctx context.Context, binary string) agent.AuthReading {
 	}
 	return classifyAuthStatus(exit, stdout.Bytes(), apiKeySet(os.Getenv))
 }
+
+// authProbeWaitDelay is how long AuthStatus waits for the probe's output pipes
+// to close after the context is done (or the child exits) before abandoning
+// them. A var so the test can shorten it.
+var authProbeWaitDelay = 2 * time.Second
 
 func apiKeySet(getenv func(string) string) string {
 	for _, k := range apiKeyEnv {
