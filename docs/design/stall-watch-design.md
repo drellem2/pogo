@@ -270,6 +270,15 @@ older than `unread_mail_age_threshold`, **or** the unread count exceeds
 `max_unread_mail_count`. A missing maildir (agent never received mail) is benign
 and silent.
 
+The watcher's **own notices are not part of the backlog** (gh drellem2/pogo#190).
+A message whose `From:` is `stall-watch` (`stallwatch.Sender`, the one constant
+both pogod's nudger and this check use) is left out of the count and the oldest
+age, so a mailbox holding only stall-watch notices never fires. When the
+recipient is stopped, the offline road mails every notice into exactly this
+maildir; counting them made the alarm its own evidence — one stopped mayor drew
+156 notices in 13h, the subject climbing on nothing but the notices before it.
+The number excluded is stamped as `self_notices_excluded` on the fire.
+
 ### Nudge + event
 
 On a cross the watcher calls its injected `Nudger` with a `Notice` — a body and
@@ -472,8 +481,33 @@ and the gap escalates: the first notice about an item is immediate, each repeat
 about that same item waits twice as long as the last, ceilinged at
 `repeat_backoff_cap` (4h). Each nudge names only the items actually due, and a
 tick on which every offending item is still inside its own backoff sends
-nothing. `unread_mail` is a single aggregate condition with no item identity, so
-it keeps a flat per-category cooldown.
+nothing.
+
+`unread_mail` is a single aggregate condition with no item identity, so it keeps
+**one** key for the category — but since gh drellem2/pogo#190 that key escalates
+on the same doubling, `nudge_cooldown` out to `repeat_backoff_cap`. It used to
+stay flat, and a stopped recipient drew one notice per 5 minutes without limit.
+What stands in for item identity is the reset rule: the key remembers the
+**oldest unread message** at the time it fired, and the escalation resets only
+when that message has left `new/` — when something was *read*. A new arrival
+must not reset it: arrivals are exactly what an unattended mailbox keeps
+receiving, so a reset keyed on the count would restore the flat cadence in
+precisely the case the backoff exists for. A reset returns the count to zero but
+keeps the last-fire time, so the next notice still waits one base cooldown.
+Each fire stamps `notice_count` and `next_backoff`, and a repeat says so in its
+body.
+
+#### Index-only mode sends nothing (gh drellem2/pogo#190)
+
+While pogod is index-only (`pogo server stop-orchestration`) the whole watcher is
+silent — every category, and no notice on entering the mode. Index-only is a
+stop the user chose, it stops the coordinator these notices address, and the
+notices would pile up unread in the mailbox the unread-mail check measures. The
+backlog is still there on resume, and **every backoff is forgotten when the pause
+ends**, so the first tick after a resume reports each standing condition fresh —
+the same restart semantics the in-process backoff already has, for the same
+reason: a resume restarts the coordinator. pogod wires this through
+`stallwatch.Options.Paused`, reading the server's mode on every tick.
 
 #### Why the key is the item, not the category (mg-1693)
 
