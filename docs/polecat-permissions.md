@@ -4,24 +4,36 @@
 
 Polecats (disposable worker agents) run in freshly-created git worktrees at `~/.pogo/polecats/<name>`. These directories don't exist until spawn time. Claude Code normally prompts for "directory trust" when started in a directory it hasn't seen before, which would block autonomous execution.
 
-Two mechanisms handle this:
+Three mechanisms handle this:
 
-1. The `--dangerously-skip-permissions` flag bypasses **tool execution** permission prompts (shell execution, file access, etc.). It is part of the Claude provider's default command template:
+1. The `--dangerously-skip-permissions` flag bypasses **tool execution** permission prompts (shell execution, file access, etc.). It is part of the Claude provider's default command template, together with the `--settings` argument described in 3:
 
 ```go
-// internal/claude/provider.go
-CommandTemplate: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}",
+// internal/claude/provider.go — expands to:
+claude --dangerously-skip-permissions --settings {"skipDangerousModePermissionPrompt":true} --append-system-prompt-file {{.PromptFile}}
 ```
 
 The agent harness is selected by a first-class `agent.Provider` value (see `docs/design/multi-provider-architecture-survey.md`). Four providers are registered — `claude` (the default), `codex`, `pi`, and `cursor` — each owning its command template, required non-interactive flags, nudge dialect, and lifecycle hooks (`internal/claude`, `internal/codex`, `internal/pi`, `internal/cursor`).
 
-2. The **trust dialog auto-accept** hook (`claude.TrustDialogHook`) monitors the agent's PTY output during startup for the workspace trust dialog and automatically sends Enter to accept it. This is registered as a `PostSpawnHook` on the agent registry and lives in `internal/claude/`, keeping Claude-specific behavior out of the generic agent package.
+2. The **trust dialog auto-accept** hook (`claude.TrustDialogHook`) monitors the agent's PTY output during startup for the workspace trust dialog and answers it **by label**: it moves the highlight to "Yes, I trust this folder", re-reads the screen, and only then presses Enter; a dialog it does not recognise gets no keystroke (drellem2/pogo#177, mg-f394). This is registered as a `PostSpawnHook` on the agent registry and lives in `internal/claude/`, keeping Claude-specific behavior out of the generic agent package.
+
+3. The **bypass-permissions warning** is pre-accepted per session by `--settings {"skipDangerousModePermissionPrompt":true}` (`claude.BypassWarningSettings`, drellem2/pogo#173). A profile that has never accepted `--dangerously-skip-permissions` shows "WARNING: Claude Code running in Bypass Permissions mode" with **"No, exit" highlighted**, so an unattended first-run spawn would exit. The flag layers the key onto that one session only: nothing is written to `~/.claude/settings.json`, so your own interactive sessions are unchanged. It is announced rather than silent — `pogo install` prints one line saying pogo's agents run Claude Code in bypass-permissions mode, and `pogo doctor --check` shows the same fact as the `claude permission mode` row. There is no interactive consent step, because install also runs non-interactively. Verified against Claude Code 2.1.283 in a sandbox HOME: without the argument the warning renders; with it the session goes straight to the composer, and the trust dialog is still shown and answerable.
 
 ### Why two mechanisms?
 
 The `--dangerously-skip-permissions` flag does **not** suppress the workspace trust dialog ("Quick safety check: Is this a project you created or one you trust?"). This dialog is a separate security boundary in Claude Code that runs before the permission mode takes effect.
 
-The trust dialog hook polls the agent's output buffer for up to 8 seconds after spawn, looking for the "safety check" text. When detected, it sends Enter (`\r`) to accept the default "Yes" option.
+Since Claude Code 2.1.270 the dialog's highlighted default is "No, exit", so the hook must select "Yes" by label rather than press a bare Enter — see mg-f394 in the changelog for the details.
+
+### First-run login (drellem2/pogo#173)
+
+A Claude Code profile that has never logged in shows a theme picker and then a browser OAuth flow before any composer. Only a human can complete that, so pogo does not try. Instead it checks `claude auth status --json`:
+
+- `pogo install` prints a loud first step — run `claude` once in a terminal and log in — when the reading is not-logged-in.
+- `pogo doctor --check` has a `claude login` row: pass when logged in, **fail** on a positive not-logged-in, warn when the reading is inconclusive.
+- **Crew auto-start** (pogod's boot sweep and every `pogo server start`) refuses to spawn crew agents **only on a positive `loggedIn: false`**. Every other outcome fails open and spawns with a logged warning: a non-zero exit for another reason, a CLI without the `auth` subcommand, a timeout, unparseable output, or `loggedIn: false` while `ANTHROPIC_API_KEY` (or another API-credential variable) is set. A false refusal stops the whole crew on a machine that works; a false spawn costs one stalled agent. The refusal is re-checked on every sweep, nothing is latched, and it is annunciated once per episode as the `harness_not_logged_in` condition, copied out of band. A hand-run `pogo agent start` is never gated, and a custom `[agents] command` whose binary is not `claude` is never probed.
+
+Not covered: with `ANTHROPIC_API_KEY` set but never approved, Claude Code shows "Detected a custom API key … ❯ No (recommended)" while `auth status` reports `loggedIn: true`. That gate is tracked separately.
 
 ### Why not `--add-dir`?
 
@@ -80,7 +92,7 @@ command = "custom-agent --prompt {{.PromptFile}}"
 
 If a custom command omits `--dangerously-skip-permissions` (or uses a non-Claude binary that has its own permission system), the polecat may get stuck at an interactive prompt in its new worktree directory. The `ValidateCommandBinary` function checks that the binary exists on PATH but does not validate flags.
 
-To guard against this, `ValidatePolecatCommand` logs a warning when a polecat command template is missing any of the active provider's declared non-interactive flags (`claude.Provider.NonInteractiveFlags` — currently just `--dangerously-skip-permissions`).
+To guard against this, `ValidatePolecatCommand` logs a warning when a polecat command template is missing any of the active provider's declared non-interactive flags (`claude.Provider.NonInteractiveFlags` — `--dangerously-skip-permissions` and `--settings {"skipDangerousModePermissionPrompt":true}`). A custom command that passes its own `--settings` JSON satisfies the second by including `"skipDangerousModePermissionPrompt":true` in it. The JSON must contain no whitespace: the template is split on whitespace and is not shell-quoted.
 
 ## Claim behavior
 
@@ -105,7 +117,9 @@ The `mg claim` command (`mg` is macguffin, the task-store CLI) is called by the 
 | Scenario | What happens | Mitigation |
 |----------|-------------|------------|
 | Tool permissions prompt blocks startup | Polecat never reaches `mg claim` | `--dangerously-skip-permissions` prevents this |
-| Workspace trust dialog blocks startup | Polecat never reaches `mg claim` | `claude.TrustDialogHook` auto-accepts within 8s |
+| Workspace trust dialog blocks startup | Polecat never reaches `mg claim` | `claude.TrustDialogHook` selects "Yes" by label |
+| Bypass-permissions warning blocks startup | Session exits ("No, exit" is the default) | `--settings {"skipDangerousModePermissionPrompt":true}` |
+| Harness has no login | Agent sits at the login screen | Crew auto-start refuses on a positive not-logged-in; `pogo doctor --check` fails the `claude login` row |
 | `mg` binary not on PATH | `mg claim` fails with command-not-found | Polecat should mail mayor; `mg` is installed globally |
 | Work item already claimed | `mg claim` returns error | Polecat should mail mayor and not proceed |
 | Network/macguffin unavailable | `mg claim` fails | Polecat should mail mayor |

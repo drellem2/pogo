@@ -24,7 +24,10 @@ var Provider = agent.Provider{
 	// freshly-created worktree directories; --permission-mode bypassPermissions
 	// does not work without additional setup. It does NOT suppress the
 	// workspace trust dialog — TrustDialogHook handles that separately.
-	CommandTemplate: "claude --dangerously-skip-permissions --append-system-prompt-file {{.PromptFile}}",
+	// BypassWarningSettings pre-accepts the "Bypass Permissions mode" warning
+	// a never-accepted profile shows, whose default is "No, exit" (#173).
+	CommandTemplate: "claude --dangerously-skip-permissions " + BypassWarningSettings +
+		" --append-system-prompt-file {{.PromptFile}}",
 
 	// Claude Code selects a model with `--model <name>`. The template above
 	// deliberately pins none, so an agent with no explicit selection inherits
@@ -38,7 +41,19 @@ var Provider = agent.Provider{
 		Flag: "--append-system-prompt-file",
 	},
 
-	NonInteractiveFlags: []string{"--dangerously-skip-permissions"},
+	NonInteractiveFlags: []string{"--dangerously-skip-permissions", BypassWarningSettings},
+
+	// A custom [agents] command that merges the key into its own --settings
+	// JSON satisfies the requirement without the exact argument above.
+	NonInteractiveFlagAliases: map[string][]string{
+		BypassWarningSettings: {bypassWarningSettingsKey},
+	},
+
+	PermissionNotice: PermissionNotice,
+
+	// Crew auto-start asks `claude auth status` before spawning, and refuses
+	// only on a positive loggedIn:false (#173). See AuthStatus.
+	AuthPreflight: AuthStatus,
 
 	// Claude's Ink/React TUI nudge dialect. pogo's DefaultNudgeProfile was
 	// tuned against it, so the provider adopts it verbatim — keeping a single

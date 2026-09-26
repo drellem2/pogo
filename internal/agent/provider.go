@@ -1,6 +1,9 @@
 package agent
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // DefaultProviderID is the built-in fallback harness provider — the final tier
 // of the per-spawn resolution chain (see Registry.resolveProvider). It is kept
@@ -69,6 +72,22 @@ type Provider struct {
 	// --force) does not trip a spurious warning. nil for providers whose
 	// non-interactive flags have no aliases.
 	NonInteractiveFlagAliases map[string][]string
+
+	// PermissionNotice is one sentence telling the operator what permission
+	// posture pogo runs this harness in. `pogo install` prints it and
+	// `pogo doctor --check` shows it as a row, so a posture pogo chose on the
+	// operator's behalf — Claude's bypass-permissions warning is pre-accepted
+	// through --settings — is announced rather than silent (drellem2/pogo#173).
+	// Empty = nothing to announce.
+	PermissionNotice string
+
+	// AuthPreflight asks the harness binary (the resolved path from the spawn
+	// command) whether it has a login. nil = this harness has no such probe,
+	// and nothing is checked. Only a POSITIVE AuthNotLoggedIn reading refuses
+	// anything; every failure to read — a non-zero exit for some other reason,
+	// a missing subcommand on an older CLI, a timeout, unparseable output —
+	// must come back AuthUnknown, which fails open. See authpreflight.go.
+	AuthPreflight func(ctx context.Context, binary string) AuthReading
 
 	// InitialPromptViaArgv is true when the harness accepts its initial task
 	// message as a trailing positional argv element (pi: `pi [messages...]`).

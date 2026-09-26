@@ -421,7 +421,10 @@ func (s *Server) sweepCrew(report *StartReport) {
 			report.AgentsAlreadyRunning = append(report.AgentsAlreadyRunning, res.Name)
 		case agent.AutoStartStatusSkippedParked:
 			report.AgentsParked = append(report.AgentsParked, res.Name)
-		case agent.AutoStartStatusFailed:
+		case agent.AutoStartStatusFailed, agent.AutoStartStatusRefusedNotLoggedIn:
+			// A login refusal is reported as a failure on purpose: the agent
+			// is not running, and `pogo server start` must say so and exit
+			// non-zero rather than read as a clean start (drellem2/pogo#173).
 			report.AgentsFailed = append(report.AgentsFailed,
 				AgentStartFailure{Name: res.Name, Error: res.Error})
 		}

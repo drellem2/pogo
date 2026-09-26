@@ -41,6 +41,8 @@ import "fmt"
 //   mg-a19a pogod_log_not_written      — its unread-pipe case kills pogod ~30s
 //       after every boot, and the coordinator with it
 //   mg-5af1 orchestration_left_stopped — the stop took the coordinator down too
+//   mg-b968 harness_not_logged_in      — the refused crew includes the
+//       coordinator (harnesslogin.go, drellem2/pogo#173)
 //
 // A3 (ackwatch_not_armed) does not: it is a consequence of A2 on the same boot,
 // and A2 already reaches the box. The "never `human`" above predates the

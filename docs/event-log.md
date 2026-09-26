@@ -2134,7 +2134,12 @@ descends from, one level up.
   - `condition` (string, required): the stable suppression key, e.g. `"scheduler_load_failed"`, or
     subject-scoped as `"autostart_failed:doctor"` / `"gitgc_sweep_failed:/path/to/repo"`
   - `row` (string, required): the enumeration row it carries, `"A2"`–`"A15"`. This is how the
-    investigation and the running daemon get reconciled without grepping code
+    investigation and the running daemon get reconciled without grepping code. A condition that
+    does not come from that enumeration carries its originating work item id instead — e.g.
+    `"mg-5af1"` for `orchestration_left_stopped`, or `"mg-b968"` for `harness_not_logged_in`: a
+    crew auto-start sweep refused agents because the harness positively reported no login
+    (drellem2/pogo#173). That one is raised once per episode however many agents or retries it
+    covers, is copied out of band, and clears on the first sweep that refuses nothing
   - `addressee` (string, required): where it was sent. Empty only with `reason: "unroutable"`
   - `notified` (bool, required): whether a mail actually went out on this occurrence
   - `reason` (string, required): why this occurrence did or did not mail —

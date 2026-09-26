@@ -4148,7 +4148,11 @@ Flags:
 	srv.SetAgentStarter(agentStarterFor(
 		func() bool { return cfg.Source != "" },
 		func() bool { return cfg.Agents.AutoStart },
-		agentRegistry.AutoStartAgents,
+		func() []agent.AutoStartResult {
+			res := agentRegistry.AutoStartAgents()
+			annunciateHarnessLogin(conditions, coordinator, res, time.Now())
+			return res
+		},
 	))
 	if mergeQueue != nil {
 		onMerged := mergeQueue.OnMergedFunc()
@@ -4286,8 +4290,14 @@ Flags:
 		if !cfg.Agents.AutoStart {
 			log.Printf("pogod: crew auto-start disabled ([agents] autostart = false); not starting any agents")
 		} else {
-			for _, res := range agentRegistry.AutoStartAgents() {
+			results := agentRegistry.AutoStartAgents()
+			// Before the per-agent switch, so a refused coordinator is
+			// annunciated once as the login it is, not as N A5 rows (#173).
+			annunciateHarnessLogin(conditions, coordinator, results, time.Now())
+			for _, res := range results {
 				switch res.Status {
+				case agent.AutoStartStatusRefusedNotLoggedIn:
+					log.Printf("pogod: auto-start of %s REFUSED: %s", res.Name, res.Error)
 				case agent.AutoStartStatusStarted:
 					log.Printf("pogod: auto-started %s", res.Name)
 					conditions.Clear(rowA5AutoStartPrefix+res.Name, time.Now())
