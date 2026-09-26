@@ -54,11 +54,31 @@ func TestLatenessLine_NamesTheWrongReference(t *testing.T) {
 	for _, want := range []string{
 		"CURRENT clock",      // the right reference
 		"NOT against fired=", // the wrong one, named
-		"4h19m",              // the measurement that makes the warning credible
+		"4h19m",              // the incident that makes the warning credible...
+		"2026-08-19",         // ...dated, so it reads as history, not as this fire
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("lateness line is missing %q:\n%s", want, body)
 		}
+	}
+}
+
+// TestLatenessLine_DoesNotClaimToMeasureThisFire is drellem2/pogo#183. The line
+// used to say "(measured gap between sent and read: 4h19m)" on EVERY fire — a
+// literal from 2026-08-19, and the only duration on the line, so a fire sent on
+// time read as 4h19m late. Nothing at send time can measure sent→read: the read
+// has not happened. The 4h19m may appear only as the dated incident.
+func TestLatenessLine_DoesNotClaimToMeasureThisFire(t *testing.T) {
+	due := time.Date(2026, 9, 26, 7, 30, 0, 0, time.UTC)
+	e := Entry{ID: "mail-check-mg-06e7", Agent: "t06e7",
+		Cron: "*/10 * * * *", Message: "Check your mail", NextFire: due}
+
+	body := buildBody(e, due.Add(16*time.Second))
+	if strings.Contains(body, "measured gap") {
+		t.Errorf("lateness line presents a literal as a per-fire measurement:\n%s", body)
+	}
+	if !strings.Contains(body, "(on 2026-08-19 a fire sent 10s late was not read for 4h19m)") {
+		t.Errorf("lateness line lost the dated 2026-08-19 history:\n%s", body)
 	}
 }
 
