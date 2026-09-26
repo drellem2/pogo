@@ -52,6 +52,14 @@ func TestMain(m *testing.M) {
 	// agent_attach_rebound records into the developer's live ~/.pogo/events.log,
 	// and agent_attach_rebound is an operator alarm for a production fault
 	// (mg-d216) — a test run must not manufacture one.
+	// The per-repo cap tests' fixture repositories, as real directories inside
+	// the sandbox rather than paths that exist only on one developer's machine
+	// (mg-47f9 — see goRepo).
+	if err := makeCapRepos(sb.Root); err != nil {
+		down()
+		panic("agent TestMain: making cap fixture repos: " + err.Error())
+	}
+
 	sandboxEventLog = filepath.Join(sb.Root, "events.log")
 	events.SetLogPathForTesting(sandboxEventLog)
 
