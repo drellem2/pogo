@@ -164,6 +164,29 @@ An agent process exited unexpectedly (non-zero exit code, killed by signal other
 {"schema_version":1,"timestamp":"2026-04-25T11:02:47.200000000Z","event_type":"agent_crashed","agent":"crew-arch","details":{"pid":47011,"exit_code":-1,"signal":"SIGKILL","last_output":"... claude: out of memory"}}
 ```
 
+#### `agent_early_exit`
+
+A **polecat** exited during its cold start: nobody asked it to stop, and it died inside its provider's cold-start budget (the initial nudge's `InitialNudgeTimeout`, 60s by default) ([internal/agent/earlyexit.go](../internal/agent/earlyexit.go), mg-f394). Written **in addition to** `agent_stopped` / `agent_crashed`, which say how the process ended; this one says the worker never got going, and — unlike them — it carries the work item.
+
+It exists because of drellem2/pogo#177. Claude Code's trust dialog was answered "No, exit", the harness exited 1 about three seconds in, and every other record read healthy: the spawn had returned ok, the item was claimed at spawn, and the worktree was reaped on exit like any finished polecat's. The spawn's HTTP result cannot carry this — it is written the moment the process exists — so the death is surfaced here and in a mail from `pogod` to the coordinator.
+
+The exit status is not part of the test: Codex refusing its trust dialog exits 0. A requested stop (`pogo agent stop`, a reap) is never an early exit, however soon after the spawn. Crew agents are excluded; a crew crash loop already has `agent_crashed` and `agent_restarted`. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (`cat-<name>`), `details`
+- **Optional envelope:** `work_item_id` (the item the polecat was dispatched on — now claimed with no worker), `repo`
+- **`details` fields:**
+  - `pid` (int, required)
+  - `exit_code` (int, required): exit status, `-1` if killed by a signal
+  - `seconds_after_spawn` (number, required): how long the process lived
+  - `cold_start_window_sec` (number, required): the budget it died inside
+  - `composer_seen` (bool, required): whether the harness ever showed a ready composer. `false` means it died before it could take a prompt — the trust-dialog signature; look for a `trust_dialog_refused` beside it
+  - `provider` (string, required): harness provider id
+  - `last_output` (string, optional): ANSI-stripped tail of the PTY ring, ~512 bytes
+
+```json
+{"schema_version":1,"timestamp":"2026-09-26T10:22:10.000000000Z","event_type":"agent_early_exit","agent":"cat-f394","work_item_id":"mg-f394","repo":"/Users/daniel/dev/pogo","details":{"pid":68573,"exit_code":1,"seconds_after_spawn":2.8,"cold_start_window_sec":60,"composer_seen":false,"provider":"claude","last_output":"❯ No, exit\r\n  Yes, I trust this folder"}}
+```
+
 #### `agent_restarted`
 
 A crew agent that crashed has been automatically restarted by pogod's supervisor loop. Polecats are never restarted (they're ephemeral) — this event applies only to crew.
@@ -2008,12 +2031,12 @@ pogod's prompt-ready sentinel drift detector ([sentineldrift.go](../internal/age
 
 #### `trust_dialog_refused`
 
-A trust-dialog hook answered a harness's directory-trust dialog, and the harness then **exited** instead of drawing its composer ([internal/codex/trust_hook.go](../internal/codex/trust_hook.go), mg-7511). The keystroke did the opposite of what it was meant to, so the spawn is dead even though it was reported ok. This is the failure drellem2/pogo#177 found on Claude Code, where Enter landed on "No, exit". It is deliberately separate from `sentinel_drift`: the dialog marker matched, so this is not evidence that a sentinel went stale. Emitted at most once per spawn. Currently only the Codex hook emits it. Additive — no `schema_version` bump.
+A trust-dialog hook answered a harness's directory-trust dialog, and the harness then **exited** instead of drawing its composer ([internal/claude/trust_hook.go](../internal/claude/trust_hook.go), mg-f394; [internal/codex/trust_hook.go](../internal/codex/trust_hook.go), mg-7511). The keystroke did the opposite of what it was meant to, so the spawn is dead even though it was reported ok. This is the failure drellem2/pogo#177 found on Claude Code, where Enter landed on "No, exit". It is deliberately separate from `sentinel_drift`: the dialog marker matched, so this is not evidence that a sentinel went stale. Emitted at most once per spawn, by the Claude and Codex hooks. Pair it with the `agent_early_exit` for the same agent. Additive — no `schema_version` bump.
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (`cat-<name>` / `crew-<name>`), `details`
 - **Optional envelope:** `work_item_id`
 - **`details` fields:**
-  - `provider` (string, required): harness provider id, e.g. `"codex"`
+  - `provider` (string, required): harness provider id, e.g. `"claude"` or `"codex"`
 
 ```json
 {"schema_version":1,"timestamp":"2026-09-26T09:20:00.000000000Z","event_type":"trust_dialog_refused","agent":"cat-p7511","work_item_id":"mg-7511","details":{"provider":"codex"}}

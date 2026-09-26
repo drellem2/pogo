@@ -2049,6 +2049,14 @@ Flags:
 		// are not deferred.
 		deferBackstop.cancel(a)
 
+		// A polecat that died during its cold start reads, from everywhere
+		// else, as one that is working: spawn ok, item claimed, worktree reaped
+		// below like any finished polecat's. Say so to the coordinator
+		// (mg-c1e2 part 3, drellem2/pogo#177).
+		if e, ok := a.EarlyExit(); ok {
+			notifyEarlyExit(a.Name, a.WorkItemID, coordinator, e, client.SendMGMail)
+		}
+
 		// Consult the synthetic-failure-turn detector BEFORE respawning
 		// (mg-8cdb). An agent whose transcript shows it failing every turn
 		// locally is not recoverable by restarting: the replacement session

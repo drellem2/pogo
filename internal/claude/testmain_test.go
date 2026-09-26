@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/events"
 )
 
 // TestMain takes this package's test binary off the PRODUCTION sentinel-drift
@@ -27,8 +28,13 @@ import (
 //
 // Mirrors internal/cursor/testmain_test.go deliberately: the hazard is the same
 // shape in both providers, so the two files should diff to the same control.
+//
+// It also takes the trust_dialog_refused event off the production events.log:
+// trust_hook_label_test.go drives the refused arm on purpose (mg-f394), and
+// internal/codex does the same for its copy of the hook.
 func TestMain(m *testing.M) {
 	restore := agent.StubDriftSinkForTesting()
+	emitEvent = func(events.Event) {}
 	code := m.Run()
 	restore()
 	os.Exit(code)
