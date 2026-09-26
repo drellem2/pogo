@@ -126,6 +126,21 @@ const (
 	// has been shown wrong about and below every confirmed landed one it is meant
 	// to catch.
 	ContentLandedRatio = 0.95
+
+	// ContentAbsentRatio is the fraction BELOW which a measured branch is called
+	// "consistent with absent", and at or above which (up to ContentLandedRatio)
+	// it is "partly present — not corroborated" (drellem2/pogo#174, mg-aa7d).
+	//
+	// THIS NUMBER IS A GUESS AND IS UNMEASURED. The only evidence behind it is the
+	// five-branch sample at the top of this file, in which branches scoring 0.88,
+	// 0.91 and 0.94 were ALL on main: that establishes that landed work lives in
+	// the band between this constant and ContentLandedRatio, and nothing more. It
+	// does not establish that everything below 0.5 is absent — which is why the
+	// low cell says what was MEASURED ("consistent with absent") and never that the
+	// second opinion "agrees the work is absent". Before #174, every measured
+	// ratio under 0.95 printed that sentence, including a 0.896 whose branch had
+	// landed. Move this only with a measurement, and cite it here.
+	ContentAbsentRatio = 0.5
 )
 
 // Presence is how much of what a branch ADDS the target already has.
@@ -161,6 +176,22 @@ func (p Presence) Ratio() float64 {
 // of this file: no caller may treat it as a merge verdict.
 func (p Presence) SuggestsLanded() bool {
 	return p.Measured && p.Ratio() >= ContentLandedRatio
+}
+
+// PartlyPresent reports whether the measurement landed in the band that
+// neither suggests landed nor is consistent with absent — at or above
+// ContentAbsentRatio and below ContentLandedRatio. That band is where the
+// measured landed-but-demoted branches sit, so a reader must check by hand.
+func (p Presence) PartlyPresent() bool {
+	return p.Measured && p.Ratio() >= ContentAbsentRatio && p.Ratio() < ContentLandedRatio
+}
+
+// ConsistentWithAbsent reports whether the second opinion was taken and scored
+// below ContentAbsentRatio. It is the ONLY cell in which the second opinion backs
+// `git cherry`'s verdict; unmeasured, unavailable, partly present and suggests
+// landed all leave the row resting on patch ids alone.
+func (p Presence) ConsistentWithAbsent() bool {
+	return p.Measured && p.Ratio() < ContentAbsentRatio
 }
 
 // Describe renders the measurement for a report line, including the unmeasured
@@ -215,7 +246,19 @@ func Corroborate(repo string, f Finding) (Presence, string) {
 			"clear the row: check by hand before submitting or deleting the branch, and expect to find the "+
 			"same subject on the target under another sha.", p.Describe())
 	}
-	return p, fmt.Sprintf("Second opinion agrees the work is absent from the target: %s.", p.Describe())
+	if p.PartlyPresent() {
+		// NOT "agrees the work is absent" — that was drellem2/pogo#174: a 90%
+		// overlap printed under a sentence saying the work was missing. This band
+		// is where the measured landed branches (0.88, 0.91, 0.94) sit.
+		return p, fmt.Sprintf("Second opinion: PARTLY PRESENT — NOT CORROBORATED: %s. That is too much "+
+			"to call absent and too little to call landed; a squash or rebase merge can leave a branch "+
+			"that DID land scoring here. Check by hand whether it landed before submitting it.",
+			p.Describe())
+	}
+	// Say what was measured, not that the work is absent: nothing has measured
+	// where absent work scores (see ContentAbsentRatio).
+	return p, fmt.Sprintf("Second opinion: %d of %d added line(s) present in the target (%.0f%%) — "+
+		"consistent with absent.", p.Present, p.Added, 100*p.Ratio())
 }
 
 // MeasurePresence answers Presence for a finding's unmerged commits.

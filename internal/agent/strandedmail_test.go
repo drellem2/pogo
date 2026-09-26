@@ -457,3 +457,118 @@ func TestWrapAtKeepsLongTokensIntact(t *testing.T) {
 		}
 	}
 }
+
+// strandedAlertWith is a pushed, open-item alert carrying presence p and the
+// given unmerged commits.
+func strandedAlertWith(p strandedwork.Presence, unmerged ...strandedwork.Commit) StrandedAlert {
+	if len(unmerged) == 0 {
+		unmerged = []strandedwork.Commit{{SHA: "c2f1854cea4f", Subject: "feat: the work (mg-a174)"}}
+	}
+	return StrandedAlert{
+		Polecat: "a174", WorkItemID: "mg-a174", Repo: "/repo", Route: RouteRelease,
+		ItemStatus: "available",
+		Finding: strandedwork.Finding{
+			Repo: "/repo", Branch: "polecat-a174", Ref: "refs/remotes/origin/polecat-a174",
+			Pushed: true, Found: true, Target: "refs/remotes/origin/main",
+			Disposition: strandedwork.DispositionResubmit,
+			Unmerged:    unmerged,
+		},
+		Presence:      p,
+		SecondOpinion: "Second opinion: (rendered by strandedwork.Corroborate).",
+	}
+}
+
+// TestStrandedAlertRemedyFollowsTheSecondOpinion is drellem2/pogo#174's mail
+// half. The remedy used to be an imperative, paste-ready resubmit whatever the
+// second opinion said — including for a branch 90% present on the target. Now
+// only the consistent-with-absent cell says "resubmit"; every other cell says
+// check by hand first and keeps the submit line only as conditional. "do not
+// dispatch" stays imperative in every cell, subject and body.
+func TestStrandedAlertRemedyFollowsTheSecondOpinion(t *testing.T) {
+	submit := "pogo refinery submit polecat-a174 --repo=/repo --author=mg-a174"
+	for _, c := range []struct {
+		name     string
+		p        strandedwork.Presence
+		resubmit bool
+	}{
+		{"consistent with absent", strandedwork.Presence{Added: 345, Present: 20, Measured: true}, true},
+		{"partly present (#174's 309/345)", strandedwork.Presence{Added: 345, Present: 309, Measured: true}, false},
+		{"suggests landed", strandedwork.Presence{Added: 2063, Present: 2008, Measured: true}, false},
+		{"unmeasured", strandedwork.Presence{Added: 5, Present: 0, Measured: false}, false},
+		{"unavailable", strandedwork.Presence{}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			subject, body := strandedAlertWith(c.p).Message()
+			if !strings.Contains(subject, "do NOT dispatch") || !strings.Contains(body, "DO NOT DISPATCH A WORKER AT mg-a174") {
+				t.Errorf("the prohibition softened with the second opinion:\n%s\n%s", subject, body)
+			}
+			if !strings.Contains(body, submit) {
+				t.Errorf("the submit line is gone; it must survive, conditional or not:\n%s", body)
+			}
+			gotResubmit := strings.Contains(body, "WHAT TO DO — resubmit, do not dispatch")
+			gotCheck := strings.Contains(body, "WHAT TO DO — check by hand first, do not dispatch")
+			if gotResubmit != c.resubmit || gotCheck == c.resubmit {
+				t.Errorf("resubmit header=%t check header=%t, want resubmit=%t:\n%s", gotResubmit, gotCheck, c.resubmit, body)
+			}
+			if strings.Contains(body, "safe to submit") != c.resubmit {
+				t.Errorf("the footer's \"safe to submit\" disagrees with the remedy (resubmit=%t):\n%s", c.resubmit, body)
+			}
+			if c.resubmit {
+				if !strings.Contains(body, "branch carries work") {
+					t.Errorf("the absent cell hedged the opening:\n%s", body)
+				}
+				return
+			}
+			if !strings.Contains(body, "branch may carry work") {
+				t.Errorf("an uncorroborated row still asserts the target lacks the work:\n%s", body)
+			}
+			only := strings.Index(body, "Only if it did NOT land")
+			if only < 0 || only > strings.Index(body, submit) {
+				t.Errorf("the submit line is not conditional on the hand check:\n%s", body)
+			}
+			if !strings.Contains(body, "git -C /repo log --oneline --fixed-strings --grep=mg-a174 refs/remotes/origin/main") {
+				t.Errorf("the hand check names nothing runnable:\n%s", body)
+			}
+		})
+	}
+}
+
+// TestStrandedAlertWithholdsSubmitForARescueCommit mirrors strandwatch's
+// KindRescueUnbuilt (mg-aed4): a rescue commit bypassed the pre-commit hook and
+// was never built or reviewed, so a submit that PASSES the gate merges unreviewed
+// work. The mail withholds the paste-ready submit entirely — even when the
+// second opinion is consistent with absent — and names the commit instead.
+func TestStrandedAlertWithholdsSubmitForARescueCommit(t *testing.T) {
+	absent := strandedwork.Presence{Added: 345, Present: 20, Measured: true}
+	rescue := strandedwork.Commit{SHA: "9f1e2d3c4b5a6978", Subject: "rescue(WIP): unreviewed draft of the work (mg-51bf)"}
+	a := strandedAlertWith(absent,
+		strandedwork.Commit{SHA: "c2f1854cea4f", Subject: "feat: the work (mg-a174)"}, rescue)
+	subject, raw := a.Message()
+	body := strings.Join(strings.Fields(raw), " ") // the paragraph is wrapped
+	if strings.Contains(body, "refinery submit") {
+		t.Errorf("a branch carrying a rescue commit was handed a submit command:\n%s", body)
+	}
+	for _, want := range []string{
+		"do not submit this branch as it stands",
+		"RESCUE COMMIT — UNREVIEWED AND NEVER BUILT",
+		"9f1e2d3c4b5a",
+		"git -C /repo log -p refs/remotes/origin/main..refs/remotes/origin/polecat-a174",
+		"DO NOT DISPATCH A WORKER AT mg-a174",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rescue mail body missing %q:\n%s", want, body)
+		}
+	}
+	if !strings.Contains(subject, "do NOT dispatch") {
+		t.Errorf("subject lost the prohibition: %q", subject)
+	}
+	if strings.Contains(body, "safe to submit") {
+		t.Errorf("the footer countermands the withheld submit:\n%s", raw)
+	}
+
+	// Control: the same alert without the rescue commit DOES print the submit,
+	// so the absence above is the rescue cell and not a broken renderer.
+	if _, body := strandedAlertWith(absent).Message(); !strings.Contains(body, "refinery submit") {
+		t.Errorf("control failed: the ordinary absent alert printed no submit either:\n%s", body)
+	}
+}
