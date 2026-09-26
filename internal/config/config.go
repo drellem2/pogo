@@ -918,8 +918,14 @@ type Config struct {
 	// ProgressWatch is the fleet-productivity detector (mg-516e): the only
 	// standing instrument that asks whether the fleet is GETTING ANYTHING DONE
 	// rather than whether it is dead or erroring. See ProgressWatchConfig.
-	ProgressWatch   ProgressWatchConfig
-	FirstTurn       FirstTurnConfig
+	ProgressWatch ProgressWatchConfig
+	FirstTurn     FirstTurnConfig
+	// SynthWatch, RefusalWatch and TurnWatch are the on/off switches for three
+	// detectors pogod used to arm unconditionally (drellem2/pogo#185). All three
+	// default to on. See each type for what "off" does and does NOT turn off.
+	SynthWatch      SynthWatchConfig
+	RefusalWatch    RefusalWatchConfig
+	TurnWatch       TurnWatchConfig
 	WedgeWatch      WedgeWatchConfig
 	MidSessionWedge MidSessionWedgeConfig
 	DoneReap        DoneReapConfig
@@ -1818,6 +1824,39 @@ type FirstTurnConfig struct {
 	NotifyTo string
 }
 
+// SynthWatchConfig is the `[synth_watch]` section: the switch for pogod's
+// synthetic-failure-turn detector (mg-8cdb, internal/synthwatch).
+//
+// `enabled = false` is PAGE-ONLY. It stops the periodic transcript scan that
+// pages `human`, and nothing else: the respawn gate
+// (agent.Registry.ShouldRespawnAgent) keeps its transcript scanner, so an agent
+// failing every turn locally is still NOT restarted. Dropping the gate with the
+// page would re-open mg-18d0's restart loop — ~66 restarts over 23.5h that
+// recovered nothing and destroyed the transcript the diagnosis rested on. A
+// switch that also removes the gate, if one is ever wanted, is a separate key.
+type SynthWatchConfig struct {
+	// Enabled arms the pager. Defaults to true.
+	Enabled bool
+}
+
+// RefusalWatchConfig is the `[refusal_watch]` section: the switch for pogod's
+// consecutive-refusal alarm (mg-6f3d, internal/refusalwatch). Defaults to on.
+// Off means pogod neither builds nor ticks the watcher, so a run of failing
+// turns reaches no sink; `pogo check-refusals` still answers on demand.
+type RefusalWatchConfig struct {
+	// Enabled arms the alarm. Defaults to true.
+	Enabled bool
+}
+
+// TurnWatchConfig is the `[turn_watch]` section: the switch for pogod's
+// turn-completion reader (mg-a270, internal/turnwatch) — the FLEET DOWN floor
+// that lives in pogod precisely because a coordinator-owned check cannot report
+// the coordinator being down. Defaults to on.
+type TurnWatchConfig struct {
+	// Enabled arms the reader. Defaults to true.
+	Enabled bool
+}
+
 // WedgeWatchConfig configures pogod's wedged-agent DETECTOR (mg-fc8d): the
 // heartbeat-driven runner that reads every agent's PTY for known dead-end
 // states and cross-checks each agent's own declared work counter against its
@@ -2201,14 +2240,20 @@ type parsedConfig struct {
 	// merging skip_remote on truthiness alone would make `skip_remote = false`
 	// indistinguishable from an absent key, which is harmless today and would
 	// stop being so the moment the default flips.
-	promptStaleSkipRemoteSet     bool
-	ackWatchEnabledSet           bool
-	deafWatchEnabledSet          bool
-	absentWatchEnabledSet        bool
-	heartWatchEnabledSet         bool
-	blindWatchEnabledSet         bool
-	progressWatchEnabledSet      bool
-	firstTurnEnabledSet          bool
+	promptStaleSkipRemoteSet bool
+	ackWatchEnabledSet       bool
+	deafWatchEnabledSet      bool
+	absentWatchEnabledSet    bool
+	heartWatchEnabledSet     bool
+	blindWatchEnabledSet     bool
+	progressWatchEnabledSet  bool
+	firstTurnEnabledSet      bool
+	// synthWatchEnabledSet, refusalWatchEnabledSet and turnWatchEnabledSet exist
+	// because the shipped default is TRUE: without them a layered file that
+	// omits the key would merge its zero value and silently disarm the detector.
+	synthWatchEnabledSet         bool
+	refusalWatchEnabledSet       bool
+	turnWatchEnabledSet          bool
 	wedgeWatchEnabledSet         bool
 	midSessionWedgeEnabledSet    bool
 	midSessionWedgeReportOnlySet bool
@@ -2396,6 +2441,9 @@ func Load() *Config {
 			Grace:    DefaultFirstTurnGrace,
 			NotifyTo: DefaultFirstTurnNotifyTo,
 		},
+		SynthWatch:   SynthWatchConfig{Enabled: true},
+		RefusalWatch: RefusalWatchConfig{Enabled: true},
+		TurnWatch:    TurnWatchConfig{Enabled: true},
 		WedgeWatch: WedgeWatchConfig{
 			Enabled:           true,
 			Interval:          DefaultWedgeWatchInterval,
@@ -2762,6 +2810,15 @@ func Load() *Config {
 		}
 		if fileCfg.FirstTurn.NotifyTo != "" {
 			cfg.FirstTurn.NotifyTo = fileCfg.FirstTurn.NotifyTo
+		}
+		if fileCfg.synthWatchEnabledSet {
+			cfg.SynthWatch.Enabled = fileCfg.SynthWatch.Enabled
+		}
+		if fileCfg.refusalWatchEnabledSet {
+			cfg.RefusalWatch.Enabled = fileCfg.RefusalWatch.Enabled
+		}
+		if fileCfg.turnWatchEnabledSet {
+			cfg.TurnWatch.Enabled = fileCfg.TurnWatch.Enabled
 		}
 		if fileCfg.midSessionWedgeEnabledSet {
 			cfg.MidSessionWedge.Enabled = fileCfg.MidSessionWedge.Enabled
@@ -3794,6 +3851,21 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				}
 			case "notify_to":
 				cfg.FirstTurn.NotifyTo = unquotedVal
+			}
+		case "synth_watch":
+			if key == "enabled" {
+				cfg.SynthWatch.Enabled = val == "true"
+				cfg.synthWatchEnabledSet = true
+			}
+		case "refusal_watch":
+			if key == "enabled" {
+				cfg.RefusalWatch.Enabled = val == "true"
+				cfg.refusalWatchEnabledSet = true
+			}
+		case "turn_watch":
+			if key == "enabled" {
+				cfg.TurnWatch.Enabled = val == "true"
+				cfg.turnWatchEnabledSet = true
 			}
 		case "wedge_watch":
 			switch key {

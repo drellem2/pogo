@@ -1974,11 +1974,12 @@ Flags:
 	// class is fixable by restarting, and restarting costs a live session's
 	// whole context plus the transcript the diagnosis depends on.
 	//
-	// It is armed unconditionally — unlike the stall watcher it nudges nobody
-	// and starts nothing, so an unconfigured or sandbox daemon is safe. Where a
+	// It is armed by default — unlike the stall watcher it nudges nobody and
+	// starts nothing, so an unconfigured or sandbox daemon is safe. Where a
 	// harness declares no transcript path (every provider but Claude today) the
 	// scan returns StateUnavailable and every consumer behaves exactly as it did
-	// before this existed.
+	// before this existed. `[synth_watch] enabled = false` turns off the PAGE
+	// only; the respawn gate stays (drellem2/pogo#185, see armSynthWatch).
 	synthWatcher := synthwatch.New(synthwatch.Options{
 		Home:    homeDir(),
 		Targets: func() []synthwatch.Target { return synthTargets(agentRegistry) },
@@ -1986,8 +1987,8 @@ Flags:
 		Mail:    client.SendMGMail,
 	})
 	// diagnose reports the verdict, and ShouldRespawnAgent consults it before
-	// any restart_on_crash respawn.
-	agentRegistry.SetTranscriptScanner(synthScanner{w: synthWatcher})
+	// any restart_on_crash respawn — installed whatever [synth_watch] says.
+	synthPager := armSynthWatch(cfg.SynthWatch.Enabled, agentRegistry, synthWatcher)
 
 	// Build the consecutive-refusal alarm (mg-6f3d, from mg-6616's one
 	// actionable output). It reads the same transcripts as the detector above
@@ -2004,22 +2005,32 @@ Flags:
 	// disk, and one that reached nobody is retried on every scan under its own
 	// event type rather than logged inside the success path.
 	//
-	// Armed unconditionally, like the detector above: it nudges nobody, starts
+	// Armed by default, like the detector above: it nudges nobody, starts
 	// nothing, and where a harness declares no transcript path every reading is
 	// StateUnavailable, which is not a health claim and produces no alarm.
-	refusalWatcher := refusalwatch.New(refusalwatch.Options{
-		Home:    homeDir(),
-		Targets: func() []refusalwatch.Target { return refusalTargets(agentRegistry) },
-		Globs:   providers.SessionTranscriptGlobs,
-		Sinks:   refusalSinks(),
-	})
-	log.Printf("pogod: consecutive-refusal alarm enabled (%s)", refusalWatcher.Describe())
+	// `[refusal_watch] enabled = false` leaves it unbuilt (drellem2/pogo#185).
+	var refusalWatcher *refusalwatch.Watcher
+	if cfg.RefusalWatch.Enabled {
+		refusalWatcher = refusalwatch.New(refusalwatch.Options{
+			Home:    homeDir(),
+			Targets: func() []refusalwatch.Target { return refusalTargets(agentRegistry) },
+			Globs:   providers.SessionTranscriptGlobs,
+			Sinks:   refusalSinks(),
+		})
+		log.Printf("pogod: consecutive-refusal alarm enabled (%s)", refusalWatcher.Describe())
+	} else {
+		log.Print(refusalWatchNotArmedLine)
+	}
 	// The hold and the floor are stated because they are the only two knobs that
 	// can make this channel say LESS than it did, and a reader diagnosing "why
 	// did I not get paged" must be able to read their values off the daemon
 	// rather than off the source of whatever revision they think is running.
-	log.Printf("pogod: synthetic-failure-turn detector enabled (interval=%s, clear-hold=%s, page-floor=%s, page-only — restarts are SUPPRESSED, never issued; the hold delays the ALL-CLEAR, never the alarm)",
-		synthwatch.DefaultInterval, synthwatch.DefaultClearHold, synthwatch.DefaultMinPageInterval)
+	if synthPager != nil {
+		log.Printf("pogod: synthetic-failure-turn detector enabled (interval=%s, clear-hold=%s, page-floor=%s, page-only — restarts are SUPPRESSED, never issued; the hold delays the ALL-CLEAR, never the alarm)",
+			synthwatch.DefaultInterval, synthwatch.DefaultClearHold, synthwatch.DefaultMinPageInterval)
+	} else {
+		log.Print(synthWatchNotArmedLine)
+	}
 
 	agentRegistry.SetOnExit(func(a *agent.Agent, err error) {
 		// Settle any defer-done backstop for this polecat: its process has
@@ -2041,9 +2052,16 @@ Flags:
 		// stand down and say so loudly.
 		respawn, suppressedBy := agentRegistry.ShouldRespawnAgent(a)
 		if !respawn && a.ShouldRespawn() {
+			// "A human has been paged" is true only while the pager is armed;
+			// with [synth_watch] enabled = false the gate still holds and nobody
+			// was told, so the line must not claim otherwise.
+			paged := "A human has been paged."
+			if synthPager == nil {
+				paged = "Nobody was paged: [synth_watch] enabled = false."
+			}
 			log.Printf("agent %s (%s) exited while failing every turn (%s); SUPPRESSING respawn — "+
-				"a restart cannot fix this and destroys the session's context (mg-18d0). A human has been paged.",
-				a.Name, a.Type, suppressedBy.Reason)
+				"a restart cannot fix this and destroys the session's context (mg-18d0). %s",
+				a.Name, a.Type, suppressedBy.Reason, paged)
 			synthWatcher.SuppressRestart(a.Name, a.EventAgent())
 		}
 		if respawn {
@@ -3232,9 +3250,13 @@ Flags:
 	// coordinator goes to the escalation box, never to the coordinator.
 	// REPORT-ONLY: it mails and emits, with no seam to nudge or restart.
 	var turnWatcher *turnwatch.Watcher
-	if agentRegistry != nil {
+	if !cfg.TurnWatch.Enabled {
+		// drellem2/pogo#185. Checked first so the reason logged is the operator's
+		// switch, not a missing registry that would not have mattered.
+		log.Print(turnWatchNotArmedLine)
+	} else if agentRegistry != nil {
 		turnWatcher = turnwatch.New(turnwatch.Options{
-			Enabled: true,
+			Enabled: cfg.TurnWatch.Enabled,
 			Scan: func(now time.Time) (turnlog.Report, error) {
 				return turnlog.Scan(turnlog.Options{
 					Now: now,
@@ -3791,15 +3813,20 @@ Flags:
 		// The synthetic-failure-turn detector rides the same tick and throttles
 		// itself to synthwatch.DefaultInterval. In a goroutine because it reads
 		// transcript files off disk and shells out to `mg mail send` on a hit —
-		// neither must delay the next tick. Page-only.
-		go synthWatcher.Check(now)
+		// neither must delay the next tick. Page-only, and nil when
+		// [synth_watch] enabled = false.
+		if synthPager != nil {
+			go synthPager.Check(now)
+		}
 		// The consecutive-refusal alarm rides the same tick and throttles itself
 		// to refusalwatch.DefaultInterval. In a goroutine because it reads
 		// transcripts off disk and shells out to `mg mail send` on a hit —
 		// neither must delay the next tick. Alarm-only: it never restarts and
 		// never nudges, because every nudge path runs through an agent and the
 		// agents are the population that has stopped.
-		go refusalWatcher.Check(now)
+		if refusalWatcher != nil {
+			go refusalWatcher.Check(now)
+		}
 		// The credential-expiry warner rides the same tick and throttles itself
 		// to a COARSE interval. In a goroutine because it shells out to
 		// `security` (which can block on a keychain authorization prompt, hence
