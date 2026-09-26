@@ -3,6 +3,7 @@ package gitgc
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -114,6 +115,25 @@ func PreservedForItems(opts PreservedItemOptions) (PreservedItemReport, error) {
 		// directory nobody can read work out of would be a refusal with no
 		// remedy behind it.
 		if _, lerr := os.Lstat(filepath.Join(path, ".git")); lerr != nil {
+			continue
+		}
+
+		// An UNPOPULATED checkout — `git worktree add` has created the tree
+		// and its admin dir but has not yet written the index (drellem2/pogo#180).
+		// `git status` there reads every tracked file as a staged deletion, so
+		// the removal guard below calls it dirty with a modified count equal to
+		// the repo's tracked-file count, and stall-watch raised a do-not-dispatch
+		// alarm on a polecat seconds into its spawn. No agent has run in such a
+		// tree — the agent is started only after the add returns — so it holds
+		// no authored work, and skipping it is not a missed finding.
+		//
+		// Skipped HERE and nowhere else. checkWorktreeRemoval's refusal on the
+		// same tree is load-bearing (see its doc): it is what stops gc reaping a
+		// tree mid-creation. And the skip is logged, not silent: a crashed add
+		// leaves an index-less tree forever, and it must still show up somewhere.
+		if unpopulatedCheckout(path) {
+			log.Printf("gitgc: preserved-worktree probe skipped %s: no index — unpopulated checkout, not probed", path)
+			rep.Unpopulated = append(rep.Unpopulated, path)
 			continue
 		}
 
@@ -255,6 +275,53 @@ type PreservedItemReport struct {
 	// Errors are non-fatal read failures encountered along the way. They never
 	// suppress a finding — a tree that produced an error is still reported.
 	Errors []string `json:"errors,omitempty"`
+	// Unpopulated are the candidate trees skipped because their checkout has
+	// no index yet (drellem2/pogo#180) — mid-`git worktree add`, or left so by
+	// an add that crashed. Never probed, never a finding; recorded so the skip
+	// is observable rather than a tree vanishing from the report.
+	Unpopulated []string `json:"unpopulated,omitempty"`
+}
+
+// unpopulatedCheckout reports whether worktreeDir is a checkout whose index
+// has not been written: its per-worktree git dir exists and holds no `index`
+// file. That is the state `git worktree add` holds a new tree in for the whole
+// of its checkout (drellem2/pogo#180 measured `index.lock` present and `index`
+// absent across the window).
+//
+// It answers true ONLY on positive evidence. A `.git` pointer that cannot be
+// read or parsed, or an admin dir that does not exist, returns false: that
+// tree goes on to the probe, whose cannot-tell arm reports it. Skipping a tree
+// because something about it was unreadable would make the probe silent in
+// exactly the case where something is already wrong.
+func unpopulatedCheckout(worktreeDir string) bool {
+	dotgit := filepath.Join(worktreeDir, ".git")
+	fi, err := os.Lstat(dotgit)
+	if err != nil {
+		return false
+	}
+	admin := dotgit
+	if !fi.IsDir() {
+		b, rerr := os.ReadFile(dotgit)
+		if rerr != nil {
+			return false
+		}
+		gitdir, ok := strings.CutPrefix(strings.TrimSpace(firstLine(string(b))), "gitdir:")
+		if !ok {
+			return false
+		}
+		admin = strings.TrimSpace(gitdir)
+		if admin == "" {
+			return false
+		}
+		if !filepath.IsAbs(admin) {
+			admin = filepath.Join(worktreeDir, admin)
+		}
+	}
+	if st, serr := os.Stat(admin); serr != nil || !st.IsDir() {
+		return false
+	}
+	_, ierr := os.Lstat(filepath.Join(admin, "index"))
+	return os.IsNotExist(ierr)
 }
 
 // Any reports whether the scan found a tree for any item.

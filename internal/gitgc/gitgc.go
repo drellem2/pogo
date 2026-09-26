@@ -615,6 +615,17 @@ type worktreeRemovalCheck struct {
 // empty means resolve it from the tree's own .git pointer. target is the
 // integration branch, empty resolving to DefaultTargetBranch. See
 // checkOrphanCommits for why detachment alone is not the trigger.
+//
+// # CARE: do not skip index-less trees here (drellem2/pogo#180)
+//
+// A tree with no index — `git worktree add` still checking it out, or an add
+// that crashed — reads as dirty here (every tracked file a staged deletion) and
+// is REFUSED. PreservedForItems skips such trees before calling this, because
+// for a do-not-dispatch alarm that refusal is a false positive. Here it is
+// load-bearing: it is the only thing stopping gc from reaping a tree while it
+// is being created, out from under the spawn that is about to start an agent
+// in it. Do not copy that skip into this function.
+// TestRemovalGuardStillRefusesAnIndexlessTree pins it.
 func checkWorktreeRemoval(worktreeDir, repo, target string) worktreeRemovalCheck {
 	if worktreeDir == "" {
 		return worktreeRemovalCheck{}
