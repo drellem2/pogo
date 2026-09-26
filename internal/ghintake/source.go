@@ -109,14 +109,6 @@ func ParseBodyRefs(body string) []string {
 	return out
 }
 
-// mgListItem is the subset of `mg list --json` (NDJSON) this package reads.
-// `mg list` does not emit bodies, which is why establishing the carrier
-// population costs one `mg show` per item.
-type mgListItem struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-}
-
 // mgShowItem is the subset of `mg show --json` this package reads.
 type mgShowItem struct {
 	ID     string `json:"id"`
@@ -143,7 +135,23 @@ type MGSource struct {
 	// ~2000 process spawns. Serially that is fourteen seconds on pogod's
 	// heartbeat goroutine; fanned out it is about two, and it is all local.
 	Workers int
+	// Cache, when set, remembers each item's refs keyed on the mtime `mg list`
+	// reports, so a later pass forks `mg show` only for items that are new or
+	// whose file changed (drellem2/pogo#179: 88% of the live store is archived
+	// and never changes). It is a POINTER on purpose: pogod binds src.Carriers
+	// off a struct value, and an embedded cache would be copied and never hit.
+	// Nil caches nothing — right for a one-shot CLI scan, which has no second
+	// pass to serve.
+	Cache *RefCache
 }
+
+// RefCache is the per-item cache MGSource.Cache holds: the refs one `mg show`
+// yielded, with Status blank, because status is taken from the current list row
+// (see mgscan.Cache on why a rename keeps the mtime).
+type RefCache = mgscan.Cache[[]CarrierRef]
+
+// NewRefCache returns an empty RefCache for a long-lived MGSource.
+func NewRefCache() *RefCache { return mgscan.NewCache[[]CarrierRef]() }
 
 // mgStatuses are the statuses the carrier scan covers.
 //
@@ -244,12 +252,24 @@ func (s MGSource) Statuses() []string { return append([]string(nil), mgStatuses.
 // one it was built to catch. So a per-item failure is recorded as an ItemError,
 // the scan continues, and the gap is reported. See ItemError for why the
 // direction of that error makes it safe.
+//
+// With a Cache set, an item listed at the same mtime as last pass is answered
+// from the cache without forking `mg show`. Status on a cached answer comes from
+// this pass's list row. Ids listed more than once — archived twins sharing a
+// short id — always bypass the cache.
 func (s MGSource) Carriers() ([]CarrierRef, int, []ItemError, error) {
-	ids, err := s.ids()
+	rows, err := s.rows()
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	if len(ids) == 0 {
+	if s.Cache != nil {
+		listed := make(map[string]bool, len(rows))
+		for _, r := range rows {
+			listed[r.ID] = true
+		}
+		s.Cache.Retain(listed)
+	}
+	if len(rows) == 0 {
 		// Not an error — an empty store is legitimate (a fresh install, a
 		// sandbox). It is reported as ItemsScanned=0, which Detect classifies as
 		// a blind scan rather than as "every issue is uncarried".
@@ -260,11 +280,11 @@ func (s MGSource) Carriers() ([]CarrierRef, int, []ItemError, error) {
 		refs []CarrierRef
 		bad  *ItemError
 	}
-	results := make([]result, len(ids))
+	results := make([]result, len(rows))
 	// A fixed pool, not a goroutine per item: the latter parked ~4,000 stacks on
 	// a semaphore every pass on a real store (drellem2/pogo#179).
-	mgscan.Pool(len(ids), s.workers(), func(i int) {
-		refs, bad := s.refsFor(ids[i])
+	mgscan.Pool(len(rows), s.workers(), func(i int) {
+		refs, bad := s.cachedRefsFor(rows[i])
 		results[i] = result{refs: refs, bad: bad}
 	})
 
@@ -280,6 +300,36 @@ func (s MGSource) Carriers() ([]CarrierRef, int, []ItemError, error) {
 		out = append(out, r.refs...)
 	}
 	return out, scanned, bad, nil
+}
+
+// cachedRefsFor answers one listed item from the cache when its mtime is
+// unchanged, and otherwise reads it with refsFor and caches the answer.
+//
+// Only successful reads are cached: an ItemError is retried next pass, because a
+// transient failure cached at an unchanged mtime would otherwise be permanent.
+func (s MGSource) cachedRefsFor(r listRow) ([]CarrierRef, *ItemError) {
+	if r.twin {
+		s.Cache.Forget(r.ID)
+		return s.refsFor(r.ID)
+	}
+	if cached, ok := s.Cache.Lookup(r.ID, r.Mtime); ok {
+		out := make([]CarrierRef, len(cached))
+		for i, c := range cached {
+			c.Status = r.Status
+			out[i] = c
+		}
+		return out, nil
+	}
+	refs, bad := s.refsFor(r.ID)
+	if bad == nil && s.Cache != nil {
+		stored := make([]CarrierRef, len(refs))
+		for i, c := range refs {
+			c.Status = ""
+			stored[i] = c
+		}
+		s.Cache.Store(r.ID, r.Mtime, stored)
+	}
+	return refs, bad
 }
 
 // archivePartition matches the monthly partition in an mg archive path, as it
@@ -379,29 +429,40 @@ func firstLine(s string) string {
 	return s
 }
 
-// ids lists every work-item id across every status.
-func (s MGSource) ids() ([]string, error) {
-	seen := map[string]bool{}
-	var out []string
+// listRow is one distinct id from the listing. twin is set when the id was
+// listed more than once in this pass — two archived files sharing a short id, or
+// an item that moved status between two `mg list` calls — and such a row is never
+// answered from the cache: one slot keyed on one mtime cannot describe two files.
+type listRow struct {
+	mgscan.Row
+	twin bool
+}
+
+// rows lists every work item across every status, one row per distinct id, in
+// first-seen order. `mg list` does not emit bodies, which is why establishing the
+// carrier population costs one `mg show` per item the cache cannot answer.
+func (s MGSource) rows() ([]listRow, error) {
+	at := map[string]int{}
+	var out []listRow
 	for _, status := range mgStatuses {
 		listed, err := s.run("list", "--status="+status, "--json")
 		if err != nil {
 			return nil, fmt.Errorf("listing %s work items: %w", status, err)
 		}
-		for _, line := range strings.Split(string(listed), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
+		parsed, err := mgscan.ParseList(listed)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range parsed {
+			if r.ID == "" {
 				continue
 			}
-			var item mgListItem
-			if err := json.Unmarshal([]byte(line), &item); err != nil {
-				return nil, fmt.Errorf("parsing mg list output: %w", err)
-			}
-			if item.ID == "" || seen[item.ID] {
+			if i, ok := at[r.ID]; ok {
+				out[i].twin = true
 				continue
 			}
-			seen[item.ID] = true
-			out = append(out, item.ID)
+			at[r.ID] = len(out)
+			out = append(out, listRow{Row: r})
 		}
 	}
 	return out, nil
