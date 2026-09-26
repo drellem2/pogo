@@ -74,8 +74,8 @@ func (o *offlineMailbox) nudge(agent string, n Notice) (Delivery, error) {
 // simulate190 replays the reported incident: one real unread message lands at
 // start and is never read, the recipient is stopped (every notice goes to its
 // maildir), and pogod's heartbeat samples every 30s for 13h30m. It returns the
-// subjects of every notice sent.
-func simulate190(t *testing.T, cfg config.StallWatchConfig) []string {
+// subjects of every notice sent, and the unread_count each fire's event stamped.
+func simulate190(t *testing.T, cfg config.StallWatchConfig) ([]string, []int) {
 	t.Helper()
 	root := t.TempDir()
 	workRoot := filepath.Join(root, "work")
@@ -84,7 +84,8 @@ func simulate190(t *testing.T, cfg config.StallWatchConfig) []string {
 		t.Fatal(err)
 	}
 	box := &offlineMailbox{t: t, mailRoot: mailRoot}
-	w := New(cfg, Options{WorkRoot: workRoot, MailRoot: mailRoot, Nudge: box.nudge, Emit: (&recorder{}).emit})
+	rec := &recorder{}
+	w := New(cfg, Options{WorkRoot: workRoot, MailRoot: mailRoot, Nudge: box.nudge, Emit: rec.emit})
 
 	start := time.Date(2026, 9, 25, 2, 0, 0, 0, time.UTC)
 	writeMailFrom(t, mailRoot, cfg.Agent, "real-0001", "pm-pogo", start)
@@ -96,7 +97,14 @@ func simulate190(t *testing.T, cfg config.StallWatchConfig) []string {
 		box.mu.Unlock()
 		w.Check(now)
 	}
-	return box.subjects
+	var counts []int
+	for _, e := range rec.events {
+		if e.Details["category"] == categoryUnreadMail {
+			n, _ := e.Details["unread_count"].(int)
+			counts = append(counts, n)
+		}
+	}
+	return box.subjects, counts
 }
 
 // TestUnreadMailSelfFeedingRepeatsAreBounded is the regression test for #190,
@@ -113,17 +121,30 @@ func TestUnreadMailSelfFeedingRepeatsAreBounded(t *testing.T) {
 	cfg := baseConfig()
 	cfg.RepeatBackoffCap = 4 * time.Hour
 
-	got := simulate190(t, cfg)
+	got, counts := simulate190(t, cfg)
 	const want = 9
 	if len(got) != want {
 		t.Fatalf("stopped recipient drew %d unread-mail notices over 13h30m; want %d (5m doubling to a 4h cap)\nsubjects: %q",
 			len(got), want, got)
 	}
-	// Its own notices are not the backlog: every subject names the single
-	// real message, never the notices that piled up beside it.
+	// Its own notices are not the backlog: every fire counts the single real
+	// message, never the notices that piled up beside it. (This read the
+	// subject until mg-09d9 took the count out of it; the event is where the
+	// count lives now.)
+	if len(counts) != len(got) {
+		t.Fatalf("%d notices but %d unread_mail events", len(got), len(counts))
+	}
+	for i, n := range counts {
+		if n != 1 {
+			t.Errorf("notice %d counted %d unread; want 1, the one real message", i+1, n)
+		}
+	}
+	// And the nine are one alarm, so they share one subject — the property
+	// `mg mail reclaim`'s exact-Subject grouping needs to coalesce them
+	// (mg-09d9). Before, each carried its own count and age.
 	for i, s := range got {
-		if !strings.HasPrefix(s, "stall-watch: 1 unread mail,") {
-			t.Errorf("notice %d subject %q counts something other than the one real message", i+1, s)
+		if s != "stall-watch: "+unreadMailSubjectHead {
+			t.Errorf("notice %d subject %q; want the constant unread-mail subject", i+1, s)
 		}
 	}
 }

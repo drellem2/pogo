@@ -202,7 +202,7 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 			// the item rather than the config, and the subject is where that
 			// difference has to land: it arrives in the same notification list
 			// as the dispatch notices, which mean the opposite thing.
-			Subject: subject(nItems(len(group))+" blocked on you", now.Sub(oldestModTime(group)), ids),
+			Subject: subject(nItems(len(group))+" blocked on you", ids),
 			Message: msg,
 		}, details)
 	}
@@ -284,7 +284,7 @@ func (w *Watcher) fireUnreachableBlockers(now time.Time, unreachable map[string]
 		// notices share a category and a recipient can receive both, so if their
 		// subjects differed only in a number the reader would be back to opening
 		// each to find out which one this is.
-		Subject: subject(nItems(len(allIDs))+" with an UNREACHABLE blocker", now.Sub(oldestModTime(all)), allIDs),
+		Subject: subject(nItems(len(allIDs))+" with an UNREACHABLE blocker", allIDs),
 		Message: msg,
 	}, details)
 }

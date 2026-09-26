@@ -229,7 +229,7 @@ func (w *Watcher) checkIndefiniteHolds(now time.Time, items []workitem.WorkItem)
 		// notice's recipient is the coordinator and every other work-item
 		// subject it receives means "dispatch this". The subject is where that
 		// difference has to land: it arrives in the same notification list.
-		Subject: subject(nItems(len(candidates))+" held indefinitely", oldest, ids),
+		Subject: subject(nItems(len(candidates))+" held indefinitely", ids),
 		Message: msg,
 	}, details)
 }

@@ -309,7 +309,7 @@ func (w *Watcher) checkPreservedWorktrees(now time.Time, items []workitem.WorkIt
 	}
 	sel.stampDetails(details)
 	w.fire(categoryPreservedWorktree, Notice{
-		Subject: subject(nItems(len(due))+" unclaimed with UNCOMMITTED work preserved", now.Sub(oldestModTime(due)), ids),
+		Subject: subject(nItems(len(due))+" unclaimed with UNCOMMITTED work preserved", ids),
 		Message: msg,
 	}, details)
 }

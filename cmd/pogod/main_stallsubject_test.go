@@ -13,7 +13,7 @@ import (
 // mg-b6f8: the delivery site must carry the notice's own subject to the mail.
 //
 // This is the half of the fix that lives here. The watcher composes a subject
-// from facts only it holds (category, count, item ids, oldest age); this
+// from facts only it holds (category, count, item ids); this
 // function used to overwrite all of that with one constant, which is why 18
 // stall-watch mails to `human` on 2026-08-11/12 arrived under one sentence.
 // A subject that is composed and then discarded at the last step is the same
@@ -32,7 +32,7 @@ func TestStallNudgerMailsTheNoticesOwnSubject(t *testing.T) {
 		return nil
 	}, config.DefaultStallMailFallbackBacklogCap)
 
-	const subj = "stall-watch: 1 item blocked on you, oldest 6h3m — mg-0218"
+	const subj = "stall-watch: 1 item blocked on you — mg-0218"
 	if _, err := nudge("ghost-agent", stallwatch.Notice{
 		Subject: subj,
 		Message: "blocked-reminder: ...",
@@ -66,7 +66,7 @@ func TestStallNudgerMailFallbackKeepsTheSubjectAndMarksIt(t *testing.T) {
 		return nil
 	}, 300*time.Millisecond)
 
-	const subj = "stall-watch: 3 items unclaimed, oldest 42m — mg-a, mg-b, mg-c"
+	const subj = "stall-watch: 3 items unclaimed — mg-a, mg-b, mg-c"
 	delivery, err := nudge("busy-mayor", stallwatch.Notice{Subject: subj, Message: "STALL"})
 	if err != nil {
 		t.Fatalf("nudge: %v", err)

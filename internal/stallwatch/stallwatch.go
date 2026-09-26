@@ -78,6 +78,10 @@ const (
 	categoryPriorityWake = "priority_wake"
 )
 
+// unreadMailSubjectHead is the unread-mail alarm's whole subject head. It is a
+// constant on purpose — see the subject composed in checkUnreadMail (mg-09d9).
+const unreadMailSubjectHead = "unread mail piling up"
+
 // Delivery reports how a nudge reached its recipient. It is returned alongside
 // the error so a fire can record WHICH channel carried the message, not merely
 // that something worked — a nudge that arrived by the slow durable channel is a
@@ -544,7 +548,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	sel.stampDetails(details)
 	split.stampDetails(details)
 	w.fire(categoryUnclaimedItems, Notice{
-		Subject: subject(nItems(len(due))+" unclaimed", now.Sub(oldestModTime(due)), ids),
+		Subject: subject(nItems(len(due))+" unclaimed", ids),
 		Message: msg,
 	}, details)
 }
@@ -671,7 +675,7 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, fl
 	sel.stampDetails(details)
 	split.stampDetails(details)
 	w.fire(categoryPriorityWake, Notice{
-		Subject: subject(nItems(len(due))+" high-priority, unclaimed", now.Sub(oldestModTime(due)), ids),
+		Subject: subject(nItems(len(due))+" high-priority, unclaimed", ids),
 		Message: msg,
 	}, details)
 
@@ -830,9 +834,14 @@ func (w *Watcher) checkUnreadMail(now time.Time) {
 			notice, next)
 	}
 
-	// The one category with no item ids to name, so its whole discriminator is
-	// the count and the age. Both move as the backlog does.
-	subj := subject(fmt.Sprintf("%d unread mail", count), oldestAge, nil)
+	// A constant subject: this alarm has no item ids, and its count and age are
+	// exactly the facts that must stay OUT of it (mg-09d9). Both move while the
+	// backlog merely persists, so they made every copy a distinct Subject and
+	// `mg mail reclaim` — which coalesces by Subject — could not drain them. The
+	// count was worse than volatile: it is this inbox's unread total, so each
+	// notice that went unread raised the number in its successor's subject. The
+	// count, the age and the repeat number are all in the body and the event.
+	subj := subject(unreadMailSubjectHead, nil)
 
 	details := map[string]any{
 		"category":           categoryUnreadMail,

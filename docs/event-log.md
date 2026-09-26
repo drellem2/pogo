@@ -1307,7 +1307,7 @@ pogod's stall watcher (gh drellem2/macguffin #12) crossed a work-pile-up thresho
       ~/.pogo/events.log | sort | uniq -c | sort -rn | head
     ```
 
-    A count above 1 is a repeat the reader could not tell from its predecessor. That is the defect mg-b6f8 fixed, and this is how a regression of it gets counted.
+    Since mg-09d9 a count above 1 is **expected**: the subject names the alarm (category and item set) and carries no age or live count, so every repeat of one persisting stall shares its subject — which is what lets `mg mail reclaim` coalesce them. The regression to count is the other direction: two **different** item sets or categories under one subject (compare `.details.item_ids` / `.details.category` within a group), which is the defect mg-b6f8 fixed. A group count close to 1 across many fires of one alarm is mg-09d9 regressing.
 
 ```json
 {"schema_version":1,"timestamp":"2026-06-10T16:20:00.000000000Z","event_type":"stall_watch_fired","agent":"pogod","details":{"category":"unclaimed_items","watched_agent":"mayor","item_count":2,"item_ids":["mg-2350","mg-9299"],"age_threshold":"10m0s","oldest_age_seconds":1830.4,"nudge_delivery":"pty"}}

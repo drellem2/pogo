@@ -367,7 +367,7 @@ func (w *Watcher) checkStrandedPush(now time.Time, items []workitem.WorkItem, fl
 	}
 	sel.stampDetails(details)
 	w.fire(categoryStrandedPush, Notice{
-		Subject: subject(nItems(len(due))+" unclaimed with work "+headlineWhere(allQueued), now.Sub(oldestModTime(due)), ids),
+		Subject: subject(nItems(len(due))+" unclaimed with work "+headlineWhere(allQueued), ids),
 		Message: msg,
 	}, details)
 }

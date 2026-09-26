@@ -316,26 +316,40 @@ would trade a working signal for quiet, which is a regression that looks like a
 fix. The remedy is that the message body has *always* named the category, the
 count and the ids, and the subject threw all of it away.
 
-Subjects now render as `stall-watch: <head>, oldest <age> — <ids>`, and each
-part earns its place by making two notices that differ in any way render
-differently:
+Subjects now render as `stall-watch: <head> — <ids>`. A subject names **which
+alarm** a notice is; the body says how bad it is now:
 
 - **head** names the category and count, so `1 item blocked on you` never reads
   like `1 item unclaimed` — which matters most here, because those two mean
-  *opposite* things to the same reader and arrive in the same list.
-- **age** is what distinguishes a **repeat**. Count and ids are identical across
-  the repeats of a persisting stall — that is exactly the six consecutive
-  `mg-0218` notices above — and the oldest item's age is the only one of the
-  three that must have moved. It is strictly increasing for a fixed item set,
-  and minute resolution is finer than the shortest cooldown any category uses
-  (3m, the priority wake), so consecutive fires cannot collide.
+  *opposite* things to the same reader and arrive in the same list. For the
+  item categories the count is a property of the item set.
 - **ids** name which items, which is the first thing a reader wants and the
   reason they would otherwise open the mail.
 
 Past five ids the list truncates to `+N more`; two *simultaneous* batches
-sharing a five-id prefix at an equal count would then differ only in age. That
-residue is recorded rather than engineered around — the fix for it (a digest of
-the full id list) would cost the subject the readability it exists to buy.
+sharing a five-id prefix at an equal count would then render the same subject.
+That residue is recorded rather than engineered around — the fix for it (a
+digest of the full id list) would cost the subject the readability it exists to
+buy.
+
+**The subject carries nothing that moves while a condition persists (mg-09d9).**
+mg-b6f8 originally added a third part, the oldest item's age, to make repeats of
+one stall distinguishable. That made every copy of every notice unique:
+measured 2026-09-03 in the mayor's mailbox, **2167 stall-watch mails under 2162
+distinct subjects**. `mg mail reclaim` coalesces a backlog by exact Subject and
+keeps the newest `--keep` per group, so it could retain essentially all of them
+— 810 of 3482 reclaimed, almost none of it stall-watch. The unread-mail alarm
+was the worst case: its subject was `<N> unread mail, oldest <age>`, and each of
+its own unread notices raised the N in its successor's. It now carries the
+constant head `unread mail piling up`; the count, the age and `[repeat] notice
+#N` are in the body, and `unread_count` / `oldest_age_seconds` in the event.
+
+A repeat of a persisting stall is the same fact again, and rendering as the same
+line is the truthful rendering of it. What mg-b6f8 actually fixed — different
+item sets and categories collapsing onto one constant — stays fixed.
+Normalising digits at the reclaim end instead was rejected: it would also fold
+item ids together (`mg-0218` and `mg-8888` both become `mg-N`), merging two
+different alarms and dropping the last copy of one.
 
 `ack-watch` is a useful contrast and was checked in the same window: it sent 15
 mails under 2 subjects, and its subject is *computed* (`report.MailSubject()`,

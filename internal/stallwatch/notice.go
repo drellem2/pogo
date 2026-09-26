@@ -54,36 +54,49 @@ const subjectIDLimit = 5
 // subject renders a notice's mail subject from the facts the check already
 // computed for its event details.
 //
-// The shape is "stall-watch: <head>, oldest <age> — <ids>", and each part is
-// there to make two notices that differ in ANY way render differently:
+// The shape is "stall-watch: <head> — <ids>". A subject names WHICH ALARM this
+// is; the body says how bad it is right now. Two notices get the same subject
+// exactly when they are about the same condition — the same category over the
+// same item set — and different subjects whenever they are not:
 //
 //   - head names the category and the count, so an unclaimed-items notice never
 //     reads like a blocked-reminder and a batch of two never reads like a batch
-//     of one.
-//   - age is the oldest item's age, and it is what distinguishes a REPEAT.
-//     Ids and count are identical across the repeats of a persisting stall —
-//     that is exactly the 18-mail case above, six consecutive notices about
-//     mg-0218 — and age is the only fact of the three that must have moved.
-//     It is strictly increasing for a fixed item set, and minute resolution is
-//     finer than the shortest cooldown any category uses (3m, the priority
-//     wake), so consecutive fires cannot collide on it.
+//     of one. For the item categories the count is a property of the item set,
+//     so it moves only when the set does.
 //   - ids name which items, which is the first thing a reader wants and the
 //     reason they would otherwise have to open the mail.
 //
-// Where this can still repeat itself: past subjectIDLimit items, two sets with
-// a shared prefix and an equal count differ only in age — which does still
-// differ between fires, so repeats stay distinguishable; it is two DISTINCT
-// simultaneous batches that could collide, and only at six-plus items each.
-// Recorded rather than engineered around, because the fix for it (a digest of
-// the full id list) would cost the subject the readability it is here to buy.
-func subject(head string, oldest time.Duration, ids []string) string {
+// What the subject deliberately does NOT carry is anything that moves while the
+// condition merely persists — the oldest item's age, and the unread-mail count
+// (mg-09d9). mg-b6f8 put the age here to make repeats distinguishable, and that
+// made every copy of every stall-watch notice unique: measured 2026-09-03 in the
+// mayor's mailbox, 2162 distinct subjects across 2167 stall-watch mails.
+// `mg mail reclaim` coalesces a backlog by exact Subject, keeping the newest
+// --keep per group, so it could retain essentially all of them — and the
+// unread-mail alarm was the worst case, because each of its own notices raised
+// the count printed in its successor's subject. The alarm about a pile-up was
+// the one pile nobody could drain.
+//
+// A repeat of a persisting stall is the same fact again, and reading as the
+// same line is the true rendering of that. Its body still says how old the
+// stall is and, from the second notice on, "[repeat] notice #N"; its event
+// still records oldest_age_seconds. mg-b6f8's actual defect — DIFFERENT item
+// sets and categories collapsing onto one constant — stays fixed, and is what
+// TestSubjectHeadsSeparateTheCategories and the measured-sequence test pin.
+//
+// Normalising digits at the reclaim end was considered and rejected: it would
+// also fold item ids together (mg-0218 and mg-8888 are both "mg-N"), which
+// collapses two different alarms and drops the last pointer to one of them.
+//
+// Where this can still repeat itself: past subjectIDLimit items, two DISTINCT
+// simultaneous batches sharing a five-id prefix at an equal count render the
+// same subject. Recorded rather than engineered around, because the fix for it
+// (a digest of the full id list) would cost the subject the readability it is
+// here to buy.
+func subject(head string, ids []string) string {
 	var b strings.Builder
 	b.WriteString("stall-watch: ")
 	b.WriteString(head)
-	if oldest > 0 {
-		b.WriteString(", oldest ")
-		b.WriteString(compactAge(oldest))
-	}
 	if len(ids) > 0 {
 		b.WriteString(" — ")
 		if len(ids) <= subjectIDLimit {
@@ -106,7 +119,7 @@ func nItems(n int) string {
 	return fmt.Sprintf("%d items", n)
 }
 
-// compactAge formats a duration for a subject line: two units at most, no
+// compactAge formats a duration for a notice line: two units at most, no
 // fractional seconds, and minute resolution above an hour.
 //
 // time.Duration.String is unusable here — it renders 6h3m as "6h3m0s" and an

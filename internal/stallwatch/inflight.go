@@ -202,7 +202,7 @@ func (w *Watcher) checkWorkedButUnclaimed(now time.Time, items []workitem.WorkIt
 	}
 	sel.stampDetails(details)
 	w.fire(categoryWorkedUnclaimed, Notice{
-		Subject: subject(nItems(len(due))+" unclaimed but WORKED", now.Sub(oldestModTime(due)), ids),
+		Subject: subject(nItems(len(due))+" unclaimed but WORKED", ids),
 		Message: msg,
 	}, details)
 }
