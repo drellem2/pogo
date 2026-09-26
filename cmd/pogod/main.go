@@ -2627,7 +2627,11 @@ Flags:
 			// perhaps twice a year.
 			stateDir := filepath.Join(config.PogoHome(), ghintake.PollerStateDirName)
 			repos, repoSrc := ghintake.ResolveRepos(cfg.GHIntake.Repos, stateDir)
-			src := ghintake.MGSource{}
+			// The cache lives as long as this watcher, so a pass forks `mg show`
+			// only for items whose file changed since the last one (#179). It is a
+			// pointer, which is what lets it survive src.Carriers being bound off
+			// this struct value below.
+			src := ghintake.MGSource{Cache: ghintake.NewRefCache()}
 			// The credential predicate is fixed at arm time, deliberately: it is
 			// one global fact, and re-deciding it per sample would mean a `gh auth
 			// token` subprocess every fifteen minutes on every healthy scan. What
