@@ -2105,6 +2105,7 @@ func (r *Registry) waitAndHandle(a *Agent) {
 	noteWitnessExit(a)
 
 	a.emitExit(stopRequested, stopCause, exitCode, duration)
+	a.emitEarlyExit()
 
 	// Fire onExit callback BEFORE closing done, so that callers waiting on
 	// Done() (e.g. Stop/StopAll during shutdown) block until cleanup

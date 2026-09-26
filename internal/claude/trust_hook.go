@@ -1,12 +1,14 @@
 package claude
 
 import (
+	"context"
 	"log"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/events"
 )
 
 // trustDialogMarker matches the Claude Code workspace trust dialog.
@@ -38,6 +40,136 @@ func collapse(s string) string {
 // trustDialogMarker for why the whitespace must go.
 func matchesTrustDialog(output []byte) bool {
 	return trustDialogMarker.MatchString(collapse(string(agent.StripANSI(output))))
+}
+
+// trustRow is what the highlighted row of the dialog would do if Enter were
+// pressed on it.
+type trustRow int
+
+const (
+	// trustRowNone: the rows are not on screen yet, or no row carries the
+	// highlight. Nothing to act on this tick.
+	trustRowNone trustRow = iota
+	// trustRowAccept: the highlight is on the row that trusts the folder.
+	trustRowAccept
+	// trustRowRefuse: the highlight is on the row that exits Claude Code.
+	// Enter here exits the harness with status 1 (2.1.283, live, mg-c1e2).
+	trustRowRefuse
+	// trustRowUnknown: a highlighted row whose label is neither. The hook must
+	// not guess what Enter does on it.
+	trustRowUnknown
+)
+
+// trustAcceptLabels and trustRefuseLabels are the dialog's row labels,
+// whitespace-collapsed and lower-cased, with the highlight glyph and any "N."
+// ordinal removed. "yes,itrustthisfolder"/"no,exit" are Claude Code 2.1.283,
+// captured from a live PTY in a fresh `git init` dir (mg-f394), where the rows
+// carry no ordinal and "No, exit" is drawn FIRST and highlighted — which is
+// drellem2/pogo#177. "yes,proceed" is the accept row of the numbered dialog
+// earlier releases drew ("❯ 1. Yes, proceed / 2. No, exit"); it is not
+// re-measured here, and it is safe to carry only because an unrecognised label
+// fails closed.
+var (
+	trustAcceptLabels = []string{"yes,itrustthisfolder", "yes,proceed"}
+	trustRefuseLabels = []string{"no,exit"}
+)
+
+// trustHighlight is the glyph Claude Code draws at the start of the highlighted
+// row.
+const trustHighlight = "❯"
+
+// trustRowOrdinal strips an optional "1." from a collapsed row.
+var trustRowOrdinal = regexp.MustCompile(`^\d+\.`)
+
+// maxTrustRowSpan bounds how far from the accept row the highlight may sit and
+// still be read as belonging to the same dialog. The dialog has two adjacent
+// rows; the slack covers a blank separator line and nothing else.
+const maxTrustRowSpan = 3
+
+// trustRowText returns a screen row's collapsed, lower-cased label and whether
+// the row carries the highlight.
+func trustRowText(line string) (label string, highlighted bool) {
+	c := strings.ToLower(collapse(line))
+	if strings.HasPrefix(c, trustHighlight) {
+		highlighted = true
+		c = strings.TrimPrefix(c, trustHighlight)
+	}
+	return trustRowOrdinal.ReplaceAllString(c, ""), highlighted
+}
+
+func classifyTrustLabel(label string) trustRow {
+	for _, l := range trustAcceptLabels {
+		if label == l {
+			return trustRowAccept
+		}
+	}
+	for _, l := range trustRefuseLabels {
+		if label == l {
+			return trustRowRefuse
+		}
+	}
+	return trustRowUnknown
+}
+
+// highlightedTrustRow classifies the row Claude Code currently highlights, and
+// says how far the highlight is from the trusting row: move > 0 means that many
+// rows DOWN, move < 0 that many UP, 0 that it is already there (or that there
+// is nothing to move to). label is the highlighted row's collapsed label, for
+// logging.
+//
+// This is the label-select half of the #177 remedy (mg-c1e2): Enter is pressed
+// only on a row identified by its LABEL, and the direction to move is read from
+// where the two labels were DRAWN, never assumed. A fixed "\x1b[B\r" was the
+// rejected alternative — it is positional, silently re-breaks the day the rows
+// are reordered back, and moves off the right row when the highlight already
+// sits on it.
+//
+// It reads the replayed screen (screenLines), not the stripped stream, because
+// a highlight move redraws the glyph and not the label — see screenLines. The
+// LAST accept row on the screen is the current dialog; a highlight is read only
+// from rows within maxTrustRowSpan of it.
+func highlightedTrustRow(output []byte) (row trustRow, label string, move int) {
+	lines := screenLines(output)
+	accept := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l, _ := trustRowText(lines[i]); classifyTrustLabel(l) == trustRowAccept {
+			accept = i
+			break
+		}
+	}
+	if accept < 0 {
+		// No trusting row drawn. If a highlighted row IS drawn, the dialog is
+		// up and its wording is not one this hook knows — fail closed rather
+		// than wait politely for a label that will never come.
+		for i := len(lines) - 1; i >= 0; i-- {
+			if l, h := trustRowText(lines[i]); h && l != "" {
+				if r := classifyTrustLabel(l); r == trustRowRefuse {
+					// The refusing row alone, its partner not drawn yet.
+					return trustRowNone, l, 0
+				}
+				return trustRowUnknown, l, 0
+			}
+		}
+		return trustRowNone, "", 0
+	}
+	// Nearest highlight to the accept row, the accept row itself first.
+	for d := 0; d <= maxTrustRowSpan; d++ {
+		for _, i := range []int{accept - d, accept + d} {
+			if i < 0 || i >= len(lines) {
+				continue
+			}
+			l, h := trustRowText(lines[i])
+			if !h {
+				continue
+			}
+			r := classifyTrustLabel(l)
+			if r == trustRowRefuse {
+				return r, l, accept - i
+			}
+			return r, l, 0
+		}
+	}
+	return trustRowNone, "", 0
 }
 
 // composerReady reports whether Claude's composer has rendered, which proves
@@ -139,8 +271,25 @@ const TrustDialogPollInterval = 250 * time.Millisecond
 // drift signature recorded below.
 var TrustDialogTimeout = agent.DefaultNudgeProfile.InitialNudgeTimeout
 
-// TrustDialogHook returns a PostSpawnHook that auto-dismisses Claude Code's
-// workspace trust dialog by monitoring PTY output and sending Enter.
+// TrustDialogHook is the Claude provider's PostSpawnHook. It answers Claude
+// Code's workspace-trust dialog by scanning PTY output and pressing Enter on the
+// row it has identified BY LABEL as the trusting one.
+//
+// It used to press a bare Enter on whatever row was highlighted. Claude Code
+// 2.1.270+ draws "No, exit" first and highlights it, so that Enter exited every
+// spawn into an untrusted directory with status 1 — and the hook returned
+// confirmed the instant it pressed the key, so nothing noticed
+// (drellem2/pogo#177, reproduced on 2.1.283). Per mg-c1e2 it now:
+//
+//   - label-selects: Enter is sent only while highlightedTrustRow reports the
+//     accept label; a highlight on the refusing row is moved one row toward the
+//     trusting row (whichever direction the labels were drawn in) and the
+//     screen is re-scanned before anything else is sent;
+//   - fails closed: a highlight on a label that is neither gets no keystroke at
+//     all, and the spent budget records drift;
+//   - waits for the composer: after Enter the watch continues until the
+//     composer is up. An exit in that window is trustWatchRefused — distinct
+//     and loud, never folded into confirmed or drift.
 func TrustDialogHook(a *agent.Agent) {
 	watchForTrustDialog(a, TrustDialogTimeout, TrustDialogPollInterval)
 }
@@ -157,9 +306,19 @@ const (
 	trustWatchInconclusive trustWatchOutcome = iota
 	// trustWatchDrift: the budget was spent having matched NEITHER sentinel.
 	trustWatchDrift
-	// trustWatchConfirmed: the dialog was matched and answered, or the composer
-	// was seen (already-trusted worktree). Either way the sentinel is live.
+	// trustWatchConfirmed: the composer was seen — either after the dialog was
+	// answered, or with no dialog at all (already-trusted worktree). Either way
+	// the sentinel is live. Answering the dialog is NOT enough on its own: that
+	// is what the old hook returned, over a harness its own Enter had just
+	// killed (#177).
 	trustWatchConfirmed
+	// trustWatchRefused: the hook answered the dialog and the harness then
+	// EXITED instead of showing the composer. The keystroke did the opposite of
+	// what it was meant to. This is not a sentinel result — the marker matched —
+	// so it never feeds the drift detector, and it must never be read as
+	// confirmed: "spawn ok, dialog answered" over a dead harness is how #177
+	// stayed invisible.
+	trustWatchRefused
 )
 
 func (o trustWatchOutcome) String() string {
@@ -170,6 +329,8 @@ func (o trustWatchOutcome) String() string {
 		return "drift"
 	case trustWatchConfirmed:
 		return "confirmed"
+	case trustWatchRefused:
+		return "refused"
 	}
 	return "unknown"
 }
@@ -192,7 +353,30 @@ func watchForTrustDialog(a *agent.Agent, budget, poll time.Duration) {
 		agent.RecordTrustDialogReady(a.ProviderID(), agent.DefaultNudgeProfile.PromptReadySentinel, true)
 	case trustWatchDrift:
 		agent.RecordTrustDialogReady(a.ProviderID(), agent.DefaultNudgeProfile.PromptReadySentinel, false)
+	case trustWatchRefused:
+		reportTrustRefused(a)
 	}
+}
+
+// emitEvent is the event sink for trust_dialog_refused. A package var so the
+// test binary can take it off the production events.log (see TestMain).
+var emitEvent = func(ev events.Event) { events.Emit(context.Background(), ev) }
+
+// reportTrustRefused makes a refused trust answer loud: a log line AND a durable
+// trust_dialog_refused event. The log alone is not a signal on this host
+// (pogod's stderr may not even reach pogod.log), and the spawn itself has
+// already been reported ok by the time this fires.
+func reportTrustRefused(a *agent.Agent) {
+	log.Printf("agent %s: Claude Code EXITED after its workspace-trust dialog was answered — "+
+		"the keystroke refused trust instead of accepting it; the spawn is dead", a.Name)
+	emitEvent(events.Event{
+		EventType:  "trust_dialog_refused",
+		Agent:      a.EventAgent(),
+		WorkItemID: a.WorkItemID,
+		Details: map[string]any{
+			"provider": a.ProviderID(),
+		},
+	})
 }
 
 // spentBudgetOutcome decides what a spent budget means. It is the one
@@ -210,14 +394,47 @@ func watchForTrustDialog(a *agent.Agent, budget, poll time.Duration) {
 // the preference testable at all: end-to-end, a closed done channel wins
 // trustDialogWatch's outer select before the first tick even fires, so a
 // scenario test never reaches this decision.
-func spentBudgetOutcome(done <-chan struct{}) trustWatchOutcome {
+//
+// answered is whether the hook already pressed Enter on the dialog: an exit
+// after that is the refusal signature, not an inconclusive watch.
+func spentBudgetOutcome(done <-chan struct{}, answered bool) trustWatchOutcome {
 	select {
 	case <-done:
-		return trustWatchInconclusive
+		return exitOutcome(answered)
 	default:
 		return trustWatchDrift
 	}
 }
+
+// exitOutcome is what an agent exit during the watch means. Before the dialog
+// is answered it says nothing about the sentinels. After it, the harness quit
+// in response to the hook's own keystroke — trustWatchRefused.
+func exitOutcome(answered bool) trustWatchOutcome {
+	if answered {
+		return trustWatchRefused
+	}
+	return trustWatchInconclusive
+}
+
+// maxTrustRowMoves bounds how many arrow keys the hook sends to move the
+// highlight off a refusing row. The dialog has two rows, so one move ought to
+// be the whole job — and against Claude Code 2.1.283 it is not: in 10 of 10
+// live runs in a fresh directory (mg-f394) the dialog moved the highlight to
+// "Yes" on the first Down and then, unprompted, BACK to "No" a few hundred
+// milliseconds later, before the hook's pre-Enter re-scan. The re-scan saw it,
+// the next tick moved again, and every run was accepted on the second Down. A
+// hook that trusted its own keystroke instead of re-reading the screen would
+// have pressed Enter on "No, exit" in all ten — so the budget of moves and the
+// re-scan are both load-bearing, not belt and braces.
+// A highlight that still refuses after this many is something the hook does not
+// understand, and it stops pressing keys.
+const maxTrustRowMoves = 3
+
+// Arrow keys, sent as their own writes, never glued to the Enter.
+const (
+	trustRowUp   = "\x1b[A"
+	trustRowDown = "\x1b[B"
+)
 
 // trustDialogWatch is the poll loop, with the clock injected alongside the
 // timing so a test can put it in the state a starved goroutine wakes into.
@@ -253,17 +470,25 @@ func trustDialogWatch(a *agent.Agent, budget, poll time.Duration, now func() tim
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
+	// answered: Enter has been sent on the accept row. From here only the
+	// composer (confirmed), an exit (refused) or the deadline (drift) ends the
+	// watch.
+	answered := false
+	moves := 0
+	// failClosedLogged keeps a dialog the hook will not answer to one log line
+	// per spawn rather than one per tick.
+	failClosedLogged := false
+
 	for {
 		select {
 		case <-wakeup:
-			return spentBudgetOutcome(a.Done())
+			return spentBudgetOutcome(a.Done(), answered)
 		case <-a.Done():
-			// Agent exited mid-watch: inconclusive, not a ready-gate result.
-			return trustWatchInconclusive
+			return exitOutcome(answered)
 		case <-ticker.C:
 			// The tick is only a wakeup hint; the budget decides.
 			if !now().Before(deadlineAt) {
-				return spentBudgetOutcome(a.Done())
+				return spentBudgetOutcome(a.Done(), answered)
 			}
 			output := a.RecentOutput(composerScanBytes)
 			if len(output) == 0 {
@@ -272,20 +497,51 @@ func trustDialogWatch(a *agent.Agent, budget, poll time.Duration, now func() tim
 			// The composer is up, so no dialog is blocking. Stop scanning
 			// before the echoed kickoff prompt can be mistaken for the dialog,
 			// and return early on an already-trusted worktree instead of
-			// polling out the full budget. See composerReady.
+			// polling out the full budget. After an answer, this is the
+			// confirmation that the answer was accepted. See composerReady.
 			if composerReady(output) {
 				return trustWatchConfirmed
 			}
-			if matchesTrustDialog(output) {
-				log.Printf("agent %s: detected workspace trust dialog, auto-accepting", a.Name)
-				// Small delay to let the TUI fully render before sending input.
+			if answered || !matchesTrustDialog(output) {
+				continue
+			}
+			row, label, move := highlightedTrustRow(output)
+			switch row {
+			case trustRowNone:
+				// Body drawn, rows not yet: wait for the next tick.
+			case trustRowRefuse:
+				if moves < maxTrustRowMoves && move != 0 {
+					moves++
+					key := trustRowDown
+					if move < 0 {
+						key = trustRowUp
+					}
+					log.Printf("agent %s: trust dialog highlights refusing row %q, moving to the trusting row", a.Name, label)
+					if err := a.SendRaw(key); err != nil {
+						log.Printf("agent %s: failed to move trust-dialog highlight: %v", a.Name, err)
+					}
+				} else if !failClosedLogged {
+					failClosedLogged = true
+					log.Printf("agent %s: trust dialog still highlights refusing row %q after %d moves — sending nothing (fail closed)", a.Name, label, moves)
+				}
+			case trustRowUnknown:
+				if !failClosedLogged {
+					failClosedLogged = true
+					log.Printf("agent %s: trust dialog highlights unrecognised row %q — sending nothing (fail closed); the dialog wording has probably changed", a.Name, label)
+				}
+			case trustRowAccept:
+				log.Printf("agent %s: detected workspace trust dialog, accepting row %q", a.Name, label)
+				// Let the TUI finish rendering before answering, then re-scan:
+				// Enter goes only to a highlight that is STILL the accept row.
 				time.Sleep(300 * time.Millisecond)
+				if r, _, _ := highlightedTrustRow(a.RecentOutput(composerScanBytes)); r != trustRowAccept {
+					continue
+				}
 				if err := a.SendRaw("\r"); err != nil {
 					log.Printf("agent %s: failed to dismiss trust dialog: %v", a.Name, err)
+					continue
 				}
-				// The trust-dialog marker matched and we acted on it — the
-				// sentinel is live.
-				return trustWatchConfirmed
+				answered = true
 			}
 		}
 	}

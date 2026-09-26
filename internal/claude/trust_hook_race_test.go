@@ -96,12 +96,21 @@ func sawWithin(a *agent.Agent, want string, timeout time.Duration) bool {
 }
 
 // lateDialogScript renders the trust dialog only after delay, then blocks
-// reading the PTY. It prints answeredMarker if and only if something answers.
+// reading the PTY. It prints answeredMarker if and only if something answers,
+// and then the composer's ready marker, as Claude Code does once trust is
+// granted — the hook now waits for that marker before it calls a watch
+// confirmed.
+//
+// The rows are drawn with the TRUSTING row highlighted, so a single Enter is
+// the right answer and this file keeps testing timing rather than row
+// selection. Row selection, including the refusing default Claude Code 2.1.283
+// ships, is trust_hook_label_test.go's job.
 func lateDialogScript(delay string) string {
 	return "sleep " + delay + "\n" +
 		"printf '" + dialogLine + "\\n'\n" +
+		"printf '" + trustHighlight + " Yes, I trust this folder\\n  No, exit\\n'\n" +
 		"read -r _\n" +
-		"printf '" + answeredMarker + "\\n'\n" +
+		"printf '" + answeredMarker + "\\n? for shortcuts\\n'\n" +
 		"sleep 30\n"
 }
 
@@ -287,7 +296,7 @@ func TestSpentBudgetBeatsAReadyTicker(t *testing.T) {
 func TestSpentBudgetPrefersAnExitedAgentOverADriftSample(t *testing.T) {
 	exited := make(chan struct{})
 	close(exited)
-	if got := spentBudgetOutcome(exited); got != trustWatchInconclusive {
+	if got := spentBudgetOutcome(exited, false); got != trustWatchInconclusive {
 		t.Errorf("spentBudgetOutcome(closed) = %v, want %v: an agent that has "+
 			"already exited must not become a drift sample", got, trustWatchInconclusive)
 	}
@@ -295,7 +304,7 @@ func TestSpentBudgetPrefersAnExitedAgentOverADriftSample(t *testing.T) {
 	// And the live-agent side, so the test cannot pass by always answering
 	// inconclusive — which would silence the drift detector entirely.
 	live := make(chan struct{})
-	if got := spentBudgetOutcome(live); got != trustWatchDrift {
+	if got := spentBudgetOutcome(live, false); got != trustWatchDrift {
 		t.Errorf("spentBudgetOutcome(open) = %v, want %v: a spent budget on a live "+
 			"agent IS the drift signature and has to be recorded", got, trustWatchDrift)
 	}
