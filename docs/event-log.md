@@ -1146,7 +1146,9 @@ unclean death is a `pogod_boot` whose `previous.state` is `"unclean"`**, with no
 #### `pogod_boot`
 
 A pogod acquired the singleton lockfile and started. Emitted once per run,
-before the heartbeat loop writes this run's first beat.
+after reading the previous run's heartbeat and immediately after writing this
+run's first one (before mg-e71d the first beat waited one full heartbeat
+interval, so a daemon killed in its first ~30s left none).
 
 - **`agent`:** `"pogod"`
 - **`details` fields:**
@@ -1162,7 +1164,13 @@ before the heartbeat loop writes this run's first beat.
       `signal`/`error`), present only when `state` is `"clean"`
     - `last_heartbeat`: mtime of `health/pogod.heartbeat` as this run found
       it — for an unclean death, the previous daemon was alive at this time
-      and dead within roughly one heartbeat interval (~30s) after it
+      and dead within roughly one heartbeat interval (~30s) after it. It is
+      `null` when the file cannot speak for the previous run — the file is
+      absent, or its mtime predates that run's `started_at` (an earlier run
+      wrote it) — and `no_heartbeat` then says which. A null is a finding:
+      nothing bounds that death more tightly than `started_at`
+    - `no_heartbeat` (string): present exactly when `last_heartbeat` is
+      `null`; begins "no heartbeat recorded"
     - `read_error`: why the previous record could not be read
 
 ```json

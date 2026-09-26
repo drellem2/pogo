@@ -107,6 +107,36 @@ func (s lifeSandbox) lifeEvents(t *testing.T) []map[string]any {
 	return out
 }
 
+// heartbeatMtime is pogod's own heartbeat file's mtime (zero when absent).
+func (s lifeSandbox) heartbeatMtime(t *testing.T) time.Time {
+	t.Helper()
+	fi, err := os.Stat(filepath.Join(s.state, "health", "pogod.heartbeat"))
+	if err != nil {
+		return time.Time{}
+	}
+	return fi.ModTime()
+}
+
+// waitForBeatAfter waits until pogod's heartbeat file carries a beat newer than
+// before — i.e. the running daemon has written its own.
+func (s lifeSandbox) waitForBeatAfter(t *testing.T, before time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if m := s.heartbeatMtime(t); m.After(before) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("pogod never wrote its own heartbeat (file mtime still %v)\n--- log ---\n%s", before, readFile(t, s.logPath))
+}
+
+func parseRFC(v any) time.Time {
+	str, _ := v.(string)
+	ts, _ := time.Parse(time.RFC3339Nano, str)
+	return ts
+}
+
 func details(ev map[string]any) map[string]any {
 	d, _ := ev["details"].(map[string]any)
 	return d
@@ -130,9 +160,15 @@ func TestPogodRecordsBootShutdownAndUncleanDeath(t *testing.T) {
 		t.Errorf("pogod exit after SIGTERM = %v; want killed by SIGTERM (the recorder must not change how pogod dies)", c1.ProcessState)
 	}
 
-	// Run 2: SIGKILL — the death nothing can record.
+	// Run 2: SIGKILL — the death nothing can record. Kill only once run 2's own
+	// beat is OBSERVED on disk: the assertion below is about a run that got
+	// as far as beating, and a sleep would be a guess at when that is. On a
+	// Linux runner the first beat used to land ~30s after start, so this
+	// killed a run that had none and read run 1's beat back (mg-e71d).
+	beatBefore := s.heartbeatMtime(t)
 	c2 := s.start(t, bin, freePort(t), true)
 	pid2 := c2.Process.Pid
+	s.waitForBeatAfter(t, beatBefore)
 	_ = c2.Process.Kill()
 	_ = c2.Wait()
 
@@ -172,8 +208,12 @@ func TestPogodRecordsBootShutdownAndUncleanDeath(t *testing.T) {
 	if p["state"] != daemonlife.StateUnclean || num(p["pid"]) != pid2 {
 		t.Errorf("run 3 boot previous = %v, want unclean pid=%d (SIGKILLed)", p, pid2)
 	}
-	if _, ok := p["last_heartbeat"]; !ok {
+	if beat, _ := p["last_heartbeat"].(string); beat == "" {
 		t.Errorf("run 3 boot previous carries no last_heartbeat; that is the only bound on when run 2 died: %v", p)
+	} else if b, s0 := parseRFC(beat), parseRFC(p["started_at"]); b.IsZero() || s0.IsZero() || b.Before(s0.Add(-time.Second)) {
+		// A second of slack, as daemonlife allows: a filesystem stamps mtimes
+		// from a coarser clock than time.Now, so a true beat can read early.
+		t.Errorf("run 3 boot previous.last_heartbeat %s predates run 2's start %v: it is an earlier run's beat", beat, p["started_at"])
 	}
 	if d := details(evs[4]); d["signal"] != "SIGINT" || num(d["pid"]) != pid3 {
 		t.Errorf("run 3 shutdown = %v, want SIGINT pid=%d", d, pid3)

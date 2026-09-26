@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -102,6 +103,51 @@ func TestBootEventNamesUncleanDeath(t *testing.T) {
 	}
 	if _, ok := p["exit"]; ok {
 		t.Errorf("an unclean death invented an exit: %v", p)
+	}
+}
+
+// A run that died before writing its first beat must SAY so, and must not
+// inherit an earlier run's beat as its own: that would put the bound on its
+// death before it was born (mg-e71d).
+func TestBootEventSaysNoHeartbeatRatherThanOmittingOrBorrowingOne(t *testing.T) {
+	started := time.Date(2026, 9, 26, 9, 52, 35, 0, time.UTC)
+	prev := &Record{PID: 7066, StartedAt: started}
+	cur := Record{PID: 7100, StartedAt: started.Add(2 * time.Second)}
+	for _, tc := range []struct {
+		name     string
+		beat     time.Time
+		wantBeat bool
+		wantNote string
+	}{
+		{"file absent", time.Time{}, false, "does not exist"},
+		{"earlier run's beat", started.Add(-40 * time.Second), false, "predates the run's start"},
+		{"own beat stamped a coarse-clock tick early", started.Add(-4 * time.Millisecond), true, ""},
+		{"own beat", started.Add(30 * time.Second), true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := BootEvent(cur, prev, StateUnclean, tc.beat, nil).Details["previous"].(map[string]any)
+			v, present := p["last_heartbeat"]
+			if !present {
+				t.Fatalf("last_heartbeat omitted; it must be present (a time, or null with a reason): %v", p)
+			}
+			if tc.wantBeat {
+				if v != tc.beat.UTC().Format(time.RFC3339Nano) || p["no_heartbeat"] != nil {
+					t.Errorf("previous = %v, want last_heartbeat %s and no note", p, tc.beat.UTC().Format(time.RFC3339Nano))
+				}
+				return
+			}
+			note, _ := p["no_heartbeat"].(string)
+			if v != nil || !strings.Contains(note, "no heartbeat recorded") || !strings.Contains(note, tc.wantNote) {
+				t.Errorf("previous = %v, want last_heartbeat null and a no_heartbeat note naming %q", p, tc.wantNote)
+			}
+		})
+	}
+
+	// No previous record: there is no run to attribute a beat to, so the
+	// field keeps its old meaning (the file as found) and carries no note.
+	p := BootEvent(cur, nil, StateUnknown, time.Time{}, nil).Details["previous"].(map[string]any)
+	if _, ok := p["last_heartbeat"]; ok {
+		t.Errorf("first boot invented a heartbeat field: %v", p)
 	}
 }
 

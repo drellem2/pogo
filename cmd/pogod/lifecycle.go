@@ -17,6 +17,7 @@ import (
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/daemonlife"
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/reaper"
 	"github.com/drellem2/pogo/internal/version"
 )
 
@@ -65,9 +66,9 @@ func pogodHeartbeatFile() string {
 }
 
 // bootLifecycle replaces the previous run's lifecycle record with this run's
-// and emits pogod_boot naming how the previous run ended. It must run BEFORE
-// the heartbeat loop writes this run's first beat, or last_heartbeat would be
-// our own.
+// and emits pogod_boot naming how the previous run ended. It reads the previous
+// run's heartbeat and then writes this run's first one, so it must run before
+// anything else writes the heartbeat file, or last_heartbeat would be our own.
 func bootLifecycle(startedAt time.Time) *lifecycle {
 	l := &lifecycle{
 		path: daemonlife.Path(config.PogoHome()),
@@ -80,6 +81,18 @@ func bootLifecycle(startedAt time.Time) *lifecycle {
 	var lastBeat time.Time
 	if fi, err := os.Stat(pogodHeartbeatFile()); err == nil {
 		lastBeat = fi.ModTime()
+	}
+	// This run's FIRST beat, written the moment the previous run's has been
+	// read. The heartbeat loop's first tick only seeds its baseline and calls
+	// no OnTick, so the loop's first write lands one full interval (~30s) after
+	// start: a daemon killed inside that window left no beat, and the next boot
+	// either had no bound on its death or — worse — reported an EARLIER run's
+	// beat as its last one. On darwin a spurious wake nudge at startup hid the
+	// window; on a Linux runner it was the whole of a SIGKILL test (mg-e71d).
+	// The periodic tick (main's hb.OnTick) keeps it fresh from here, and owns
+	// the write-failure condition; a failure here is only logged.
+	if err := reaper.WriteHeartbeat(pogodHeartbeatFile()); err != nil {
+		log.Printf("pogod: cannot write first heartbeat %s: %v", pogodHeartbeatFile(), err)
 	}
 	prev, readErr, writeErr := daemonlife.Boot(l.path, l.cur)
 	if writeErr != nil {
@@ -110,7 +123,9 @@ func describePrevious(prev *daemonlife.Record, state string, lastBeat time.Time)
 		}
 	} else if state == daemonlife.StateUnclean {
 		s += ", NO shutdown recorded — died on a path it could not report"
-		if !lastBeat.IsZero() {
+		if note := daemonlife.HeartbeatGap(prev, lastBeat); note != "" {
+			s += "; " + note
+		} else if !lastBeat.IsZero() {
 			s += "; last heartbeat " + lastBeat.UTC().Format(time.RFC3339)
 		}
 	}
