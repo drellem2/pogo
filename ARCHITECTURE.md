@@ -348,6 +348,19 @@ precondition for stranded work, not evidence against it, because the re-dispatch
 commit-subject id, or the item's id-suffix in the branch name), so the refusal is
 overridable with `--stranded-override="<why>"`, recorded as an event.
 
+**The gate inspects candidates, not the repo (mg-110b, drellem2/pogo#175).** It
+used to `Scan` every polecat branch — a `git cherry` and four more processes per
+branch — and keep only the findings attributable to the item: 2m15s per spawn on
+a 979-branch repo, to keep one or two. It now runs `Inspect` only on
+`strandedwork.ItemCandidates`: the branches whose name matches, plus the branches
+carrying any commit, in ONE walk of all unmerged polecat history, whose subject
+names the id under the same regex and `EqualFold` attribution uses. Ancestry
+there only *selects*; `git cherry` still decides mergedness. That makes the
+prefilter exact rather than a heuristic — every `git cherry` "+" commit is in the
+walk — and a full-host re-run matched `Scan`+filter on 143 of 143 ids, at a
+median of 0.47s. Each dispatch logs one `stranded-work gate:` line with the
+candidate count and the time taken.
+
 **It has two exits, and they are not the same decision** (mg-ba32). The gate
 refuses two populations that want opposite handling: *spent, discard* — start
 over from the target, leave the branch behind, which is `--stranded-override` —
@@ -413,7 +426,8 @@ different reasons and one was not blind at all, which is worth keeping straight:
 - the mg-836c probe skipped the tree entirely, because a clean tree gives the
   removal guard nothing to refuse;
 - **the stranded-work gate above already covers a committed polecat *branch***.
-  `strandedwork.Scan` reads `refs/heads/polecat-*` as well as
+  The gate's branch list (`strandedwork.ItemCandidates`, drawn from the same
+  list `strandedwork.Scan` uses) reads `refs/heads/polecat-*` as well as
   `refs/remotes/origin/polecat-*`, and a linked worktree's branch is a ref in the
   *source repo's* namespace — so an unpushed branch has refused a spawn since
   mg-bfe0;
