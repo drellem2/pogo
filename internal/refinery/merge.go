@@ -52,7 +52,7 @@ const defaultMaxAttempts = 7
 // non-nil error: both run after the branch has landed remotely, and the merge
 // is not unwound.
 func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
-	wtDir, err := r.ensureWorktree(mr.RepoPath)
+	wtDir, err := r.ensureGateWorktree(mr)
 	if err != nil {
 		return mergeResult{}, fmt.Errorf("worktree setup: %w", err)
 	}

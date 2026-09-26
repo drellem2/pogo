@@ -956,6 +956,12 @@ func (r *Refinery) Start(ctx context.Context) {
 	// first dispatch. This runs here rather than in New so the OnMerged/
 	// OnFailed callbacks (wired between New and Start) fire for a merge that
 	// landed just before the crash.
+	//
+	// Before that, sweep every worktree for a gate the PREVIOUS pogod left
+	// running (mg-58f3). Gates run in their own process group, so they survive
+	// a daemon restart; left alone, the recovered MR's gate would start beside
+	// its own orphan in the same tree.
+	r.sweepGateWorktrees()
 	r.resolveRecovered()
 
 	ticker := time.NewTicker(r.cfg.PollInterval)
