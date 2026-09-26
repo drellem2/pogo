@@ -13,15 +13,16 @@ import (
 // mode, late, so it is silent exactly while pogod is index-only.
 func TestStallWatchPausedFollowsIndexOnlyMode(t *testing.T) {
 	testsandbox.Isolate(t)
-	saved := srv
-	t.Cleanup(func() { srv = saved })
+	saved := currentServer()
+	t.Cleanup(func() { srvRef.Store(saved) })
 
-	srv = nil
+	srvRef.Store(nil)
 	if stallWatchPaused() {
 		t.Fatal("no server built yet must not read as paused")
 	}
 
-	srv = server.New(nil, nil)
+	srv := server.New(nil, nil)
+	srvRef.Store(srv)
 	if stallWatchPaused() {
 		t.Fatal("a full-mode server must not pause the stall watcher")
 	}
@@ -36,5 +37,30 @@ func TestStallWatchPausedFollowsIndexOnlyMode(t *testing.T) {
 	}
 	if stallWatchPaused() {
 		t.Fatal("resuming full mode must un-pause the stall watcher")
+	}
+}
+
+// TestServerPublishedWhileHeartbeatReads pins mg-4d5e: main publishes the
+// server after the heartbeat is already running, and the heartbeat's
+// goroutines read it (stallWatchPaused here; orchResume's closure is the same
+// read). Under `go test -race` a plain package var failed this; it only
+// asserts anything when the race detector is on.
+func TestServerPublishedWhileHeartbeatReads(t *testing.T) {
+	testsandbox.Isolate(t)
+	saved := currentServer()
+	t.Cleanup(func() { srvRef.Store(saved) })
+	srvRef.Store(nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			stallWatchPaused()
+		}
+	}()
+	srvRef.Store(server.New(nil, nil))
+	<-done
+	if stallWatchPaused() {
+		t.Fatal("a full-mode server must not pause the stall watcher")
 	}
 }
