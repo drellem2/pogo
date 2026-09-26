@@ -791,6 +791,20 @@ An empty population is **not** a clean fleet, and the report says so out loud. Z
 agents examined produces zero findings, which is exactly the shape of green that hid
 the outage.
 
+A population of **N−1 is not a clean fleet either**, and nothing about the empty case
+tells you that. The population is pogod's registry, and a STOPPED agent is not a
+`silent` row — it is no row at all. On 2026-09-06 this check closed with "Every
+present agent has completed a turn" while doctor and representative were down; the
+word "present" carried the whole limitation. It now prints a `NOT EXAMINED` line
+naming the configured agents it did not look at, and says "NOT a fleet-wide green"
+under the clean line — read those lines; an absence does not change the exit status.
+The same blindness holds for every other registry consumer (`pogo gc`,
+`check-orphans`, `check-stranded` and the rest): **their silence carries no
+information about whether an agent is missing**, and they do not say so. The only
+readers of absence are absent-watch's mail and `pogo agent list`'s footer. After a
+suspected fleet incident, run `pogo agent list` first and read its footer; this check
+second (mg-d88e).
+
 To decide whether to believe a clean run: `pogo check-turns --probe` builds a
 throwaway fixture holding an agent that just completed a turn, one that stopped, and
 one that never started, and requires the check to report the last two. A liveness
