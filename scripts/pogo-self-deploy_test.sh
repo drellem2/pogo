@@ -4365,6 +4365,138 @@ done
 
 rm -rf "$SIGWORK"
 
+# ---------------------------------------------------------------------------
+# do_restart: bootout + bootstrap + kickstart, not kickstart -k alone (mg-716a)
+# ---------------------------------------------------------------------------
+# From 2026-09-08 to 09-26 kickstart -k ran for 18 days against a job that never
+# stayed up (runs=4639), and one bootout + bootstrap recovered it at once
+# (recovery session's postmortem figures). The cause is still open. These are
+# controls on the remedy's own hazards: every launchctl exit code in the stub is
+# one measured on this host (bootstrap of a loaded job exits 5, bootout of an
+# unloaded one exits 3, print of an unloaded one exits 113), and each case is
+# judged by the state it leaves, not only by the rc it returns.
+RS_DIR="$(mktemp -d)"
+cat > "$RS_DIR/launchctl" <<'STUB'
+#!/usr/bin/env bash
+# A launchd for one job. "$RS_STATE/loaded" existing means it is registered.
+echo "$*" >> "$RS_STATE/calls"
+case "$1" in
+    print)
+        [ -e "$RS_STATE/loaded" ] || { echo "Could not find service" >&2; exit 113; }
+        printf '\tpath = %s\n\tstate = running\n\truns = %s\n' "$RS_PLIST" "$(cat "$RS_STATE/runs" 2>/dev/null || echo 0)" ;;
+    bootout)
+        [ -e "$RS_STATE/loaded" ] || { echo "Boot-out failed: 3: No such process" >&2; exit 3; }
+        [ -e "$RS_STATE/bootout_sticks" ] && exit 0
+        rm -f "$RS_STATE/loaded"; [ -e "$RS_STATE/bootout_rc" ] && exit "$(cat "$RS_STATE/bootout_rc")"; exit 0 ;;
+    bootstrap)
+        [ -e "$RS_STATE/loaded" ] && { echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; }
+        [ -e "$RS_STATE/bootstrap_fails" ] && { echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; }
+        touch "$RS_STATE/loaded"; echo 0 > "$RS_STATE/runs"; exit 0 ;;
+    kickstart)
+        [ -e "$RS_STATE/loaded" ] || exit 113
+        echo 1 > "$RS_STATE/runs"; exit 0 ;;
+esac
+STUB
+chmod +x "$RS_DIR/launchctl"
+printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>com.pogo.daemon</string></dict></plist>\n' > "$RS_DIR/daemon.plist"
+
+# rs_run SETUP... — fresh state, then do_restart in a subshell (it exits on
+# failure). Leaves RS_OUT, RS_RC, RS_CALLS, and RS_LOADED=yes|no.
+rs_run() {
+    export RS_STATE="$RS_DIR/state" RS_PLIST="$RS_DIR/daemon.plist"
+    rm -rf "$RS_STATE"; mkdir -p "$RS_STATE"; : > "$RS_STATE/calls"
+    local f; for f in "$@"; do touch "$RS_STATE/$f"; done
+    [ -e "$RS_STATE/bootout_rc" ] && echo 36 > "$RS_STATE/bootout_rc"
+    RS_OUT="$( LAUNCHCTL="$RS_DIR/launchctl" BOOTOUT_WAIT=2 BOOTSTRAP_ATTEMPTS=3 BOOTSTRAP_RETRY_SLEEP=0 \
+        POGO_DAEMON_PLIST="$RS_PLIST" do_restart 2>&1 )"; RS_RC=$?
+    RS_CALLS="$(cut -d' ' -f1-2 "$RS_STATE/calls" | grep -v '^print' | tr '\n' ';')"
+    [ -e "$RS_STATE/loaded" ] && RS_LOADED=yes || RS_LOADED=no
+}
+# This file stubbed do_restart for verify_or_recover above. Put the real one back.
+source "$HERE/pogo-self-deploy"
+
+# 1. The ordinary night: a loaded job is booted out, bootstrapped, and started.
+rs_run loaded
+{ [ "$RS_RC" -eq 0 ] && [ "$RS_LOADED" = yes ] \
+  && [ "$RS_CALLS" = "bootout gui/$(id -u)/com.pogo.daemon;bootstrap gui/$(id -u);kickstart gui/$(id -u)/com.pogo.daemon;" ]; } \
+    && pass "do_restart: bootout, then bootstrap, then kickstart, in that order, and the job ends loaded" \
+    || fail "do_restart sequence (rc=$RS_RC loaded=$RS_LOADED): $RS_CALLS / $RS_OUT"
+grep -q -- 'kickstart -k' "$RS_STATE/calls" \
+    && fail "do_restart still runs kickstart -k, which kills an instance RunAtLoad already started" \
+    || pass "do_restart's kickstart has no -k — straight after a bootstrap there is nothing it should kill"
+grep -q "^bootstrap gui/$(id -u) $RS_DIR/daemon.plist$" "$RS_STATE/calls" \
+    && pass "do_restart bootstraps the plist launchd says it LOADED — the job being replaced, not a guess" \
+    || fail "bootstrap did not name the loaded plist: $(cat "$RS_STATE/calls")"
+
+# 2. Idempotent: a job that is already unloaded (a previous restart got as far
+#    as the bootout) is bootstrapped without a bootout, and that is success.
+rs_run
+{ [ "$RS_RC" -eq 0 ] && [ "$RS_LOADED" = yes ] && [ "${RS_CALLS#bootout}" = "$RS_CALLS" ]; } \
+    && pass "do_restart on an UNLOADED job skips the bootout and loads it — rerunning after a half-finished restart finishes it" \
+    || fail "unloaded job (rc=$RS_RC loaded=$RS_LOADED): $RS_CALLS / $RS_OUT"
+
+# 3. bootout's rc does not decide. launchd can return nonzero (36, "in
+#    progress") on a bootout that does unload the job.
+rs_run loaded bootout_rc
+{ [ "$RS_RC" -eq 0 ] && [ "$RS_LOADED" = yes ]; } \
+    && pass "a nonzero bootout that DID unload the job is followed through — the state decides, not the rc" \
+    || fail "nonzero-rc bootout (rc=$RS_RC): $RS_OUT"
+
+# 4. A bootout that never takes the job out: stop, loudly, before bootstrapping.
+rs_run loaded bootout_sticks
+{ [ "$RS_RC" -eq 5 ] && [ "$RS_LOADED" = yes ] && ! grep -q '^bootstrap' "$RS_STATE/calls"; } \
+    && pass "a bootout that leaves the job loaded exits 5 without a bootstrap on top of it" \
+    || fail "stuck bootout (rc=$RS_RC): $RS_CALLS / $RS_OUT"
+grep -q 'STILL LOADED' <<<"$RS_OUT" \
+    && pass "and it says the job is STILL LOADED" \
+    || fail "stuck bootout is not named: $RS_OUT"
+
+# 5. THE NEW HAZARD: bootout worked, bootstrap does not. The box is left with
+#    no job at all, so this must be exit 5 and must say so in words.
+rs_run loaded bootstrap_fails
+{ [ "$RS_RC" -eq 5 ] && [ "$RS_LOADED" = no ] && [ "$(grep -c '^bootstrap' "$RS_STATE/calls")" = 3 ]; } \
+    && pass "a bootstrap that keeps failing is retried BOOTSTRAP_ATTEMPTS=3 times, then exits 5" \
+    || fail "failing bootstrap (rc=$RS_RC loaded=$RS_LOADED, $(grep -c '^bootstrap' "$RS_STATE/calls") bootstraps): $RS_OUT"
+{ grep -q 'POGOD IS DOWN AND ITS JOB IS UNLOADED' <<<"$RS_OUT" && grep -q "launchctl bootstrap gui/$(id -u) $RS_DIR/daemon.plist" <<<"$RS_OUT"; } \
+    && pass "and it says pogod is DOWN with its job UNLOADED, and gives the exact bootstrap line that loads it again" \
+    || fail "unloaded-job failure is not loud enough: $RS_OUT"
+grep -q '^kickstart' "$RS_STATE/calls" \
+    && fail "do_restart kickstarted a job it failed to load" \
+    || pass "and it does not kickstart a job that is not loaded"
+
+# 6. A plist that cannot be read is caught BEFORE the bootout, while the old
+#    pogod is still up. Otherwise the bootout would remove a job nothing can load.
+rm -f "$RS_DIR/daemon.plist"
+rs_run loaded
+{ [ "$RS_RC" -eq 5 ] && [ "$RS_LOADED" = yes ] && [ -z "$RS_CALLS" ]; } \
+    && pass "a missing plist exits 5 with NO bootout — the running pogod is left alone" \
+    || fail "missing plist (rc=$RS_RC loaded=$RS_LOADED): $RS_CALLS / $RS_OUT"
+echo 'not a plist' > "$RS_DIR/daemon.plist"
+if command -v plutil >/dev/null 2>&1; then
+    rs_run loaded
+    { [ "$RS_RC" -eq 5 ] && [ "$RS_LOADED" = yes ] && [ -z "$RS_CALLS" ]; } \
+        && pass "a plist that does not parse exits 5 with NO bootout" \
+        || fail "unparseable plist (rc=$RS_RC loaded=$RS_LOADED): $RS_CALLS / $RS_OUT"
+fi
+
+# 7. The spawn accounting after a re-registration. bootstrap starts `runs` over
+#    at 0, so the old job's count (4639 on the outage night) is not "before".
+#    Without the reset, every clean restart would read as the counter going
+#    BACKWARDS.
+RS_STATE="$RS_DIR/state"; echo 1 > "$RS_STATE/runs"; touch "$RS_STATE/loaded"
+RS_OUT="$( LAUNCHCTL="$RS_DIR/launchctl" RESTART_REREGISTERED=true; report_spawns 4639 2>&1 )"
+case "$RS_OUT" in
+    *BACKWARDS*) fail "report_spawns called a re-registered job's reset counter BACKWARDS: $RS_OUT" ;;
+    *"1 spawn, no attempts burned (launchd runs 0 -> 1)"*) pass "report_spawns counts from 0 after do_restart re-registered the job" ;;
+    *) fail "report_spawns after re-registration: $RS_OUT" ;;
+esac
+RS_OUT="$( LAUNCHCTL="$RS_DIR/launchctl" RESTART_REREGISTERED=false; report_spawns 4639 2>&1 )"
+case "$RS_OUT" in
+    *BACKWARDS*) pass "negative control: with no re-registration the same readings are still called BACKWARDS" ;;
+    *) fail "negative control: the BACKWARDS branch did not fire without the reset: $RS_OUT" ;;
+esac
+rm -rf "$RS_DIR"
+
 echo ""
 PASS_COUNT=$(grep -c '^PASS:' "$RESULTS_FILE" 2>/dev/null || true)
 FAIL_COUNT=$(grep -c '^FAIL:' "$RESULTS_FILE" 2>/dev/null || true)

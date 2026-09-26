@@ -101,7 +101,7 @@ The plist must include all of these keys for pogod to behave correctly under lau
 |--------|---------|
 | Load (start) | `launchctl load ~/Library/LaunchAgents/com.pogo.daemon.plist` |
 | Unload (stop) | `launchctl unload ~/Library/LaunchAgents/com.pogo.daemon.plist` |
-| Restart | `launchctl kickstart -k gui/$(id -u)/com.pogo.daemon` |
+| Restart | `launchctl bootout gui/$(id -u)/com.pogo.daemon; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pogo.daemon.plist; launchctl kickstart gui/$(id -u)/com.pogo.daemon`: after replacing `pogod`, prefer this to `kickstart -k` (mg-716a) |
 | Check status | `launchctl list \| grep com.pogo.daemon` |
 | View logs | `tail -f ~/Library/Logs/pogo/pogod.log` |
 

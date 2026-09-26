@@ -395,7 +395,7 @@ assert_out_of_band() {
     err "refusing to redeploy: $reason"
     cat >&2 <<EOF
 
-  A redeploy runs 'launchctl kickstart -k' on ${DAEMON_LABEL}, which kills
+  A redeploy runs 'launchctl bootout' on ${DAEMON_LABEL}, which kills
   pogod's ENTIRE process tree. Run from inside that tree, it would kill the
   fleet and this process along with it, mid-deploy, with nothing left running
   to report what happened.
@@ -3618,12 +3618,136 @@ do_prove() {
 # pogod.log, from which nobody could tell WHICH prompts moved or FROM WHAT
 # revision. report_prompt_refresh below reads the record pogod now emits and
 # puts it in this transcript, which is the artifact an operator actually reads.
+#
+# BOOTOUT + BOOTSTRAP, THEN KICKSTART — NOT `kickstart -k` ALONE (mg-716a).
+# From 2026-09-08 to 09-26 pogod was down while `kickstart -k` ran against it
+# for 18 days: runs=4639, last exit 1, "spawn scheduled", never an instance that
+# stayed up. One bootout + bootstrap recovered it at once (figures from the
+# recovery session's postmortem, not re-measured here). `kickstart -k` restarts
+# the PROCESS and keeps launchd's JOB; bootout + bootstrap throws the job away
+# and registers it again from the plist, so any state launchd pinned to the job
+# goes with it. This script has just replaced the binary under the job, which is
+# the moment that state is most likely to be wrong.
+#
+# THIS IS DEFENSIVE, NOT A ROOT-CAUSE FIX. The postmortem leaves the cause
+# UNRESOLVED. The leading hypothesis is that pogod is ad-hoc signed, so every
+# build has a new cdhash, and a job carrying pinned launch-constraint state
+# stops exec'ing. But the 09-08 03:00 install ran a healthy pogod until ~18:55,
+# which a pure version of that story does not explain. And the plain case does
+# not reproduce: an isolated ad-hoc-signed LaunchAgent, rebuilt and
+# `kickstart -k`ed alone, exec'd the new binary first time (mg-716a).
+#
+# What launchctl told us on that isolated agent, and which the code below is
+# built on:
+#   - `bootstrap` of a job that is already loaded exits 5 (EIO); `bootout` of
+#     one that is not loaded exits 3. Neither exit code says whether the job
+#     ended up loaded, so every step is judged by `launchctl print` (113 when
+#     the job is not loaded), never by the rc. That is also what makes the step
+#     idempotent: a job that is already unloaded is not booted out again, and one
+#     that is already loaded counts as a successful bootstrap.
+#   - straight after `bootstrap`, a RunAtLoad+KeepAlive job read
+#     `state = not running`, `runs = 0` and stayed that way until it was
+#     kickstarted. So the kickstart is required. It is a plain kickstart with
+#     no -k, because -k would kill an instance RunAtLoad has already started.
+#
+# THE ONE NEW WAY THIS CAN LEAVE THE BOX WORSE: a bootout that works followed by
+# a bootstrap that does not leaves no job at all. Nothing respawns pogod then,
+# not KeepAlive and not recovery's kickstart, because there is no job left to
+# kickstart. So the plist is checked BEFORE the bootout, while the old pogod is
+# still up, and a bootstrap that still fails after its retries says in words
+# that the job is UNLOADED and gives the exact line that loads it again.
+# Every failure here exits 5, which the runner already treats as "pogod may be
+# DOWN".
+#
+# It runs out of band only (assert_out_of_band): a caller inside pogod's tree
+# would die at the bootout line, before the bootstrap (measured for
+# install-deploy, see report_activation).
+
+# How long do_restart waits for a bootout to take the job out of launchd, and
+# how many bootstraps it tries. Variables so the controls do not have to wait
+# out real time. The bootout wait covers launchd's SIGTERM-to-SIGKILL grace
+# (ExitTimeOut, 20s by default) with room to spare.
+BOOTOUT_WAIT="${BOOTOUT_WAIT:-60}"
+BOOTSTRAP_ATTEMPTS="${BOOTSTRAP_ATTEMPTS:-3}"
+BOOTSTRAP_RETRY_SLEEP="${BOOTSTRAP_RETRY_SLEEP:-2}"
+
+# Set true by do_restart once it has booted the job out and bootstrapped it
+# again. report_spawns reads it: bootstrap resets launchd's `runs` counter to
+# 0, so the pre-restart sample is from a job that no longer exists.
+RESTART_REREGISTERED=false
+
+# job_loaded TARGET — is TARGET registered with launchd right now?
+job_loaded() { $LAUNCHCTL print "$1" >/dev/null 2>&1; }
+
+# daemon_plist_path TARGET — the plist to bootstrap. Takes the one launchd says
+# it LOADED (`path = ...` in `launchctl print`), because that is the job we are
+# replacing. Falls back to $POGO_DAEMON_PLIST, then to the path
+# `pogo service install` writes, when the job is not loaded at all.
+daemon_plist_path() {
+    local loaded
+    loaded="$($LAUNCHCTL print "$1" 2>/dev/null | sed -n 's/^[[:space:]]*path = \(.*[^[:space:]]\)[[:space:]]*$/\1/p' | head -1)"
+    if [ -n "$loaded" ]; then printf '%s\n' "$loaded"; return 0; fi
+    printf '%s\n' "${POGO_DAEMON_PLIST:-$HOME/Library/LaunchAgents/${DAEMON_LABEL}.plist}"
+}
+
 do_restart() {
-    local target="gui/$(id -u)/$DAEMON_LABEL"
-    log "restarting pogod: launchctl kickstart -k $target"
-    # ALWAYS kickstart — never rely on KeepAlive to pick up a stopped job
-    # (mg-6afa mechanism 2 / mg-50e0). -k kills the running instance first.
-    $LAUNCHCTL kickstart -k "$target" || { err "launchctl kickstart failed"; exit 5; }
+    local domain="gui/$(id -u)"
+    local target="$domain/$DAEMON_LABEL" plist waited=0 attempt=0 out=""
+    plist="$(daemon_plist_path "$target")"
+    log "restarting pogod: launchctl bootout + bootstrap + kickstart $target (plist $plist)"
+
+    # Checked before anything is torn down: after the bootout, a plist that
+    # cannot be loaded means no job at all.
+    if [ ! -r "$plist" ]; then
+        err "cannot restart pogod: its plist $plist is missing or unreadable — refusing to boot the job out, because nothing could bootstrap it back"
+        err "  the running pogod is untouched. Reinstall the job with: pogo service install"
+        exit 5
+    fi
+    if command -v plutil >/dev/null 2>&1 && ! out="$(plutil -lint "$plist" 2>&1)"; then
+        err "cannot restart pogod: $plist does not parse ($out) — refusing to boot the job out, because nothing could bootstrap it back"
+        err "  the running pogod is untouched. Reinstall the job with: pogo service install"
+        exit 5
+    fi
+
+    if job_loaded "$target"; then
+        # Its rc is not trusted in either direction (see above); the wait
+        # below decides whether the job actually left.
+        out="$($LAUNCHCTL bootout "$target" 2>&1)" || log "  launchctl bootout returned nonzero (${out:-no output}) — judging by whether the job is still loaded"
+        while job_loaded "$target"; do
+            if [ "$waited" -ge "$BOOTOUT_WAIT" ]; then
+                err "launchctl bootout $target: the job is STILL LOADED after ${BOOTOUT_WAIT}s — not bootstrapping over it"
+                err "  the old pogod may still be running the old binary. Inspect with:"
+                err "    launchctl print $target | head -40"
+                exit 5
+            fi
+            sleep 1; waited=$(( waited + 1 ))
+        done
+        log "  booted out $target (unloaded after ${waited}s)"
+    else
+        log "  $target was not loaded — nothing to boot out, bootstrapping it"
+    fi
+
+    while :; do
+        attempt=$(( attempt + 1 ))
+        out="$($LAUNCHCTL bootstrap "$domain" "$plist" 2>&1)" || true
+        if job_loaded "$target"; then break; fi
+        if [ "$attempt" -ge "$BOOTSTRAP_ATTEMPTS" ]; then
+            err "launchctl bootstrap $domain $plist FAILED $attempt time(s): ${out:-no output}"
+            err "  POGOD IS DOWN AND ITS JOB IS UNLOADED. The bootout removed com.pogo.daemon from launchd,"
+            err "  so KeepAlive, recovery and a kickstart all have nothing to act on. A human has to load it:"
+            err "    launchctl bootstrap $domain $plist"
+            err "    launchctl kickstart $target"
+            exit 5
+        fi
+        log "  launchctl bootstrap attempt $attempt did not load the job (${out:-no output}) — retrying in ${BOOTSTRAP_RETRY_SLEEP}s"
+        sleep "$BOOTSTRAP_RETRY_SLEEP"
+    done
+    RESTART_REREGISTERED=true
+    log "  bootstrapped $target from $plist"
+
+    # ALWAYS kickstart — never rely on RunAtLoad/KeepAlive to start the job
+    # (mg-6afa mechanism 2 / mg-50e0; measured again for mg-716a above).
+    $LAUNCHCTL kickstart "$target" || { err "launchctl kickstart $target failed after a successful bootstrap — the job is loaded but may not be running"; exit 5; }
 }
 
 # ---------------------------------------------------------------------------
@@ -3803,6 +3927,10 @@ format_spawn_report() {
 # which a spawn that dies in 29ms never does.
 report_spawns() {
     local before="$1" snap after rec line
+    # do_restart re-registered the job, and bootstrap starts `runs` over at 0,
+    # so "before" is 0 and not the old job's count (mg-716a). Without this, every
+    # clean restart would read as the counter going BACKWARDS.
+    if [ "$RESTART_REREGISTERED" = true ]; then before=0; fi
     snap="$(spawn_snapshot)"
     after="${snap%%	*}"
     rec="${snap#*	}"
@@ -4329,8 +4457,11 @@ verify_or_recover() {
         err "THIS BOX NOW HAS NO POGOD. Nothing is answering $(base_url)/version after $(( RESTART_RETRIES + 1 )) kickstart(s)."
         err "  This is NOT 'the $label did not complete' — that would leave a daemon up. There is no daemon."
         err "  Every automatic recovery path on this box is downstream of pogod, so none of them will fire for this."
-        err "  A human has to start it:"
-        err "    launchctl kickstart -k gui/$(id -u)/${DAEMON_LABEL}"
+        err "  A human has to start it. Boot the job out and back in rather than kickstart -k alone:"
+        err "  the 09-08..09-26 outage survived 18 days of kickstart -k and ended at one bootout + bootstrap (mg-716a)."
+        err "    launchctl bootout gui/$(id -u)/${DAEMON_LABEL}"
+        err "    launchctl bootstrap gui/$(id -u) $(daemon_plist_path "gui/$(id -u)/${DAEMON_LABEL}")"
+        err "    launchctl kickstart gui/$(id -u)/${DAEMON_LABEL}"
         err "    launchctl print gui/$(id -u)/${DAEMON_LABEL} | head -40"
         err "    curl -s $(base_url)/version"
         return "$EXIT_NO_DAEMON"

@@ -2969,7 +2969,9 @@ merge is running, no schedule is firing, and NO AUTOMATIC PATH ON THIS BOX WILL
 RECOVER IT: the nightly deploy, this fallback and com.pogo.recovery are all
 downstream of pogod. Start it by hand:
 
-    launchctl kickstart -k gui/\$(id -u)/com.pogo.daemon
+    launchctl bootout gui/\$(id -u)/com.pogo.daemon
+    launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.pogo.daemon.plist
+    launchctl kickstart gui/\$(id -u)/com.pogo.daemon
     launchctl print gui/\$(id -u)/com.pogo.daemon | head -40
     curl -s http://127.0.0.1:10000/version" ;;
         *)
@@ -3292,7 +3294,9 @@ when pogod does not answer — correctly, because a deploy cannot drain a fleet 
 cannot reach. So this is an ALERT, and it will repeat every night until somebody
 starts the daemon:
 
-    launchctl kickstart -k gui/\$(id -u)/com.pogo.daemon
+    launchctl bootout gui/\$(id -u)/com.pogo.daemon
+    launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.pogo.daemon.plist
+    launchctl kickstart gui/\$(id -u)/com.pogo.daemon
     launchctl print gui/\$(id -u)/com.pogo.daemon | head -40
     curl -s $LIVENESS_URL/version" ;;
         *)
@@ -3497,7 +3501,7 @@ describe_exit() {
         2) echo "bad invocation or unusable repo path" ;;
         3) echo "refused: non-interactive without --yes (a bug in this wrapper — it must pass --yes)" ;;
         4) echo "BUILD FAILED (dirty tree, go install, or the post-install revision check)" ;;
-        5) echo "launchctl kickstart failed — pogod may be DOWN" ;;
+        5) echo "launchctl restart failed (bootout/bootstrap/kickstart) — pogod may be DOWN" ;;
         # 6 was "post-restart verification failed" until mg-0155, and had never
         # been that: every exit-6 site is a drain PRECONDITION refusal, reached
         # before the build. The description sent the 2026-08-07 03:00 reader to
@@ -3752,12 +3756,17 @@ EOF
             ;;
         5)
             cat <<'EOF'
-The launchctl kickstart failed AFTER a successful install, which is the one exit
-here that can leave the box worse than it found it: pogod may be DOWN. Check it
-first and restore service before diagnosing anything else:
+The launchctl restart failed AFTER a successful install, which is the one exit
+here that can leave the box worse than it found it: pogod may be DOWN, and since
+mg-716a the restart is bootout + bootstrap + kickstart, so its job may also be
+UNLOADED (then nothing, not even KeepAlive, will start it). The deploy log's
+ERROR lines say which step failed. Check it first and restore service before
+diagnosing anything else:
 
   launchctl print gui/$(id -u)/com.pogo.daemon | head -20
-  launchctl kickstart -k gui/$(id -u)/com.pogo.daemon
+  launchctl bootout gui/$(id -u)/com.pogo.daemon
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pogo.daemon.plist
+  launchctl kickstart gui/$(id -u)/com.pogo.daemon
   curl -s http://127.0.0.1:10000/version
 EOF
             ;;
@@ -3811,12 +3820,17 @@ pogod's clients write to. A dead daemon does not trigger any of them, and on
 2026-08-26 exactly that produced six consecutive nights of "nothing owed, exit 0"
 over a box with no daemon on it (mg-a854).
 
-  launchctl kickstart -k gui/$(id -u)/com.pogo.daemon
+  launchctl bootout gui/$(id -u)/com.pogo.daemon
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pogo.daemon.plist
+  launchctl kickstart gui/$(id -u)/com.pogo.daemon
   launchctl print gui/$(id -u)/com.pogo.daemon | head -40
   curl -s http://127.0.0.1:10000/version
   tail -50 ~/Library/Logs/pogo/pogod.log
 
-If the kickstart does not stick, `launchctl print`'s `last exit reason` is the
+Boot the job out and back in; do not reach for `kickstart -k` alone. From
+2026-09-08 to 09-26 kickstart -k ran against this job for 18 days without
+bringing pogod back, and one bootout + bootstrap did (mg-716a; the cause is still
+open). If the restart does not stick, `launchctl print`'s `last exit reason` is the
 field to read first — a Launch Constraint Violation against a freshly installed
 binary has done this before (mg-9cc0).
 EOF
