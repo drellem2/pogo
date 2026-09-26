@@ -106,10 +106,9 @@ func simulate190(t *testing.T, cfg config.StallWatchConfig) []string {
 // backoff doubles from the 5m base to the 4h cap — notices at 10m, 15m, 25m,
 // 45m, 85m, 165m, 325m, 565m and 805m. Nine over 13h30m.
 //
-// The positive control is the pre-fix cadence: the same run with escalation
-// disabled (a cap below the base is repeatCooldown's documented escape hatch
-// to a flat cooldown) fires once per 5m from 10m to 810m — 161, the count the
-// triage simulation of the old code produced — and must fail the new bound.
+// Its positive control is TestUnreadMail190ControlRunsThePreFixCode, which
+// runs this same simulation against the stallwatch package as it stood before
+// the fix.
 func TestUnreadMailSelfFeedingRepeatsAreBounded(t *testing.T) {
 	cfg := baseConfig()
 	cfg.RepeatBackoffCap = 4 * time.Hour
@@ -126,16 +125,6 @@ func TestUnreadMailSelfFeedingRepeatsAreBounded(t *testing.T) {
 		if !strings.HasPrefix(s, "stall-watch: 1 unread mail,") {
 			t.Errorf("notice %d subject %q counts something other than the one real message", i+1, s)
 		}
-	}
-
-	flat := cfg
-	flat.RepeatBackoffCap = time.Minute // below the 5m base: flat cooldown
-	control := simulate190(t, flat)
-	if len(control) != 161 {
-		t.Fatalf("positive control: flat-cooldown run fired %d times; want 161 (the pre-fix cadence)", len(control))
-	}
-	if len(control) <= want {
-		t.Fatalf("positive control %d does not exceed the bound %d — the test cannot tell the fix from the bug", len(control), want)
 	}
 }
 

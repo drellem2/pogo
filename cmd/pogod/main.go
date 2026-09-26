@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nightlyone/lockfile"
@@ -106,7 +107,18 @@ var fleetProgress *progresswatch.Watcher
 
 var mergeQueue *refinery.Refinery
 var sched *scheduler.Scheduler
-var srv *server.Server
+
+// srvRef holds the server coordinator. It is an atomic pointer rather than a
+// plain var because main publishes it AFTER the heartbeat is already running,
+// and the heartbeat's goroutines — the stall watcher's Paused hook and the
+// orchestration resumer — read it from their own goroutines: a plain var there
+// was a data race (mg-4d5e). Read it through currentServer(); nil means the
+// server is not built yet.
+var srvRef atomic.Pointer[server.Server]
+
+// currentServer returns the server coordinator, or nil before main builds it.
+func currentServer() *server.Server { return srvRef.Load() }
+
 var startTime time.Time
 
 var bindFlag = flag.String("bind", "", "address to bind the server to (default: 127.0.0.1)")
@@ -647,7 +659,7 @@ func healthFull(w http.ResponseWriter, r *http.Request) {
 
 	// Pogod health
 	mode := "full"
-	if srv != nil {
+	if srv := currentServer(); srv != nil {
 		mode = srv.Mode().String()
 	}
 	pogodHealth := health.Pogod{
@@ -975,7 +987,7 @@ func registerHandlers() {
 	// actually be called. These two branches used to open-code the same four
 	// http.Handle lines, and a route that reached neither of them 404'd for
 	// two weeks (mg-c26d).
-	if srv != nil {
+	if srv := currentServer(); srv != nil {
 		apimount.Mount(http.DefaultServeMux, srv.RequireOrchestration(orchestrated))
 
 		// Server mode endpoints (not guarded — always available)
@@ -1313,6 +1325,7 @@ func newStallNudgerWithTimeoutAndDamper(reg *agent.Registry, mail func(to, from,
 // while the server is in index-only mode (gh drellem2/pogo#190). A daemon
 // whose server is not built yet is not paused — there is no mode to honour.
 func stallWatchPaused() bool {
+	srv := currentServer()
 	return srv != nil && srv.Mode() == config.ModeIndexOnly
 }
 
@@ -3610,6 +3623,7 @@ Flags:
 	var orchResume *orchResumer
 	if cfg.OrchestrationResume.Enabled {
 		orchResume = newOrchResumer(func() orchResumeServer {
+			srv := currentServer()
 			if srv == nil {
 				return nil
 			}
@@ -4139,7 +4153,7 @@ Flags:
 	}
 
 	// Initialize server coordinator
-	srv = server.New(agentRegistry, mergeQueue)
+	srv := server.New(agentRegistry, mergeQueue)
 	// The deadline every stop is measured against (mg-5af1). Set here rather
 	// than defaulted inside the server so the value an operator reads in
 	// config.toml is the value the daemon applies. A DISABLED resumer also
@@ -4194,6 +4208,10 @@ Flags:
 			return newRef, nil
 		})
 	}
+
+	// Publish the server only once it is fully configured: the heartbeat is
+	// already running and reads it from other goroutines (mg-4d5e).
+	srvRef.Store(srv)
 
 	// Register HTTP handlers
 	registerHandlers()
