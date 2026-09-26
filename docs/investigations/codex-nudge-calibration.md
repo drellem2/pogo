@@ -111,12 +111,38 @@ suppress it — that flag governs command approvals and the sandbox, not project
 trust. The survey said to "add a `codex` hook only if Codex surfaces a dialog
 the bypass flag does not suppress (determine empirically)" — it does, so
 `codex.TrustDialogHook` (a `PostSpawnHook`, mirroring `claude.TrustDialogHook`)
-presses Enter to accept it.
+presses Enter on the accept row to accept it.
 
 One rendering subtlety: Codex draws the dialog body glyph-by-glyph with cursor
 positioning, so once ANSI escapes are stripped the inter-word spaces vanish
 (`"untrusted contents"` → `"untrustedcontents"`). The hook collapses all
 whitespace before matching its marker — see `matchesTrustDialog`.
+
+**Which row Enter lands on (mg-7511, 2026-09-26).** Claude Code 2.1.270+
+highlights "No, exit" by default, so its hook's bare Enter killed every spawn
+(drellem2/pogo#177). Codex does not: 0.132.0 highlights `› 1. Yes, continue` in a
+git dir and in a non-git dir (live PTY), and upstream `main` initialises
+`highlighted: TrustDirectorySelection::Trust` unconditionally. But Enter on
+`2. No, quit` exits Codex with status **0** (live), and a pogo worktree of an
+already-trusted repo shows no dialog at all (Codex resolves trust at the repo
+root). The hook now applies #177's remedy anyway:
+
+- **label-select** — Enter is sent only while the last highlighted row
+  (`› N. <label>`) reads as the trusting label; a highlight on the refusing row
+  is moved with Up and re-scanned. Codex re-emits both rows on every move, so
+  the re-scan sees it (live: after Down the stream carries
+  `1.Yes,continue›2.No,quit`).
+- **fail closed** — any other label gets no keystroke; the spent budget is
+  drift. Upstream's "Open restricted" row falls here on purpose.
+- **composer-ready** — after Enter the hook waits for the status box. An exit
+  in that window is a distinct `trustWatchRefused` outcome and a
+  `trust_dialog_refused` event, never a confirmed spawn.
+
+Upstream reworded the dialog after 0.132.0 (openai/codex#44732): body "Trust this
+folder? Codex can read, edit, and run files here, ...", rows "Trust and
+continue" / "Quit". The marker and label sets carry those strings **from source
+and the render snapshot only** — this host runs 0.132.0, so they are unverified
+on a live PTY. Fail-closed is what makes that acceptable.
 
 No `SessionHook` is needed: Codex surfaces no mid-session modal requiring a
 keystroke (the quota/rate-limit notice is an inline message; command approvals

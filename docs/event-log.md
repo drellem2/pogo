@@ -2006,6 +2006,19 @@ pogod's prompt-ready sentinel drift detector ([sentineldrift.go](../internal/age
 {"schema_version":1,"timestamp":"2026-07-13T18:20:00.000000000Z","event_type":"sentinel_drift","agent":"pogod","details":{"provider":"claude","gate":"initial-nudge","sentinel":"? for shortcuts","missed":11,"total":12,"fraction":0.9166666666666666,"window":"1h0m0s"}}
 ```
 
+#### `trust_dialog_refused`
+
+A trust-dialog hook answered a harness's directory-trust dialog, and the harness then **exited** instead of drawing its composer ([internal/codex/trust_hook.go](../internal/codex/trust_hook.go), mg-7511). The keystroke did the opposite of what it was meant to, so the spawn is dead even though it was reported ok. This is the failure drellem2/pogo#177 found on Claude Code, where Enter landed on "No, exit". It is deliberately separate from `sentinel_drift`: the dialog marker matched, so this is not evidence that a sentinel went stale. Emitted at most once per spawn. Currently only the Codex hook emits it. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent` (`cat-<name>` / `crew-<name>`), `details`
+- **Optional envelope:** `work_item_id`
+- **`details` fields:**
+  - `provider` (string, required): harness provider id, e.g. `"codex"`
+
+```json
+{"schema_version":1,"timestamp":"2026-09-26T09:20:00.000000000Z","event_type":"trust_dialog_refused","agent":"cat-p7511","work_item_id":"mg-7511","details":{"provider":"codex"}}
+```
+
 #### `auto_renudge`
 
 pogod's post-spawn start-verification watcher ([startverify.go](../internal/agent/startverify.go), mg-feb3, gh drellem2/macguffin#24) re-delivered a bare submit terminator (CR) to a freshly spawned polecat because its mg work item was still unclaimed after the start-verify window. Under a concurrent spawn wave a CPU-starved harness can miss the initial kickoff nudge (the false-idle gate delivers it before Claude Code is listening; it piles in the kernel input buffer and Ink absorbs it as one paste block whose CR never re-tokenizes as a submit — mg-ce61), leaving the agent alive but never claiming its item. The watcher gates on a HARD started-signal — originally the item leaving `available/`, and since mg-7d6d the claim PID moving off pogod's own for dispatches pogod claimed at spawn — never on output quiescence, and retries a bounded number of times; one event is emitted per delivered CR. A run of these on the same spawn wave is the productized-recovery footprint of the init-stall. Additive — no `schema_version` bump.
