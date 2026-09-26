@@ -703,13 +703,16 @@ not cover.  It is also visible from outside, which is what this test uses:
 `default-directory'.  A stray file dropped into whichever project the user was
 visiting is the cheap, checkable proxy for the pty being gone.
 
-The buffer assertion is here because the obvious way to silence `nohup.out' —
-handing the spawn a redirect or no output at all — would take pogod's startup
-output with it, and that output is the only account of a daemon that failed to
-bind."
+The log assertion is here because pogod's startup output is the only account
+of a daemon that failed to bind, and since mg-a7a1 it goes to
+`pogo-server-log-file' rather than to a pipe Emacs reads — a pipe that has no
+reader once Emacs exits, which kills the pogod writing to it."
   (pogo-test--call-with-fake-pogod
    (lambda (fake)
      (let* ((default-directory (make-temp-file "pogo-test-cwd" t))
+            (log-dir (make-temp-file "pogo-test-log" t))
+            ;; A directory that does not exist yet: the spawn must create it.
+            (pogo-server-log-file (expand-file-name "sub/pogod.log" log-dir))
             (pogo-debug-log nil))
        (unwind-protect
            (progn
@@ -720,10 +723,29 @@ bind."
              (should-not (file-exists-p (expand-file-name "nohup.out")))
              (should (pogo-test--wait-until
                       (lambda ()
-                        (with-current-buffer "*pogo-server*"
-                          (string-match-p "stand-in pogod is up"
-                                          (buffer-string)))))))
-         (ignore-errors (delete-directory default-directory t)))))))
+                        (and (file-exists-p pogo-server-log-file)
+                             (with-temp-buffer
+                               (insert-file-contents pogo-server-log-file)
+                               (string-match-p "stand-in pogod is up"
+                                               (buffer-string))))))))
+         (ignore-errors (delete-directory default-directory t))
+         (ignore-errors (delete-directory log-dir t)))))))
+
+(ert-deftest pogo-test-logged-argv-redirects-to-the-log-file ()
+  "`pogo--logged-argv' puts the log file, then the untouched argv, after sh -c."
+  (let ((pogo--is-windows nil)
+        (pogo-server-log-file "/var/log/pogo/pogod.log"))
+    (let ((argv (pogo--logged-argv '("/usr/bin/nohup" "/opt/bin/pogod"))))
+      (should (equal (seq-take argv 2) '("/bin/sh" "-c")))
+      (should (string-match-p ">>\"\\$log\" 2>&1" (nth 2 argv)))
+      (should (equal (nthcdr 4 argv)
+                     '("/var/log/pogo/pogod.log" "/usr/bin/nohup" "/opt/bin/pogod"))))))
+
+(ert-deftest pogo-test-logged-argv-is-unchanged-on-windows ()
+  "Windows has no /bin/sh, so the argv is left alone there."
+  (let ((pogo--is-windows t))
+    (should (equal (pogo--logged-argv '("C:/pogo/pogod.exe"))
+                   '("C:/pogo/pogod.exe")))))
 
 (ert-deftest pogo-test-an-undetached-spawn-dies-of-that-same-sighup ()
   "The same stand-in pogod, spawned bare, dies of the signal the other survives.

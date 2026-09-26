@@ -287,6 +287,17 @@ the second case answers immediately with connection refused."
   :type 'number
   :package-version '(pogo . "0.0.1"))
 
+(defcustom pogo-server-log-file (expand-file-name "~/Library/Logs/pogo/pogod.log")
+  "File a pogod spawned by `pogo-start' writes its stdout and stderr to.
+
+The default is the file the launchd job names, so a pogod Emacs starts logs
+where a launchd one does.  It must be a FILE: a pogod whose output is a pipe
+lives only as long as the pipe's reader, and dies of SIGPIPE on its first log
+line after that reader goes (mg-a7a1)."
+  :group 'pogo
+  :type 'file
+  :package-version '(pogo . "0.0.1"))
+
 (defcustom pogo-track-known-projects-automatically t
   "Controls whether Pogo will automatically register known projects.
 
@@ -452,6 +463,30 @@ Windows has neither `nohup' nor SIGHUP, so PROGRAM is returned bare there."
         (pogo-log "nohup not found: a spawned pogod will die when Emacs exits")
         (list program)))))
 
+(defun pogo--logged-argv (argv)
+  "Return ARGV wrapped so its stdio is `pogo-server-log-file', not Emacs.
+
+Emacs hands a subprocess a pipe it reads for as long as Emacs lives.  pogod
+outlives Emacs by design (`pogo--detached-argv'), so on a pipe it would die of
+SIGPIPE at its first log line after Emacs exits — the same death, by a quieter
+route, that the nohup prefix exists to prevent (mg-a7a1).  The shell opens the
+log for append and execs ARGV onto it, stdin on /dev/null.  pogod also
+re-points a piped stdio at its log on its own; this keeps an older pogod, which
+does not, alive too.
+
+Because stdout is then a file, `nohup' does not create a `nohup.out'.
+
+Windows has no /bin/sh and no SIGPIPE, so ARGV is returned unchanged there."
+  (if pogo--is-windows
+      argv
+    (append (list "/bin/sh" "-c"
+                  (concat "log=$1; shift; "
+                          "mkdir -p \"$(dirname \"$log\")\" && "
+                          "exec \"$@\" </dev/null >>\"$log\" 2>&1")
+                  "pogo-spawn"
+                  (expand-file-name pogo-server-log-file))
+            argv)))
+
 (defun pogo-start ()
   "Spawn a detached pogod and return its process object, or nil.
 
@@ -462,22 +497,22 @@ the enable path.  Call `pogo-try-start' instead."
   (let ((program (pogo--pogod-program)))
     (if (not program)
         (pogo-log "pogod is not on exec-path; not starting a server")
-      ;; A pipe, not the pty `process-connection-type' defaults to.  Two
-      ;; reasons, and both of them are the point of this function:
+      ;; A pipe, not the pty `process-connection-type' defaults to: a pty
+      ;; would be Emacs's pty, and it would be pogod's controlling terminal.
+      ;; Emacs closing the master on exit hangs up everything in that session
+      ;; — the mg-6b66 cascade one level up, arriving by a route `nohup' does
+      ;; not cover.
       ;;
-      ;; A pty would be Emacs's pty, and it would be pogod's controlling
-      ;; terminal.  Emacs closing the master on exit hangs up everything in
-      ;; that session — which is the mg-6b66 cascade one level up, arriving by
-      ;; a route `nohup' does not cover.
-      ;;
-      ;; And `nohup' checks isatty(stdout): on a pty it decides it must
-      ;; preserve output and creates a `nohup.out' in `default-directory',
-      ;; dropping a stray file into whichever project the user happened to be
-      ;; visiting.  Over a pipe it leaves stdio alone, so pogod's startup
-      ;; output still lands in *pogo-server* where it can be read.
+      ;; The pipe carries only the wrapper shell's own errors, into
+      ;; *pogo-server*.  pogod's output goes to `pogo-server-log-file'
+      ;; (`pogo--logged-argv'): a pipe Emacs reads is a pipe with no reader
+      ;; once Emacs exits, and a pogod writing to it then dies of SIGPIPE
+      ;; (mg-a7a1).  That file is also where a daemon that failed to bind
+      ;; says why.
       (let* ((process-connection-type nil)
              (proc (apply #'start-process "pogod" "*pogo-server*"
-                          (pogo--detached-argv program))))
+                          (pogo--logged-argv
+                           (pogo--detached-argv program)))))
         ;; The daemon is not ours to kill, so do not stop and ask about it on
         ;; exit.  This suppresses the prompt only; the SIGHUP that follows is
         ;; already a no-op thanks to `pogo--detached-argv'.

@@ -5,7 +5,6 @@
 package client
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +12,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -172,7 +173,7 @@ func StartServer() error {
 	if daemonBound() {
 		return nil
 	}
-	return startServerCmd(newServerCmd(), HealthCheck, startupHealthTimeout)
+	return startServerCmd(newServerCmd(), config.PogodLogPath(), HealthCheck, startupHealthTimeout)
 }
 
 // newServerCmd builds the pogod invocation used by StartServer. The daemon is
@@ -193,16 +194,28 @@ func newServerCmd() *exec.Cmd {
 }
 
 // startServerCmd spawns the given command and waits for healthCheck to
-// succeed within timeout. It captures pogod's stdout+stderr so that,
-// when the daemon fails to bind (or exits early), the error message
-// surfaces the underlying cause rather than reporting a false success.
-// Both streams are captured because pogod's startup-error path is
-// inconsistent — lockfile errors go to stdout (fmt.Printf) while runtime
-// log lines go to stderr (log package).
+// succeed within timeout.
+//
+// pogod's stdin is /dev/null and its stdout+stderr are logPath, opened for
+// append — NEVER a pipe back to this process (mg-a7a1). This process is a CLI
+// invocation (`lsp`, `pose`, `pogo visit` from a shell's chpwd hook, `pogo
+// server start`) that exits the moment the daemon answers. A pipe it owned
+// would lose its only reader right then, and pogod's next log line would take
+// SIGPIPE — Go kills a process that writes to a broken pipe on fd 1 or 2. That
+// is the 2026-09 outage: pogod booted, spawned the mayor, and was dead ~30s
+// later, on every boot, with the log file launchd names recording none of it.
+// A pipe that is read until pogod dies is not a fix either — it moves the
+// death to whenever the reader goes. A file has no reader to lose.
+//
+// The early-exit diagnostics this function has always given are kept: what
+// pogod wrote to logPath since the spawn is read back and included in the
+// error. Both streams go to the file because pogod's startup-error path is
+// inconsistent — lockfile errors go to stdout (fmt.Printf) while runtime log
+// lines go to stderr (log package).
 //
 // On success, the spawned process is left running. On failure, the
-// process is killed and its captured output is included in the returned
-// error (truncated to a sane prefix).
+// process is killed and what it wrote is included in the returned error
+// (truncated to a sane prefix).
 //
 // Ownership note: startServerCmd spawns a background goroutine that calls
 // cmd.Wait and keeps it after returning. Callers (including tests) must
@@ -210,12 +223,29 @@ func newServerCmd() *exec.Cmd {
 // the losing Wait blocks forever in awaitGoroutines because the internal
 // goroutineErr channel is sent exactly one value (mg-59d5). To stop the
 // process, Kill it and let the background goroutine reap it.
-func startServerCmd(cmd *exec.Cmd, healthCheck func() error, timeout time.Duration) error {
-	var output bytes.Buffer
-	var outputMu sync.Mutex
-	writer := &lockedWriter{w: &output, mu: &outputMu}
-	cmd.Stdout = writer
-	cmd.Stderr = writer
+func startServerCmd(cmd *exec.Cmd, logPath string, healthCheck func() error, timeout time.Duration) error {
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return fmt.Errorf("cannot create pogod log directory: %w", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("cannot open pogod log %s: %w", logPath, err)
+	}
+	// Close our copy once the child holds its own; the child's descriptors
+	// are independent of ours after Start.
+	defer logFile.Close()
+	var startOffset int64
+	if fi, err := logFile.Stat(); err == nil {
+		startOffset = fi.Size()
+	}
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		return fmt.Errorf("cannot open %s: %w", os.DevNull, err)
+	}
+	defer devnull.Close()
+	cmd.Stdin = devnull
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to spawn pogod: %w", err)
@@ -225,9 +255,7 @@ func startServerCmd(cmd *exec.Cmd, healthCheck func() error, timeout time.Durati
 	go func() { exited <- cmd.Wait() }()
 
 	readOutput := func() string {
-		outputMu.Lock()
-		defer outputMu.Unlock()
-		msg := strings.TrimSpace(output.String())
+		msg := strings.TrimSpace(readSince(logPath, startOffset))
 		const max = 1024
 		if len(msg) > max {
 			msg = msg[:max] + "..."
@@ -267,18 +295,24 @@ func startServerCmd(cmd *exec.Cmd, healthCheck func() error, timeout time.Durati
 	}
 }
 
-// lockedWriter serializes writes to an underlying buffer so that the
-// background cmd.Wait goroutine and the polling goroutine can safely
-// read pogod's stderr after a deadline trips.
-type lockedWriter struct {
-	w  *bytes.Buffer
-	mu *sync.Mutex
-}
-
-func (l *lockedWriter) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.w.Write(p)
+// readSince returns what has been appended to path at or after offset. A
+// rotation that shrank the file under us reads from the start instead.
+func readSince(path string, offset int64) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err == nil && offset > fi.Size() {
+		offset = 0
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return ""
+	}
+	// Bounded: the caller keeps only a prefix, and a concurrent writer must
+	// not make this read unbounded.
+	data, _ := io.ReadAll(io.LimitReader(f, 64<<10))
+	return string(data)
 }
 
 // GetServerMode returns the current run mode of the server ("full" or "index-only").

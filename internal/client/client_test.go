@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -53,7 +54,7 @@ func TestStartServerCmd_BindFailureSurfacedInError(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "echo 'listen tcp 127.0.0.1:6060: bind: address already in use' >&2; exit 1")
 
 	start := time.Now()
-	err := startServerCmd(cmd, alwaysFailingHealth, 5*time.Second)
+	err := startServerCmd(cmd, testLogPath(t), alwaysFailingHealth, 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -77,7 +78,7 @@ func TestStartServerCmd_BindFailureSurfacedInError(t *testing.T) {
 func TestStartServerCmd_StdoutFailureSurfacedInError(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "echo 'Cannot get lock \"/tmp/pogo.pid\", reason: Locked by other process'; exit 1")
 
-	err := startServerCmd(cmd, alwaysFailingHealth, 5*time.Second)
+	err := startServerCmd(cmd, testLogPath(t), alwaysFailingHealth, 5*time.Second)
 	if err == nil {
 		t.Fatal("expected error when pogod exits with stdout-only message, got nil")
 	}
@@ -99,7 +100,7 @@ func TestStartServerCmd_TimeoutWithoutHealth(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "echo 'pogod: still trying to bind...' >&2; exec sleep 30")
 
 	start := time.Now()
-	err := startServerCmd(cmd, alwaysFailingHealth, 500*time.Millisecond)
+	err := startServerCmd(cmd, testLogPath(t), alwaysFailingHealth, 500*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -132,7 +133,7 @@ func TestStartServerCmd_HealthySucceeds(t *testing.T) {
 	}
 
 	start := time.Now()
-	err := startServerCmd(cmd, healthCheck, 5*time.Second)
+	err := startServerCmd(cmd, testLogPath(t), healthCheck, 5*time.Second)
 	elapsed := time.Since(start)
 
 	// Always clean up the spawned process, regardless of test outcome.
@@ -160,7 +161,7 @@ func TestStartServerCmd_HealthySucceeds(t *testing.T) {
 // directly without trying to poll a nonexistent process.
 func TestStartServerCmd_SpawnFailure(t *testing.T) {
 	cmd := exec.Command("/nonexistent/path/to/pogod-binary-mg71e6")
-	err := startServerCmd(cmd, alwaysFailingHealth, 5*time.Second)
+	err := startServerCmd(cmd, testLogPath(t), alwaysFailingHealth, 5*time.Second)
 	if err == nil {
 		t.Fatal("expected error when binary doesn't exist, got nil")
 	}
@@ -185,7 +186,7 @@ func TestNewServerCmd_SessionIsolation(t *testing.T) {
 	// actually lands the child in its own process group.
 	fake := exec.Command("sh", "-c", "exec sleep 30")
 	fake.SysProcAttr = cmd.SysProcAttr
-	if err := startServerCmd(fake, func() error { return nil }, 5*time.Second); err != nil {
+	if err := startServerCmd(fake, testLogPath(t), func() error { return nil }, 5*time.Second); err != nil {
 		t.Fatalf("startServerCmd: %v", err)
 	}
 	defer func() {
@@ -206,4 +207,9 @@ func TestNewServerCmd_SessionIsolation(t *testing.T) {
 	if childPgid != fake.Process.Pid {
 		t.Errorf("spawned daemon pgid = %d, want %d (daemon should lead its own session/process group)", childPgid, fake.Process.Pid)
 	}
+}
+
+func testLogPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "pogod.log")
 }

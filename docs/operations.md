@@ -494,6 +494,44 @@ report a pid for a daemon that is not answering — the command fails with `pogo
 server is not reachable` instead. `GET /health/full` (`pogod.pid`) and
 `GET /version` (`pid`) carry the same value for programmatic callers.
 
+## Who can start pogod, and where its output goes (mg-a7a1)
+
+A pogod whose stdout or stderr is a **pipe** lives only as long as whatever
+reads the other end. When that reader exits, pogod's next log line is a write
+to a broken pipe on fd 1 or 2, and Go kills the process with SIGPIPE. Its
+agents go with it, because their PTYs die with pogod. This is how the
+2026-09-08 → 09-26 outage kept recurring. The recovery session watched pogods
+with fd 2 on a PIPE die about 30 s after each boot, and one of them started
+while `com.pogo.daemon` was booted out (the session's figures, not
+re-measured here). Measured for this change against the deployed binary: a
+sandbox pogod spawned onto a pipe that was then closed died with rc −13
+(SIGPIPE) on its first write, which was one `GET /file`.
+
+Every path in this repo that execs pogod:
+
+| Spawner | Who reaches it | stdio |
+|---|---|---|
+| launchd `com.pogo.daemon` | boot, `KeepAlive`, `launchctl kickstart` (tier 2, the recovery job, the nightly deploy) | `~/Library/Logs/pogo/pogod.log` (plist `StandardOutPath`/`StandardErrorPath`) |
+| `internal/client.StartServer` | `pogo server start`, `pogo init` with no service installed, and **every `lsp`, `pose`, `pogo visit`** when pogod is down (`RunWithHealthCheck`). The zsh/bash integration runs `pogo visit` on every `cd` | `~/Library/Logs/pogo/pogod.log`, stdin `/dev/null`. **Before mg-a7a1 it was a pipe read by the CLI, which exits the moment pogod answers `/health`.** |
+| Emacs `pogo-start` (`emacs/pogo.el`) | `pogo-mode` when no daemon answers | `pogo-server-log-file` (default the same log). Before mg-a7a1 it was a pipe Emacs read until Emacs exited. |
+
+No launchd job, recovery script or reminder script on this box execs pogod
+directly. `pogo-recovery.sh` and `pogo-deploy.sh` go through
+`launchctl kickstart`.
+
+**The spawner you cannot list is covered by pogod itself.** First thing in
+`main`, before it writes anything, pogod checks fds 1 and 2. If either is a
+pipe, it re-points both at the log the installed plist names, or at this
+build's default when no plist is installed. It then logs one line naming its
+parent:
+
+    pogod: stderr was a PIPE (parent pid=N command="…"); re-pointed stdout+stderr at …/pogod.log …
+
+`grep 'was a PIPE' ~/Library/Logs/pogo/pogod.log` therefore lists every
+non-launchd spawner that has started a pogod since this change. `parent pid=1`
+means the spawner had already exited. A tty (a foreground run), a regular file
+and a socket (systemd's journal) are left alone.
+
 ## Pogod restart policy
 
 `pogod` runs under launchd with `KeepAlive=true` (see `scripts/launchd/com.pogo.daemon.plist`). That means **any uncoordinated kill is a loop**: launchd relaunches the daemon within seconds, and if the caller then re-evaluates "pogod looks broken — kill it again," the system gets stuck in a kill→relaunch→kill cycle. The decision recorded in mg-f5fc is that callers — polecats (disposable worker agents), crew agents, humans at a terminal — follow a three-tier escalation. Try tier 1 first; only escalate when the situation matches the criteria below.

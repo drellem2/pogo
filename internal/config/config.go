@@ -3154,6 +3154,24 @@ func LockfilePath() string {
 	return filepath.Join(PogoHome(), "pogo.pid")
 }
 
+// PogodLogDir is ~/Library/Logs/pogo — the directory the launchd plist points
+// pogod's stdout and stderr at. It lives here, rather than only in the service
+// package, because the CLI's own spawn path (internal/client.StartServer) must
+// name the same file and cannot import service (service imports client).
+func PogodLogDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "Logs", "pogo")
+}
+
+// PogodLogPath is the file every non-launchd spawn of pogod must send stdio to
+// (mg-a7a1). A pogod whose stdout/stderr is a PIPE lives only as long as the
+// pipe's reader: once the reader exits, pogod's next log write takes SIGPIPE
+// and the daemon dies, taking the agents whose PTYs it owns with it. A
+// regular file has no reader to lose.
+func PogodLogPath() string {
+	return filepath.Join(PogodLogDir(), "pogod.log")
+}
+
 // maxUnixSocketPathLen is the longest bindable AF_UNIX path. sockaddr_un's
 // sun_path field is 104 bytes on darwin and 108 on linux, both counting the NUL
 // terminator. We budget against the smaller (darwin) figure on every platform so
