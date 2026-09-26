@@ -109,6 +109,58 @@ func TestAuthStatusExec(t *testing.T) {
 	}
 }
 
+// TestAuthStatusDoesNotWaitOnAGrandchild pins the probe's WaitDelay (mg-2991).
+// CommandContext kills only the direct child, so a grandchild that inherited
+// stdout used to hold Run open until IT exited — past the probe timeout, which
+// is the one thing the timeout promises. Control: with authProbeWaitDelay = 0
+// (no WaitDelay), both cases below block for the grandchild's full sleep.
+func TestAuthStatusDoesNotWaitOnAGrandchild(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "")
+	t.Setenv("CLAUDE_CODE_USE_VERTEX", "")
+	old := authProbeWaitDelay
+	authProbeWaitDelay = 300 * time.Millisecond
+	defer func() { authProbeWaitDelay = old }()
+
+	const grandchild = 10 // seconds the backgrounded holder keeps stdout open
+	stub := func(body string) string {
+		p := filepath.Join(t.TempDir(), "claude")
+		script := "#!/bin/sh\nsleep " + itoa(grandchild) + " &\n" + body
+		if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	within := func(name string, f func() agent.AuthReading) agent.AuthReading {
+		start := time.Now()
+		r := f()
+		if d := time.Since(start); d > grandchild*time.Second/2 {
+			t.Errorf("%s: AuthStatus took %s — it waited on the grandchild holding stdout", name, d)
+		}
+		return r
+	}
+
+	// A hung probe with a pipe-holding grandchild: returns at the deadline.
+	hang := stub("exec sleep 30\n")
+	r := within("hung", func() agent.AuthReading {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		return AuthStatus(ctx, hang)
+	})
+	if r.State != agent.AuthUnknown {
+		t.Errorf("hung: %v (%s)", r.State, r.Detail)
+	}
+
+	// A probe that answered and exited 0 while a grandchild lingers: the
+	// answer it printed is still read, not discarded as "did not complete".
+	answered := stub("cat <<'JSON'\n" + loggedInAuthStatus + "\nJSON\nexit 0\n")
+	r = within("answered", func() agent.AuthReading { return AuthStatus(context.Background(), answered) })
+	if r.State != agent.AuthLoggedIn {
+		t.Errorf("answered then lingered: %v (%s)", r.State, r.Detail)
+	}
+}
+
 // TestCommandTemplateCarriesBypassWarningSettings pins part A of #173: the
 // default spawn argv carries --settings with the JSON as ONE argument (the
 // template is split on whitespace with no shell quoting), and the JSON parses.
@@ -206,11 +258,11 @@ func TestAutoStartLoginPreflight(t *testing.T) {
 			// Hand-starting is never second-guessed: the operator is watching.
 			if tc.refusing {
 				a, err := reg.StartCrewAgent("scout")
+				if errors.Is(err, agent.ErrHarnessNotLoggedIn) {
+					t.Fatalf("manual start ran the preflight: %v", err)
+				}
 				if err != nil || a == nil {
 					t.Fatalf("manual StartCrewAgent refused: %v", err)
-				}
-				if errors.Is(err, agent.ErrHarnessNotLoggedIn) {
-					t.Fatal("manual start ran the preflight")
 				}
 			}
 		})
