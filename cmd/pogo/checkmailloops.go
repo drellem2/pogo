@@ -90,6 +90,17 @@ agents it did not judge, whatever the verdict — a clean bill of health over 2 
 NOTHING says so in as many words rather than printing an all-clear, and a pogod
 with no basis to judge at all is an ERROR here, not an empty list.
 
+Each agent that is not judged also carries an OBSERVATION of its mail loop:
+whether the scheduler holds a mail-check for it, by the same alias rules
+diagnose uses (mg-b70c). That turns "3 not judged" into "3 not judged; all 3
+have a loop anyway". It is informational only — it never moves an agent into
+the judged set, never makes one RED, and never changes the exit status. An
+excluded agent with no loop is not a finding: a stopped agent's loop is reaped
+by design, and a polecat between spawn and registration has none yet. In
+--json it is each unjudged entry's "mail_loop": "present" or "absent"; an entry
+with no "mail_loop" came from a pogod older than the observation and means NOT
+REPORTED, never "absent".
+
 The machine-readable reason in --json is one of "polecat", "not_running",
 "not_configured", "unreadable_prompts" — one per category above. Until mg-7b3f
 the last two were a single value, because agent.IsConfiguredAgent returned false

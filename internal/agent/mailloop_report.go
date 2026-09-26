@@ -96,10 +96,70 @@ func (r MailLoopExclusionReason) Describe() string {
 // not a finding: nothing here is wrong, and nothing here is an all-clear
 // either. It is the census line that turns "judged 2 of 6" from a number into
 // a statement (mg-0db1).
+//
+// MailLoop is what the scheduler says about this agent's mail-check schedule —
+// an OBSERVATION, not a judgement (mg-b70c). It turns "3 not judged" into "3
+// not judged; all 3 have a loop anyway", which the report could not say while
+// it only disclosed the set. It is informational and nothing else: it does not
+// move the agent into Judged, it cannot put the agent in Missing, and
+// Actionable never reads it. The eligibility boundary is mg-738f's cry-wolf
+// guarantee, and widening what the check JUDGES is a different decision from
+// widening what it REPORTS.
 type MailLoopExclusion struct {
-	Name   string                  `json:"name"`
-	Type   AgentType               `json:"type"`
-	Reason MailLoopExclusionReason `json:"reason"`
+	Name     string                  `json:"name"`
+	Type     AgentType               `json:"type"`
+	Reason   MailLoopExclusionReason `json:"reason"`
+	MailLoop MailLoopObservation     `json:"mail_loop"`
+}
+
+// MailLoopObservation is whether a mail-check schedule was FOUND for an agent
+// the report did not judge.
+//
+// It has three states, and the empty one is not "absent". A pogod older than
+// mg-b70c does not send the field, and a plain decode turns that into "" — so
+// "" must read as "not reported", never as "no loop". The field carries no
+// omitempty for the same reason Unjudged is a pointer: a daemon that does
+// observe always puts a non-empty value on the wire, and only an old one
+// leaves it blank.
+type MailLoopObservation string
+
+const (
+	// MailLoopObservedPresent: the scheduler holds a mail-check for this agent,
+	// by the same alias rules diagnose uses. Something will wake it.
+	MailLoopObservedPresent MailLoopObservation = "present"
+	// MailLoopObservedAbsent: no mail-check is registered. For an unjudged
+	// agent this is NOT a finding — a stopped, unexpected agent has its loop
+	// reaped by design, and a polecat between spawn and registration has none
+	// yet. It is a fact stated beside the exclusion, not a vote against it.
+	MailLoopObservedAbsent MailLoopObservation = "absent"
+)
+
+// Describe renders the observation as the phrase an operator reads.
+func (o MailLoopObservation) Describe() string {
+	switch o {
+	case MailLoopObservedPresent:
+		return "has a mail loop"
+	case MailLoopObservedAbsent:
+		return "no mail loop registered"
+	case "":
+		return "mail loop not reported"
+	}
+	return string(o)
+}
+
+// observeMailLoop reads whether a has a mail-check schedule WITHOUT judging it.
+//
+// It deliberately does not go through mailLoopFor: that function's whole job
+// is to refuse an answer for an agent outside the eligibility boundary, and
+// routing an excluded agent through it would either return mailLoopUnknown
+// (and observe nothing) or tempt a caller to loosen mailLoopJudgeable (and
+// judge it). This asks the provider the same question with the same identity
+// mailLoopFor would pass, and returns a fact with no verdict attached.
+func observeMailLoop(a *Agent, p MailCheckProvider) MailLoopObservation {
+	if p.HasMailCheck(a.EventAgent()) {
+		return MailLoopObservedPresent
+	}
+	return MailLoopObservedAbsent
 }
 
 // MailLoopReport is one reading of the fleet's mail-delivery paths: every agent
@@ -205,10 +265,13 @@ func (r *Registry) MailLoopReport() (MailLoopReport, error) {
 			// mailLoopUnknown. The reason comes from mailLoopExclusionFor —
 			// the same function mailLoopJudgeable is defined in terms of — so
 			// the roster cannot name a reason the predicate would not give.
+			// MailLoop is observed, not judged (mg-b70c): it never
+			// touches Judged or Missing.
 			unjudged = append(unjudged, MailLoopExclusion{
-				Name:   a.Name,
-				Type:   a.Type,
-				Reason: mailLoopExclusionFor(a),
+				Name:     a.Name,
+				Type:     a.Type,
+				Reason:   mailLoopExclusionFor(a),
+				MailLoop: observeMailLoop(a, provider),
 			})
 		}
 	}
@@ -304,8 +367,48 @@ func (rep MailLoopReport) renderCoverage(b *strings.Builder) {
 	fmt.Fprintf(b, "\nNot judged: %d of %d. This is not a verdict on them — it is who the verdict\n"+
 		"above does NOT cover:\n", len(*rep.Unjudged), rep.Scanned)
 	for _, u := range *rep.Unjudged {
-		fmt.Fprintf(b, "  %-20s %-8s %s\n", u.Name, u.Type, u.Reason.Describe())
+		fmt.Fprintf(b, "  %-20s %-8s %s [%s]\n", u.Name, u.Type, u.Reason.Describe(), u.MailLoop.Describe())
 	}
+	renderUnjudgedLoops(b, *rep.Unjudged)
+}
+
+// renderUnjudgedLoops summarises the mail-loop OBSERVATION over the unjudged
+// set (mg-b70c): "3 not judged; all 3 have a loop anyway".
+//
+// It is informational only, and the sentence says so, because the same line
+// sits under a RED verdict and a green one: an unjudged agent with no loop is
+// not a finding, and an unjudged agent with one does not make the verdict
+// cover it. Unreported observations (a pogod older than mg-b70c) are counted
+// as unknown and never folded into either side — "the daemon did not say" is
+// not "no loop", the same distinction renderCoverage draws one field up.
+func renderUnjudgedLoops(b *strings.Builder, unjudged []MailLoopExclusion) {
+	n := len(unjudged)
+	var present, absent, unknown int
+	for _, u := range unjudged {
+		switch u.MailLoop {
+		case MailLoopObservedPresent:
+			present++
+		case MailLoopObservedAbsent:
+			absent++
+		default:
+			unknown++
+		}
+	}
+	switch {
+	case unknown == n:
+		fmt.Fprintf(b, "Mail loops of the %d not judged: NOT REPORTED — this pogod is older than the\n"+
+			"client and does not observe them.\n", n)
+		return
+	case present == n:
+		fmt.Fprintf(b, "All %d not judged have a mail-check schedule anyway.\n", n)
+	default:
+		fmt.Fprintf(b, "Of the %d not judged: %d have a mail-check schedule, %d have none registered", n, present, absent)
+		if unknown > 0 {
+			fmt.Fprintf(b, ", %d not reported", unknown)
+		}
+		b.WriteString(".\n")
+	}
+	b.WriteString("(Observed, not judged: this does not move the verdict or the exit status.)\n")
 }
 
 // Actionable reports whether the report found anything worth acting on. It is
@@ -315,7 +418,10 @@ func (rep MailLoopReport) renderCoverage(b *strings.Builder) {
 // excluded on purpose (mg-738f drew the boundary and the cry-wolf guarantee
 // rests on it), so exiting non-zero because a polecat exists would make the
 // command's exit status useless. mg-0db1 changed what the command DISCLOSES,
-// not what it judges — recorded here rather than left as a silence.
+// not what it judges — recorded here rather than left as a silence. mg-b70c
+// then OBSERVED each unjudged agent's mail loop, and that observation does not
+// move it either: an excluded agent gets a sentence in the report, not a vote
+// in the exit status.
 func (rep MailLoopReport) Actionable() bool { return len(rep.Missing) > 0 }
 
 // handleMailLoops serves GET /agents/mail-loops: the FLEET-WIDE read of the

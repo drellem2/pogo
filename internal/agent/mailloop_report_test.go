@@ -227,9 +227,9 @@ func TestMailLoopReport_GreenPathNamesWhoItDidNotJudge(t *testing.T) {
 		t.Fatal("Unjudged = nil from a registry that computed the set; absent means 'this daemon does not report it'")
 	}
 	want := []MailLoopExclusion{
-		{Name: "cat-032b", Type: TypePolecat, Reason: ExclusionPolecat},
-		{Name: "doctor", Type: TypeCrew, Reason: ExclusionNotRunning},
-		{Name: "ghost", Type: TypeCrew, Reason: ExclusionNotConfigured},
+		{Name: "cat-032b", Type: TypePolecat, Reason: ExclusionPolecat, MailLoop: MailLoopObservedAbsent},
+		{Name: "doctor", Type: TypeCrew, Reason: ExclusionNotRunning, MailLoop: MailLoopObservedAbsent},
+		{Name: "ghost", Type: TypeCrew, Reason: ExclusionNotConfigured, MailLoop: MailLoopObservedAbsent},
 	}
 	if len(*rep.Unjudged) != len(want) {
 		t.Fatalf("Unjudged = %+v, want %+v", *rep.Unjudged, want)
@@ -495,5 +495,137 @@ func TestMailLoopReport_ScannedMinusJudgedIsTheUnjudgedCount(t *testing.T) {
 	if rep.Scanned-rep.Judged != 0 || len(*rep.Unjudged) != 0 {
 		t.Errorf("full-coverage report: scanned(%d) - judged(%d) with unjudged=%+v, want 0 both ways",
 			rep.Scanned, rep.Judged, *rep.Unjudged)
+	}
+}
+
+// TestMailLoopReport_ObservesUnjudgedLoopsWithoutJudgingThem is mg-b70c's
+// acceptance: turn "3 not judged" into "3 not judged; all 3 have a loop
+// anyway" — and change NOTHING about what is judged.
+//
+// The hard constraint is the half worth a test. The eligibility boundary is
+// mg-738f's cry-wolf guarantee, so an excluded agent WITHOUT a loop must not
+// reach Missing or move Actionable, and an excluded agent WITH one must not be
+// counted as Judged. Both directions are staged: a report where every unjudged
+// agent is loop-less, over a green verdict, must still exit 0.
+func TestMailLoopReport_ObservesUnjudgedLoopsWithoutJudgingThem(t *testing.T) {
+	sandboxDesiredState(t, "pm-pogo", true)
+	now := time.Now()
+
+	newReg := func() *Registry {
+		reg, err := NewRegistry(shortSocketDir(t))
+		if err != nil {
+			t.Fatalf("NewRegistry: %v", err)
+		}
+		reg.agents["pm-pogo"] = mailLoopCrewAgent("pm-pogo", now)
+		cat := mailLoopCrewAgent("b70c", now)
+		cat.Type = TypePolecat
+		cat.PID = liveProcess(t)
+		reg.agents["b70c"] = cat
+		off := mailLoopCrewAgent("doctor", now)
+		off.PID = deadProcess(t)
+		reg.agents["doctor"] = off
+		ghost := mailLoopCrewAgent("ghost", now)
+		ghost.PID = liveProcess(t)
+		reg.agents["ghost"] = ghost
+		return reg
+	}
+
+	// Every agent, judged or not, has a loop.
+	reg := newReg()
+	reg.SetMailCheckProvider(fakeMailChecks{have: map[string]bool{
+		"crew-pm-pogo": true, "cat-b70c": true, "crew-doctor": true, "crew-ghost": true,
+	}})
+	rep, err := reg.MailLoopReport()
+	if err != nil {
+		t.Fatalf("MailLoopReport: %v", err)
+	}
+	if rep.Judged != 1 || rep.Scanned != 4 || len(rep.Missing) != 0 {
+		t.Fatalf("an observed loop moved the judgement: Judged=%d Scanned=%d Missing=%+v, want 1/4/[]",
+			rep.Judged, rep.Scanned, rep.Missing)
+	}
+	for _, u := range *rep.Unjudged {
+		if u.MailLoop != MailLoopObservedPresent {
+			t.Errorf("%s: MailLoop = %q, want %q", u.Name, u.MailLoop, MailLoopObservedPresent)
+		}
+	}
+	out := rep.Render()
+	for _, w := range []string{"Not judged: 3 of 4", "All 3 not judged have a mail-check schedule anyway",
+		"[has a mail loop]", "does not move the verdict or the exit status"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("Render() missing %q:\n%s", w, out)
+		}
+	}
+	blob, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(blob), `"mail_loop":"present"`) {
+		t.Errorf("JSON does not carry the observation the text prints:\n%s", blob)
+	}
+
+	// Only the JUDGED agent has a loop. The three loop-less agents are excluded,
+	// so this is still a GREEN report and must exit 0 — this is the positive
+	// control that the observation actually varies AND that it has no vote.
+	reg = newReg()
+	reg.SetMailCheckProvider(fakeMailChecks{have: map[string]bool{"crew-pm-pogo": true}})
+	rep, err = reg.MailLoopReport()
+	if err != nil {
+		t.Fatalf("MailLoopReport: %v", err)
+	}
+	if rep.Judged != 1 || len(rep.Missing) != 0 {
+		t.Fatalf("an unjudged agent without a loop reached the verdict: Judged=%d Missing=%+v", rep.Judged, rep.Missing)
+	}
+	if rep.Actionable() {
+		t.Error("Actionable() = true because unjudged agents have no loop — the observation must not move exit status")
+	}
+	out = rep.Render()
+	for _, w := range []string{"All 1 judged agent(s)", "0 have a mail-check schedule, 3 have none registered",
+		"[no mail loop registered]"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("Render() missing %q:\n%s", w, out)
+		}
+	}
+	if strings.Contains(out, "NO mail-check schedule") {
+		t.Errorf("an unjudged agent with no loop rendered as a RED finding:\n%s", out)
+	}
+}
+
+// TestMailLoopReport_UnreportedObservationIsNotAbsent is the version-skew guard
+// for mg-b70c's field, the same one Unjudged's pointer carries one level up: a
+// pogod that reports the unjudged set but predates the observation sends no
+// "mail_loop", and "the daemon did not say" must not render as "no loop".
+func TestMailLoopReport_UnreportedObservationIsNotAbsent(t *testing.T) {
+	const oldDaemon = `{"scanned":3,"judged":1,"unjudged":[` +
+		`{"name":"doctor","type":"crew","reason":"not_running"},` +
+		`{"name":"ghost","type":"crew","reason":"not_configured"}]}`
+	var rep MailLoopReport
+	if err := json.Unmarshal([]byte(oldDaemon), &rep); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	out := rep.Render()
+	if !strings.Contains(out, "NOT REPORTED") || !strings.Contains(out, "[mail loop not reported]") {
+		t.Errorf("an unreported observation must say so:\n%s", out)
+	}
+	for _, forbidden := range []string{"none registered", "no mail loop registered", "have a mail-check schedule anyway"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("Render() claimed %q over a daemon that observed nothing:\n%s", forbidden, out)
+		}
+	}
+
+	// Mixed: one observed, one not. The unknown is counted separately rather
+	// than folded into either side.
+	(*rep.Unjudged)[0].MailLoop = MailLoopObservedPresent
+	out = rep.Render()
+	if !strings.Contains(out, "1 have a mail-check schedule, 0 have none registered, 1 not reported") {
+		t.Errorf("mixed observation render:\n%s", out)
+	}
+
+	// And a daemon that DOES observe always emits the field — no omitempty.
+	blob, err := json.Marshal(MailLoopExclusion{Name: "x", MailLoop: MailLoopObservedAbsent})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(blob), `"mail_loop":"absent"`) {
+		t.Errorf("an observed absence must be on the wire:\n%s", blob)
 	}
 }
