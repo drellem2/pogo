@@ -124,6 +124,25 @@ type pogodCondition struct {
 	// fleet condition there reproduces the defect while looking like a fix.
 	To string
 
+	// OutOfBand marks a condition whose trigger means pogod is unhealthy or the
+	// coordinator is down (mg-875d). The annunciator then ALSO mails its
+	// out-of-band box — `[agents] escalation_box` in production — so the notice
+	// is never addressed only to an agent pogod runs. conditions.go says which
+	// rows set it and why; this field is the whole of the routing decision.
+	//
+	// It exists because To is an agent pogod runs. For most rows that is right:
+	// the coordinator can act and is alive to. For these rows it is circular —
+	// the coordinator either IS the casualty (A5/A6 about itself), dies with the
+	// daemon being reported (pogod_log_not_written, whose unread-pipe case kills
+	// pogod within ~30s of every boot), cannot be woken (A2), or was stopped with
+	// the rest of the fleet (orchestration_left_stopped). The escalation box is
+	// read by a launchd job, not by anything pogod owns, so it is the one
+	// addressee these states do not take down with them.
+	//
+	// The To copy is kept, not replaced: the coordinator is still the actor once
+	// the fleet is back, and its maildir is where the remedy will be read.
+	OutOfBand bool
+
 	// Detail is the human-readable cause, usually an error string. It goes in
 	// the mail body and on the event verbatim, and is hashed for Fingerprint
 	// when the caller does not supply one.
@@ -157,6 +176,7 @@ type conditionNoticeState struct {
 	Fingerprint string    `json:"fingerprint"`
 	Row         string    `json:"row,omitempty"`
 	To          string    `json:"to"`
+	OutOfBand   string    `json:"out_of_band,omitempty"`
 	FirstSeen   time.Time `json:"first_seen"`
 	// NotifiedAt is stamped only on a SUCCESSFUL send. A mail that failed must
 	// not be remembered as delivered or the retry never happens and the alarm
@@ -223,6 +243,10 @@ type conditionAnnunciator struct {
 	wake      conditionWaker
 	renotify  time.Duration
 	minGap    time.Duration
+
+	// outOfBandBox is where OutOfBand conditions are copied (mg-875d). Set once
+	// at startup by setOutOfBandBox, before the first Raise.
+	outOfBandBox string
 
 	mu    sync.Mutex
 	disk  conditionNotices
@@ -344,6 +368,7 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 	}
 
 	a.mu.Lock()
+	oob := a.outOfBandFor(c)
 	prev, seen := a.mem[c.ID]
 	if !seen {
 		prev, seen = a.disk.Conditions[c.ID]
@@ -353,6 +378,12 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 	case !seen:
 		reason = "new"
 	case prev.To != c.To:
+		reason = "readdressed"
+	case prev.OutOfBand != oob && now.Sub(prev.NotifiedAt) >= a.minGap:
+		// The out-of-band copy was never delivered (it failed, or the box was
+		// configured after the last notice). Retried at the same hourly floor
+		// as a changed fingerprint, never per raise: A11 raises every
+		// heartbeat tick, and every retry re-mails To as well.
 		reason = "readdressed"
 	case prev.Fingerprint != fp && now.Sub(prev.NotifiedAt) >= a.minGap:
 		reason = "changed"
@@ -377,10 +408,30 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 	a.mu.Unlock()
 
 	subject, body := c.Subject, c.Body
-	if err := a.mail(c.To, conditionMailFrom, subject, body); err != nil {
-		// The notifier failed. Be loud, put the error on the spine, and do NOT
+	err := a.mail(c.To, conditionMailFrom, subject, body)
+	var oobErr error
+	if oob != "" {
+		// The out-of-band copy is sent whatever happened to the first: it is the
+		// one that matters in the states that set it, and a failed coordinator
+		// send is no reason to withhold it.
+		oobErr = a.mail(oob, conditionMailFrom, subject, body)
+		if oobErr != nil {
+			log.Printf("pogod: ⚠ OUT-OF-BAND copy of condition %s (%s) to %s FAILED: %v — "+
+				"the only reader outside the fleet was not told", c.ID, c.Row, oob, oobErr)
+			a.emit(c, oob, false, reason, oobErr.Error())
+		} else {
+			log.Printf("pogod: condition %s (%s) copied out of band to %s (%s)", c.ID, c.Row, oob, reason)
+			a.emit(c, oob, true, reason, "")
+		}
+	}
+	if err != nil && (oob == "" || oobErr != nil) {
+		// Nobody was told. Be loud, put the error on the spine, and do NOT
 		// remember this as announced — dropping it means the next occurrence
 		// treats it as new and tries again.
+		//
+		// Only when EVERY addressee failed. A delivered out-of-band copy is a
+		// delivery: forgetting it would re-mail that reader on every raise, and
+		// A11 raises every heartbeat tick.
 		log.Printf("pogod: ⚠ condition notice to %s FAILED for %s (%s): %v — "+
 			"the condition is UNANNOUNCED; retrying on the next occurrence", c.To, c.ID, c.Row, err)
 		a.mu.Lock()
@@ -392,8 +443,19 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 		a.emit(c, c.To, false, reason, err.Error())
 		return
 	}
+	if err != nil {
+		log.Printf("pogod: ⚠ condition notice to %s FAILED for %s (%s): %v — "+
+			"delivered out of band to %s only", c.To, c.ID, c.Row, err, oob)
+		a.emit(c, c.To, false, reason, err.Error())
+	}
 
-	st := conditionNoticeState{Fingerprint: fp, Row: c.Row, To: c.To, FirstSeen: firstSeen, NotifiedAt: now}
+	// Record the out-of-band box only if it was actually DELIVERED, so a failed
+	// copy stays owed and the hourly retry above can fire for it.
+	delivered := oob
+	if oobErr != nil {
+		delivered = ""
+	}
+	st := conditionNoticeState{Fingerprint: fp, Row: c.Row, To: c.To, OutOfBand: delivered, FirstSeen: firstSeen, NotifiedAt: now}
 	a.mu.Lock()
 	a.mem[c.ID] = st
 	a.disk.Conditions[c.ID] = st
@@ -410,8 +472,33 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 	}
 	a.mu.Unlock()
 
-	log.Printf("pogod: condition %s (%s) mailed to %s (%s)", c.ID, c.Row, c.To, reason)
-	a.emit(c, c.To, true, reason, "")
+	if err == nil {
+		log.Printf("pogod: condition %s (%s) mailed to %s (%s)", c.ID, c.Row, c.To, reason)
+		a.emit(c, c.To, true, reason, "")
+	}
+}
+
+// outOfBandFor is the second addressee actually used for c: empty when c is
+// not an out-of-band condition, when no box is configured, or when the box IS
+// To (a deployment whose coordinator mailbox is its escalation box needs one
+// mail, not two). Caller holds a.mu.
+func (a *conditionAnnunciator) outOfBandFor(c pogodCondition) string {
+	if !c.OutOfBand || a.outOfBandBox == "" || a.outOfBandBox == c.To {
+		return ""
+	}
+	return a.outOfBandBox
+}
+
+// setOutOfBandBox names the mailbox OutOfBand conditions are copied to. pogod
+// passes `[agents] escalation_box`. Unset, OutOfBand conditions go to To alone —
+// which is the pre-mg-875d behaviour, so a test that does not care gets it.
+func (a *conditionAnnunciator) setOutOfBandBox(box string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.outOfBandBox = box
+	a.mu.Unlock()
 }
 
 // Clear forgets a condition, so a recurrence reads as a fresh transition and

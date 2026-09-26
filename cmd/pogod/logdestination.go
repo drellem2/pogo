@@ -170,6 +170,9 @@ func conditionLogNotWritten(to string, d logDestination) pogodCondition {
 		ID:  logDestinationConditionID,
 		Row: "mg-a19a",
 		To:  to,
+		// Out of band (mg-875d): the unread-pipe case this detector names kills
+		// pogod within ~30s of every boot (mg-a7a1), and the coordinator with it.
+		OutOfBand: true,
 		Detail: fmt.Sprintf("installed job names %s; pogod pid %d fd 2 is %s",
 			d.JobLogPath, os.Getpid(), d.Stderr),
 		// Fingerprinted on the destination and not on the pid: a daemon

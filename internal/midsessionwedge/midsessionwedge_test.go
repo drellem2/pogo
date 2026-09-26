@@ -869,3 +869,38 @@ func TestSamplesDoNotOverlap(t *testing.T) {
 			"judged the same agent against the same attempt count", n, o.MaxAttempts)
 	}
 }
+
+// TestAWedgedAddresseeIsAlsoEscalated (mg-875d): a wedge notice ABOUT the
+// mailbox it is addressed to is a circular route — the coordinator parked at
+// its own composer is not reading mail. It must also reach EscalateTo, and a
+// wedge on any other agent must not.
+func TestAWedgedAddresseeIsAlsoEscalated(t *testing.T) {
+	for _, tc := range []struct {
+		wedged string
+		want   []string
+	}{
+		{"mayor", []string{"mayor", "operator"}},
+		{"dead", []string{"mayor"}},
+	} {
+		h := newHarness()
+		o := h.opts()
+		o.EscalateTo = "operator"
+		o.Interval = time.Second
+		o.Quiescence = time.Minute
+		o.MaxAttempts = 3
+		w := New(o)
+		start := base(t)
+		h.set(owed(tc.wedged, "static", start))
+		run(w, start, time.Minute, 200, nil)
+
+		h.mu.Lock()
+		var got []string
+		for _, m := range h.mails {
+			got = append(got, strings.SplitN(m, "|", 2)[0])
+		}
+		h.mu.Unlock()
+		if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Errorf("wedged %s: mailed %v, want %v", tc.wedged, got, tc.want)
+		}
+	}
+}
