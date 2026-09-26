@@ -1,7 +1,8 @@
 package agent
 
-// Two rules pinned as properties of the shipped corpus (mg-1763): "ask which
-// TREE you are in", and "a negative result needs a positive control".
+// Rules pinned as properties of the shipped corpus: "ask which TREE you are
+// in" and "a negative result needs a positive control" (mg-1763), and "commit
+// a live file before you delete from it" (mg-4748).
 //
 // They ship together because they were decided together, and they are pinned
 // here for the same reason the unmeasured-numbers rule next door is: a prompt
@@ -67,6 +68,23 @@ package agent
 // Hence the general clause: when an instrument would return the same answer
 // under two different world-states, it is not evidence about either until a
 // control distinguishes them.
+//
+// # Rule 3 — commit a live file before you delete from it (mg-4748)
+//
+// Text added to a tracked file and deleted before the next commit is in no
+// commit. On 2026-08-20 section 4a of `~/.pogo/agents/architect/deploy-verify.md`
+// carried a pre-registered scoring standard, hand-written after the file's
+// last commit; it sat dirty ~7h and was deleted by an agent correctly obeying
+// the section's own "delete this section" line. Re-derived here from that
+// repo, with a control: `deploy-verify procedure` is present at both 8ebb773
+// and 774ebd4, `four things and` at neither. Only an unrelated snapshot kept it.
+//
+// The ticket first blamed the nightly deploy; that was retracted (the deploy
+// log never names the file), and the rule accordingly says nothing about the
+// deploy. It is scoped to text you did not write in this session, for the
+// same reason Rule 1 is scoped to the tree: "commit before any deletion" is
+// wrong wherever an agent revises its own draft, and would be discarded on
+// contact.
 //
 // # What is deliberately NOT asserted, and it matters
 //
@@ -147,6 +165,26 @@ const positiveControlRule = "**A NEGATIVE result needs a POSITIVE CONTROL.** Whe
 	"`<<'EOF'` for heredocs, and single-quote `--body` arguments containing " +
 	"backticks."
 
+// commitBeforeDeleteRule is the third line (mg-4748). See the "Rule 3" note in
+// the file comment for why it is scoped to text you did not write.
+const commitBeforeDeleteRule = "**Commit a live file before you delete text you did not write in " +
+	"this session.** Lines added to a tracked file and removed before the " +
+	"next commit exist in NO commit — no `git log` shows them arriving or " +
+	"leaving, and nothing can recover them. So before you delete from a " +
+	"file someone else (or an earlier session) edited, run `git diff HEAD " +
+	"-- <file>`: if the lines you are about to remove show as `+`, they " +
+	"were never committed — commit the file's current state first, by " +
+	"path, and delete in a second commit. A SELF-RETIRING section " +
+	"(\"delete this once it has run\") is the sharpest case, because " +
+	"following it correctly destroys its own audit trail and nothing " +
+	"about it hints that its text is uncommitted; if you AUTHOR one, " +
+	"commit it before anyone executes it. On 2026-08-20 a pre-registered " +
+	"scoring standard in `~/.pogo/agents/architect/deploy-verify.md` was " +
+	"lost exactly this way: hand-written, dirty for ~7h, deleted by an " +
+	"agent retiring it correctly, and present in no commit (mg-4748). " +
+	"Undoing your own edits from this session is not the case — that " +
+	"deletes nothing anyone else relied on."
+
 // corpusRules is the population the presence tests walk: each rule with the
 // heading an editor would grep for and the guidance a failure should print.
 var corpusRules = []struct {
@@ -173,6 +211,15 @@ var corpusRules = []struct {
 			"guidance it already carries. It is the half of mg-1763 that carries the " +
 			"justification — it catches the two SILENT instances; the quoting advice " +
 			"inside it only catches the loud ones.",
+	},
+	{
+		name:    "commit-before-delete",
+		heading: "**Commit a live file before you delete",
+		text:    commitBeforeDeleteRule,
+		adding: "If this prompt is new, add the line beside the other two. Do NOT widen " +
+			"it to \"commit before any deletion\": undoing your own edits in your own " +
+			"worktree is correct and ordinary, and a rule that demands a commit for " +
+			"it gets discarded on contact, taking the real hazard with it.",
 	},
 }
 
@@ -274,6 +321,43 @@ var treeAndControlParts = []struct {
 			"HEAD AND for a directory that is not a worktree, which fails toward the " +
 			"ALARMING reading rather than the reassuring one. A positive control " +
 			"covers both, because it asks the same question either way.",
+	},
+	{
+		rule:    "commit-before-delete",
+		heading: "**Commit a live file before you delete",
+		what:    "the fact — uncommitted-then-deleted text is in NO commit",
+		re:      regexp.MustCompile(`exist in NO commit`),
+		why: "This IS the rule. Nothing about a dirty line looks different from a " +
+			"committed one when you read the file; the loss is only visible from " +
+			"history, and history is exactly what never saw it.",
+	},
+	{
+		rule:    "commit-before-delete",
+		heading: "**Commit a live file before you delete",
+		what:    "the check and the remedy — diff against HEAD, commit first, delete second",
+		re:      regexp.MustCompile("(?s)`git diff HEAD -- <file>`.{0,200}?commit the file's current state first"),
+		why: "Without the check the rule is a mood. `git diff HEAD` (not bare `git " +
+			"diff`, which hides staged lines) is what tells you the text is " +
+			"uncommitted, and the two-commit order is what puts it in history.",
+	},
+	{
+		rule:    "commit-before-delete",
+		heading: "**Commit a live file before you delete",
+		what:    "the self-retiring case, for readers AND authors",
+		re:      regexp.MustCompile(`(?s)SELF-RETIRING.{0,300}?if you AUTHOR one, commit it before anyone executes it`),
+		why: "The instance that cost something was a section that instructed its own " +
+			"deletion: the executor followed it correctly and destroyed the scoring " +
+			"standard of a pre-registered study. The author is the one who knows " +
+			"the text is uncommitted, so the author clause is the cheaper half.",
+	},
+	{
+		rule:    "commit-before-delete",
+		heading: "**Commit a live file before you delete",
+		what:    "its scope — text you did not write, not your own undo",
+		re:      regexp.MustCompile(`(?s)you did not write in this session.*Undoing your own edits from this session is not the case`),
+		why: "A rule that demands a commit before every deletion is wrong in every " +
+			"worktree where an agent revises its own draft, and gets discarded on " +
+			"contact. The scope is what lets it survive meeting that counterexample.",
 	},
 }
 
