@@ -27,6 +27,11 @@ const (
 	// AutoStartStatusFailed means we tried to start the agent but the spawn
 	// itself errored out.
 	AutoStartStatusFailed AutoStartStatus = "failed"
+	// AutoStartStatusRefusedNotLoggedIn means the harness POSITIVELY reported
+	// that it has no login, so the agent was not spawned: it would have sat at
+	// the harness's first-run login screen (drellem2/pogo#173). Any reading
+	// short of that positive one spawns instead — see authpreflight.go.
+	AutoStartStatusRefusedNotLoggedIn AutoStartStatus = "refused_not_logged_in"
 )
 
 // AutoStartResult records what happened for one prompt file during auto-start.
@@ -274,6 +279,7 @@ func (r *Registry) AutoStartAgents() []AutoStartResult {
 	}
 
 	var results []AutoStartResult
+	preflight := newAuthPreflight()
 	for _, c := range cands {
 		if st, err := expectedStatus(c); st != "" {
 			switch st {
@@ -309,7 +315,18 @@ func (r *Registry) AutoStartAgents() []AutoStartResult {
 			continue
 		}
 
-		a, err := r.StartCrewAgent(c.name)
+		a, err := r.startCrewAgent(c.name, preflight)
+		if errors.Is(err, ErrHarnessNotLoggedIn) {
+			log.Printf("autostart: %s refused: %v", c.name, err)
+			results = append(results, AutoStartResult{
+				Name:     c.name,
+				Path:     c.path,
+				Category: c.category,
+				Status:   AutoStartStatusRefusedNotLoggedIn,
+				Error:    err.Error(),
+			})
+			continue
+		}
 		if err != nil {
 			// Treat "already running" as skipped rather than failed: the
 			// check-then-act on r.Get above is not atomic with the spawn, and

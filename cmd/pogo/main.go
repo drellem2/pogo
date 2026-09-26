@@ -3502,12 +3502,19 @@ that copy and overwrite without a safety net.`,
 				cli.ExitWithError(jsonOutput, "failed to install prompts: "+err.Error(), cli.ExitError)
 			}
 
+			// Step 4: the harness's first-run gates (drellem2/pogo#173). Stated
+			// rather than asked: install also runs non-interactively, so there
+			// is no consent prompt — the permission posture is announced, and a
+			// missing login becomes the loudest next step.
+			harnesses := configuredHarnessOnboarding()
+
 			if jsonOutput {
 				cli.PrintJSON(map[string]interface{}{
 					"status":       "installed",
 					"prompts":      result,
 					"pinnedRoles":  pinRes.Pinned,
 					"configPinned": len(pinRes.Pinned) > 0,
+					"harnesses":    harnesses,
 				})
 			} else {
 				if len(result.Installed) > 0 {
@@ -3529,7 +3536,13 @@ that copy and overwrite without a safety net.`,
 					fmt.Printf("  ✓ pinned current role default(s) [%s] in %s (existing install)\n",
 						strings.Join(pinRes.Pinned, ", "), pinRes.Path)
 				}
+				printHarnessOnboarding(os.Stdout, harnesses)
 				fmt.Println("\nReady. Next steps:")
+				for _, h := range harnesses {
+					if h.Login == "not_logged_in" {
+						fmt.Printf("  %-26s # FIRST: log in once — agents cannot start until you do\n", h.Binary)
+					}
+				}
 				fmt.Printf("  pogo agent start %-9s # Start the coordinator\n", agent.CoordinatorName())
 				fmt.Println("  mg new \"your task here\"   # File work for agents")
 			}
@@ -3811,6 +3824,23 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					warn(provider.Binary+" in PATH", fmt.Sprintf("not found (configured agent harness %q)", provider.ID))
 				} else {
 					pass(provider.Binary+" in PATH", p)
+				}
+				// First-run gates (drellem2/pogo#173): the permission posture
+				// pogo pre-accepts on the operator's behalf is stated, and a
+				// harness with no login is named — crew auto-start refuses
+				// to spawn into it.
+				h := harnessOnboardingFor(provider, exec.LookPath)
+				if h.PermissionNotice != "" {
+					pass(provider.Binary+" permission mode", h.PermissionNotice)
+				}
+				switch h.Login {
+				case "logged_in":
+					pass(provider.Binary+" login", h.LoginDetail)
+				case "not_logged_in":
+					fail(provider.Binary+" login", fmt.Sprintf("NOT LOGGED IN (%s) — run `%s` once in a "+
+						"terminal and log in; crew auto-start refuses until you do", h.LoginDetail, provider.Binary))
+				case "unknown":
+					warn(provider.Binary+" login", "could not determine: "+h.LoginDetail)
 				}
 			}
 

@@ -1308,6 +1308,14 @@ type StartErrorResponse struct {
 // Returns ErrPromptNotFound (wrapped) when the prompt file is missing, or any
 // error from Spawn (e.g. when the agent is already registered).
 func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
+	return r.startCrewAgent(name, nil)
+}
+
+// startCrewAgent is StartCrewAgent with an optional login preflight. Only the
+// auto-start sweep passes one: a crew auto-start is unattended, so an agent it
+// spawns into a harness with no login stalls with nobody watching. An operator
+// running `pogo agent start` by hand is watching, and is not second-guessed.
+func (r *Registry) startCrewAgent(name string, preflight *authPreflight) (*Agent, error) {
 	// Reject an unusable name up front. Spawn checks it again, but the callers
 	// that reach this function directly — autostart and Wake — would otherwise
 	// create the agent dir and expand a prompt for a name that cannot spawn.
@@ -1401,6 +1409,9 @@ func (r *Registry) StartCrewAgent(name string) (*Agent, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agent command template error: %w", err)
+	}
+	if err := preflight.check(name, provider, cmd); err != nil {
+		return nil, err
 	}
 
 	// All crew agents get an initial nudge to bypass the CLI interactive prompt.
