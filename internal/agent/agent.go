@@ -395,6 +395,13 @@ type Registry struct {
 	// (pogod) to handle crew restarts and polecat cleanup.
 	onExit func(a *Agent, err error)
 
+	// onStart is called after an agent process has been SUCCESSFULLY started,
+	// by any path: a fresh Spawn (boot auto-start, `pogo agent start`/`wake`,
+	// polecat dispatch) or a Respawn. It runs after r.mu is released. Set by
+	// pogod to retire conditions that assert the agent is not running
+	// (mg-f474).
+	onStart func(a *Agent)
+
 	// providers is the pool of known harness descriptors, keyed by id
 	// ("claude", "codex", "pi", "cursor"). pogod registers every provider at startup
 	// (RegisterProvider); resolveProvider then picks one per spawn from the
@@ -673,6 +680,31 @@ func (r *Registry) SetOnExit(fn func(a *Agent, err error)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onExit = fn
+}
+
+// SetOnStart sets the callback invoked after any agent has been successfully
+// started — by Spawn or by Respawn alike, which is the point: a condition that
+// says "this agent is gone" must be retired by the agent coming back, not only
+// by the one path that raised it (mg-f474). It is never called for a start
+// that failed, and it runs outside the registry lock.
+func (r *Registry) SetOnStart(fn func(a *Agent)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onStart = fn
+}
+
+// fireOnStart invokes the onStart callback for a, if a is non-nil and a
+// callback is set. Callers MUST NOT hold r.mu.
+func (r *Registry) fireOnStart(a *Agent) {
+	if a == nil {
+		return
+	}
+	r.mu.RLock()
+	cb := r.onStart
+	r.mu.RUnlock()
+	if cb != nil {
+		a.Safely("registry.onStart", func() { cb(a) })
+	}
 }
 
 // SetDraining toggles drain mode. While draining, handleSpawnPolecat refuses
@@ -1026,6 +1058,11 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		return nil, err
 	}
 
+	// Registered BEFORE the lock's defer so it runs AFTER the unlock (defers
+	// are LIFO): the onStart callback must not run under r.mu.
+	var started *Agent
+	defer func() { r.fireOnStart(started) }()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1269,6 +1306,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		})
 	}
 
+	started = a
 	return a, nil
 }
 
@@ -1642,6 +1680,10 @@ func IsExpectedRespawnRefusal(err error) bool {
 }
 
 func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, error) {
+	// See Spawn: registered before the lock so it fires after the unlock.
+	var started *Agent
+	defer func() { r.fireOnStart(started) }()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1795,6 +1837,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		})
 	}
 
+	started = a
 	return a, nil
 }
 

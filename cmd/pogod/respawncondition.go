@@ -73,3 +73,30 @@ func noteRespawnOutcome(conds conditionRaiser, coordinator, agentName string, re
 		conds.flush()
 	}
 }
+
+// noteAgentStarted retires the rows that assert agentName is NOT running —
+// A6 `restart_failed:` and A5 `autostart_failed:` — because it now is. It is
+// wired to the registry's OnStart hook, which fires on every successful start.
+//
+// Until mg-f474 each row was cleared only by the path that raised it: A6 by a
+// successful DEFERRED respawn (noteRespawnOutcome, above) and A5 by the next
+// boot's auto-start sweep. An agent brought back any other way — `pogo agent
+// start`, `pogo agent wake`, a boot auto-start after an A6 — never reached
+// either, so the row outlived the fault indefinitely. Three A6 rows asserted
+// "that agent is gone" about agents that had been running for 150h, 29 days
+// after they were raised. The cost is not only a wrong display: a live row is
+// suppression state (conditionAnnunciator.Raise). A GENUINE later A6 for that
+// agent is judged against the stale row rather than as "new" — suppressed
+// outright if its detail matches, or within the hour since the stale row last
+// mailed — and when it is mailed it inherits the stale row's first_seen, so it
+// reports a month-old fault instead of the one that just happened.
+//
+// Clearing on start does not hide a real failure. A6 and A5 each describe an
+// agent that is absent; once the agent is running that is false, and if it
+// crashes again and the respawn fails again, the row is raised afresh — and,
+// because the stale one is gone, notified afresh.
+func noteAgentStarted(conds conditionRaiser, agentName string, now time.Time) {
+	conds.Clear(rowA6RestartPrefix+agentName, now)
+	conds.Clear(rowA5AutoStartPrefix+agentName, now)
+	conds.flush()
+}

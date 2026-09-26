@@ -276,3 +276,88 @@ func TestGuardRefusalLeavesAnEarlierRestartFailedStanding(t *testing.T) {
 		})
 	}
 }
+
+// TestAnyStartRetiresRestartFailed is mg-f474's reproduction, end to end on the
+// real registry and the real annunciator.
+//
+// The state on the live host: a `restart_failed:<name>` row raised at a fleet
+// stop, and the agent later brought back by an ordinary start — which goes
+// through Registry.Spawn, not RespawnFromGeneration, and so never reached the
+// only Clear the row had. The row then asserted "that agent is gone" about an
+// agent that had been running for 150h.
+//
+// The wiring below is main.go's, verbatim in shape: SetOnStart →
+// noteAgentStarted.
+func TestAnyStartRetiresRestartFailed(t *testing.T) {
+	sandboxPogoHome(t)
+
+	rec := &condRecorder{}
+	ann, path := newTestAnnunciator(t, rec.send, nil)
+	t0 := time.Date(2026, 8, 9, 22, 12, 0, 0, time.UTC)
+
+	stale := conditionRestartFailed("mayor", "architect", "boom")
+	ann.Raise(stale, t0)
+	ann.flush()
+	if _, live := loadConditionNotices(path).Conditions[stale.ID]; !live {
+		t.Fatalf("precondition: %s is not on disk after the raise", stale.ID)
+	}
+
+	reg, err := agent.NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	t.Cleanup(func() { reg.StopAll(2 * time.Second) })
+	reg.SetOnStart(func(a *agent.Agent) {
+		noteAgentStarted(ann, a.Name, time.Now())
+	})
+
+	// An unrelated agent's start must not retire architect's row.
+	if _, err := reg.Spawn(agent.SpawnRequest{Name: "pm-pogo", Type: agent.TypeCrew, Command: []string{"cat"}}); err != nil {
+		t.Fatalf("Spawn pm-pogo: %v", err)
+	}
+	if _, live := loadConditionNotices(path).Conditions[stale.ID]; !live {
+		t.Fatalf("starting pm-pogo cleared %s; a start retires only its OWN agent's rows", stale.ID)
+	}
+
+	// `pogo agent start architect` funnels to exactly this call.
+	if _, err := reg.Spawn(agent.SpawnRequest{Name: "architect", Type: agent.TypeCrew, Command: []string{"cat"}}); err != nil {
+		t.Fatalf("Spawn architect: %v", err)
+	}
+	if st, live := loadConditionNotices(path).Conditions[stale.ID]; live {
+		t.Fatalf("%s is still live on disk (first_seen %s) after architect started — the row "+
+			"asserts the agent is gone while it runs, and nothing else will clear it (mg-f474)",
+			stale.ID, st.FirstSeen)
+	}
+
+	// And the point of retiring it: a genuine later A6 is a NEW condition, with
+	// its own first_seen, not a continuation of the stale one.
+	mailsBefore := len(rec.sent)
+	t1 := t0.Add(29 * 24 * time.Hour)
+	ann.Raise(conditionRestartFailed("mayor", "architect", "boom"), t1)
+	if len(rec.sent) != mailsBefore+1 {
+		t.Fatalf("a genuine A6 after the start sent %d mails, want 1", len(rec.sent)-mailsBefore)
+	}
+	ann.flush()
+	if got := loadConditionNotices(path).Conditions[stale.ID].FirstSeen; !got.Equal(t1) {
+		t.Errorf("first_seen of the fresh A6 = %s, want %s — it inherited the stale row's", got, t1)
+	}
+}
+
+// TestNoteAgentStartedClearsBothAbsenceRows pins which rows a start retires:
+// both conditions that say "this agent is not running" — A6 and A5 — and
+// nothing else.
+func TestNoteAgentStartedClearsBothAbsenceRows(t *testing.T) {
+	conds := &recordingConditions{}
+	noteAgentStarted(conds, "pa", time.Now())
+
+	want := []string{rowA6RestartPrefix + "pa", rowA5AutoStartPrefix + "pa"}
+	if fmt.Sprint(conds.cleared) != fmt.Sprint(want) {
+		t.Fatalf("cleared = %v; want %v", conds.cleared, want)
+	}
+	if len(conds.raised) != 0 {
+		t.Fatalf("a start raised %v", conds.raised)
+	}
+	if conds.flushes == 0 {
+		t.Error("the clear was not flushed, so the stale row would come back on the next pogod boot")
+	}
+}
