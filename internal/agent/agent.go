@@ -590,6 +590,10 @@ type Registry struct {
 	// reserve is unenforced — the cap still caps, it simply cannot tell an idle
 	// refinery from one it failed to ask.
 	refineryActivity RefineryActivity
+	// mergeQueue is how the cap learns WHICH workers' branches are in the
+	// refinery's queue, so up to MergeQueuedCredit of them stop counting
+	// (mg-976f). Nil means nobody is excused — every live worker counts.
+	mergeQueue MergeQueueReader
 	// flowReader reads a work item's state carrier for the review-slot
 	// reserve (mg-bf42). Nil means MGFlowReader{}.
 	flowReader FlowReader

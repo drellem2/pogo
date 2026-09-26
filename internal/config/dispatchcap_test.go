@@ -150,3 +150,22 @@ func loadWithConfigDir(t *testing.T, dir string) *Config {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
 	return Load()
 }
+
+// TestMergeQueuedCreditZeroIsAValue: `merge_queued_credit = 0` turns the
+// credit off (mg-976f) and must not be reset to the shipped default; a file
+// that does not name the key keeps that default.
+func TestMergeQueuedCreditZeroIsAValue(t *testing.T) {
+	if got := loadWithConfigDir(t, t.TempDir()).DispatchCap.MergeQueuedCredit; got != DefaultMergeQueuedCredit {
+		t.Errorf("unconfigured MergeQueuedCredit = %d, want the default %d", got, DefaultMergeQueuedCredit)
+	}
+	dir := t.TempDir()
+	writeCapConfig(t, dir, "[dispatch]\nmerge_queued_credit = 0\n")
+	if got := loadWithConfigDir(t, dir).DispatchCap.MergeQueuedCredit; got != 0 {
+		t.Errorf("MergeQueuedCredit = %d, want 0 — an explicit off was overwritten by the default", got)
+	}
+	dir = t.TempDir()
+	writeCapConfig(t, dir, "[dispatch]\nmerge_queued_credit = -3\n")
+	if got := loadWithConfigDir(t, dir).DispatchCap.MergeQueuedCredit; got != 0 {
+		t.Errorf("MergeQueuedCredit = %d, want a negative clamped to 0", got)
+	}
+}

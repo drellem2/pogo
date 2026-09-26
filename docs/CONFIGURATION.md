@@ -766,6 +766,11 @@ max_polecats_per_repo = 3
 # Slots withheld from worker dispatch while the refinery has a merge request
 # for that repo — IN FLIGHT OR QUEUED. 0 = no reservation. Default: 1.
 refinery_reserve = 1
+
+# Live workers per repo NOT counted because their branch is in the refinery's
+# merge queue (queued or in its gate) — they poll, they do not build.
+# 0 = every live worker counts. Default: 2.
+merge_queued_credit = 2
 ```
 
 `pogo agent spawn-polecat --repo=<path>` refuses with **503** when the repo is
@@ -824,6 +829,30 @@ all dispatch would be a wedge with no way out but a config edit.
 the only side that can be told "not yet" — the refinery cannot evict a worker
 that is already building. This prevents the starvation from forming; it does not
 cure one that has already formed.
+
+### Why a worker waiting on the merge queue is not counted (mg-976f)
+
+The cap counts **processes**; the hazard it guards against is **CPU** — N
+workers running one repo's test suite at once. A worker that has submitted its
+branch runs nothing: it polls `pogo refinery show` until the merge lands and
+pogod stops it. Measured 2026-09-07: three pogo polecats, all submitted and
+waiting on a serial queue, held every slot while the fleet used 0.40 of 10
+cores, and a ready high-priority item was refused for capacity nobody was
+using. The worker whose branch is in the gate was also being counted twice —
+once as a worker, once as the refinery's reserved slot.
+
+So up to `merge_queued_credit` live workers whose merge request is queued or
+in flight for the repo are left out of the count. A worker is recognised by the
+MR's author (its work item id or agent name) or by its `polecat-<name>` branch.
+`pogo host load --repo=<path>` lists them on a `Waiting:` line.
+
+**Why it is bounded.** A submitted worker is not finished: a failed gate mails
+it, and a rebase conflict or red build sends it back to building. The dispatch
+its excused slot allowed cannot be taken back, so the credit is exactly the
+most the repo can overshoot the cap by — and only if that many gates fail
+while the replacements are still building. The default of 2 is the smallest
+that frees a slot in the measured state (three waiting, reserve making the cap
+2). A queue that cannot be read excuses nobody.
 
 ### Why a gh-issue build is charged two slots (mg-bf42)
 
