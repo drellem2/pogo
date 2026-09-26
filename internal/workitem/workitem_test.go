@@ -533,3 +533,38 @@ func mustList(t *testing.T, f func() ([]WorkItem, error)) []WorkItem {
 	}
 	return items
 }
+
+// TestParsesBranch pins the `branch:` frontmatter field against the shape mg
+// actually writes (`mg new --branch`), in the claimed/ directory a dispatched
+// item sits in. spawn-polecat defaults --branch from it (drellem2/pogo#176), so
+// a silent miss here would put a worker back on the default branch.
+func TestParsesBranch(t *testing.T) {
+	dir := t.TempDir()
+	claimed := filepath.Join(dir, "claimed")
+	if err := os.MkdirAll(claimed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeItem(t, filepath.Join(claimed, "mg-br01.md.4242"), `---
+id: mg-br01
+type: task
+repo: /Users/daniel/research/one_third_width_three
+priority: high
+branch: a8-s2-cont-execution-arc
+---
+# an item on an integration branch
+`)
+	item, found, err := FindFrom(dir, "mg-br01")
+	if err != nil || !found {
+		t.Fatalf("FindFrom = (found=%v, err=%v), want the item", found, err)
+	}
+	if got, want := item.Branch, "a8-s2-cont-execution-arc"; got != want {
+		t.Errorf("Branch = %q, want %q", got, want)
+	}
+
+	// No `branch:` line is the ordinary case, and it reads as empty.
+	writeItem(t, filepath.Join(claimed, "mg-br02.md"), "---\nid: mg-br02\n---\n# none\n")
+	item, _, _ = FindFrom(dir, "mg-br02")
+	if item.Branch != "" {
+		t.Errorf("Branch with no branch: line = %q, want empty", item.Branch)
+	}
+}

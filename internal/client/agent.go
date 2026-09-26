@@ -267,12 +267,16 @@ func GetHostLoad(repo string) (*agent.HostLoadResponse, error) {
 }
 
 // SpawnPolecat asks pogod to spawn a polecat from a template.
-func SpawnPolecat(req agent.SpawnPolecatAPIRequest) (*agent.AgentInfo, error) {
+func SpawnPolecat(req agent.SpawnPolecatAPIRequest) (*agent.SpawnPolecatAPIResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	return postSpawn("spawn-polecat", "/agents/spawn-polecat", body)
+	var resp agent.SpawnPolecatAPIResponse
+	if err := postSpawnInto("spawn-polecat", "/agents/spawn-polecat", body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // SpawnOutcomeUnknownError reports a spawn request that REACHED pogod and
@@ -312,31 +316,41 @@ func IsSpawnOutcomeUnknown(err error) bool {
 // is the one that matters: before mg-c252 a transport error after the request
 // was sent came back as a plain error indistinguishable from a refusal.
 func postSpawn(op, path string, body []byte) (*agent.AgentInfo, error) {
+	var info agent.AgentInfo
+	if err := postSpawnInto(op, path, body, &info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// postSpawnInto is postSpawn decoding the 201 body into out, for endpoints
+// whose answer carries more than the agent record (spawn-polecat's base
+// report).
+func postSpawnInto(op, path string, body []byte, out any) error {
 	r, err := http.Post(serverURL+path, "application/json", bytes.NewReader(body))
 	if err != nil {
 		if requestNeverSent(err) {
-			return nil, err
+			return err
 		}
-		return nil, &SpawnOutcomeUnknownError{Op: op, Detail: err.Error()}
+		return &SpawnOutcomeUnknownError{Op: op, Detail: err.Error()}
 	}
 	defer r.Body.Close()
 	if r.StatusCode == http.StatusAccepted {
 		raw, _ := io.ReadAll(r.Body)
 		var se agent.StartErrorResponse
 		if json.Unmarshal(raw, &se) == nil && se.Reason == agent.SpawnStillRunningReason {
-			return nil, &SpawnOutcomeUnknownError{Op: op, StillRunning: true, Detail: se.Message}
+			return &SpawnOutcomeUnknownError{Op: op, StillRunning: true, Detail: se.Message}
 		}
-		return nil, &SpawnOutcomeUnknownError{Op: op, StillRunning: true, Detail: "pogod answered 202 Accepted: " + strings.TrimSpace(string(raw))}
+		return &SpawnOutcomeUnknownError{Op: op, StillRunning: true, Detail: "pogod answered 202 Accepted: " + strings.TrimSpace(string(raw))}
 	}
 	if r.StatusCode != http.StatusCreated {
-		return nil, interpretSpawnFailure(op, r)
+		return interpretSpawnFailure(op, r)
 	}
-	var info agent.AgentInfo
-	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
 		// pogod said 201 and the body did not arrive intact: the agent exists.
-		return nil, &SpawnOutcomeUnknownError{Op: op, Detail: "201 Created, then reading the answer failed: " + err.Error()}
+		return &SpawnOutcomeUnknownError{Op: op, Detail: "201 Created, then reading the answer failed: " + err.Error()}
 	}
-	return &info, nil
+	return nil
 }
 
 // requestNeverSent reports whether a transport error proves the request did

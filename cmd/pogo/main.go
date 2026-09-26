@@ -2867,6 +2867,14 @@ live spawn is drellem2/pogo#167. Check 'pogo agent list' instead.`,
 				cli.PrintJSON(info)
 			} else {
 				fmt.Printf("Spawned polecat %s (pid=%d, prompt=%s)\n", info.Name, info.PID, info.PromptFile)
+				if line := spawnBaseLine(info.Base, spawnPolecatId); line != "" {
+					fmt.Println(line)
+				}
+				// On stderr as well as in the JSON: the fallback is correct, but a
+				// dispatcher who expected the target has to see that it did not get it.
+				if info.Base != nil && info.Base.Warning != "" {
+					fmt.Fprintf(os.Stderr, "warning: %s\n", info.Base.Warning)
+				}
 			}
 		},
 	}
@@ -2881,7 +2889,7 @@ live spawn is drellem2/pogo#167. Check 'pogo agent list' instead.`,
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBody, "body", "", "Inline shortcut for the work item body ({{.Body}}); the shell expands backticks and $VARS in it — prefer --body-file; mutually exclusive with --body-file")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatId, "id", "", "Work item ID ({{.Id}}); omitting it forfeits start-verification — pogod cannot detect or auto-recover a failed start without a claim signal (mg-2437)")
 	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatRepo, "repo", "", "Target repository path ({{.Repo}})")
-	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBranch, "branch", "", "Target branch for refinery submit ({{.Branch}})")
+	cmdAgentSpawnPolecat.Flags().StringVar(&spawnPolecatBranch, "branch", "", "Target branch ({{.Branch}}): the worktree is based on origin/<branch>, the refinery submit targets it, and a PR is opened against it. Omit to use the work item's `branch:` field, else the repo's default branch; a value that contradicts the item's `branch:` is REFUSED (drellem2/pogo#176)")
 	cmdAgentSpawnPolecat.Flags().StringSliceVarP(&spawnPolecatEnv, "env", "e", nil, "Additional environment variables (KEY=VALUE)")
 	// NOTE: this enumeration is stale — `cursor` is registered and accepted but
 	// unlisted. Left alone deliberately: TestProviderHelpTextIsNotAuthoritative

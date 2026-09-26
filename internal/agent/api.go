@@ -98,12 +98,17 @@ type SpawnPolecatAPIRequest struct {
 	// item's `type` is looked up in the CLOSED map in templateroute.go, and an
 	// unrouted type produces no template and refuses the spawn. There is no
 	// default (mg-9a04).
-	Template string   `json:"template,omitempty"`
-	Task     string   `json:"task,omitempty"`     // Work item title
-	Body     string   `json:"body,omitempty"`     // Work item body
-	Id       string   `json:"id,omitempty"`       // Work item ID
-	Repo     string   `json:"repo,omitempty"`     // Target repository path
-	Branch   string   `json:"branch,omitempty"`   // Target branch for refinery submit
+	Template string `json:"template,omitempty"`
+	Task     string `json:"task,omitempty"` // Work item title
+	Body     string `json:"body,omitempty"` // Work item body
+	Id       string `json:"id,omitempty"`   // Work item ID
+	Repo     string `json:"repo,omitempty"` // Target repository path
+	// Branch is the TARGET branch: the worktree is based on origin/<branch>, the
+	// refinery submit targets it, and a gh-issue PR is opened against it. Empty
+	// defaults to the work item's `branch:` field, then to the repo's default
+	// branch; a value that contradicts the item's field is refused
+	// (drellem2/pogo#176, spawntarget.go).
+	Branch   string   `json:"branch,omitempty"`
 	Env      []string `json:"env,omitempty"`      // Additional env vars
 	Provider string   `json:"provider,omitempty"` // Harness provider override (--provider): tier 1 of resolution
 	// Model is the model override (--model): tier 1 of the model chain, beating
@@ -1578,6 +1583,28 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
+	// Target: default --branch from the work item's `branch:` field, and refuse
+	// a --branch that contradicts it (drellem2/pogo#176). BEFORE every gate that
+	// takes spawnReq.Branch (stranded, preserved, merged) and before template
+	// expansion, so the worktree base, the submit target and the PR base are all
+	// computed from the one resolved value. Until this, the item's field reached
+	// a spawn only if the dispatcher copied it by hand, and one forgotten flag
+	// sent all three to the default branch. See spawntarget.go.
+	//
+	// 409 like the gates around it: the request contradicts the item, and a
+	// retry unchanged is refused identically. No side effects precede it.
+	target, targetFrom, targetRefusal := r.resolveSpawnTarget(spawnReq)
+	if targetRefusal != "" {
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, targetRefusal)
+		return
+	}
+	if targetFrom == TargetFromWorkItem {
+		log.Printf("polecat %s: no --branch given; targeting %s from work item %s's `branch:` field",
+			spawnReq.Name, target, spawnReq.Id)
+	}
+	spawnReq.Branch = target
+	spawnBase := &SpawnBase{Target: target, TargetFrom: targetFrom}
+
 	// Pairing gate: refuse to put a worker on a work item whose REPOSITORY
 	// requires a paired item — one filed in advance that references this one —
 	// when no such item exists (mg-0e24). Same chokepoint as the assignee gate,
@@ -2182,6 +2209,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		log.Printf("polecat %s: created worktree at %s (branch %s, base %q)", spawnReq.Name, worktreeDir, branchName, baseRef)
+		spawnBase.BaseRef = baseRef
+		if warning := polecatBaseWarning(spawnReq.Branch, baseRef, adoption != nil); warning != "" {
+			spawnBase.Warning = warning
+			log.Printf("polecat %s: %s", spawnReq.Name, warning)
+		}
 
 		// The adoption is MEASURED, never assumed from having passed the argument
 		// — see verifyAdoption. A flag named "adopt" over a worktree that adopted
@@ -2331,7 +2363,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(agentInfo(a))
+	json.NewEncoder(w).Encode(SpawnPolecatAPIResponse{AgentInfo: agentInfo(a), Base: spawnBase})
 }
 
 // failPolecatSpawn reports a polecat dispatch that produced no agent, on both
