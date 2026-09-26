@@ -2670,12 +2670,19 @@ func reclaimStalePolecatBranch(repo, branch, baseRef string) error {
 			"(`git -C %s worktree list`) and re-dispatch", branch, err, repo, repo)
 	}
 	if holder.OwnerTree != "" {
-		return fmt.Errorf("branch %s is owned by the worktree at %s: a polecat for this work item is "+
-			"still live — that tree is named after it, whether or not the branch is what is checked "+
+		// "Still has a tree", not "still live": a stopped polecat whose dirty
+		// tree was preserved owns its name exactly as a running one does, and a
+		// refusal that asserts a running worker sends the reader hunting for one.
+		name := gitgc.PolecatNameForWorktree(holder.OwnerTree)
+		return fmt.Errorf("branch %s is owned by the worktree at %s: a polecat for this work item "+
+			"still has a tree there — a running worker, or a stopped one whose uncommitted work was "+
+			"preserved. That tree is named after it, whether or not the branch is what is checked "+
 			"out inside (a worker on a review or QA branch owns its name just the same). "+
-			"Stop it before re-dispatching (`pogo agent list`, then `pogo agent stop %s`); do NOT "+
-			"remove the worktree to clear this, its uncommitted files exist nowhere else",
-			branch, holder.OwnerTree, gitgc.PolecatNameForWorktree(holder.OwnerTree))
+			"If `pogo agent list` shows %s running, stop it before re-dispatching (`pogo agent stop "+
+			"%s`); if not, the tree is preserved work — recover it (`git -C %s status`) before "+
+			"anything else. Do NOT remove the worktree to clear this, its uncommitted files exist "+
+			"nowhere else",
+			branch, holder.OwnerTree, name, name, holder.OwnerTree)
 	}
 	if holder.CheckedOutAt != "" {
 		return fmt.Errorf("branch %s is checked out at %s: a polecat for this work item is still live. "+

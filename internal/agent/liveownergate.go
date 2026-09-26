@@ -125,24 +125,38 @@ func (r *Registry) liveOwnerRefusal(name, workItemID string) string {
 //
 // worktreeDir is the live polecat's registered tree when the registry knows it,
 // and "" for a witness-only survivor, whose tree we can locate but not confirm.
-// The message says which it is rather than asserting a path it did not read.
+// The message says which it is rather than asserting a path it did not read —
+// in the PROSE. The command it hands out takes the bare path either way: a
+// `git -C` whose argument carries an explanatory parenthetical is not a command
+// (round 1 of PR #172 shipped exactly that).
 func liveNameRefusal(name, worktreeDir, evidence string) string {
-	target := polecatWorktreePath(name)
-	where := "its worktree"
-	if worktreeDir != "" {
-		where = worktreeDir
-	} else if target != "" {
-		where = target + " (the path this dispatch would have targeted)"
+	tree := worktreeDir
+	where := worktreeDir
+	if tree == "" {
+		tree = polecatWorktreePath(name)
+		where = "its worktree"
+		if tree != "" {
+			where = tree + " (the path this dispatch would have targeted)"
+		}
+	}
+	var exits string
+	if evidence == InFlightFromWitness {
+		exits = survivorExits(name, tree)
+	} else {
+		read := "`pogo agent list` for the worker"
+		if tree != "" {
+			read += fmt.Sprintf(", `git -C %s status` for what is in it that exists nowhere else", tree)
+		}
+		exits = fmt.Sprintf("Read the tree first (%s); if that worker really is finished, "+
+			"`pogo agent stop %s` — which preserves a dirty tree rather than reaping it — and then "+
+			"re-dispatch.", read, name)
 	}
 	return fmt.Sprintf(
 		"polecat %q is ALREADY RUNNING (evidence: %s), and this dispatch would give a second worker "+
 			"the same name. The name is not a label: the worktree directory and the branch are made "+
 			"from it, so this spawn targets %s and the branch %s%s — the live worker's own. Nothing "+
-			"was dispatched. %s Read the tree first (`pogo agent list` for the worker, `git -C %s "+
-			"status` for what is in it that exists nowhere else); if that worker really is finished, "+
-			"`pogo agent stop %s` — which preserves a dirty tree rather than reaping it — and then "+
-			"re-dispatch.",
-		name, evidence, where, gitgc.BranchPrefix, name, liveOwnerNotOverridable, where, name)
+			"was dispatched. %s %s",
+		name, evidence, where, gitgc.BranchPrefix, name, liveOwnerNotOverridable, exits)
 }
 
 // liveItemRefusal is the refusal for a dispatch onto a work item a live polecat
@@ -157,23 +171,112 @@ func liveNameRefusal(name, worktreeDir, evidence string) string {
 // strands that worker on an item it no longer owns — the mirror image of the
 // state claim-at-spawn was built to prevent (mg-7254). Stopping normally
 // releases the claim on its own (mg-fb13); unclaiming is for the case where it
-// did not, or where the "live" worker turns out to be a witness record whose
-// pid could not be read.
+// did not.
+//
+// A WITNESS-evidence owner gets different exits (survivorExits), because the
+// registry-evidence ones do not work on it: it is absent from `pogo agent list`
+// and `pogo agent stop` answers 404 for it. Nothing releases its claim when it
+// is killed, so there the unclaim is part of the kill line rather than a
+// fallback.
 func liveItemRefusal(workItemID string, owner InFlightWorkItem) string {
-	return fmt.Sprintf(
+	head := fmt.Sprintf(
 		"work item %s is ALREADY BEING WORKED by live polecat %q (evidence: %s), so this is a "+
 			"DUPLICATE dispatch. Two workers on one item is what drellem2/pogo#167 is about: the "+
 			"second spawn's cleanup path force-removes a worktree, and the tree it reaches is the "+
 			"first worker's, holding uncommitted files that are on no branch, in no stash and on no "+
-			"remote. Nothing was dispatched. %s Read it first: `pogo agent list` names the live "+
+			"remote. Nothing was dispatched. %s ",
+		workItemID, owner.Polecat, owner.Evidence, liveOwnerNotOverridable)
+	if owner.Evidence == InFlightFromWitness {
+		return head + fmt.Sprintf("`mg show %s` names the pid holding the claim. ", workItemID) +
+			survivorExits(owner.Polecat, polecatWorktreePath(owner.Polecat))
+	}
+	return head + fmt.Sprintf(
+		"Read it first: `pogo agent list` names the live "+
 			"worker and `mg show %s` names the pid holding the claim. If that worker really is "+
 			"finished, `pogo agent stop %s` — which preserves a dirty tree rather than reaping it — "+
 			"and re-dispatch; stopping normally hands the claim back by itself, and only if the item "+
 			"is still claimed once NOTHING is live on it does it need `mg unclaim %s`. Do not run "+
 			"that first: unclaiming an item its worker is still on strands the worker, which is the "+
 			"same loss in the other direction.",
-		workItemID, owner.Polecat, owner.Evidence, liveOwnerNotOverridable, workItemID,
-		owner.Polecat, workItemID)
+		workItemID, owner.Polecat, workItemID)
+}
+
+// survivorExits is the way past this gate for a live owner known ONLY from the
+// witness — a polecat that outlived the pogod that spawned it.
+//
+// WHY IT IS NOT `pogo agent stop` (round 1 of PR #172). The registry has no
+// adopt path (mg-13a3), so this pogod holds no handle on a survivor: `pogo agent
+// list` does not show it and `pogo agent stop <name>` answers 404
+// (Registry.StopWithCause). A non-overridable refusal whose only exits fail is a
+// dead end, and a dead end on a gate with no flag is how gates get disarmed. So
+// the message names what DOES work for a process this pogod did not spawn: its
+// pid, `pogo agent witness` (the same (pid, start_time) probe the gate itself
+// used, over a process boundary), and a kill gated on that probe — the orphan
+// alert's line (mailOrphanAlert, mg-da48), for the orphan alert's reason: the
+// refusal is read later than it is written, and a bare `kill <pid>` aimed by a
+// decayed record lands on whatever recycled the pid.
+//
+// Every command here is paste-runnable. An Unreadable verdict is not listed by
+// `pogo agent witness` (it lists only CONFIRMED survivors), so gating the kill on
+// it would be a line that silently never fires; that case names the pid and a
+// `ps` that lets a human do the identity check the kernel would not.
+func survivorExits(name, tree string) string {
+	// The two commands that do NOT work are named without backticks on purpose:
+	// every backticked span in this gate's refusals is an offered command, and
+	// the test holds it to being runnable.
+	notHere := "THIS WORKER IS NOT IN pogo agent list, AND pogo agent stop WILL ANSWER 404 FOR IT: it " +
+		"outlived the pogod that spawned it, so this pogod has no handle on it and cannot stop it."
+	read := ""
+	if tree != "" {
+		read = fmt.Sprintf(" Read its tree first — `git -C %s status` — for what is in it that exists "+
+			"nowhere else.", tree)
+	}
+	rec, verdict, ok := witnessedPolecat(name)
+	if !ok || rec.PID <= 0 {
+		return notHere + " `pogo agent witness` lists its pid." + read + " Re-dispatch only once " +
+			"`pogo agent witness` no longer lists it."
+	}
+	unclaim := ""
+	claimNote := ""
+	if item := strings.TrimSpace(rec.WorkItemID); item != "" {
+		unclaim = " && mg unclaim " + item
+		claimNote = fmt.Sprintf(" The unclaim is in the line because nothing hands %s back when a "+
+			"survivor dies: the pogod that would have is gone.", item)
+	}
+	after := " The worktree stays on disk — a kill removes no files — so re-dispatch into it, or " +
+		"recover what it holds, afterwards."
+	if verdict == WitnessUnreadable {
+		return notHere + fmt.Sprintf(" It holds pid %d, which answers signals but whose start time "+
+			"could not be read, so pogod cannot confirm that pid is still this polecat — and "+
+			"`pogo agent witness`, which lists only CONFIRMED survivors, will not show it.%s Confirm "+
+			"it by hand before killing anything: `ps -o lstart=,command= -p %d`. Only if that is "+
+			"the polecat and it really is finished: `kill %d%s`.%s%s",
+			rec.PID, read, rec.PID, rec.PID, unclaim, claimNote, after)
+	}
+	return notHere + fmt.Sprintf(" It is pid %d, and `pogo agent witness` lists it.%s If that worker "+
+		"really is finished, end it with this line, which re-confirms identity (pid AND start time) "+
+		"before it kills, so a pid recycled since this refusal was written cannot be hit: "+
+		"`pogo agent witness --json | grep -q '%s' && kill %d%s`.%s%s",
+		rec.PID, read, WitnessAliveGrep(name, rec.PID), rec.PID, unclaim, claimNote, after)
+}
+
+// witnessedPolecat returns name's witness record and its verdict right now, or
+// ok=false when the store has none (or cannot be read — the gate has already
+// reported a read failure by the time a refusal is being worded, and the
+// fallback wording still names a runnable way to find the pid).
+func witnessedPolecat(name string) (witnessRecord, WitnessVerdict, bool) {
+	witnessMu.Lock()
+	recs, err := loadPolecatWitness()
+	witnessMu.Unlock()
+	if err != nil {
+		return witnessRecord{}, WitnessNoRecord, false
+	}
+	for _, r := range recs {
+		if r.Name == name {
+			return r, witnessVerdict(r), true
+		}
+	}
+	return witnessRecord{}, WitnessNoRecord, false
 }
 
 // liveOwnerUnreadableRefusal is the refusal for a gate that could not establish

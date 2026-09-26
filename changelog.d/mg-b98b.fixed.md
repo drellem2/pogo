@@ -43,6 +43,14 @@
   live owner, both exits in the order they must be taken (`pogo agent stop`
   first — `mg unclaim` on an item its worker is still on strands that worker),
   and says *why* there is no override, so a reader does not go looking for one.
+  For a live owner known **only from the witness** — a restart survivor, which
+  `pogo agent list` does not show and `pogo agent stop` answers 404 for — the
+  refusal instead names its **pid**, `pogo agent witness`, and a kill gated on
+  that same (pid, start time) probe
+  (`pogo agent witness --json | grep -q '…' && kill <pid> && mg unclaim <item>`,
+  the orphan alert's line), or a `ps` identity check when the start time cannot
+  be read. Every command a refusal offers is paste-runnable, and a test executes
+  the ones that need no pogod.
   Alone among these gates it fails **closed** on a witness it cannot read: an
   unreadable store is not an empty fleet, and `gitgc` already skips its whole
   sweep on that same failure.

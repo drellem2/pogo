@@ -3,9 +3,12 @@ package agent
 import (
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Tests for drellem2/pogo#167: a duplicate spawn-polecat dispatch onto a name or
@@ -76,6 +79,116 @@ func TestLiveOwnerGate_SeesARestartSurvivor(t *testing.T) {
 	}
 	if refusal := reg.liveOwnerRefusal("fresh-name", "mg-survivor"); refusal == "" {
 		t.Error("a restart-surviving polecat's ITEM was re-dispatched: the union is not being consulted")
+	}
+}
+
+// TestLiveOwnerGate_SurvivorRefusalOffersExitsThatWork pins round 1 of PR #172.
+// For a WITNESS-evidence owner the registry-evidence exits are dead ends: the
+// survivor is not in `pogo agent list` and `pogo agent stop <name>` answers 404
+// (Registry.StopWithCause), because this pogod never spawned it. A refusal with
+// no override whose only exits fail is a dead end, so both halves must name the
+// pid, `pogo agent witness`, and a kill gated on the witness — and every
+// command they offer must actually run. The ones that CAN run without a live
+// pogod (git, ps) are executed here, not string-matched.
+func TestLiveOwnerGate_SurvivorRefusalOffersExitsThatWork(t *testing.T) {
+	sandboxWitness(t)
+	t.Setenv("POGO_HOME", t.TempDir())
+	pid := liveProcess(t)
+	if err := RecordPolecatWitness("survivor", pid, "mg-survivor", "/repo"); err != nil {
+		t.Fatalf("RecordPolecatWitness: %v", err)
+	}
+	// The survivor's tree, as a real repo, so the `git -C` it is sent to runs.
+	tree := polecatWorktreePath("survivor")
+	if err := os.MkdirAll(tree, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, tree, "init", "-q")
+	reg := newDrainTestRegistry(t) // empty: the survivor is known only from the witness
+
+	for _, tc := range []struct{ half, name, item string }{
+		{"name", "survivor", "mg-unrelated"},
+		{"item", "fresh-name", "mg-survivor"},
+	} {
+		refusal := reg.liveOwnerRefusal(tc.name, tc.item)
+		if refusal == "" {
+			t.Fatalf("%s half: a restart survivor was not refused", tc.half)
+		}
+		pidStr := strconv.Itoa(pid)
+		for _, want := range []string{
+			"pid " + pidStr,
+			"`pogo agent witness`",
+			"404",
+			WitnessAliveGrep("survivor", pid),
+			"&& kill " + pidStr + " && mg unclaim mg-survivor",
+		} {
+			if !strings.Contains(refusal, want) {
+				t.Errorf("%s half: survivor refusal must contain %q, got: %s", tc.half, want, refusal)
+			}
+		}
+		assertOfferedCommandsRun(t, tc.half, refusal)
+		assertNotOverridable(t, refusal)
+	}
+}
+
+// TestLiveOwnerGate_UnreadableSurvivorIsNotSentToAGrepThatNeverFires. A
+// survivor whose start time cannot be read still counts as live (LivePolecatSet),
+// but `pogo agent witness` lists only CONFIRMED survivors — so the witness-gated
+// kill line would be a command that silently never fires. The refusal must name
+// the pid and a hand identity check instead.
+func TestLiveOwnerGate_UnreadableSurvivorIsNotSentToAGrepThatNeverFires(t *testing.T) {
+	sandboxWitness(t)
+	t.Setenv("POGO_HOME", t.TempDir())
+	pid := liveProcess(t)
+	if err := RecordPolecatWitness("survivor", pid, "mg-survivor", "/repo"); err != nil {
+		t.Fatalf("RecordPolecatWitness: %v", err)
+	}
+	tree := polecatWorktreePath("survivor")
+	if err := os.MkdirAll(tree, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, tree, "init", "-q")
+	prev := procStartFn
+	procStartFn = func(int) (time.Time, bool) { return time.Time{}, false }
+	t.Cleanup(func() { procStartFn = prev })
+	reg := newDrainTestRegistry(t)
+
+	refusal := reg.liveOwnerRefusal("fresh-name", "mg-survivor")
+	if refusal == "" {
+		t.Fatal("an unreadable-but-live survivor's item was re-dispatched")
+	}
+	pidStr := strconv.Itoa(pid)
+	for _, want := range []string{"`ps -o lstart=,command= -p " + pidStr + "`", "`kill " + pidStr + " && mg unclaim mg-survivor`"} {
+		if !strings.Contains(refusal, want) {
+			t.Errorf("refusal must contain %q, got: %s", want, refusal)
+		}
+	}
+	if strings.Contains(refusal, "grep -q") {
+		t.Errorf("an unreadable survivor is not in `pogo agent witness`; a kill gated on it never fires: %s", refusal)
+	}
+	assertOfferedCommandsRun(t, "unreadable", refusal)
+}
+
+// assertOfferedCommandsRun holds every backticked span in a refusal to being a
+// command: no prose placeholder inside it (round 1 shipped `git -C <path> (the
+// path this dispatch would have targeted) status`), and never one of the exits
+// that answers 404 for a survivor. The spans that need no pogod — git, ps — are
+// executed and must exit 0.
+func assertOfferedCommandsRun(t *testing.T, label, refusal string) {
+	t.Helper()
+	parts := strings.Split(refusal, "`")
+	for i := 1; i < len(parts); i += 2 {
+		span := parts[i]
+		if strings.ContainsAny(span, "()<>") {
+			t.Errorf("%s: offered command carries prose, not a command: `%s`", label, span)
+		}
+		if strings.HasPrefix(span, "pogo agent stop") || span == "pogo agent list" {
+			t.Errorf("%s: offered `%s` for a survivor, which this pogod cannot see or stop", label, span)
+		}
+		if strings.HasPrefix(span, "git ") || strings.HasPrefix(span, "ps ") {
+			if out, err := exec.Command("sh", "-c", span).CombinedOutput(); err != nil {
+				t.Errorf("%s: offered command `%s` does not run: %v\n%s", label, span, err, out)
+			}
+		}
 	}
 }
 
@@ -211,7 +324,7 @@ func TestSpawnPolecat_DoesNotDestroyALivePolecatsTree(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Errorf("status = %d, want 409 naming the live owner; body: %s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "still live") {
+	if !strings.Contains(rr.Body.String(), "still has a tree") {
 		t.Errorf("the refusal must name the cause, got: %s", rr.Body.String())
 	}
 }
