@@ -16,10 +16,13 @@ import (
 // stopped the fleet — is in internal/server/orchestrationresume.go.
 //
 // This is a detector on the heartbeat tick, in the shape every other detector
-// here has, with one difference that has to be said out loud: it ACTS. Of the
-// twelve subsystems riding hb.OnTick, exactly two do anything but report, and
-// the other one (doneReap) only stops a process whose work is provably over.
-// This one starts a fleet.
+// here has, with one difference that has to be said out loud: it ACTS. It is
+// not the only subsystem on hb.OnTick that does — the stall watcher and the
+// scheduler type into agents' terminals, the mid-session wedge detector sends a
+// bare Return, and doneReap stops polecats — but the others act on agents that
+// are running. This one starts a fleet. docs/CONFIGURATION.md's "What runs by
+// default" table lists which sections act, and a test keeps it current, so no
+// count is kept here (drellem2/pogo#199).
 //
 // WHY ACTING IS RIGHT HERE AND REPORTING IS NOT. A report goes to the
 // coordinator's mailbox. The coordinator is a crew agent. Crew agents are

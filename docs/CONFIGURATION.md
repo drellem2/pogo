@@ -5,6 +5,117 @@ lives, and which doc to read for depth. This is a survey, not a reference. For
 the guided walkthrough of reshaping pogo for a non-coding workflow, start with
 [docs/customizing.md](customizing.md).
 
+## What runs by default
+
+Read this before you upgrade pogod across a long gap. Every section of
+`config.toml` that your file does not name runs at the default in this table,
+because the effective configuration is **your file plus pogo's defaults**
+(see "Where `config.toml` lives" below for how two files layer). The table has
+one row per section the parser reads, plus one row per switch inside
+`[stall_watch]`. `internal/config/defaults_table_test.go` checks it against
+`config.Load()` and against the parser's section and key names, so a section
+cannot ship without a row and a row cannot claim a default the code does not
+have.
+
+How to read the columns:
+
+- **Key** is the switch, spelled as `config.toml` spells it. `—` means the
+  section has no on/off switch.
+- **Default** is what you get when your file does not name the key. `on` and
+  `off` are the switch's value. `inert` means the section is on in principle
+  but does nothing until you give it a list, such as `repos` or `jobs`.
+  `—` means there is nothing to switch.
+- **Kind** answers the safety question. `observes` means it reads, then
+  mails, logs, or emits events, and changes nothing else. `ACTS` means it can
+  change something outside its own state files, and the last column names
+  the action. `plumbing` means it sets how pogod itself runs, and there is
+  nothing to observe or act on.
+
+Two defaults depend on a config file existing at all. A pogod with **no**
+config file (a sandbox, CI, a test) does not auto-start the crew, does not
+refresh installed prompts, and does not arm the stall watcher. A pogod with any
+config file, even an empty one, gets all three. Every other row is the same
+with or without a file.
+
+To turn a row off, set its key in your file: `enabled = false` under the
+section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
+
+<!-- defaults-table:begin -->
+| Section | Key | Default | Kind | What it does when it fires |
+|---|---|---|---|---|
+| `[server]` | — | — | plumbing | Sets pogod's listen port and bind address. |
+| `[search]` | — | — | plumbing | Sets the indexer's limits and roots. The indexer reads your repos and writes only its own index. |
+| `[heartbeat]` | — | — | plumbing | Sets the tick that drives every watcher below, and the clock-jump threshold. |
+| `[agents]` | `autostart` | on | ACTS | Starts every configured crew agent (the coordinator and the PMs) when pogod boots, and again when an orchestration restart runs. Needs a config file. See [Crew auto-start](#crew-auto-start). |
+| `[agents.crew]` | — | — | plumbing | Sets the harness command and provider for crew agents. |
+| `[agents.polecat]` | — | — | plumbing | Sets the harness command and provider for polecats. |
+| `[refinery]` | `enabled` | on | ACTS | Acts only on branches someone ran `pogo refinery submit` for. It runs the gate, merges the branch into its target, pushes the target to `origin`, marks the work item done, stops the merged polecat, and mails the coordinator. See [Refinery / build.sh gates](#refinery--buildsh-gates). |
+| `[gitgc]` | `enabled` | on | ACTS | Once at boot, then every `interval`: force-deletes local `polecat-*` branches (`git branch -D`) and removes leaked polecat worktrees when no live polecat owns them and the work item is archived, or done with its branch merged into `main`. An archived item's branch is deleted even if it never merged. It keeps anything it cannot classify, and a worktree that is dirty or holds commits no ref reaches. It mails the coordinator when a sweep fails. Code: `internal/gitgc`. |
+| `[stall_watch]` | `enabled` | on | ACTS | Types a nudge into the coordinator's terminal when its unclaimed work or unread mail passes a threshold. If the terminal is busy, it mails instead. Needs a config file. See [Stall watcher](#stall-watcher). |
+| `[stall_watch]` | `priority_wake_enabled` | on | ACTS | Sends the same nudge sooner for a high-priority available item. See [Priority wake](#priority-wake). |
+| `[stall_watch]` | `blocked_reminder_enabled` | on | ACTS | Nudges, or mails, the agent named in a `blocked:<agent>` assignee that a decision is owed. The notices stop at a cap. |
+| `[stall_watch]` | `indefinite_hold_report_enabled` | on | observes | Mails a read-only digest of holds that nothing scheduled will ever release. See [A hold with no driver is invisible](#a-hold-with-no-driver-is-invisible). |
+| `[dispatch]` | `max_polecats_per_repo` | on | ACTS | Refuses to spawn a worker into a repo that already has 3 live workers. While the refinery holds a merge request for that repo, it holds back 1 of the 3 slots. Default `max_polecats_per_repo = 3`; `0` turns it off. See [Dispatch cap](#dispatch-cap--how-many-workers-may-enter-one-repository). |
+| `[dispatch_pairing]` | `repos` | inert | ACTS | Once you list `repos`, it refuses to dispatch an item in those repos until its paired item is filed. See [Dispatch pairing](#dispatch-pairing--items-that-owe-a-paired-work-item). |
+| `[audit_successor]` | `repos` | inert | observes | Once you list `repos`, `pogo doctor` warns about merged audits that no successor answered. It runs only inside `pogo doctor`, never in pogod, and it never refuses. See [Audit successors](#audit-successors--merged-audits-that-nothing-answered). |
+| `[reaper]` | `enabled` | on | ACTS | Inert until you list `jobs`. It runs `launchctl kickstart` on a declared launchd job whose heartbeat file has gone stale, and after `max_kickstarts` tries it mails `mayor` and `human`. See [Heartbeat reaper](#heartbeat-reaper-tier-1). |
+| `[reconcile]` | `mirrors` | inert | observes | Declares host mirrors. pogod never reconciles them. `[drift_watch]` reads the list, and `pogo service reconcile` copies files only when you run it. See [Host reconcile + drift check](#host-reconcile--drift-check). |
+| `[drift_watch]` | `enabled` | on | observes | Mails when a mirrored host artifact drifts from its source, when the running pogod is behind, or when the nightly deploy did not fire. It never reconciles. |
+| `[cred_expiry]` | `enabled` | on | observes | Mails before the fleet's harness credential expires. It never re-mints. See [The credential-expiry warner](#the-credential-expiry-warner). |
+| `[gh_teardown]` | `enabled` | on | observes | Mails when a done gh-issue carrier's GitHub issue is still open. It never closes or comments. See [The gh-issue teardown detector](#the-gh-issue-teardown-detector). |
+| `[gh_intake]` | `enabled` | on | observes | Mails when an open GitHub issue has no carrier work item. It never files an item or comments. See [The gh-issue intake detector](#the-gh-issue-intake-detector). |
+| `[carrier_drift]` | `enabled` | on | observes | Mails when a live carrier's GitHub issue has moved on without it. It never comments, closes, or edits. Code: `internal/carrierdrift`. |
+| `[review_decl]` | `enabled` | on | observes | Mails when a work item is missing its `reviews:` declaration. It never writes one. Code: `internal/reviewdecl`. |
+| `[prompt_edit]` | `enabled` | on | observes | Mails when an installed prompt was hand-edited after install. It never rewrites the prompt. Code: `internal/promptedit`. |
+| `[prompt_stale]` | `enabled` | on | observes | Mails when the installed prompts are behind the repo. It never reinstalls. Code: `internal/promptstale`. |
+| `[ack_watch]` | `enabled` | on | observes | Mails when an agent completes too few of its scheduled fires. See [ack-watch](#the-scheduler-completion-deficit-detector-ack-watch). |
+| `[deaf_watch]` | `enabled` | on | observes | Mails when a running agent has no mail loop that could wake it. See [deaf-watch](#the-missing-mail-loop-announcer-deaf-watch). |
+| `[heart_watch]` | `enabled` | on | observes | Mails when a crew heartbeat goes stale. `restart_after` is a threshold in the notice; heart-watch restarts nothing. See [heart-watch](#who-reads-the-crew-heartbeat-when-the-coordinator-is-dark-heart-watch). |
+| `[blind_watch]` | `enabled` | on | observes | Mails when wedge-watch keeps declining to judge an agent. See [blind-watch](#who-reads-a-detector-that-says-it-cannot-answer-blind-watch). |
+| `[absent_watch]` | `enabled` | on | observes | Mails when a configured agent is missing from the registry. It never starts the agent. See [absent-watch](#the-absent-agent-announcer-absent-watch). |
+| `[progress_watch]` | `enabled` | on | observes | Mails when the fleet is landing no work. See [progress-watch](#is-the-fleet-getting-anything-done-progress-watch). |
+| `[first_turn]` | `enabled` | on | observes | Mails when an agent never completes its first turn. See [first-turn](#the-first-completed-turn-floor-first-turn). |
+| `[synth_watch]` | `enabled` | on | observes | Pages `human` when an agent's turns fail synthetically. `off` stops only the page. The respawn suppression that stops pogod restarting such an agent stays on, and has no key. See [Switching off synthwatch, refusal-watch and turn-watch](#switching-off-synthwatch-refusal-watch-and-turn-watch). |
+| `[refusal_watch]` | `enabled` | on | observes | Mails on a run of consecutive refused turns. It never restarts or nudges. |
+| `[turn_watch]` | `enabled` | on | observes | Mails when agents stop completing turns (the fleet-down floor). |
+| `[wedge_watch]` | `enabled` | on | observes | Emits events for agents parked at a dead-end prompt or with a frozen work counter. It sends no mail. See [wedge-watch](#the-wedged-agent-detector-wedge-watch). |
+| `[midsession_wedge]` | `enabled` | on | ACTS | Types a bare Return into an agent whose composer holds an unsubmitted message. The attempts are bounded, and when they run out it mails the coordinator. `report_only = true` withholds the Return. See [mid-session wedge](#the-mid-session-wedge-detector-midsession_wedge). |
+| `[done_reap]` | `enabled` | on | ACTS | Stops a polecat whose work item is done, or parked at `stage: gated`, once its terminal has been quiet for `idle_grace`. See [done-reap](#the-done-item-polecat-reaper-done-reap). |
+| `[orchestration_resume]` | `enabled` | on | ACTS | Restarts the whole fleet when orchestration was stopped and nothing resumed it within `grace`, then mails the coordinator. See [Orchestration resume deadline](#orchestration-resume-deadline). |
+<!-- defaults-table:end -->
+
+### Acting behaviours that deliberately have no key
+
+These run whatever your `config.toml` says. None of them has an on/off
+switch, and that is deliberate.
+
+- **Crew restart on crash.** pogod respawns a crew agent that exits
+  unexpectedly. The switch is `restart_on_crash` in that agent's prompt
+  frontmatter, not in `config.toml`. pogod suppresses the respawn when
+  synthwatch finds the agent is failing every turn.
+- **Worktree cleanup on polecat exit.** On every polecat exit, normal or
+  forced, pogod removes the polecat's worktree. It keeps a worktree that is
+  dirty, holds commits no ref reaches, or cannot be checked.
+- **Harness dialogs.** At spawn, pogod accepts the harness's workspace-trust
+  dialog. For an agent's whole life, it dismisses the rating dialog and the
+  rate-limit-options modal with their menu keystrokes.
+- **Kickoff re-delivery.** After a spawn, if the agent shows no sign that it
+  started, pogod re-sends a bare Return so a kickoff stuck in the input buffer
+  is submitted.
+- **Scheduler fires.** pogod types each `pogo schedule` entry into its target
+  agent's terminal when it comes due. It fires only entries that someone
+  registered.
+- **Prompt refresh at boot.** When a config file exists, pogod rewrites
+  installed prompts under `$POGO_HOME/agents/` that are behind the binary's
+  embedded copies. It declines a prompt that has local edits, and mails about
+  it.
+- **Dispatch-time gates.** A spawn is refused when its item is assigned to
+  `human` or `parked`, is at `stage: gated`, or has already merged. pogod
+  claims the work item at spawn.
+- **Condition notices.** pogod mails the coordinator about its own faults
+  (a failed git GC sweep, a failed prompt refresh, a failed restart, and
+  others), and queues a terminal wake when the coordinator needs one.
+
 ## PM TOMLs
 
 Per-product-manager config lives in `~/.pogo/agents/pm/<name>.toml` —

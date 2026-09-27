@@ -1987,9 +1987,11 @@ type MidSessionWedgeConfig struct {
 // mechanics live in cmd/pogod/donereap.go, which also documents why the
 // condition is item-done AND idle rather than item-done alone.
 //
-// ACTING, not report-only — the one detector here that is. It stops a process
-// whose work is provably concluded; it cannot mark an item, mail, nudge, or
-// spawn.
+// ACTING, not report-only. It stops a process whose work is provably
+// concluded; it cannot mark an item, mail, nudge, or spawn. It is not the only
+// acting section: the "What runs by default" table in docs/CONFIGURATION.md
+// lists every section as observes or ACTS, and a test pins that table to this
+// file (drellem2/pogo#199).
 type DoneReapConfig struct {
 	// Enabled turns the reaper on. Defaults to true.
 	Enabled bool
@@ -2005,9 +2007,9 @@ type DoneReapConfig struct {
 // fleet (mg-5af1): if orchestration is stopped and nothing has resumed it
 // within Grace, pogod resumes it and mails the coordinator.
 //
-// ACTING, not report-only — the second detector here that is, after DoneReap.
-// Its action is bounded to one thing: putting the daemon back into the mode it
-// boots into. It cannot stop anything, and it cannot act at all while the fleet
+// ACTING, not report-only (see the "What runs by default" table in
+// docs/CONFIGURATION.md for every section that acts). Its action is bounded to
+// one thing: putting the daemon back into the mode it boots into. It cannot stop anything, and it cannot act at all while the fleet
 // is up.
 //
 // TURNING IT OFF is a real choice and it is spelled out rather than left to a
