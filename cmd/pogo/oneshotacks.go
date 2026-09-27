@@ -101,9 +101,11 @@ func oneShotAckLine(rep scheduler.OneShotReport, err error, now time.Time) (stri
 		return "warn", fmt.Sprintf(
 			"NOT MEASURABLE on this box yet — %d one-shot removal(s) in %s carry the RETIRED `one_shot_complete` label "+
 				"(newest %s), so the pogod that wrote them predates d71e1e2 and could not emit `one_shot_unacked` at all. "+
-				"An unanswered one-shot would be invisible here until pogod is rebuilt. Run `curl -s http://127.0.0.1:%d/version` "+
-				"to see what is running. %s",
-			rep.Legacy, window, rep.LegacyLast.Local().Format("2006-01-02 15:04 MST"), doctorVersionPort(), oneShotLimits)
+				"%s %s Does the RUNNING pogod have the fix? `%s; echo $?` prints 0 yes, 1 no (rebuild), anything else means that checkout cannot answer. "+
+				"To measure the part of the window the old writer did not touch: `pogo check-oneshots --since=%s`. %s",
+			rep.Legacy, window, rep.LegacyLast.Local().Format("2006-01-02 15:04 MST"),
+			oneShotLegacyAgeOut(rep, now), oneShotLabelledSince(rep), oneShotAncestryCommand(),
+			oneShotAfterLegacy(rep), oneShotLimits)
 	}
 
 	if len(rep.Unanswered) == 0 {
@@ -122,6 +124,82 @@ func oneShotAckLine(rep scheduler.OneShotReport, err error, now time.Time) (stri
 	return "warn", fmt.Sprintf("%d one-shot(s) FIRED AND NOBODY ANSWERED in %s: %s. %d acked. "+
 		"Run `pogo check-oneshots` for what each was carrying. %s",
 		len(rep.Unanswered), window, strings.Join(named, "; "), len(rep.Answered), oneShotLimits)
+}
+
+// The four helpers below are the REMEDY half of the old-writer notice, shared
+// by the doctor row and check-oneshots so the two cannot drift apart.
+//
+// The notice used to end "invisible here until pogod is rebuilt" with a `curl
+// /version` (mg-9ac7). Both halves sent the reader to an action that could not
+// work: a retired record in the window is a property of the DATA, so a redeploy
+// leaves the row NOT MEASURABLE until the record ages out — and the reader who
+// redeployed concludes the redeploy failed. And a bare revision cannot say
+// whether d71e1e2 is in it; that takes an ancestry test against a checkout. So
+// the notice now names what governs it (the age-out), a command that yields a
+// verdict (the ancestry test, with its exit codes), and the one action that
+// makes the class measurable today (a --since after the last retired record).
+
+// oneShotLegacyAgeOut says when the newest retired record leaves the window. A
+// rolling window (no --until) slides with the clock, so the record leaves once
+// the window's length has passed since it; a fixed window never drops it.
+func oneShotLegacyAgeOut(rep scheduler.OneShotReport, now time.Time) string {
+	if !rep.Until.IsZero() {
+		return "This window has a fixed end, so it will always contain that record; " +
+			"no rebuild changes what it holds."
+	}
+	length := now.Sub(rep.Since)
+	out := rep.LegacyLast.Add(length)
+	return fmt.Sprintf("This is a limit of the DATA, not necessarily of the running build: a rolling %s window "+
+		"stops containing that record at about %s, and rebuilding pogod does not bring that forward.",
+		describeWindowLength(length), out.Local().Format("2006-01-02 15:04 MST"))
+}
+
+// describeWindowLength renders a window length in days when it is whole days
+// (the default is 7), and as a duration otherwise.
+func describeWindowLength(d time.Duration) string {
+	day := 24 * time.Hour
+	if d >= day && d%day < time.Minute {
+		return fmt.Sprintf("%d-day", int(d/day))
+	}
+	return d.Round(time.Minute).String()
+}
+
+// oneShotLabelledSince reports the one piece of evidence the log itself holds
+// about the current writer: a labelled outcome newer than the newest retired
+// one was written by a pogod that has the labels. Its absence proves nothing —
+// one-shots are rare — and the sentence says so rather than implying a rebuild.
+func oneShotLabelledSince(rep scheduler.OneShotReport) string {
+	var newest time.Time
+	for _, set := range [][]scheduler.OneShotOutcome{rep.Answered, rep.Unanswered, rep.Skipped} {
+		for _, o := range set {
+			if o.Removed.After(newest) {
+				newest = o.Removed
+			}
+		}
+	}
+	if newest.After(rep.LegacyLast) {
+		return fmt.Sprintf("The log already holds a labelled outcome from %s, after the newest retired one, "+
+			"so the pogod writing it since then has the fix.", newest.Local().Format("2006-01-02 15:04 MST"))
+	}
+	return "No labelled outcome follows the newest retired one, which says nothing either way: " +
+		"one-shots are rare, and a window with none since cannot show which build is running."
+}
+
+// oneShotAncestryCommand is the check that answers "does the running pogod have
+// d71e1e2". Exit 0 and 1 are the verdicts; git exits 128 when the checkout
+// lacks either commit or the revision came back empty, which is why the caller
+// must not collapse it with `|| echo no`.
+func oneShotAncestryCommand() string {
+	return fmt.Sprintf("git -C <your pogo checkout> merge-base --is-ancestor d71e1e2 "+
+		"\"$(curl -s http://127.0.0.1:%d/version | jq -r .revision)\"", doctorVersionPort())
+}
+
+// oneShotAfterLegacy is the --since that starts just after the newest retired
+// record. The window is [since, until), and RFC3339 here is second-granular, so
+// the stamp is rounded UP to the next whole second — rounding down would keep a
+// record with a fractional second inside the window it was meant to exclude.
+func oneShotAfterLegacy(rep scheduler.OneShotReport) string {
+	return rep.LegacyLast.Truncate(time.Second).Add(time.Second).UTC().Format(time.RFC3339)
 }
 
 // oneShotIdentity is the short form: which one-shot, whose, and when it left.
@@ -223,11 +301,15 @@ counts as answered here, and a fire still inside its 24h ack window is neither
 answered nor missed.
 
 A LOG WHOSE WRITER PREDATES THE LABELS IS REPORTED AS SUCH, never as clean. The
-four labels ship in d71e1e2 and are inert until pogod is rebuilt onto it; before
-that every one-shot left as the retired ` + "`one_shot_complete`" + `, which this command
-recognises for exactly this purpose. Finding one in the window means an
-unanswered one-shot would be INVISIBLE here, and it says so rather than printing
-a zero it cannot stand behind.
+four labels ship in d71e1e2; a pogod built before it left every one-shot as the
+retired ` + "`one_shot_complete`" + `, which this command recognises for exactly this
+purpose. Finding one in the window means an unanswered one-shot would be
+INVISIBLE here, and it says so rather than printing a zero it cannot stand
+behind. That is a limit of the DATA, not necessarily of the running build: the
+record stays in a rolling window until it ages out (the notice gives the date),
+and rebuilding pogod does not remove it. The notice gives a git ancestry test
+for whether the running build has the fix, and a --since that measures only
+the part of the window after the last retired record.
 
 REPORTS ONLY. It never re-fires a one-shot, never re-registers one, and never
 acks on anyone's behalf. Re-firing a missed obligation is a decision with a
@@ -291,9 +373,15 @@ func renderOneShotReport(rep scheduler.OneShotReport, now time.Time, all bool) s
 	if rep.WriterPredatesLabels() {
 		fmt.Fprintf(&b, "NOT MEASURABLE — %d removal(s) in this window carry the RETIRED `one_shot_complete`\n"+
 			"label (newest %s). The pogod that wrote them predates d71e1e2 and\n"+
-			"cannot emit `one_shot_unacked`, so an unanswered one-shot would not appear below.\n"+
-			"Check what is running:  curl -s http://127.0.0.1:%d/version | jq -r .revision\n\n",
-			rep.Legacy, rep.LegacyLast.Local().Format("2006-01-02 15:04 MST"), doctorVersionPort())
+			"cannot emit `one_shot_unacked`, so an unanswered one-shot would not appear below.\n\n"+
+			"%s\n%s\n\n"+
+			"Does the RUNNING pogod have the fix? (0 = yes, 1 = no: rebuild; anything else\n"+
+			"means that checkout cannot answer — fetch, or use one that has both commits)\n"+
+			"  %s; echo $?\n"+
+			"Measure the part of the window the old writer did not touch:\n"+
+			"  pogo check-oneshots --since=%s\n\n",
+			rep.Legacy, rep.LegacyLast.Local().Format("2006-01-02 15:04 MST"),
+			oneShotLegacyAgeOut(rep, now), oneShotLabelledSince(rep), oneShotAncestryCommand(), oneShotAfterLegacy(rep))
 	}
 
 	if len(rep.Unanswered) == 0 {
