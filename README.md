@@ -93,6 +93,8 @@ Swap the prompts and set `[refinery] enabled = false` to drive research, content
 
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md) surveys every customization point — PM TOMLs, prompt templates, the scheduler, agent registry, refinery gates, and mail.
 
+**Upgrading pogod? Read [What runs by default](docs/CONFIGURATION.md#what-runs-by-default) first.** Every section your `config.toml` does not name runs at its default, and most sections default to on. That table lists each section's key, its default, and whether it only observes or ACTS (merges, deletes branches and worktrees, stops or starts agents, types into agents' terminals).
+
 ## Learn more
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — full system design

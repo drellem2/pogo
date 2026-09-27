@@ -3596,8 +3596,9 @@ Flags:
 	// until a coordinator noticed. See cmd/pogod/donereap.go for why the
 	// condition is item-done AND idle, and why it polls rather than hooks.
 	//
-	// The only ACTING detector on this tick. Its action is bounded to stopping a
-	// polecat whose work is provably concluded.
+	// ACTING, not report-only: its action is bounded to stopping a polecat whose
+	// work is provably concluded. It is not the only acting subsystem on this
+	// tick — docs/CONFIGURATION.md's "What runs by default" table lists them.
 	// Tell the agent that COMMISSIONED a work item when it completes (mg-f120).
 	// Built here, once, and shared by the two observers of a close — the merge
 	// reap below and the done-item reaper — so that one completion seen from two
