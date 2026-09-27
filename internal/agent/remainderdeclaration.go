@@ -56,6 +56,11 @@ import (
 // It does not refuse the dispatch. The tag means "this work has a known
 // remainder", not "this is unsafe to start".
 //
+// It does not stay silent when it cannot read the item (mg-7231). An id whose
+// tags could not be read gets a shorter could-not-check block rather than
+// nothing — see MGRemainderDeclarer.DeclaresRemainder for why each direction
+// lands where it does, including why a spawn with no --id gets nothing.
+//
 // It does not suppress itself when the item already carries a `successor:<id>`
 // tag, and that is a decision rather than an omission. A pre-existing successor
 // tag DOES satisfy `mg done` (measured 2026-08-19 against a scratch store: an
@@ -74,6 +79,29 @@ import (
 // the reader of a refusal message must be looking at the same string.
 const DeclaresRemainderTag = "declares-remainder"
 
+// RemainderAnswer is what a RemainderDeclarer found out about one work item.
+//
+// Three values, not a bool, and the third is the point of mg-7231. The first
+// version of this file (mg-a367) answered a bool, so "the item carries no tag"
+// and "the item could not be read" were the same `false` — and both produced NO
+// block. That made the control silent to the worker in exactly the case where
+// pogod did not know, which is the defect mg-a367 closed one level down: a
+// warning present only where nothing went wrong.
+type RemainderAnswer int
+
+const (
+	// RemainderUndeclared: the item was read and does not carry the tag — or
+	// there is no item at all (a spawn with no --id). Nothing is prepended.
+	RemainderUndeclared RemainderAnswer = iota
+	// RemainderDeclared: the item was read and carries the tag. The full
+	// warning is prepended.
+	RemainderDeclared
+	// RemainderUnknown: an id was named but its tags could not be read — the
+	// store could not be located or read, or the item was not found in it. A
+	// shorter block is prepended that tells the worker to check for itself.
+	RemainderUnknown
+)
+
 // RemainderDeclarer answers whether a work item declares a remainder, at the
 // moment of dispatch.
 //
@@ -83,10 +111,10 @@ const DeclaresRemainderTag = "declares-remainder"
 // load-bearing gate's interface to carry an unrelated verdict is how two rules
 // begin to drift apart. This one is not a gate at all — it refuses nothing.
 type RemainderDeclarer interface {
-	// DeclaresRemainder reports whether workItemID carries the declaration. A
-	// missing id, an item that cannot be found, and an unreadable store all
-	// report false: see MGRemainderDeclarer.DeclaresRemainder for the direction.
-	DeclaresRemainder(workItemID string) bool
+	// DeclaresRemainder reports what is known about workItemID's declaration,
+	// and — for RemainderUnknown — why it is not known, for the log line and
+	// the block. See MGRemainderDeclarer.DeclaresRemainder for the directions.
+	DeclaresRemainder(workItemID string) (RemainderAnswer, string)
 }
 
 // MGRemainderDeclarer is the production RemainderDeclarer: it reads the work
@@ -100,38 +128,48 @@ type MGRemainderDeclarer struct {
 
 // DeclaresRemainder implements RemainderDeclarer.
 //
-// THE FAILURE DIRECTION IS QUIET, and unlike the dispatch gates that is not a
-// trade-off between refusing and allowing — nothing is refused either way. What
-// is lost when this cannot answer is a paragraph of prose, so an unreadable
-// store, an absent item, or a spawn with no --id all produce no block and the
-// dispatch proceeds exactly as it did before this file existed. The read failure
-// is logged, because "the warning did not appear" and "the warning was not
-// needed" are otherwise the same observation from outside.
-func (m MGRemainderDeclarer) DeclaresRemainder(workItemID string) bool {
+// NOTHING IS REFUSED IN ANY DIRECTION — what is at stake is a paragraph of
+// prose. The question is only which paragraph, and the answer is set by the
+// same asymmetry that keeps the block from suppressing itself on a successor
+// tag (see the file comment): a paragraph a worker did not need costs it ten
+// seconds, and a missing one costs the coordinator an item stuck in available/.
+//
+//   - NO --id -> RemainderUndeclared, and this one is not a gap. The hazard the
+//     block warns about is pogod's close-at-merge being refused, and that close
+//     is keyed on a work item; a spawn with no item has nothing for `mg done` to
+//     refuse. The id-less spawn itself is legitimate — --id is optional by
+//     design (mg-2437: --no-worktree in-place dispatch commonly has no item) and
+//     the template router already refuses one that does not name its template —
+//     so it is neither refused here nor warned about.
+//   - AN ID THAT CANNOT BE ANSWERED FOR -> RemainderUnknown (mg-7231). An
+//     unlocatable store, a read error, and an item not found in the store's
+//     default statuses all land here. None of them is evidence the item is
+//     undeclared, so the worker is told pogod could not check and given the one
+//     command that does. "Not found" is included deliberately: internal/workitem
+//     does not search every directory `mg` does (pending/ is excluded from a
+//     by-id lookup), and a present-but-unparseable file is reported as absent,
+//     so from here an unreadable item and a missing one look the same.
+func (m MGRemainderDeclarer) DeclaresRemainder(workItemID string) (RemainderAnswer, string) {
 	if workItemID == "" {
-		return false
+		return RemainderUndeclared, ""
 	}
 	root := macguffinStoreRoot(m.Root)
 	if root == "" {
-		return false
+		return RemainderUnknown, "no macguffin store could be located"
 	}
 	item, found, err := workitem.FindFrom(filepath.Join(root, "work"), workItemID)
 	if err != nil {
-		log.Printf("remainder declaration: could not read work item %s from %s: %v — "+
-			"dispatching WITHOUT the `%s` warning; if this item declares a remainder, "+
-			"its worker was not told that `mg done` will refuse without --successor",
-			workItemID, root, err, DeclaresRemainderTag)
-		return false
+		return RemainderUnknown, fmt.Sprintf("reading it from %s failed: %v", root, err)
 	}
 	if !found {
-		return false
+		return RemainderUnknown, fmt.Sprintf("it was not found (or could not be parsed) under %s", filepath.Join(root, "work"))
 	}
 	for _, tag := range item.TagList() {
 		if strings.EqualFold(strings.TrimSpace(tag), DeclaresRemainderTag) {
-			return true
+			return RemainderDeclared, ""
 		}
 	}
-	return false
+	return RemainderUndeclared, ""
 }
 
 // SetRemainderDeclarer installs the reader consulted before a polecat's prompt
@@ -156,17 +194,61 @@ func (r *Registry) getRemainderDeclarer() RemainderDeclarer {
 	return d
 }
 
-// declaresRemainderPrelude returns the block to prepend to the rendered prompt,
-// or "" when the item declares no remainder (or could not be read).
+// declaresRemainderPrelude returns the block to prepend to the rendered prompt:
+// the full warning for a declaring item, the could-not-check block for an item
+// whose tags could not be read, and "" otherwise.
 //
 // The text is fixed apart from the item id. It names the refusal the worker will
 // hit, both ways out, and — because a worker that has already merged is usually
 // seconds from being stopped — says that there is no second chance to notice.
 func (r *Registry) declaresRemainderPrelude(workItemID string) string {
-	if !r.getRemainderDeclarer().DeclaresRemainder(workItemID) {
-		return ""
+	answer, why := r.getRemainderDeclarer().DeclaresRemainder(workItemID)
+	switch answer {
+	case RemainderDeclared:
+		return remainderPreludeFor(workItemID)
+	case RemainderUnknown:
+		// Still logged: the worker is now told, but "pogod could not read the
+		// store at dispatch" is an operator fact too.
+		log.Printf("remainder declaration: could not read the tags of work item %s (%s) — "+
+			"prepending the could-not-check block instead of the `%s` warning",
+			workItemID, why, DeclaresRemainderTag)
+		return remainderUnknownPreludeFor(workItemID, why)
 	}
-	return remainderPreludeFor(workItemID)
+	return ""
+}
+
+// remainderUnknownPreludeFor renders the block for an item pogod could not read
+// (mg-7231). It is deliberately SHORT and deliberately not the full warning: the
+// full warning asserts that the item declares a remainder, and pogod does not
+// know that. It asserts only what is known — the check did not happen — and
+// hands the worker the command that performs it, so the answer comes from the
+// store `mg done` itself will consult. A worker that finds the tag gets the same
+// two ways out as the full block, named in one line each.
+func remainderUnknownPreludeFor(workItemID, why string) string {
+	return fmt.Sprintf(`# ⚠ pogod could NOT check whether %[1]s declares a remainder — check it yourself
+
+At dispatch pogod tried to read %[1]s's tags and could not: %[2]s. So it does
+not know whether the item is tagged `+"`"+DeclaresRemainderTag+"`"+` — and that tag makes
+`+"`mg done`"+` REFUSE the close unless a successor is named. On the merge path pogod
+performs that close seconds after your branch lands and then stops you, so a
+refusal you did not prepare for lands on nobody.
+
+Before you submit to the refinery, run:
+
+    mg show %[1]s | grep '^Tags:'
+
+If `+"`"+DeclaresRemainderTag+"`"+` is NOT there, ignore this block. If it IS, do one of these
+before submitting: file the item that carries the remainder and link it back
+(`+"`mg edit <the new id> --add-tags=predecessor:%[1]s`"+` — `+"`mg new`"+` alone does not
+write the link pogod looks for), or, if nothing is genuinely left, retract the
+declaration with `+"`mg edit %[1]s --rm-tags="+DeclaresRemainderTag+"`"+` and say why in your verdict.
+
+*This block was injected by pogod at dispatch because it could not read the work
+item. It is not part of the brief below, and it replaces nothing in it.*
+
+---
+
+`, workItemID, why)
 }
 
 // remainderPreludeFor renders the fixed block for one item id. Split out from

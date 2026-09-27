@@ -347,8 +347,10 @@ time. Cost twice on 2026-08-13 (mg-6e4f, mg-4020).
 off the item and puts a fixed block above the rendered prompt naming the refusal and both ways out
 (mg-a367) — because this instruction failed a third time on mg-9d4e, *the ticket about that failure*,
 while you were dispatching under a repeated stall-watch notice about it. Treat the injection as the
-floor, not the message: it knows the tag and nothing else, it is silent for a spawn with no `--id` or
-an item it cannot read, and only you can say **what** the remainder is for this item.
+floor, not the message: it knows the tag and nothing else, and only you can say **what** the remainder
+is for this item. For an item it cannot read it prepends a shorter could-not-check block telling the
+{{.Worker}} to look at the tags itself (mg-7231); for a spawn with no `--id` it prepends nothing,
+because there is no item whose close could be refused.
 
 **Do NOT tell it to pass `--successor` on `mg done` — that instruction asks for something it never
 does.** On the merge path the {{.Worker}} submits and exits, and *pogod* performs the close. Since
