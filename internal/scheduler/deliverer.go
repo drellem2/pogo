@@ -203,6 +203,10 @@ func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time
 // next to the ones that were confirmed, rather than indistinguishable from
 // them.
 //
+// ErrNudgeMangled is NOT the exception either (mg-8a70): the harness submitted
+// only part of the fire — measured, the last ~120 characters — so what the
+// agent holds is a fragment, and the mailbox copy is the only whole one.
+//
 // ErrWakeSuppressed is NOT the exception and must not become one: a suppressed
 // wake wrote nothing at all, so mail is the only delivery rather than a second
 // one — which is the property mg-8184 built the suppression against.

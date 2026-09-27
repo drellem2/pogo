@@ -11,18 +11,21 @@ package agent
 // the file grows by one record per prompt the agent actually received, and
 // nobody but the harness can make it grow.
 //
-// The count is the only thing read, so the record format is deliberately
-// uninteresting: one RFC3339Nano timestamp per line. Records are appended with
-// O_APPEND and are far below PIPE_BUF, so concurrent hook processes interleave
+// Each record is one line: an RFC3339Nano timestamp, optionally followed by a
+// tab and a JSON excerpt of the submitted prompt (see "Receipt content"
+// below). A record is appended in a single write with O_APPEND, which places
+// the whole write at end of file, so concurrent hook processes interleave
 // whole lines rather than shredding each other.
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -45,18 +48,7 @@ func RecordSubmit(path string) error {
 	if path == "" {
 		return errors.New("receipt path is empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create receipt dir: %w", err)
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return fmt.Errorf("open receipt file: %w", err)
-	}
-	defer f.Close()
-	if _, err := f.WriteString(time.Now().Format(time.RFC3339Nano) + "\n"); err != nil {
-		return fmt.Errorf("append receipt: %w", err)
-	}
-	return nil
+	return appendReceiptLine(path, time.Now().Format(time.RFC3339Nano)+"\n")
 }
 
 // CountSubmits returns how many prompts the agent has submitted since its
@@ -110,4 +102,114 @@ func ResetReceipt(path string) error {
 		return err
 	}
 	return nil
+}
+
+// Receipt content (mg-8a70).
+//
+// A count proves that A prompt was submitted, not that it was THIS prompt, or
+// all of it. On Claude Code 2.1.283 a nudge longer than the tty's input queue
+// (1022 bytes on darwin) arrives in two reads; the harness turns the first into
+// a paste placeholder and then drops it at submit, so the agent receives only
+// the last ~120 characters — and the receipt still moved by one. pogod logged
+// 128 such fires as nudge_sent mode=confirm. So the hook now also records an
+// excerpt of what was actually submitted, and the confirm path compares it
+// with what was sent (see judgeDelivery).
+//
+// The record stays one line: "<RFC3339Nano>\t<json>". CountSubmits still counts
+// lines, and a line without the tab — a hook binary older than this, or a test
+// fake — parses as a record whose content is unknown, which is never judged.
+
+// receiptExcerptRunes bounds each excerpt. It must exceed the fingerprint
+// (deliveryFingerprintRunes) by at least the length of any wrapper the harness
+// puts around a prompt — Claude Code wraps a pasted prompt in a
+// `<pasted_content id="…">` tag of ~30 characters — so the sent head can still be
+// found inside the received head.
+const receiptExcerptRunes = 100
+
+// SubmitRecord is one parsed receipt line.
+type SubmitRecord struct {
+	// HasContent is false for a record that carries no excerpt: a legacy
+	// timestamp-only line, or a hook that could not read the prompt.
+	HasContent bool `json:"-"`
+	// Len is the submitted prompt's length in runes.
+	Len int `json:"len"`
+	// Head and Tail are the first and last receiptExcerptRunes runes of it.
+	Head string `json:"head"`
+	Tail string `json:"tail"`
+}
+
+// newSubmitRecord builds the excerpt record for a submitted prompt.
+func newSubmitRecord(prompt string) SubmitRecord {
+	r := []rune(prompt)
+	head, tail := r, r
+	if len(r) > receiptExcerptRunes {
+		head = r[:receiptExcerptRunes]
+		tail = r[len(r)-receiptExcerptRunes:]
+	}
+	return SubmitRecord{HasContent: true, Len: len(r), Head: string(head), Tail: string(tail)}
+}
+
+// RecordSubmitPrompt appends one submission record carrying an excerpt of the
+// prompt the harness submitted. Called from the harness hook process.
+func RecordSubmitPrompt(path, prompt string) error {
+	if path == "" {
+		return errors.New("receipt path is empty")
+	}
+	data, err := json.Marshal(newSubmitRecord(prompt))
+	if err != nil {
+		return fmt.Errorf("encode receipt: %w", err)
+	}
+	return appendReceiptLine(path, time.Now().Format(time.RFC3339Nano)+"\t"+string(data)+"\n")
+}
+
+func appendReceiptLine(path, line string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create receipt dir: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open receipt file: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line); err != nil {
+		return fmt.Errorf("append receipt: %w", err)
+	}
+	return nil
+}
+
+// parseSubmitRecord parses one non-empty receipt line.
+func parseSubmitRecord(line string) SubmitRecord {
+	_, js, ok := strings.Cut(line, "\t")
+	if !ok {
+		return SubmitRecord{}
+	}
+	var rec SubmitRecord
+	if err := json.Unmarshal([]byte(js), &rec); err != nil {
+		return SubmitRecord{}
+	}
+	rec.HasContent = true
+	return rec
+}
+
+// ReadSubmits returns every record in the receipt file, in submission order.
+// Its length equals CountSubmits; a missing file is (nil, nil).
+func ReadSubmits(path string) ([]SubmitRecord, error) {
+	if path == "" {
+		return nil, errors.New("receipt path is empty")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []SubmitRecord
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		out = append(out, parseSubmitRecord(line))
+	}
+	return out, nil
 }

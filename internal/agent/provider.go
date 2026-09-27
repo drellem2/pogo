@@ -276,6 +276,19 @@ type NudgeProfile struct {
 	// Agent.Nudge for the paste-detection rationale (Claude: 50ms).
 	SubmitDelay time.Duration
 
+	// InputChunkBytes, when positive, is the largest piece of a nudge body
+	// written to the PTY at once. A longer body is written in pieces, each
+	// only after the harness has read everything before it (see Agent.Nudge),
+	// so no single read() the harness makes is larger than this. Zero writes
+	// the body in one piece — the behaviour before mg-8a70.
+	//
+	// Claude: 512. Measured against Claude Code 2.1.283 (mg-8a70): a single
+	// read of ~900 bytes or more is taken as a paste and wrapped in
+	// <pasted_content>, and a body over 1022 bytes — the darwin tty input
+	// queue — is split by the kernel into two reads, whose first becomes a
+	// paste placeholder the harness drops at submit, delivering only the tail.
+	InputChunkBytes int
+
 	// IdleThreshold is how long PTY output must be quiet before the agent is
 	// considered idle for wait-idle nudge delivery (Claude: 2s).
 	IdleThreshold time.Duration
@@ -333,6 +346,7 @@ var DefaultNudgeProfile = NudgeProfile{
 	InitialNudgeTimeout: 60 * time.Second,
 	SubmitTerminator:    "\r",
 	SubmitDelay:         50 * time.Millisecond,
+	InputChunkBytes:     512,
 	IdleThreshold:       2 * time.Second,
 
 	// Claude Code's empty Ink composer renders a "? for shortcuts" hint in its
