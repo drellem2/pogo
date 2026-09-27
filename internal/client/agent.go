@@ -19,6 +19,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/mailbox"
 	"github.com/drellem2/pogo/internal/workitem"
 )
 
@@ -425,36 +426,36 @@ func ListPrompts() ([]agent.PromptInfo, error) {
 	return prompts, nil
 }
 
-// NudgeOrMail tries to nudge an agent via PTY. If the agent is not running,
-// it falls back to sending a macguffin mail message via the gt CLI.
-func NudgeOrMail(name, message string, opts *NudgeOpts) (fallback bool, err error) {
-	err = NudgeAgent(name, message, opts)
-	if err == nil {
-		return false, nil
-	}
-	if err != ErrAgentNotRunning {
-		return false, err
-	}
-
-	// Fallback: send via gt mail
-	return true, sendMailFallback(name, message)
+// NotRunningError is what a nudge to an agent that is not running returns. It
+// names the mailbox, because mail is the only thing that can still reach it.
+type NotRunningError struct {
+	Agent string
+	Box   string
 }
 
-// sendMailFallback sends a nudge message via gt mail send.
-func sendMailFallback(name, message string) error {
-	return SendMail(name, "nudge", message)
+func (e *NotRunningError) Error() string {
+	return fmt.Sprintf("agent %s is not running — nothing was sent. "+
+		"Its mail waits unread in box %s until it runs again; to leave it a message: "+
+		"mg mail send %s --from=<you> --subject=... --body=...", e.Agent, e.Box, e.Box)
 }
 
-// SendMail sends a mail message to the given address via gt mail send.
-// The address is interpreted as a rig/role path (e.g. "mayor/", "pogo/polecats/chrome").
-func SendMail(address, subject, body string) error {
-	cmd := execCommand("gt", "mail", "send", address, "-s", subject, "-m", body)
-	cmd.Stderr = nil
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("mail send failed: %s (%w)", string(out), err)
+// Unwrap lets errors.Is(err, ErrAgentNotRunning) keep working.
+func (e *NotRunningError) Unwrap() error { return ErrAgentNotRunning }
+
+// NudgeRunning nudges an agent via PTY and, when the agent is not running,
+// FAILS with a *NotRunningError naming its mailbox (mg-e00c).
+//
+// It replaces NudgeOrMail, whose fallback sent the text through `gt mail
+// send` — a mail system nothing in this fleet reads — and then printed "sent
+// via mail", so a nudge to a stopped agent reported success and reached
+// nobody. A nudge is a terminal write; with no terminal there is nothing to
+// deliver, and the caller is told where mail would wait instead.
+func NudgeRunning(name, message string, opts *NudgeOpts) error {
+	err := NudgeAgent(name, message, opts)
+	if errors.Is(err, ErrAgentNotRunning) {
+		return &NotRunningError{Agent: name, Box: mailbox.Canonical(name)}
 	}
-	return nil
+	return err
 }
 
 // SendMGMail sends a mail message via macguffin (mg mail send).

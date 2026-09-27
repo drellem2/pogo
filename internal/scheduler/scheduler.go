@@ -377,7 +377,7 @@ type AgentLiveness interface {
 }
 
 // Deliverer abstracts the side of the scheduler that talks to the rest of
-// pogod. Production wires this to a NudgeOrMail-style helper; tests substitute
+// pogod. Production wires this to PogodDeliverer (nudge, else mg mail); tests substitute
 // a recorder.
 type Deliverer interface {
 	Deliver(ctx context.Context, entry Entry, fireTime time.Time) error

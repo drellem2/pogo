@@ -70,6 +70,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[prompt_stale]` | `enabled` | on | observes | Mails when the installed prompts are behind the repo. It never reinstalls. Code: `internal/promptstale`. |
 | `[ack_watch]` | `enabled` | on | observes | Mails when an agent completes too few of its scheduled fires. See [ack-watch](#the-scheduler-completion-deficit-detector-ack-watch). |
 | `[deaf_watch]` | `enabled` | on | observes | Mails when a running agent has no mail loop that could wake it. See [deaf-watch](#the-missing-mail-loop-announcer-deaf-watch). |
+| `[wake_watch]` | `enabled` | on | ACTS | Types a pointer of at most 100 characters into an agent's terminal when mail or an assignment arrives for it, re-points work left unconsumed and then mails `mayor`, and mails the sender and `mayor` when mail goes to an agent that is not running. Phase 1 is shadow: the mail-check timers stay on. See [wake-watch](#the-pointer-waker-wake-watch). Code: `internal/wakewatch`. |
 | `[heart_watch]` | `enabled` | on | observes | Mails when a crew heartbeat goes stale. `restart_after` is a threshold in the notice; heart-watch restarts nothing. See [heart-watch](#who-reads-the-crew-heartbeat-when-the-coordinator-is-dark-heart-watch). |
 | `[blind_watch]` | `enabled` | on | observes | Mails when wedge-watch keeps declining to judge an agent. See [blind-watch](#who-reads-a-detector-that-says-it-cannot-answer-blind-watch). |
 | `[absent_watch]` | `enabled` | on | observes | Mails when a configured agent is missing from the registry. It never starts the agent. See [absent-watch](#the-absent-agent-announcer-absent-watch). |
@@ -2321,6 +2322,74 @@ box does a person actually read" and "how often may this shout" are facts about
 the deployment.
 
 Source of truth: `internal/ackwatch/`.
+
+## The pointer waker (wake-watch)
+
+An agent is woken when there is something for it to do, and only then
+(mg-5496). wake-watch is phase 1 of 4. It tails macguffin's own
+`~/.macguffin/events.jsonl` and acts on what that log already records.
+
+- **Arrival.** A `mail.sent` to a running agent, addressed by its name or by
+  the work-item box of the item it holds, gets ONE pointer nudge. So does an
+  assignment: a `work.edited` with `fields=assignee` whose `assignee_after` is a
+  running agent or `blocked:<agent>`, or a `work.created` whose item has an
+  assignee. `work.created` does not carry the assignee today, so it is read from
+  the item. The pointer is built by pogod and is **at most 100 bytes, enforced in
+  code**. The command to run comes last, because the end of a line is the part
+  that survives (mg-8a70). Examples:
+  `mail from mayor: "please rebase" — mg mail list e00c` and
+  `assigned: mg-1234 "fix the parser" — mg show mg-1234`. A recipient gets at
+  most one pointer per `coalesce`, and anything arriving inside that window goes
+  out as one pointer with a count (`2 new, latest …`).
+- **Recovery.** Every `recovery_interval`, for each running agent, wake-watch
+  takes the oldest mail with no `mail.read` and the oldest assignment the agent
+  has not claimed or edited. Past `renudge_after` it re-sends the pointer
+  (`still unread: …`), at most once per `renudge_every` and up to
+  `max_renudges` times. After that it emits `wake_unconsumed` and mails the
+  coordinator once.
+- **Bounce.** Mail to a name that belongs to an agent that is not running gets a
+  mail to the sender (if the sender is running, or is `human`) and to the
+  coordinator: `recipient <x> is not running; your mail is unread in <box>`. That
+  covers a reaped polecat, its work-item box, and a parked or configured-but-absent
+  crew agent. Mail to a box that is no agent's, such as `human`, is neither pointed
+  at nor bounced.
+
+Every decision is an event in `events.log`, the silent ones included:
+`wake_pointer_sent`, `wake_renudge`, `wake_unconsumed`, `wake_bounce`,
+`wake_pointer_skipped` (self-sent, self-assigned, not an agent's box, pogod's own
+mail), `wake_watch_armed`, `wake_watch_blind` and `wake_watch_sighted`. Each
+carries the recipient, the trigger event, the msg id or item id, and `text_len`,
+the length of the text sent.
+
+**A missing `events.jsonl` means no data, never no mail.** While the file is
+absent, wake-watch is blind: it records `wake_watch_blind` once and suspends
+recovery rather than re-nudge from a model that can no longer see reads. A
+replaced file, whether rotated, rebuilt, or given a new inode, is read from its
+start. Only events younger than 10 minutes count as arrivals, and a msg id
+already seen is never pointed at twice. **A restart does not re-point old
+mail**: the byte offset, the file's identity, the re-nudge budget and the names
+of agents seen are kept in `$POGO_HOME/wakewatch/state.json`. With no state
+file, only events written after start are arrivals.
+
+**Phase 1 is SHADOW.** The mail-check timers and `RegisterMailCheck` stay on.
+`pogo check-wakewatch [--since 24h] [--json]` is phase 2's gate. It joins every
+mail a timer-driven mail-check turn read (a read in one of the fire's boxes
+within 10 minutes of a `mail-check-*` fire) against the pointers sent before it.
+It prints the misses: `MISS` (no pointer), `MISS-LATE` (the pointer came after
+the read) and `MISS-FAILED` (a pointer was attempted and not delivered). Every
+other row is explained: `COVERED`, `BOUNCED`, `SKIPPED`, `PRE-ARM` and
+`NO-SEND-RECORD`. It exits 1 on any miss and 3 when it is blind.
+
+```toml
+[wake_watch]
+enabled           = true
+coalesce          = "60s"
+recovery_interval = "5m"
+renudge_after     = "15m"
+renudge_every     = "15m"
+max_renudges      = 3
+lookback          = "24h"
+```
 
 ## The missing-mail-loop announcer (deaf-watch)
 

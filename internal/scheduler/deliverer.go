@@ -28,8 +28,9 @@ type MailSender func(to, from, subject, body string) error
 //
 //   - DeliveryNudge: deliver via the agent's PTY if the agent is currently
 //     running. Falls back to mail if the agent is not registered with the
-//     daemon — matches client.NudgeOrMail's existing semantics so a sleeping
-//     polecat picks the message up next time it lists mail.
+//     daemon, so a sleeping polecat picks the message up next time it lists
+//     mail. (This is macguffin mail, which agents read — unlike the `gt mail`
+//     fallback `pogo nudge` used to have, removed in mg-e00c.)
 //   - DeliveryMail:  always send via macguffin mail.
 //
 // The mail fallback is COALESCED — see the fallback-run block below. That is

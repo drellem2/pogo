@@ -476,6 +476,17 @@ const (
 	// therefore disables the AGE-based escalation only.
 	DefaultAckWatchEscalateAfter = 24 * time.Hour
 
+	// Wake-watch defaults (mg-5496 / mg-e00c). These are the design's starting
+	// values; phase 1's shadow data is what sets them. internal/wakewatch holds
+	// the same numbers as its own zero-value fallbacks, and a pogod test pins
+	// the two sets equal.
+	DefaultWakeWatchCoalesce         = 60 * time.Second
+	DefaultWakeWatchRecoveryInterval = 5 * time.Minute
+	DefaultWakeWatchRenudgeAfter     = 15 * time.Minute
+	DefaultWakeWatchRenudgeEvery     = 15 * time.Minute
+	DefaultWakeWatchMaxRenudges      = 3
+	DefaultWakeWatchLookback         = 24 * time.Hour
+
 	// DefaultDeafWatchInterval is how often pogod's missing-mail-loop announcer
 	// samples the registry (mg-032b). Finer than the ack-watch cadence because
 	// the condition is a BOOLEAN state rather than a rate: there is no averaging
@@ -905,6 +916,8 @@ type Config struct {
 	PromptStale PromptStaleConfig
 	AckWatch    AckWatchConfig
 	DeafWatch   DeafWatchConfig
+	// WakeWatch is the pointer-nudge waker (mg-e00c). See WakeWatchConfig.
+	WakeWatch WakeWatchConfig
 	// HeartWatch is the pogod-resident reader of the crew heartbeat (mg-d616).
 	// See HeartWatchConfig.
 	HeartWatch HeartWatchConfig
@@ -1567,6 +1580,33 @@ type AckWatchConfig struct {
 	// escalation. It never gates a FLEET BLACKOUT, which escalates on its first
 	// sample by construction (mg-e2a4).
 	EscalateAfter time.Duration
+}
+
+// WakeWatchConfig configures pogod's WAKER (mg-5496 phase 1, mg-e00c): the
+// component that tails ~/.macguffin/events.jsonl and types a pointer of at most
+// 100 characters into an agent's terminal when mail or an assignment arrives
+// for it, re-points work left unconsumed, reports it to the coordinator after
+// MaxRenudges tries, and bounces mail addressed to an agent that is not running.
+//
+// ACTS: it types into terminals and sends mail. Phase 1 is SHADOW — the
+// mail-check timers stay on beside it, and `pogo check-wakewatch` measures
+// whether every mail a timer found had already been pointed at.
+type WakeWatchConfig struct {
+	// Enabled turns it on. Defaults to true.
+	Enabled bool
+	// Coalesce is the minimum gap between two pointers to one recipient; what
+	// arrives inside it is sent as one pointer carrying a count.
+	Coalesce time.Duration
+	// RecoveryInterval is how often unconsumed work is looked for.
+	RecoveryInterval time.Duration
+	// RenudgeAfter is the age at which unconsumed work is re-pointed.
+	RenudgeAfter time.Duration
+	// RenudgeEvery is the minimum gap between re-nudges of one piece of work.
+	RenudgeEvery time.Duration
+	// MaxRenudges is how many re-nudges precede the unconsumed-work report.
+	MaxRenudges int
+	// Lookback bounds how far back the event log is modelled.
+	Lookback time.Duration
 }
 
 // DeafWatchConfig configures pogod's missing-mail-loop ANNOUNCER (mg-032b): the
@@ -2245,6 +2285,7 @@ type parsedConfig struct {
 	promptStaleSkipRemoteSet bool
 	ackWatchEnabledSet       bool
 	deafWatchEnabledSet      bool
+	wakeWatchEnabledSet      bool
 	absentWatchEnabledSet    bool
 	heartWatchEnabledSet     bool
 	blindWatchEnabledSet     bool
@@ -2398,6 +2439,15 @@ func Load() *Config {
 			BlackoutRenotify: DefaultAckWatchBlackoutRenotify,
 			NotifyTo:         DefaultAckWatchNotifyTo,
 			EscalateAfter:    DefaultAckWatchEscalateAfter,
+		},
+		WakeWatch: WakeWatchConfig{
+			Enabled:          true,
+			Coalesce:         DefaultWakeWatchCoalesce,
+			RecoveryInterval: DefaultWakeWatchRecoveryInterval,
+			RenudgeAfter:     DefaultWakeWatchRenudgeAfter,
+			RenudgeEvery:     DefaultWakeWatchRenudgeEvery,
+			MaxRenudges:      DefaultWakeWatchMaxRenudges,
+			Lookback:         DefaultWakeWatchLookback,
 		},
 		DeafWatch: DeafWatchConfig{
 			Enabled:       true,
@@ -2692,6 +2742,27 @@ func Load() *Config {
 		// escalation off, so it must survive the merge like any other override.
 		if fileCfg.AckWatch.EscalateAfter != 0 {
 			cfg.AckWatch.EscalateAfter = fileCfg.AckWatch.EscalateAfter
+		}
+		if fileCfg.wakeWatchEnabledSet {
+			cfg.WakeWatch.Enabled = fileCfg.WakeWatch.Enabled
+		}
+		if fileCfg.WakeWatch.Coalesce > 0 {
+			cfg.WakeWatch.Coalesce = fileCfg.WakeWatch.Coalesce
+		}
+		if fileCfg.WakeWatch.RecoveryInterval > 0 {
+			cfg.WakeWatch.RecoveryInterval = fileCfg.WakeWatch.RecoveryInterval
+		}
+		if fileCfg.WakeWatch.RenudgeAfter > 0 {
+			cfg.WakeWatch.RenudgeAfter = fileCfg.WakeWatch.RenudgeAfter
+		}
+		if fileCfg.WakeWatch.RenudgeEvery > 0 {
+			cfg.WakeWatch.RenudgeEvery = fileCfg.WakeWatch.RenudgeEvery
+		}
+		if fileCfg.WakeWatch.MaxRenudges > 0 {
+			cfg.WakeWatch.MaxRenudges = fileCfg.WakeWatch.MaxRenudges
+		}
+		if fileCfg.WakeWatch.Lookback > 0 {
+			cfg.WakeWatch.Lookback = fileCfg.WakeWatch.Lookback
 		}
 		if fileCfg.deafWatchEnabledSet {
 			cfg.DeafWatch.Enabled = fileCfg.DeafWatch.Enabled
@@ -3722,6 +3793,36 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "escalate_after":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.AckWatch.EscalateAfter = d
+				}
+			}
+		case "wake_watch":
+			switch key {
+			case "enabled":
+				cfg.WakeWatch.Enabled = val == "true"
+				cfg.wakeWatchEnabledSet = true
+			case "coalesce":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WakeWatch.Coalesce = d
+				}
+			case "recovery_interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WakeWatch.RecoveryInterval = d
+				}
+			case "renudge_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WakeWatch.RenudgeAfter = d
+				}
+			case "renudge_every":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WakeWatch.RenudgeEvery = d
+				}
+			case "max_renudges":
+				if n, err := strconv.Atoi(unquotedVal); err == nil {
+					cfg.WakeWatch.MaxRenudges = n
+				}
+			case "lookback":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.WakeWatch.Lookback = d
 				}
 			}
 		case "deaf_watch":
