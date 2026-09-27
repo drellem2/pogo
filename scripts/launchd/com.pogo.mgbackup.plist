@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- com.pogo.mgbackup — hourly commit + push of ~/.macguffin to a bare repo
+         OUTSIDE it, ~/backups/macguffin.git (mg-b01d). See
+         scripts/mg-store-backup.sh for what it does and how a failure alerts,
+         and scripts/launchd/README.md for install and restore.
+
+         A launchd job, not a `pogo schedule`: pogod's scheduler delivers a
+         prompt to an agent and cannot run a command, and the store backup
+         must not depend on pogod or on any agent being alive. -->
+    <key>Label</key>
+    <string>com.pogo.mgbackup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- A static copy, like pogo-deploy.sh: merging a change to the repo
+             script does nothing until it is copied here again. -->
+        <string>/Users/YOUR_USERNAME/.pogo/bin/mg-store-backup.sh</string>
+    </array>
+
+    <!-- Hourly at :17. Daniel asked for "daily or so"; hourly costs one
+         `git add -A` over a few hundred KB, and bounds the loss to an hour.
+         StartCalendarInterval coalesces fires missed during sleep into one on
+         wake, which is the right replay for a backup. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>17</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/mgbackup.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/pogo/mgbackup.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Must resolve `git`, `mg` (the failure mail), `gh` (visibility
+             check and git credential helper) and `zsh` (GH_TOKEN import). -->
+        <key>PATH</key>
+        <string>/Users/YOUR_USERNAME/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
+        <!-- Pinned so the store and the alert both mean the live store, even
+             if a stale MG_ROOT is ever exported somewhere. -->
+        <key>MG_ROOT</key>
+        <string>/Users/YOUR_USERNAME/.macguffin</string>
+        <key>MG_BACKUP_STORE</key>
+        <string>/Users/YOUR_USERNAME/.macguffin</string>
+        <key>MG_BACKUP_REMOTE_DIR</key>
+        <string>/Users/YOUR_USERNAME/backups/macguffin.git</string>
+        <!-- The off-machine copy (Daniel approved a PRIVATE repo, 2026-09-27
+             16:33Z). The script refuses to push unless `gh repo view` says
+             PRIVATE, on every run. Remove this key to disable it.
+             NO GH_TOKEN HERE: ~/Library/LaunchAgents is world-readable. The
+             script imports it from ~/.zshenv via `zsh -c` at run time. -->
+        <key>MG_BACKUP_GITHUB_REPO</key>
+        <string>drellem2/macguffin-store</string>
+    </dict>
+</dict>
+</plist>

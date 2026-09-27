@@ -993,3 +993,68 @@ tail -5 ~/Library/Logs/pogo/fleet-liveness.log     # RunAtLoad means there is al
 Same caveat as above, and it is the reason the ledger exists at all: a ledger
 whose newest line is hours old means the witness stopped, and nothing on this box
 watches this witness.
+
+## Store Backup Agent (`com.pogo.mgbackup`)
+
+Hourly (at :17, plus once at load) commit of `~/.macguffin` and push to a bare
+repo **outside** it, `~/backups/macguffin.git` (mg-b01d). The 2026-09-27 store
+loss was an `rm -rf ~/.macguffin`; the `.git` that `mg init --git` creates lives
+inside the store and dies with it, so it is not a backup by itself.
+
+What `mg` does on its own: nothing automatic. `mg init --git` only runs
+`git init`, and the only commit path is the manual `mg snapshot` (`git add -A` +
+commit). This job does the same `git add -A`, so `mail/`, `work/`,
+`events.jsonl` and `log/` are all included, then pushes to the remote `backup`.
+It is append-only: it never forces, amends or resets, and a push the backup
+refuses (someone rewrote the store's history) is a failure, not something it
+overwrites.
+
+**Failure detection.** Every step's exit status is checked. The first non-zero
+one logs `FAIL: <reason>`, writes `~/.pogo/mgbackup/FAILED`, mails `mayor`
+(from `mgbackup`), and exits 1, so launchd's `last exit code` is 1 too. After a
+push, the backup's `refs/heads/<branch>` must equal the store's HEAD and
+`git fsck --connectivity-only` must pass. It mails on ok→fail, repeats at most
+once per 24h while it stays failed, and mails once on recovery. When the store
+itself is gone, mail cannot be delivered (the mailbox is gone with it). The log
+says `ALERT NOT DELIVERED`, the `FAILED` file stays, and a macOS notification
+is attempted.
+
+```bash
+# install (static copy: re-run after merging a change to the script)
+cp scripts/mg-store-backup.sh ~/.pogo/bin/mg-store-backup.sh
+sed "s|YOUR_USERNAME|$(whoami)|g" scripts/launchd/com.pogo.mgbackup.plist \
+  > ~/Library/LaunchAgents/com.pogo.mgbackup.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.pogo.mgbackup.plist
+tail -5 ~/Library/Logs/pogo/mgbackup.log            # RunAtLoad: a line is already there
+launchctl print gui/$(id -u)/com.pogo.mgbackup | grep -E 'state|runs|last exit'
+```
+
+**Restore.** A bare `git clone` is not a complete restore. Git records no empty
+directories, so every maildir's empty `new/`, `cur/`, `tmp/` and every empty
+`work/<state>/` would be missing. `scripts/mg-store-restore.sh <dest>` clones,
+runs `mg --root <dest> init`, and recreates the maildir subdirs. It refuses an
+existing `<dest>` and never touches `~/.macguffin`. To put a restore live, stop
+pogod, move the damaged store aside, and restore with `~/.macguffin` as the
+destination.
+
+**Off-machine copy.** With `MG_BACKUP_GITHUB_REPO=drellem2/macguffin-store`
+(set in the shipped plist; Daniel approved a private repo on 2026-09-27), each
+run also pushes to the remote `github` (`https://github.com/<repo>.git`), after
+the local push, so an outage cannot cost the local copy. Before every push it
+checks `gh repo view --json visibility`. Anything other than `PRIVATE`, or no
+answer, is a failure and nothing is pushed: the store holds every agent's mail.
+The push is verified with `git ls-remote`. launchd provides no `GH_TOKEN`, and
+the plist must never carry one (LaunchAgents is world-readable), so the script
+imports it from `~/.zshenv` with `zsh -c` at run time and never logs it.
+
+```bash
+scripts/mg-store-restore.sh /tmp/r https://github.com/drellem2/macguffin-store.git
+```
+
+**Not covered.** A lost or leaked GitHub token stops the off-machine push, and
+the failure alert reports it. So does being offline, reported at most once a
+day. Loss is bounded by the cadence: up to an hour of changes, longer if the
+machine sleeps through the :17 fire (launchd coalesces missed fires into one on
+wake). Writes landing between `git add -A` and the commit wait for the next
+run. The backup keeps history, so a corruption that the store commits is
+recoverable only by checking out an older commit, which is a manual step.

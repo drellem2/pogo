@@ -106,6 +106,11 @@ gate_step "Testing Go packages" bash scripts/signal-witness.sh bash scripts/tmpd
 # rather than the ~300s internal/agent costs in full.
 gate_step "Testing the \$TMPDIR leak guard" bash scripts/tmpdir-leak_test.sh
 
+# The macguffin store backup and restore (mg-b01d): append-only push to a repo
+# outside the store, alert-once on failure, and a restore that brings back the
+# empty maildir/work dirs git cannot carry. Temp store only; never ~/.macguffin.
+gate_step "Testing the mg store backup/restore" bash scripts/mg-store-backup_test.sh
+
 # The signal witness (mg-3bd1). The load-bearing pair is Tests 3 and 4: the
 # witness's verdict is the ANCESTOR reading, and "every ancestor survived"
 # means nothing until the same reading has been shown to report a dead one. The
