@@ -279,3 +279,40 @@ func (a mergedOpenAlert) Message() (subject, body string) {
 		"half that is observable from outside the daemon that found it.\n")
 	return subject, b.String()
 }
+
+// EventMergedGatedNotClosed is the gated half of a merge whose item stayed open
+// (mg-6275): the branch landed, and pogod declined to close the item because it is
+// unclaimed behind a dispatch gate (`parked`/`human`/`blocked:<agent>`).
+const EventMergedGatedNotClosed = "work_item_merged_not_closed_gated"
+
+// recordMergedGatedNotClosed puts the gated not-closed case on the event spine.
+//
+// THE ALERT IS STILL SUPPRESSED FOR IT, and this does not reverse mg-f17c: no
+// coordinator mail, no "file its successor" remedy. What it fixes is that the
+// spine held NOTHING merged-not-closed-shaped for the case. On 2026-09-08 mg-1530
+// merged while `blocked:mayor`, the not-closed notice reached the filer two
+// seconds later as a `work_item_completion_notice` with `closed:false`, and a
+// census of `event_type ~ merged_not_closed` came back empty — which was read as
+// "the alert did not fire" for the only live instance in 30 days, when the
+// suppression was the design working. The name keeps the `merged_not_closed`
+// stem so that census finds it, and a suffix so an EXACT match on the alert's
+// type still counts only real alerts.
+func recordMergedGatedNotClosed(mr *refinery.MergeRequest, worker string, closeErr error) {
+	if mr == nil || mr.Author == "" || closeErr == nil {
+		return
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType:  EventMergedGatedNotClosed,
+		Agent:      "pogod",
+		WorkItemID: mr.Author,
+		Repo:       mr.RepoPath,
+		Details: map[string]any{
+			"worker":      worker,
+			"branch":      mr.Branch,
+			"mr":          mr.ID,
+			"target":      mr.TargetRef,
+			"merged_sha":  mr.MergedSHA,
+			"close_error": closeErr.Error(),
+		},
+	})
+}
