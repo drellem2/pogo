@@ -63,6 +63,7 @@ var configFieldSection = map[string]string{
 	"PromptStale":         "prompt_stale",
 	"AckWatch":            "ack_watch",
 	"DeafWatch":           "deaf_watch",
+	"WakeWatch":           "wake_watch",
 	"HeartWatch":          "heart_watch",
 	"BlindWatch":          "blind_watch",
 	"AbsentWatch":         "absent_watch",

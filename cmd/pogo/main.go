@@ -2968,7 +2968,10 @@ Agents whose harness reports no submissions (a provider with no receipt hook, or
 an agent spawned before the hook existed) fall back to --wait-idle behaviour
 automatically.
 
-If the agent is not running, falls back to sending the message via gt mail.`,
+If the agent is not running, the command FAILS and names the agent's mailbox:
+nothing is sent. (It used to fall back to "gt mail send", which nothing in this
+fleet reads, and report success — mg-e00c.) To leave a message for a stopped
+agent, mail it: mg mail send <box> --from=<you> --subject=... --body=...`,
 		Args: cobra.MinimumNArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			name := args[0]
@@ -2985,28 +2988,18 @@ If the agent is not running, falls back to sending the message via gt mail.`,
 				opts.Mode = "immediate"
 			}
 
-			fallback, err := client.NudgeOrMail(name, message, opts)
-			if err != nil {
+			if err := client.NudgeRunning(name, message, opts); err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
 
 			if jsonOutput {
-				status := "delivered"
-				method := "pty"
-				if fallback {
-					method = "mail"
-				}
 				cli.PrintJSON(map[string]string{
-					"status": status,
+					"status": "delivered",
 					"agent":  name,
-					"method": method,
+					"method": "pty",
 				})
 			} else {
-				if fallback {
-					fmt.Printf("Agent %s not running — sent via mail.\n", name)
-				} else {
-					fmt.Printf("Nudged %s.\n", name)
-				}
+				fmt.Printf("Nudged %s.\n", name)
 			}
 		},
 	}
@@ -3605,7 +3598,7 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					if len(args) > 0 {
 						message := strings.Join(args, " ")
 						opts := &client.NudgeOpts{Mode: "wait-idle", Timeout: 30}
-						_, nudgeErr := client.NudgeOrMail("doctor", message, opts)
+						nudgeErr := client.NudgeRunning("doctor", message, opts)
 						if nudgeErr != nil {
 							result["nudge"] = map[string]string{"status": "error", "error": nudgeErr.Error()}
 						} else {
@@ -3618,7 +3611,7 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					if len(args) > 0 {
 						message := strings.Join(args, " ")
 						opts := &client.NudgeOpts{Mode: "wait-idle", Timeout: 30}
-						_, nudgeErr := client.NudgeOrMail("doctor", message, opts)
+						nudgeErr := client.NudgeRunning("doctor", message, opts)
 						if nudgeErr != nil {
 							fmt.Printf("Warning: could not nudge doctor: %s\n", nudgeErr)
 						} else {
@@ -4666,6 +4659,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// produce, and the only kind whose silence means what it appears to mean.
 	rootCmd.AddCommand(newTurnDoneCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckTurnsCmd(&jsonOutput))
+	rootCmd.AddCommand(newCheckWakewatchCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckHeartbeatsCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckProgressCmd(&jsonOutput))
 	// check-stranded (mg-be37): the PERIODIC half of the spawn-time stranded-work

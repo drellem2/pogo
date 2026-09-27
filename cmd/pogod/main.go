@@ -3937,6 +3937,14 @@ Flags:
 	// is heartbeat freshness, never process existence. mg-d18b.
 	startReaper(hbCtx, cfg.Reaper)
 
+	// The pointer waker (mg-5496 phase 1, mg-e00c): an agent is woken when mail
+	// or an assignment arrives for it, with a pointer of at most 100 bytes;
+	// unconsumed work is re-pointed and then reported, and mail to an agent that
+	// is not running is bounced. ACTS — see docs/CONFIGURATION.md's "What runs by
+	// default" table. SHADOW: the mail-check timers stay on beside it, and
+	// `pogo check-wakewatch` measures whether they ever find mail it missed.
+	startWakeWatch(hbCtx, cfg.WakeWatch, agentRegistry, coordinator, log.Printf)
+
 	// Optional platform-specific wake notifier — reduces wake-event latency
 	// from up-to-Interval (~30s) down to <1s by short-circuiting the
 	// heartbeat tick when the OS reports a wake. Strict performance
