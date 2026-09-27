@@ -121,6 +121,13 @@ doubling backoff from a 1h base those span ~7h (0, +1h, +2h, +4h) — long past 
 point where "the agent never knew" is a live explanation. A negative value
 disables the cap.
 
+The cap is the *whole* answer to "I know": there is still no acknowledgment
+path, and the notice text says so. An earlier wording told recipients to "say
+so in the item body", which nothing reads. Agents who followed it edited the
+body once per notice and got the same notices anyway (mg-1105). If an
+acknowledgment is ever wanted, it has to be read here in code (e.g. a body
+marker that suppresses the remaining notices), not promised in the string.
+
 The base cooldown is an hour rather than the 5-minute stall cooldown because the
 recipients differ in kind: a stall nudge asks the coordinator for a dispatch it
 can make in seconds; a blocked-reminder asks an agent for a **decision**, which is

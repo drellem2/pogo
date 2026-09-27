@@ -176,9 +176,8 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 				"This is NOT a dispatch request: they are gated away from automatic dispatch and stay that way "+
 				"until you act. Run `mg show <id>` for what each one is waiting on, do it, then tell whoever set "+
 				"the block (or clear it yourself with `mg edit <id> --assignee=<owner>`). "+
-				"If you are waiting on purpose, say so in the item body — this notice stops after %d reminders "+
-				"whether or not the block clears.",
-			len(group), strings.Join(ids, ", "), max)
+				blockedReminderStopSentence(max),
+			len(group), strings.Join(ids, ", "))
 		msg += subsetRepeatNotice(sel, ids)
 
 		details := map[string]any{
@@ -335,6 +334,24 @@ func (w *Watcher) blockedReminderCooldown() time.Duration {
 		return w.cfg.BlockedReminderCooldown
 	}
 	return config.DefaultBlockedReminderCooldown
+}
+
+// blockedReminderStopSentence says, truthfully, what an agent waiting on
+// purpose can do about this notice: nothing. Nothing in this check reads an
+// item body, so there is no acknowledgment path — the cap bounds the damage
+// instead (see TestBlockedReminderStopsAtMaxNotices). The old sentence told the
+// recipient to "say so in the item body", which had no effect on anything: a
+// conscientious agent wrote a body section per notice and every notice still
+// arrived unchanged (mg-1105). Do not offer an affordance the code does not
+// honour. max is the effective cap; 0 means uncapped, which the old %d
+// rendered as "stops after 0 reminders".
+func blockedReminderStopSentence(max int) string {
+	if max <= 0 {
+		return "If you are waiting on purpose, there is nothing to acknowledge — no reply or body edit " +
+			"stops this notice; it repeats on a backoff until the block clears (the notice cap is disabled)."
+	}
+	return fmt.Sprintf("If you are waiting on purpose, there is nothing to acknowledge — no reply or body edit "+
+		"stops this notice; it stops by itself after %d reminders whether or not the block clears.", max)
 }
 
 // blockedReminderMaxNotices returns the effective notice cap. A negative

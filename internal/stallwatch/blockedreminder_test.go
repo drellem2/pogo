@@ -279,6 +279,55 @@ func TestBlockedReminderCapCanBeDisabled(t *testing.T) {
 	}
 }
 
+// TestBlockedReminderOffersNoFalseAcknowledgment pins mg-1105. The notice used
+// to say "if you are waiting on purpose, say so in the item body" — but nothing
+// in this check reads a body, so complying changed nothing and the same notices
+// kept arriving. The message must not instruct an action the code ignores, and
+// must state the stop condition that actually applies: the cap when there is
+// one, and no count at all when the cap is disabled (the old %d rendered
+// "stops after 0 reminders" there).
+func TestBlockedReminderOffersNoFalseAcknowledgment(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cap   int
+		want  string
+		wantN string
+	}{
+		{"capped", 3, "stops by itself after 3 reminders", ""},
+		{"uncapped", -1, "the notice cap is disabled", "after 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := blockedCfg()
+			cfg.BlockedReminderMaxNotices = tc.cap
+			w, rec, workRoot, mailRoot := testEnv(t, cfg)
+			makeMailbox(t, mailRoot, "pm-pogo")
+			now := time.Now()
+			writeItem(t, workRoot, "mg-hold", "blocked:pm-pogo", now)
+
+			w.Check(now)
+
+			got := blockedNudges(rec)
+			if len(got) != 1 {
+				t.Fatalf("got %d notices, want 1", len(got))
+			}
+			msg := got[0].message
+			// Positive control for the negatives below: the instrument sees the
+			// stop sentence at all.
+			if !strings.Contains(msg, "nothing to acknowledge") || !strings.Contains(msg, tc.want) {
+				t.Errorf("message does not state the real stop condition %q: %q", tc.want, msg)
+			}
+			for _, false_ := range []string{"say so in the item body", "item body"} {
+				if strings.Contains(msg, false_) {
+					t.Errorf("message offers %q, an acknowledgment nothing reads: %q", false_, msg)
+				}
+			}
+			if tc.wantN != "" && strings.Contains(msg, tc.wantN) {
+				t.Errorf("uncapped message claims a count (%q): %q", tc.wantN, msg)
+			}
+		})
+	}
+}
+
 // TestBlockedReminderBacksOffBetweenNotices: the second notice waits a base
 // cooldown. Without this the reminder would fire every heartbeat tick, which is
 // the defect mg-1693 measured on the dispatch categories.
