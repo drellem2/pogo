@@ -2231,8 +2231,24 @@ it**. Before that every one-shot leaves as the retired `one_shot_complete`, and 
 naive reader would print "no unanswered one-shots" over a fleet where the class
 cannot be observed at all. Finding that label in the window makes this command
 say so and exit 1 instead — the same trap that produced mg-afd0 and mg-3141.
-`curl -s http://127.0.0.1:10000/version | jq -r .revision` answers what is
-actually running.
+
+That is a limit of the **data**, not necessarily of the running build, and the
+notice says so (mg-9ac7). Once the retired record is in the window, rebuilding
+pogod does not remove it: the row stays NOT MEASURABLE until the record ages out
+of the rolling window, and the notice prints that date. A reader who redeploys
+to clear it will otherwise see the same warning the next morning and conclude
+the redeploy failed. A bare `curl …/version` cannot settle whether the fix is
+running either, because a revision does not say what it contains. The notice
+gives the ancestry test instead:
+
+    git -C <your pogo checkout> merge-base --is-ancestor d71e1e2 \
+        "$(curl -s http://127.0.0.1:10000/version | jq -r .revision)"; echo $?
+
+`0` means the running build has the fix, and `1` means it does not, so rebuild.
+Anything else (git's `128`) means that checkout lacks one of the commits or
+pogod did not answer. Do not fold it into `|| echo no`. To measure the part of
+the window the old writer did not touch today, the notice also prints
+`pogo check-oneshots --since=<just after the newest retired record>`.
 
 ### Not in ack-watch, and that is a decision
 

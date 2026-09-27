@@ -25,9 +25,8 @@ func unansweredFixture(id, agent, msg string) scheduler.OneShotOutcome {
 // TestOneShotAckLine_OldWriterDoesNotReadAsClean is the reason this renderer is
 // its own function rather than a count comparison at the call site.
 //
-// d71e1e2 is merged and inert until pogod is rebuilt onto it. Until then every
-// one-shot leaves as the retired `one_shot_complete` and the labels this row
-// reads cannot appear at all — so the naive row prints "no unanswered one-shots"
+// A pogod built before d71e1e2 removes every one-shot as the retired
+// `one_shot_complete`, and the labels this row reads cannot appear at all — so the naive row prints "no unanswered one-shots"
 // with total confidence over a fleet where the class is simply unmeasurable.
 // That is the mg-afd0 / mg-3141 confusion, and a detector built to close a
 // silence must not answer with one.
@@ -47,8 +46,79 @@ func TestOneShotAckLine_OldWriterDoesNotReadAsClean(t *testing.T) {
 	if !strings.Contains(detail, "one_shot_complete") {
 		t.Errorf("detail = %q, want it to name the retired label it found", detail)
 	}
-	if !strings.Contains(detail, "/version") {
-		t.Errorf("detail = %q, want it to say how to check what is running", detail)
+	if !strings.Contains(detail, "merge-base --is-ancestor d71e1e2") {
+		t.Errorf("detail = %q, want a command that yields a verdict on the running build, not a bare revision", detail)
+	}
+}
+
+// TestOneShotLegacyNotice_RemedyIsTheAgeOutNotARebuild pins mg-9ac7. The notice
+// used to say an unanswered one-shot was invisible "until pogod is rebuilt" and
+// offered `curl /version`. The running build already had the fix; the blocker
+// was a retired record inside the window, which a redeploy does not remove — so
+// the reader who redeployed saw NOT MEASURABLE the next morning and concluded
+// the redeploy failed. Both renderers must name the age-out date, disown the
+// rebuild as the thing that clears it, give a command with a verdict, and give
+// the --since that measures the untouched part of the window today.
+func TestOneShotLegacyNotice_RemedyIsTheAgeOutNotARebuild(t *testing.T) {
+	now := time.Date(2026, 8, 19, 9, 0, 0, 0, time.UTC)
+	rep := scheduler.OneShotReport{
+		Since:      now.Add(-7 * 24 * time.Hour),
+		Files:      []string{"/tmp/events.log"},
+		Legacy:     198,
+		LegacyLast: time.Date(2026, 8, 13, 2, 21, 0, 500e6, time.UTC),
+	}
+	ageOut := time.Date(2026, 8, 20, 2, 21, 0, 500e6, time.UTC).Local().Format("2006-01-02 15:04 MST")
+	_, row := oneShotAckLine(rep, nil, now)
+	full := renderOneShotReport(rep, now, false)
+	for name, out := range map[string]string{"doctor row": row, "check-oneshots": full} {
+		for _, want := range []string{
+			ageOut,
+			"7-day window",
+			"rebuilding pogod does not bring that forward",
+			"merge-base --is-ancestor d71e1e2",
+			"echo $?",
+			// Rounded UP past the fractional second, or [since, until) would
+			// keep the very record it is meant to exclude.
+			"--since=2026-08-13T02:21:01Z",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s is missing %q:\n%s", name, want, out)
+			}
+		}
+		if strings.Contains(out, "until pogod is rebuilt") {
+			t.Errorf("%s still names a rebuild as what clears it:\n%s", name, out)
+		}
+	}
+}
+
+// A fixed window (--until) never slides, so an age-out date would be false.
+func TestOneShotLegacyAgeOut_FixedWindowHasNoDate(t *testing.T) {
+	rep := scheduler.OneShotReport{
+		Since:      oneShotNow().Add(-7 * 24 * time.Hour),
+		Until:      oneShotNow().Add(-time.Hour),
+		Legacy:     1,
+		LegacyLast: oneShotNow().Add(-2 * time.Hour),
+	}
+	got := oneShotLegacyAgeOut(rep, oneShotNow())
+	if !strings.Contains(got, "always contain") || strings.Contains(got, "stops containing") {
+		t.Errorf("fixed window: %q", got)
+	}
+}
+
+// The log's own evidence about the current writer: a labelled outcome after the
+// newest retired one says the writer has the fix; none says nothing either way.
+func TestOneShotLabelledSince(t *testing.T) {
+	rep := scheduler.OneShotReport{Legacy: 1, LegacyLast: oneShotNow().Add(-3 * time.Hour)}
+	if got := oneShotLabelledSince(rep); !strings.Contains(got, "says nothing either way") {
+		t.Errorf("no labelled outcome: %q — absence must not read as evidence", got)
+	}
+	rep.Answered = []scheduler.OneShotOutcome{{Reason: scheduler.ReasonOneShotAcked, Removed: oneShotNow().Add(-4 * time.Hour)}}
+	if got := oneShotLabelledSince(rep); !strings.Contains(got, "says nothing either way") {
+		t.Errorf("labelled outcome OLDER than the retired one: %q — it says nothing about the current writer", got)
+	}
+	rep.Answered = append(rep.Answered, scheduler.OneShotOutcome{Reason: scheduler.ReasonOneShotAcked, Removed: oneShotNow().Add(-time.Hour)})
+	if got := oneShotLabelledSince(rep); !strings.Contains(got, "has the fix") {
+		t.Errorf("labelled outcome after the retired one: %q", got)
 	}
 }
 
