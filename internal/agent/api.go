@@ -234,10 +234,11 @@ type DrainStatus struct {
 	// completes; it must simply stop claiming these do not exist.
 	Unreachable []OrphanedPolecat `json:"unreachable,omitempty"`
 
-	// UnreachableErr is set when the witness store could not be read, meaning
-	// we do not know whether survivors exist. An empty Unreachable with this
-	// set means "cannot see", NOT "none" — the caller must not render the two
-	// the same way (mg-76e5).
+	// UnreachableErr is set when the witness store could not be read, or does
+	// not exist at all (ErrWitnessAbsent, drellem2/pogo#197), meaning we do not
+	// know whether survivors exist. An empty Unreachable with this set means
+	// "cannot see", NOT "none" — the caller must not render the two the same
+	// way (mg-76e5).
 	UnreachableErr string `json:"unreachable_err,omitempty"`
 }
 
@@ -2935,8 +2936,8 @@ func (r *Registry) handleDrain(w http.ResponseWriter, req *http.Request) {
 	}
 	// The registry cannot see a polecat that survived an earlier restart, so
 	// ask the witness — the one source that outlives the pogod that wrote it.
-	// Report a read failure rather than letting it collapse into "none"
-	// (mg-0b77).
+	// Report a read failure — or an absent store — rather than letting it
+	// collapse into "none" (mg-0b77, drellem2/pogo#197).
 	orphans, err := r.OrphanedPolecats()
 	if err != nil {
 		status.UnreachableErr = err.Error()

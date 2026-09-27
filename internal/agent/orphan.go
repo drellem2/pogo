@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -98,6 +99,17 @@ type OrphanedPolecat struct {
 	WorkItemID string    `json:"work_item_id,omitempty"`
 }
 
+// ErrWitnessAbsent is returned by OrphanedPolecats when the witness store does
+// not exist at all. It is NOT a report of zero survivors: with no store there is
+// no record of who was spawned, so polecats left by an earlier pogod cannot be
+// seen. Test for it with errors.Is (drellem2/pogo#197).
+//
+// The store is created by the first agent start, so this state is normally
+// brief. That has an honest limit: once it exists, polecats spawned by a pogod
+// that never wrote a witness are still invisible — they simply stop being
+// reported as an absence and start being unrecorded.
+var ErrWitnessAbsent = errors.New("witness store absent — survivors of an earlier pogod cannot be seen; this is NOT zero")
+
 // OrphanedPolecats returns every polecat this pogod can SEE is alive but
 // cannot REACH — the population mg-13a3 made visible and that nothing yet
 // acts on.
@@ -107,12 +119,26 @@ type OrphanedPolecat struct {
 // a different fact from "nobody is out there" — the same distinction mg-76e5
 // enforced one layer up (mail_check_count yields EMPTY, never 0). A caller
 // that renders this error as zero survivors has rebuilt the defect.
+//
+// An ABSENT store is a third state and gets its own error, ErrWitnessAbsent
+// (drellem2/pogo#197). loadWitnessAllTypes maps a missing file to "no records",
+// which is right for the reaper and wrong here: absence means nobody ever wrote
+// a witness on this box — a pogod that predates it, a wiped POGO_HOME — not that
+// nobody is out there. So an empty read is only a zero once WitnessStoreExists
+// has said the file is there.
 func (r *Registry) OrphanedPolecats() ([]OrphanedPolecat, error) {
 	alive, err := WitnessedAlivePolecats()
 	if err != nil {
 		return nil, err
 	}
 	if len(alive) == 0 {
+		present, err := WitnessStoreExists()
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			return nil, fmt.Errorf("%w at %s", ErrWitnessAbsent, WitnessPath())
+		}
 		return nil, nil
 	}
 
@@ -154,7 +180,13 @@ type orphanReporter struct {
 	cooldown  time.Duration
 	now       func() time.Time
 	alert     func(OrphanedPolecat)
+	logf      func(format string, args ...any)
 	lastAlert map[string]time.Time
+	// absent is whether the previous sweep found the witness store absent.
+	// The absent state is logged on entry and on exit only: it is steady
+	// (it lasts until an agent starts), so a line per heartbeat tick would
+	// bury itself, and the transitions are what a reader needs.
+	absent bool
 }
 
 func newOrphanReporter() *orphanReporter {
@@ -162,8 +194,47 @@ func newOrphanReporter() *orphanReporter {
 		cooldown:  orphanAlertCooldown,
 		now:       time.Now,
 		alert:     defaultOrphanAlert,
+		logf:      log.Printf,
 		lastAlert: map[string]time.Time{},
 	}
+}
+
+// Return values of ReportOrphanedPolecats that are not a population. Both are
+// negative so no caller can add them into a count by accident, and they are
+// distinct so a caller can tell "cannot read" from "nothing to read".
+const (
+	// OrphanSweepUnreadable: the witness store exists (or could not be
+	// stat'ed) but could not be read.
+	OrphanSweepUnreadable = -1
+	// OrphanSweepAbsent: the witness store does not exist (ErrWitnessAbsent).
+	OrphanSweepAbsent = -2
+)
+
+// sweep turns one OrphanedPolecats result into the reporter's return value,
+// logging and alerting as it goes. Split from ReportOrphanedPolecats so the
+// state handling is testable without the process-global reporter.
+func (o *orphanReporter) sweep(orphans []OrphanedPolecat, err error) int {
+	isAbsent := errors.Is(err, ErrWitnessAbsent)
+	o.mu.Lock()
+	was := o.absent
+	o.absent = isAbsent
+	o.mu.Unlock()
+
+	switch {
+	case isAbsent:
+		if !was {
+			o.logf("orphan: %v — cannot enumerate surviving polecats; reporting absent, NOT zero (drellem2/pogo#197)", err)
+		}
+		return OrphanSweepAbsent
+	case was:
+		o.logf("orphan: witness store is present again at %s — orphan sweep resumed (drellem2/pogo#197)", WitnessPath())
+	}
+	if err != nil {
+		o.logf("orphan: cannot enumerate surviving polecats (%v) — this is NOT a report of zero (mg-0b77)", err)
+		return OrphanSweepUnreadable
+	}
+	o.report(orphans)
+	return len(orphans)
 }
 
 // report fires the alert for each survivor outside its cooldown, and returns
@@ -208,17 +279,17 @@ var fleetOrphans = newOrphanReporter()
 // (not the number alerted — the cooldown suppresses repeats, and a caller
 // asking "is anything leaked right now?" wants the population, not the noise).
 //
-// A witness read error is surfaced and reported as -1 rather than 0: we do not
-// know, and this function will not be the one that says "none" when it means
-// "cannot see".
+// A witness read error is surfaced and reported as OrphanSweepUnreadable (-1)
+// rather than 0: we do not know, and this function will not be the one that
+// says "none" when it means "cannot see". An ABSENT store is reported as
+// OrphanSweepAbsent (-2), and logged when the sweep enters and leaves that
+// state (drellem2/pogo#197).
+//
+// pogod's heartbeat discards the return value, so the LOG LINE is the half of
+// this that actually reaches anyone; the return value is for tests and any
+// future caller.
 func (r *Registry) ReportOrphanedPolecats() int {
-	orphans, err := r.OrphanedPolecats()
-	if err != nil {
-		log.Printf("orphan: cannot enumerate surviving polecats (%v) — this is NOT a report of zero (mg-0b77)", err)
-		return -1
-	}
-	fleetOrphans.report(orphans)
-	return len(orphans)
+	return fleetOrphans.sweep(r.OrphanedPolecats())
 }
 
 // defaultOrphanAlert is the production alert sink: a durable event on the spine

@@ -2,9 +2,12 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -391,5 +394,192 @@ func TestDrainStatus_HealthyPolecatIsCountedNotOrphaned(t *testing.T) {
 	if len(status.Unreachable) != 0 {
 		t.Errorf("DrainStatus.Unreachable = %v, want [] — this polecat is reachable; reporting it "+
 			"would make every redeploy warn about a healthy fleet", orphanNames(status.Unreachable))
+	}
+}
+
+// writeEmptyWitness writes a PRESENT-but-empty store the way production does
+// after the last polecat is removed: saveWitness(nil) persists an empty array.
+func writeEmptyWitness(t *testing.T) {
+	t.Helper()
+	witnessMu.Lock()
+	defer witnessMu.Unlock()
+	if err := saveWitness(nil); err != nil {
+		t.Fatalf("saveWitness(nil): %v", err)
+	}
+}
+
+// witnessStoreStates is the three-state matrix drellem2/pogo#197 is about. Each
+// entry builds its state through the same writers production uses; "absent"
+// builds nothing, which is exactly how the state arises on a host whose pogod
+// has never started an agent.
+var witnessStoreStates = []struct {
+	name  string
+	setup func(t *testing.T)
+}{
+	{"absent", func(t *testing.T) {}},
+	{"present-empty", writeEmptyWitness},
+	{"unreadable", func(t *testing.T) {
+		if err := os.WriteFile(WitnessPath(), []byte("{not json"), 0o644); err != nil {
+			t.Fatalf("write corrupt witness: %v", err)
+		}
+	}},
+}
+
+// TestOrphanedPolecats_AbsentPresentEmptyUnreadable pins that the three store
+// states produce three distinguishable results. Before drellem2/pogo#197 the
+// absent store returned (nil, nil) — byte-identical to present-and-empty — so
+// every caller rendered "no store here" as "nobody is out there".
+func TestOrphanedPolecats_AbsentPresentEmptyUnreadable(t *testing.T) {
+	for _, st := range witnessStoreStates {
+		t.Run(st.name, func(t *testing.T) {
+			sandboxWitness(t)
+			reg := newDrainTestRegistry(t)
+			st.setup(t)
+
+			got, err := reg.OrphanedPolecats()
+			if got != nil {
+				t.Errorf("OrphanedPolecats() = %v, want nil", orphanNames(got))
+			}
+			switch st.name {
+			case "absent":
+				if !errors.Is(err, ErrWitnessAbsent) {
+					t.Fatalf("OrphanedPolecats() err = %v, want ErrWitnessAbsent — an absent store is "+
+						"not a clean fleet; a nil error here is read by every caller as zero survivors "+
+						"(drellem2/pogo#197)", err)
+				}
+			case "present-empty":
+				if err != nil {
+					t.Fatalf("OrphanedPolecats() err = %v, want nil — a present, empty store IS a zero, "+
+						"and reporting it as an error would make every idle fleet read as blind", err)
+				}
+			case "unreadable":
+				if err == nil {
+					t.Fatal("OrphanedPolecats() err = nil, want an error for an unreadable store (mg-0b77)")
+				}
+				if errors.Is(err, ErrWitnessAbsent) {
+					t.Fatalf("OrphanedPolecats() err = %v is ErrWitnessAbsent — the store is there and "+
+						"could not be read, which is a different fault with a different fix", err)
+				}
+			}
+		})
+	}
+}
+
+// TestDrainStatus_AbsentPresentEmptyUnreadable carries the matrix to /drain,
+// the one caller that renders the answer for a human (pogo-self-deploy prints
+// unreachable_err as "cannot tell whether any polecat survived"). Absent and
+// unreadable must set UnreachableErr; present-empty must not.
+func TestDrainStatus_AbsentPresentEmptyUnreadable(t *testing.T) {
+	for _, st := range witnessStoreStates {
+		t.Run(st.name, func(t *testing.T) {
+			sandboxWitness(t)
+			reg := newDrainTestRegistry(t)
+			st.setup(t)
+
+			srv := httptest.NewServer(http.HandlerFunc(reg.handleDrain))
+			defer srv.Close()
+			resp, err := http.Get(srv.URL)
+			if err != nil {
+				t.Fatalf("GET /agents/drain: %v", err)
+			}
+			defer resp.Body.Close()
+			var status DrainStatus
+			if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+				t.Fatalf("decode DrainStatus: %v", err)
+			}
+			if len(status.Unreachable) != 0 {
+				t.Errorf("DrainStatus.Unreachable = %v, want []", orphanNames(status.Unreachable))
+			}
+			wantErr := st.name != "present-empty"
+			if (status.UnreachableErr != "") != wantErr {
+				t.Fatalf("DrainStatus.UnreachableErr = %q, want set=%v — only a present store can say "+
+					"'none unreachable'; absent and unreadable must say 'cannot see' (drellem2/pogo#197)",
+					status.UnreachableErr, wantErr)
+			}
+			if st.name == "absent" && !strings.Contains(status.UnreachableErr, "absent") {
+				t.Errorf("DrainStatus.UnreachableErr = %q, want it to name the store as absent so the "+
+					"reader knows which fault this is", status.UnreachableErr)
+			}
+		})
+	}
+}
+
+// TestReportOrphanedPolecats_ReturnValuePerState pins the reporter's return
+// value across the matrix through the production entry point: -2 absent, 0
+// present-empty, -1 unreadable.
+func TestReportOrphanedPolecats_ReturnValuePerState(t *testing.T) {
+	want := map[string]int{
+		"absent":        OrphanSweepAbsent,
+		"present-empty": 0,
+		"unreadable":    OrphanSweepUnreadable,
+	}
+	for _, st := range witnessStoreStates {
+		t.Run(st.name, func(t *testing.T) {
+			sandboxWitness(t)
+			reg := newDrainTestRegistry(t)
+			st.setup(t)
+
+			prev := fleetOrphans
+			fleetOrphans = newOrphanReporter()
+			fleetOrphans.logf = func(string, ...any) {}
+			t.Cleanup(func() { fleetOrphans = prev })
+
+			if got := reg.ReportOrphanedPolecats(); got != want[st.name] {
+				t.Fatalf("ReportOrphanedPolecats() = %d, want %d (drellem2/pogo#197)", got, want[st.name])
+			}
+		})
+	}
+}
+
+// TestOrphanReporter_AbsentLogsOnTransitionOnly pins the log cadence for the
+// absent state. It is steady — it lasts until an agent starts — and pogod
+// sweeps every heartbeat, so logging per tick would bury the line under itself.
+// Entry and exit are logged; ticks in between are silent. An unreadable store
+// keeps logging every sweep, as before.
+func TestOrphanReporter_AbsentLogsOnTransitionOnly(t *testing.T) {
+	var lines []string
+	r := newOrphanReporter()
+	r.alert = func(OrphanedPolecat) {}
+	r.logf = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+
+	absentErr := fmt.Errorf("%w at /p/w.json", ErrWitnessAbsent)
+	for i := 0; i < 3; i++ {
+		if got := r.sweep(nil, absentErr); got != OrphanSweepAbsent {
+			t.Fatalf("sweep(absent) = %d, want %d", got, OrphanSweepAbsent)
+		}
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "NOT zero") {
+		t.Fatalf("three absent sweeps logged %q, want exactly one line saying absent is NOT zero", lines)
+	}
+
+	// The store appears: one line records the end of the episode.
+	if got := r.sweep(nil, nil); got != 0 {
+		t.Fatalf("sweep(present-empty) = %d, want 0", got)
+	}
+	if len(lines) != 2 || !strings.Contains(lines[1], "present again") {
+		t.Fatalf("leaving the absent state logged %q, want a second line saying the store is present again", lines)
+	}
+	r.sweep(nil, nil)
+	if len(lines) != 2 {
+		t.Fatalf("a steady present-empty sweep logged %q, want nothing new", lines[2:])
+	}
+
+	// Going absent again is a new episode and is logged again.
+	r.sweep(nil, absentErr)
+	if len(lines) != 3 {
+		t.Fatalf("re-entering the absent state logged %d lines total, want 3", len(lines))
+	}
+
+	// Unreadable is unchanged: -1 and a line on every sweep.
+	lines = nil
+	r.sweep(nil, nil)
+	lines = nil
+	for i := 0; i < 2; i++ {
+		if got := r.sweep(nil, errors.New("witness: cannot read /p/w.json: bad json")); got != OrphanSweepUnreadable {
+			t.Fatalf("sweep(unreadable) = %d, want %d", got, OrphanSweepUnreadable)
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("two unreadable sweeps logged %d lines, want 2", len(lines))
 	}
 }
