@@ -3031,6 +3031,10 @@ pogod registers this as the harness's UserPromptSubmit hook and passes the
 receipt file's location in POGO_SUBMIT_RECEIPT. The receipt is what lets a nudge
 be confirmed rather than assumed — see 'pogo nudge --help'.
 
+The receipt carries a short excerpt of each end of the submitted prompt, read
+from the hook payload on stdin, so pogod can tell a whole delivery from one the
+harness cut short. A payload it cannot read still records the submit.
+
 This command ALWAYS succeeds and always prints nothing. A hook that exits
 non-zero blocks the agent's prompt, and a hook that writes to stdout has its
 output injected into the agent's context: a delivery receipt must never be able
@@ -3038,7 +3042,15 @@ to break, or edit, the delivery it is reporting on.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			if path := os.Getenv("POGO_SUBMIT_RECEIPT"); path != "" {
-				if err := agent.RecordSubmit(path); err != nil {
+				// The payload's prompt is what the harness actually
+				// submitted; its excerpt lets pogod tell a whole
+				// delivery from a head-truncated one (mg-8a70). No
+				// readable prompt still records the submit, as before.
+				record := func() error { return agent.RecordSubmit(path) }
+				if prompt, ok := readHookPrompt(os.Stdin, hookStdinTimeout); ok {
+					record = func() error { return agent.RecordSubmitPrompt(path, prompt) }
+				}
+				if err := record(); err != nil {
 					// stderr only: it is not fed back into the agent's context.
 					fmt.Fprintf(os.Stderr, "pogo hook prompt-submit: %v\n", err)
 				}

@@ -781,6 +781,8 @@ An agent sent macguffin mail (`mg mail send`).
   - `delivery` (string, required): `"pty"` (delivered to live session) or `"mail_fallback"` (target not running, queued as mail)
   - `mode` (string, optional): how delivery was established — `"idle"` (waited for quiescence, then wrote and assumed), `"immediate"` (wrote with no precondition), `"ready"` (initial nudge, past the prompt-ready gate), or one of the confirmed-delivery outcomes: `"confirm"` (the message alone drew a submission receipt), `"confirm-bare-return"` (a bare return submitted text the harness had left unsent), `"confirm-resend"` (the message had to be sent twice). The last three are the only values that mean the AGENT reported receiving it; the rest mean pogod wrote bytes. See mg-ebee.
   - `fire_token` (string, optional): correlation id, present when the nudge carries a scheduler fire. Joins to `scheduler_fire_delivered` and `scheduler_fire_completed` on the same value.
+  - `content_check` (string, optional; confirm modes only): whether what the harness SUBMITTED was compared with what was sent (mg-8a70). `"intact"` means the receipt's excerpt carries both ends of the message. `"unknown"` means nothing in the receipt window could be judged — typically a hook binary older than mg-8a70, which records a count and no excerpt. A delivery that fails the check is not logged here; it is logged as `nudge_unconfirmed` `outcome: "mangled"`. Before mg-8a70, a confirm-mode `nudge_sent` proved that a submit happened, not that the content arrived.
+  - `received_as_paste` (bool, optional): the content arrived intact, but Claude Code wrapped it in `<pasted_content>`, which it tells the model to treat as possibly not the user's words.
 
 ```json
 {"schema_version":1,"timestamp":"2026-04-25T10:15:30.000000000Z","event_type":"nudge_sent","agent":"mayor","details":{"to":"crew-arch","message":"check your mail","delivery":"pty","mode":"idle"}}
@@ -889,6 +891,7 @@ them.
   - `outcome` (string, required):
     - `"queued"` — written to a harness that was **mid-turn**. Claude Code takes such a prompt and acts on it but fires no `UserPromptSubmit` for it, so the receipt cannot move: pogod can neither confirm nor deny, and does not retry (a resend would deliver the instruction twice). The scheduler deliberately withholds its mail fallback for this outcome alone. See `docs/investigations/confirmed-nudge-delivery-2026-07-29.md`.
     - `"refused"` — the full escalation ran (the message, a bare return, the message again) and the harness recorded nothing. **Nobody received it.** This is the outcome that used to be reported as success.
+    - `"mangled"` — the harness DID submit a prompt, but its receipt excerpt is recognisably this message with one end missing (mg-8a70). The measured case is Claude Code 2.1.283 receiving a >1022-byte nudge in two reads and submitting only the last ~120 characters; 128 of 257 polecat mail-check fires on 2026-09-26/27 arrived that way, each logged as `nudge_sent` `mode: "confirm"`. The scheduler falls back to mail, which carries the whole text. Extra fields: `step` (which escalation step drew the receipt), `sent_len` and `received_len` (runes), `received_head` (the first ≤100 runes the harness submitted).
   - `fire_token` (string, optional): as for `nudge_sent`.
 
 ```json

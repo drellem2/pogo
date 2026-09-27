@@ -36,6 +36,13 @@ func TestMailAfterNudge(t *testing.T) {
 			true,
 		},
 		{"a PTY write error falls back", errors.New("write to PTY: file already closed"), true},
+		{
+			// mg-8a70: the agent got only the tail, so the mailbox copy is
+			// the one that carries the whole instruction.
+			"submitted but mangled: mail carries the whole text",
+			fmt.Errorf("nudge to %q: %w", "t036c", agent.ErrNudgeMangled),
+			true,
+		},
 	}
 
 	for _, tt := range tests {

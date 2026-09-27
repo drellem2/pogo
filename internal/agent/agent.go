@@ -1870,7 +1870,9 @@ func (a *Agent) Nudge(message string) error {
 	}
 
 	if message != "" {
-		if _, err := a.master.WriteString(message); err != nil {
+		// Long bodies go in drain-gated pieces so the harness never reads
+		// one as a paste (mg-8a70) — see writeNudgeBody.
+		if err := a.writeNudgeBody(message); err != nil {
 			return fmt.Errorf("write to PTY: %w", err)
 		}
 		time.Sleep(a.nudge.SubmitDelay)

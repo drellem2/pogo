@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/drellem2/pogo/internal/events"
@@ -75,6 +76,12 @@ var (
 	// recorded a submission. Nobody received it. This is the outcome that used
 	// to be reported as success.
 	ErrNudgeUnconfirmed = errors.New("nudge not confirmed by the agent")
+
+	// ErrNudgeMangled means the harness DID submit a prompt, but its recorded
+	// excerpt is recognisably this message with one end missing — the
+	// head-truncation Claude Code 2.1.283 inflicted on long nudges (mg-8a70).
+	// Before receipts carried content, this was logged as a confirmed success.
+	ErrNudgeMangled = errors.New("nudge submitted but mangled in transit")
 )
 
 // IsIdle returns true if no output has been written to the agent's PTY
@@ -487,13 +494,7 @@ func (a *Agent) deliverConfirmed(msg string, timeout time.Duration, corr string)
 		return err
 	}
 	if _, ok := a.awaitSubmit(before, step); ok {
-		// A confirmed submit drains whatever was loaded, including anything a
-		// previous mid-turn delivery left in the composer. Discharge the
-		// obligation here rather than leaving a stale record for the
-		// mid-session watcher to judge a healthy agent against.
-		a.clearQueuedNudge()
-		emitNudgeSent(a, msg, "confirm", corr)
-		return nil
+		return a.settleConfirmed(msg, before, "confirm", corr)
 	}
 
 	if busy {
@@ -519,9 +520,7 @@ func (a *Agent) deliverConfirmed(msg string, timeout time.Duration, corr string)
 	}
 	if _, ok := a.awaitSubmit(before, step); ok {
 		log.Printf("agent %s: bare return submitted the loaded message", a.Name)
-		a.clearQueuedNudge()
-		emitNudgeSent(a, msg, "confirm-bare-return", corr)
-		return nil
+		return a.settleConfirmed(msg, before, "confirm-bare-return", corr)
 	}
 
 	// Step 3: the message again. The bare return proved nothing was loaded.
@@ -530,9 +529,7 @@ func (a *Agent) deliverConfirmed(msg string, timeout time.Duration, corr string)
 		return fmt.Errorf("resend to %q: %w", a.Name, err)
 	}
 	if _, ok := a.awaitSubmit(before, step); ok {
-		a.clearQueuedNudge()
-		emitNudgeSent(a, msg, "confirm-resend", corr)
-		return nil
+		return a.settleConfirmed(msg, before, "confirm-resend", corr)
 	}
 
 	emitNudgeUnconfirmed(a, msg, "refused", corr)
@@ -541,11 +538,65 @@ func (a *Agent) deliverConfirmed(msg string, timeout time.Duration, corr string)
 		a.Name, timeout, ErrNudgeUnconfirmed)
 }
 
+// settleConfirmed finishes a delivery whose receipt moved: it discharges any
+// queued-nudge obligation and then judges WHAT was submitted against what was
+// sent (mg-8a70). A receipt proves a submit, not the content: on Claude Code
+// 2.1.283 half the long scheduler fires were submitted as only their last ~120
+// characters and every one was logged as confirmed.
+//
+// A mangled delivery is reported as ErrNudgeMangled and is NOT retried here.
+// The agent did receive and act on the remnant, and a second typed copy would
+// meet the same harness; the scheduler's answer to any nudge error is the
+// mailbox copy, which carries the whole text by a path with no tty in it.
+func (a *Agent) settleConfirmed(msg string, before int, mode, corr string) error {
+	// A confirmed submit drains whatever was loaded, including anything a
+	// previous mid-turn delivery left in the composer. Discharge the
+	// obligation here rather than leaving a stale record for the mid-session
+	// watcher to judge a healthy agent against.
+	a.clearQueuedNudge()
+
+	var window []SubmitRecord
+	if recs, err := ReadSubmits(a.receiptFile); err == nil && len(recs) > before {
+		window = recs[before:]
+	}
+	verdict, rec := judgeDelivery(msg, window)
+	if verdict == deliveryMangled {
+		log.Printf("agent %s: nudge submitted but mangled — sent %d runes, harness submitted %d beginning %q",
+			a.Name, len([]rune(msg)), rec.Len, rec.Head)
+		emitNudgeUnconfirmedDetails(a, msg, "mangled", corr, map[string]any{
+			"step":          mode,
+			"sent_len":      len([]rune(msg)),
+			"received_len":  rec.Len,
+			"received_head": rec.Head,
+		})
+		return fmt.Errorf("nudge to %q: the harness submitted a prompt, but not the one sent — "+
+			"%d of %d characters arrived, beginning %q: %w",
+			a.Name, rec.Len, len([]rune(msg)), rec.Head, ErrNudgeMangled)
+	}
+	extra := map[string]any{"content_check": verdict.String()}
+	if verdict == deliveryIntact && strings.Contains(rec.Head, pastedContentTag) {
+		// Intact, but the harness presented it to the model as pasted text,
+		// which Claude Code instructs the model to treat as possibly not the
+		// user's. Recorded, not refused: the content arrived.
+		extra["received_as_paste"] = true
+	}
+	emitNudgeSentDetails(a, msg, mode, corr, extra)
+	return nil
+}
+
+// pastedContentTag is how Claude Code wraps a prompt it received as a paste.
+const pastedContentTag = "<pasted_content"
+
 // emitNudgeSent records a nudge_sent event for a successful PTY delivery.
 // Sender is "pogod" — the process actually writing the bytes — since the
 // originating agent identity isn't plumbed through this call site in v1.
 // Best-effort: events.Emit never propagates errors.
 func emitNudgeSent(a *Agent, msg, mode, corr string) {
+	emitNudgeSentDetails(a, msg, mode, corr, nil)
+}
+
+// emitNudgeSentDetails is emitNudgeSent with extra detail keys.
+func emitNudgeSentDetails(a *Agent, msg, mode, corr string, extra map[string]any) {
 	details := map[string]any{
 		"to":       a.eventAgent(),
 		"message":  msg,
@@ -559,6 +610,9 @@ func emitNudgeSent(a *Agent, msg, mode, corr string) {
 	if corr != "" {
 		details["fire_token"] = corr
 	}
+	for k, v := range extra {
+		details[k] = v
+	}
 	events.Emit(context.Background(), events.Event{
 		EventType: "nudge_sent",
 		Agent:     "pogod",
@@ -571,8 +625,14 @@ func emitNudgeSent(a *Agent, msg, mode, corr string) {
 // string — is the same shape of invisibility that let 647 delivered fires sit
 // alongside a fleet where nothing consumed them: outcome is only auditable if
 // it is in the log next to the successes. outcome is "queued" (written to a
-// mid-turn harness, not retried) or "refused" (escalated to the end, nothing).
+// mid-turn harness, not retried), "refused" (escalated to the end, nothing),
+// or "mangled" (submitted, but not the text that was sent — mg-8a70).
 func emitNudgeUnconfirmed(a *Agent, msg, outcome, corr string) {
+	emitNudgeUnconfirmedDetails(a, msg, outcome, corr, nil)
+}
+
+// emitNudgeUnconfirmedDetails is emitNudgeUnconfirmed with extra detail keys.
+func emitNudgeUnconfirmedDetails(a *Agent, msg, outcome, corr string, extra map[string]any) {
 	details := map[string]any{
 		"to":       a.eventAgent(),
 		"message":  msg,
@@ -582,6 +642,9 @@ func emitNudgeUnconfirmed(a *Agent, msg, outcome, corr string) {
 	}
 	if corr != "" {
 		details["fire_token"] = corr
+	}
+	for k, v := range extra {
+		details[k] = v
 	}
 	events.Emit(context.Background(), events.Event{
 		EventType: "nudge_unconfirmed",
