@@ -192,6 +192,22 @@ mkdir -p "$TMP/empty"
 "$SCRIPT" --root "$TMP/empty" >/dev/null 2>&1
 [ $? -eq 2 ] && pass "exit 2 on an unreadable store" || fail "expected exit 2 for a missing events.jsonl"
 
+echo "=== 7. the citation pattern reads 4- and 5-hex ids whole, and not a sha"
+# macguffin widened ids from 4 to 5 hex characters (drellem2/macguffin#33) and
+# both widths coexist (mg-2f62). Run the script's OWN ITEM pattern, lifted from
+# its source, so this control cannot drift from the instrument it guards.
+ITEM_LINE="$(grep -E '^ITEM = re\.compile' "$SCRIPT")"
+if [ -z "$ITEM_LINE" ]; then
+	fail "could not find the ITEM pattern in $SCRIPT — the control below would test nothing"
+else
+	GOT="$(ITEM_LINE="$ITEM_LINE" python3 -c '
+import os, re
+exec(os.environ["ITEM_LINE"])
+print(" ".join(ITEM.findall("(mg-2f62) (mg-2f62a) mg-0123456789abcdef0123456789abcdef01234567 mg-2f62ab")))
+')"
+	[ "$GOT" = "mg-2f62 mg-2f62a" ] && pass "4-char and 5-char ids both match, whole; a 40-char sha and a 6-hex run do not" ||
+		fail "ITEM matched [$GOT], want [mg-2f62 mg-2f62a]"
+fi
 echo
 if [ "$FAILURES" -eq 0 ]; then
 	echo "premise-expiry-rate_test.sh: all controls passed"

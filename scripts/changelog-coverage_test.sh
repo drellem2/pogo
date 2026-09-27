@@ -305,6 +305,45 @@ else
 fi
 rm -rf "$T"
 
+# --- Test 8b: 5-hex ids are ids; longer hex runs and prefixes are not ------
+# macguffin widened ids from 4 to 5 hex characters (drellem2/macguffin#33) and
+# both widths coexist (mg-2f62). A 5-char id must be counted whole — not as its
+# 4-char prefix, which is a different item — a 40-char sha after `mg-` must not
+# be counted at all, and a 4-char id is not "described" by an entry that names
+# the 5-char id it prefixes.
+echo ""
+echo "Test 8b: 4- and 5-hex ids both counted; a sha is not; a prefix is not a description"
+T="$(mktemp -d)"
+make_repo "$T"
+commit_subject "$T" "feat(thing): five-char id (mg-bbbbb)"
+commit_subject "$T" "fix(thing): four-char id (mg-cccc)"
+commit_subject "$T" "fix(thing): not an id (mg-0123456789abcdef0123456789abcdef01234567)"
+awk '{print} /^## \[Unreleased\]/{print ""; print "- only the five-char sibling is described (mg-ccccc)."}' \
+    "$T/CHANGELOG.md" > "$T/CHANGELOG.tmp" && mv "$T/CHANGELOG.tmp" "$T/CHANGELOG.md"
+set +e
+out="$(run_coverage "$T" 2>&1)"
+status=$?
+set -e
+if echo "$out" | grep -q 'population.*: 2'; then
+    pass "population is 2 — the 5-char id counted, the 40-char sha not"
+else
+    fail "expected population 2; output was:"
+    echo "$out" | sed 's/^/      /' >&2
+fi
+if echo "$out" | grep -qE '^  mg-bbbbb ' && ! echo "$out" | grep -qE '^  mg-bbbb '; then
+    pass "names the 5-char id whole (mg-bbbbb), not its 4-char prefix"
+else
+    fail "did not name mg-bbbbb whole; output was:"
+    echo "$out" | sed 's/^/      /' >&2
+fi
+if [ "$status" -eq 1 ] && echo "$out" | grep -qE '^  mg-cccc '; then
+    pass "mg-cccc stays undescribed although [Unreleased] names mg-ccccc"
+else
+    fail "mg-cccc was treated as described by mg-ccccc (exit $status); output was:"
+    echo "$out" | sed 's/^/      /' >&2
+fi
+rm -rf "$T"
+
 # --- Test 9: the real repo, reported not asserted --------------------------
 # Requirement from the ticket: report the coverage number with the population
 # named beside it. Deliberately NOT an assertion on the gap count — that number

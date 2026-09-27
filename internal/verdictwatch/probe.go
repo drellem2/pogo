@@ -440,7 +440,7 @@ func (s *store) runIn(actor, stdin string, args ...string) (string, int, error) 
 	return string(out), 0, nil
 }
 
-var probeItemID = regexp.MustCompile(`\bmg-[0-9a-f]{4,}\b`)
+var probeItemID = regexp.MustCompile(`\bmg-[0-9a-f]{4,5}\b`)
 
 // newItem files an item as `filer`, with --no-repo so the fixture does not
 // record whichever ephemeral worktree the caller happens to be running in, and

@@ -385,7 +385,7 @@ func liveAgentNames() (map[string]bool, error) {
 //
 // Keyed by (repo, branch): a branch name alone is ambiguous across the three
 // repos this fleet works, and polecat branch names are derived from work-item
-// ids that are only 4 hex digits wide.
+// ids that are only 4 or 5 hex digits wide.
 //
 // THE MR ID AND STATUS TRAVEL WITH THE KEY (mg-4bf1). A bare bool was enough
 // while a queued branch was silently excluded from the report; now that it is a

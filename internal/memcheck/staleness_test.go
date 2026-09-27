@@ -397,7 +397,7 @@ func TestResolverIsCalledOncePerDistinctID(t *testing.T) {
 	}
 }
 
-// TestWorkItemIDAnchoring: a 4-hex id must not be mined out of a longer token.
+// TestWorkItemIDAnchoring: a 4- or 5-hex id must not be mined out of a longer token.
 func TestWorkItemIDAnchoring(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -407,11 +407,12 @@ func TestWorkItemIDAnchoring(t *testing.T) {
 		{"(mg-8614)", 1},
 		{"mg-8614.", 1},
 		{"v0.4.0/mg-bc47", 1},
-		{"mg-86140", 0}, // longer than 4 hex digits
-		{"xmg-8614", 0}, // not at a word boundary
-		{"mg-861", 0},   // too short
-		{"mg-zzzz", 0},  // not hex
-		{"MG-8614", 0},  // ids are lowercase
+		{"mg-86140", 1},  // 5 hex digits is an id too (mg-2f62)
+		{"mg-861403", 0}, // longer than 5 hex digits
+		{"xmg-8614", 0},  // not at a word boundary
+		{"mg-861", 0},    // too short
+		{"mg-zzzz", 0},   // not hex
+		{"MG-8614", 0},   // ids are lowercase
 		{"mg-8614 mg-e996", 2},
 	}
 	for _, tc := range cases {

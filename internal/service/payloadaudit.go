@@ -335,8 +335,10 @@ func installedAgeNote(mod time.Time) string {
 	return mod.Format("2006-01-02")
 }
 
-// workItemID matches the mg-XXXX ids this repo stamps into the files a fix touches.
-var workItemID = regexp.MustCompile(`mg-[0-9a-f]{4}`)
+// workItemID matches the mg-XXXX ids this repo stamps into the files a fix touches:
+// 4 or 5 hex characters (drellem2/macguffin#33), bounded so a 5-char id is read
+// whole rather than as its 4-char prefix — which would be a different item (mg-2f62).
+var workItemID = regexp.MustCompile(`\bmg-[0-9a-f]{4,5}\b`)
 
 // missingWorkItemIDs is the set of work items named in the source and absent from the
 // installed copy — a LOWER BOUND on the fixes that are not running.

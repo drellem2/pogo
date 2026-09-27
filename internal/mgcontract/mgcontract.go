@@ -1021,7 +1021,7 @@ func (s *store) run(args ...string) (string, int, error) {
 	return string(out), 0, nil
 }
 
-var mgID = regexp.MustCompile(`\bmg-[0-9a-f]{4,}\b`)
+var mgID = regexp.MustCompile(`\bmg-[0-9a-f]{4,5}\b`)
 
 // newItem files an item with --no-repo: these fixtures are about nothing, and
 // resolving a repo from the cwd would record whichever ephemeral worktree the

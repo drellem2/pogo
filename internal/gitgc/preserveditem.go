@@ -401,7 +401,7 @@ func (r PreservedItemReport) IDs() []string {
 // tree THIS item's", which is a string question. A guard must not depend on a
 // subprocess it can be denied.
 //
-// Comparison is on the bare 4-hex code: candidateIDs emits both the `mg-`
+// Comparison is on the bare 4- or 5-hex code: candidateIDs emits both the `mg-`
 // prefixed and unprefixed spellings of every candidate, so normalising both
 // sides costs nothing and makes a caller's `836c` and `mg-836c` the same
 // question.
@@ -411,7 +411,7 @@ func OwnerMatchesItem(owner, workItemID string) bool {
 		return false
 	}
 	// Lowercased before candidate generation, not merely at comparison: the
-	// last-resort 4-hex recovery inside candidateIDs is a lowercase regex, so an
+	// last-resort hex-run recovery inside candidateIDs is a lowercase regex, so an
 	// upper- or mixed-case directory name would yield no hex candidate at all
 	// and the match would fail silently rather than loudly.
 	for _, c := range candidateIDs(strings.ToLower(owner)) {

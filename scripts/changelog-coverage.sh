@@ -101,9 +101,13 @@ fi
 # Distinct mg-ids named in the subject of a feat:/fix: commit in the range.
 # Conventional-commit subjects carry the originating work-item id in parens,
 # e.g. "fix(test): the live deploy control ... (mg-3412)".
+# Ids are 4 OR 5 hex characters (drellem2/macguffin#33); the trailing \b keeps a
+# longer hex run from being read as its prefix, and the lookups below are
+# word-bounded for the same reason — `mg-2f62` is not described by `mg-2f62a`
+# (mg-2f62).
 IDS="$(git -C "$REPO" log --format='%s' "$RANGE" \
         | grep -E '^(feat|fix)(\([^)]*\))?!?:' \
-        | grep -oE 'mg-[0-9a-f]{4,}' \
+        | grep -oE 'mg-[0-9a-f]{4,5}\b' \
         | LC_ALL=C sort -u || true)"
 
 population=0
@@ -123,9 +127,9 @@ UNDESCRIBED=""
 for id in $IDS; do
     if compgen -G "$FRAG_DIR/$id.*.md" >/dev/null 2>&1; then
         n_frag=$((n_frag + 1))
-    elif [ -n "$UNREL" ] && printf '%s' "$UNREL" | grep -q -- "$id"; then
+    elif [ -n "$UNREL" ] && printf '%s' "$UNREL" | grep -qE -- "${id}\b"; then
         n_unrel=$((n_unrel + 1))
-    elif [ -n "$RELEASED" ] && printf '%s' "$RELEASED" | grep -q -- "$id"; then
+    elif [ -n "$RELEASED" ] && printf '%s' "$RELEASED" | grep -qE -- "${id}\b"; then
         n_rel=$((n_rel + 1))
     else
         UNDESCRIBED="$UNDESCRIBED$id"$'\n'
@@ -168,7 +172,7 @@ else
         echo ""
         echo -e "${RED}These ids are in the range and nothing describes them:${NC}"
         for id in $UNDESCRIBED; do
-            subj="$(git -C "$REPO" log --format='%s' "$RANGE" | grep -m1 -- "$id" || true)"
+            subj="$(git -C "$REPO" log --format='%s' "$RANGE" | grep -m1 -E -- "${id}\b" || true)"
             printf '  %s  %s\n' "$id" "$subj"
         done
         echo ""

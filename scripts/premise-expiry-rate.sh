@@ -109,7 +109,7 @@ ROOT = os.environ["MG_ANALYSIS_ROOT"]
 FORMAT = os.environ["MG_ANALYSIS_FORMAT"]
 LIST = os.environ["MG_ANALYSIS_LIST"] == "1"
 
-ITEM = re.compile(r"\bmg-[0-9a-f]{4}\b")
+ITEM = re.compile(r"\bmg-[0-9a-f]{4,5}\b")
 
 # A citation is "declared live" when the text around it says the cited item has
 # not landed yet. These are the phrases the corpus actually uses; they are

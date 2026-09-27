@@ -1033,22 +1033,28 @@ func resolveWorker(it item, byFrom map[string][]message) (names []string, resolv
 	return hits, "shape"
 }
 
-var idSuffix = regexp.MustCompile(`^mg-([0-9a-f]{4})$`)
+// idSuffix accepts a 4- or 5-hex id: macguffin widened ids from 4 to 5 hex
+// characters (drellem2/macguffin#33) and both widths coexist. Bounded at 5, not
+// `{4,}`, so a sha-shaped token is not an id (mg-2f62).
+var idSuffix = regexp.MustCompile(`^mg-([0-9a-f]{4,5})$`)
 
 // shapeNames enumerates the agent names the polecat naming convention would give
 // a worker on this item.
 //
 // The sidecar is the only worker identity mg RECORDS, but it is not the only one
 // mg CARRIES: a polecat working `mg-9a19` is named `9a19`, or `z9a19`, or
-// `mg-9a19` — the id's four hex characters with at most a one-character
-// generation prefix. Resolving from the sidecar alone put two items that had
+// `mg-9a19` — the id's hex characters (four or five) with at most a
+// one-character generation prefix. Resolving from the sidecar alone put two items that had
 // been hand-verified as DELIVERED into UNDECIDABLE, which is the same silence
 // the original ticket was about (its DEFECT-2).
 //
 // Deliberately narrow: at most ONE alphanumeric character of prefix, or the
 // literal `cat-` prefix. `mg-` spellings need no entry because every comparison
 // runs through mailbox.Canonical, which is what mg itself does. A wider rule
-// starts matching unrelated agents.
+// starts matching unrelated agents. Even this rule overlaps once 5-char ids
+// exist: `a2198` is both a generation-prefixed worker on mg-2198 and the bare
+// name of a worker on mg-a2198. By resolveWorker's asymmetry the overlap can
+// only wrongly move a row to DELIVERED, never manufacture a drop.
 func shapeNames(id string) []string {
 	m := idSuffix.FindStringSubmatch(id)
 	if m == nil {

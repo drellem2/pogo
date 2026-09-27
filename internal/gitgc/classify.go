@@ -151,8 +151,38 @@ var agentPrefixes = []string{"cat-", "polecat-", "mg-", "pc-", "gt-"}
 // re-dispatched or fixup polecat (e.g. polecat-3963-r, polecat-gt-30eb-fix).
 var retrySuffixes = []string{"-retry", "-redo", "-new", "-fix", "-r3", "-r2", "-r", "-3", "-2"}
 
-// hexToken matches a 4-hex-character macguffin work-item code.
-var hexToken = regexp.MustCompile(`[0-9a-f]{4}`)
+// hexRun matches a maximal run of 4 to 6 hex characters — one not adjacent to
+// any other hex character — inside a polecat name.
+//
+// A work-item code is 4 OR 5 hex characters (macguffin widened ids from 4 to 5,
+// drellem2/macguffin#33, and both widths coexist), and a polecat name may glue a
+// one-character generation prefix onto it: `p06cb`, `w836c`, and — the case an
+// unbounded `[0-9a-f]{4}` got wrong — a HEX letter, `a2198` or `e171a`, which
+// are the live names pogod hands out. The run is bounded on both sides so it is
+// never a slice of a longer hex token such as a sha; see hexCandidates for how a
+// run becomes ids (mg-2f62).
+var hexRun = regexp.MustCompile(`(?:^|[^0-9a-f])([0-9a-f]{4,6})(?:[^0-9a-f]|$)`)
+
+// hexCandidates turns a bounded hex run into the work-item codes it can spell,
+// most-specific first: the whole run when it is itself an id width (4 or 5),
+// then the run minus a one-character generation prefix when THAT is an id width.
+//
+// Deliberately never the LEADING four of a longer run. That was the old
+// recovery, and it read `a2198` (generation letter `a` + mg-2198) as mg-a219 —
+// a different, possibly real, item. A 5-run is genuinely ambiguous once 5-char
+// ids exist (`a2198` is also the bare name of mg-a2198), so both readings are
+// offered and the index decides; the whole-run reading is tried first because a
+// bare-id name is what `add("mg-" + suffix)` already prefers above.
+func hexCandidates(run string) []string {
+	var out []string
+	if len(run) <= 5 {
+		out = append(out, run)
+	}
+	if n := len(run) - 1; n >= 4 && n <= 5 {
+		out = append(out, run[1:])
+	}
+	return out
+}
 
 // candidateIDs derives the macguffin work-item IDs a polecat NAME might
 // correspond to, most-specific first. The name is the polecat's registry
@@ -165,7 +195,7 @@ var hexToken = regexp.MustCompile(`[0-9a-f]{4}`)
 // in the wild — so several spellings are generated and the caller resolves the
 // first that exists.
 //
-// Because every form a polecat name takes embeds its 4-hex ticket code,
+// Because every form a polecat name takes embeds its 4- or 5-hex ticket code,
 // recovering that code is reliable; a name that yields no resolvable
 // candidate is simply left classified TicketUnknown and therefore kept.
 func candidateIDs(suffix string) []string {
@@ -215,10 +245,12 @@ func candidateIDs(suffix string) []string {
 	}
 	add("mg-" + bare)
 
-	// Last resort: the first 4-hex token in the core recovers the ticket
-	// code from glued forms such as p06cb / r283e.
-	if m := hexToken.FindString(core); m != "" {
-		add("mg-" + m)
+	// Last resort: the first bounded hex run in the core recovers the ticket
+	// code from glued forms such as p06cb / r283e / a2198.
+	if m := hexRun.FindStringSubmatch(core); m != nil {
+		for _, c := range hexCandidates(m[1]) {
+			add("mg-" + c)
+		}
 	}
 	return out
 }
@@ -267,7 +299,7 @@ func (idx TicketIndex) BranchState(branch string) (id string, state TicketState)
 // fleet's naming at all.
 //
 // The name is lowercased first, for the reason OwnerMatchesItem records: the
-// last-resort 4-hex recovery is a lowercase regex, so a mixed-case name would
+// last-resort hex-run recovery is a lowercase regex, so a mixed-case name would
 // silently yield no hex candidate rather than failing loudly.
 func ItemIDsForName(name string) []string {
 	return candidateIDs(strings.ToLower(name))

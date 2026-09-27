@@ -93,7 +93,7 @@ func TestMgPrefixedFilenameIsNotAnID(t *testing.T) {
 	}
 	// Boundaries in both directions, so a longer hex run is not silently
 	// truncated into a plausible id.
-	for _, text := range []string{"mg-28801", "mg-2880x", "xmg-2880"} {
+	for _, text := range []string{"mg-288012", "mg-2880x", "xmg-2880"} {
 		if got := IDs(text); got != nil {
 			t.Errorf("IDs(%q) = %v, want none", text, got)
 		}
@@ -121,8 +121,14 @@ func TestKnownStrandStaysAFinding(t *testing.T) {
 	}
 	// The branch spelling has to be read too: a polecat name and a work-item id
 	// are different strings, and the pass's own doc says to check both.
-	if !containsAll(got.Mechanical, "mg-d36e") {
-		t.Errorf("mechanical ids = %v, want the branch candidate mg-d36e among them", got.Mechanical)
+	// `d36e3` is generation letter `d` + mg-36e3, or the bare 5-char id mg-d36e3
+	// (drellem2/macguffin#33); both are candidates. It used to pin mg-d36e, the
+	// leading four hex of the run, which is neither reading (mg-2f62).
+	if !containsAll(got.Mechanical, "mg-d36e3") {
+		t.Errorf("mechanical ids = %v, want the branch candidate mg-d36e3 among them", got.Mechanical)
+	}
+	if containsAll(got.Mechanical, "mg-d36e") {
+		t.Errorf("mechanical ids = %v, carry mg-d36e — the leading four of a 5-hex run is not an id", got.Mechanical)
 	}
 	if !containsAll(got.Resolved, "mg-c76a") {
 		t.Errorf("resolved = %v, want the resolving prose id carried as evidence", got.Resolved)

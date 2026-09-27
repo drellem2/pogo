@@ -100,11 +100,12 @@ const (
 // one item. See NewMgResolver.
 type StatusResolver func(id string) (ItemState, string)
 
-// workItemID matches a macguffin short ID: `mg-` plus exactly 4 hex digits.
+// workItemID matches a macguffin short ID: `mg-` plus 4 or 5 hex digits (ids
+// widened from 4 to 5, drellem2/macguffin#33; both widths coexist — mg-2f62).
 //
 // Anchored on both sides against hex-adjacent characters so a longer token is
-// not mined for a 4-digit prefix.
-var workItemID = regexp.MustCompile(`\bmg-[0-9a-f]{4}\b`)
+// not mined for a 4- or 5-digit prefix.
+var workItemID = regexp.MustCompile(`\bmg-[0-9a-f]{4,5}\b`)
 
 // Assertions are the phrases that make an index line's claim tense-bearing —
 // a statement about a state that can expire.

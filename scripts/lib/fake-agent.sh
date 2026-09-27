@@ -40,7 +40,7 @@ extract_field() {
     grep -m1 "^\*\*$1:\*\*" "$PROMPT" \
         | sed -E "s/^\\*\\*$1:\\*\\*[[:space:]]+//;s/[[:space:]]+$//"
 }
-extract_id()       { grep -oE 'mg-[a-f0-9]{4,}' "$PROMPT" | head -1; }
+extract_id()       { grep -oE 'mg-[a-f0-9]{4,5}\b' "$PROMPT" | head -1; }
 extract_repo()     { extract_field "Repository"; }
 extract_worktree() { extract_field "Working Directory"; }
 

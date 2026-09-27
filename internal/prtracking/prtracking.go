@@ -237,12 +237,13 @@ func Classify(pr PR, resolves func(id string) bool) Result {
 // itemID matches a macguffin work-item id. Case-insensitive because a human
 // writing one in prose may shout it; the result is normalised to lower case.
 //
-// The trailing boundary is what keeps `mg-28801` and `mg-2880x` out — a
-// 4-hex-code id is exactly four characters and a longer run is not one. The
+// The trailing boundary is what keeps `mg-288012` and `mg-2880x` out — an id is
+// four or five hex characters (widened by drellem2/macguffin#33; mg-2f62) and a
+// longer run is not one. The
 // hex class is also what keeps ordinary `mg-`-prefixed FILENAMES out: the
 // evidence for this package came from a PR whose body cites
 // `docs/design/mg-artifact-delivery.md`, and `arti` is not hex.
-var itemID = regexp.MustCompile(`(?i)\bmg-[0-9a-f]{4}\b`)
+var itemID = regexp.MustCompile(`(?i)\bmg-[0-9a-f]{4,5}\b`)
 
 // IDs extracts every distinct work-item id mentioned in the given texts,
 // sorted. Exported because the extractor is the part a reader will want to run
