@@ -341,6 +341,15 @@ type PopulationReport struct {
 	// — apart.
 	FirstTokenCarrying time.Time `json:"first_token_carrying,omitempty"`
 	LastTokenLess      time.Time `json:"last_token_less,omitempty"`
+
+	// HistoryTruncated says the requested window starts before the oldest
+	// record rotation retained, so fires before HistoryFloor may have existed
+	// and been discarded (mg-a6c0). Every count above is then a lower bound
+	// for RequestedFrom..To. Set by the caller from ReadFireTimeline's
+	// Coverage; SplitWithEpisodes cannot know it.
+	HistoryTruncated bool      `json:"history_truncated,omitempty"`
+	HistoryFloor     time.Time `json:"history_floor,omitempty"`
+	RequestedFrom    time.Time `json:"requested_from,omitempty"`
 }
 
 // Deficit is Delivered-Completed: the number the alert is read off.
@@ -531,6 +540,15 @@ func (r PopulationReport) Render() string {
 
 	fmt.Fprintf(&b, "ack deficit population split — %s .. %s\n",
 		stamp(r.From), stamp(r.To))
+	if r.HistoryTruncated {
+		// Before the "no fires" early return on purpose: a zero over a window
+		// the log cannot reach is the case that most needs saying.
+		fmt.Fprintf(&b, "WARNING: window starts before retained history at %s", stamp(r.HistoryFloor))
+		if !r.RequestedFrom.IsZero() {
+			fmt.Fprintf(&b, " (requested from %s)", stamp(r.RequestedFrom))
+		}
+		b.WriteString(";\n         fires before that were rotated out of events.log — counts are a lower bound.\n")
+	}
 
 	if r.Delivered == 0 {
 		b.WriteString("No fires in the window. Nothing measured — which is not the same as nothing wrong.\n")

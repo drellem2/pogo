@@ -41,6 +41,21 @@ func SampleEntries(entries []scheduler.Entry, ref time.Time) []Sample {
 	return out
 }
 
+// Coverage is how much of a requested window the retained events log could
+// answer. It travels with a timeline because a count over a window is two
+// claims — what was found, and that nothing was missed — and only the first
+// one is visible in the events themselves.
+type Coverage struct {
+	// Truncated reports that the window reaches back before Floor AND rotation
+	// has discarded history, so records before Floor may have existed and been
+	// deleted. A deficit measured over such a window is a lower bound on the
+	// window it names.
+	Truncated bool `json:"truncated,omitempty"`
+	// Floor is the first record of the oldest retained file read. Zero when no
+	// file was read.
+	Floor time.Time `json:"floor,omitempty"`
+}
+
 // ReadFireTimeline reads the delivery/completion timeline out of logPath,
 // restricted to [since, until). A zero until means "up to the end of the log".
 //
@@ -53,17 +68,31 @@ func SampleEntries(entries []scheduler.Entry, ref time.Time) []Sample {
 // Two reads rather than one unfiltered read: events.Filter carries a single
 // Type, and this log is tens of megabytes on a live box, most of it neither
 // event.
-func ReadFireTimeline(logPath string, since, until time.Time) ([]FireEvent, error) {
+//
+// It reads every retained file reaching into the window, not just the live
+// log (mg-a6c0). The live log rotates at 100MB, which on this fleet is well
+// inside the default seven-day populations window, and a read of the live file
+// alone reported every delivery and completion before the last rotation as
+// absent — an undercount with nothing on it to say so.
+func ReadFireTimeline(logPath string, since, until time.Time) ([]FireEvent, Coverage, error) {
 	var out []FireEvent
+	var cov Coverage
 	for kind, evType := range map[FireEventKind]string{
 		FireDelivered: "scheduler_fire_delivered",
 		FireCompleted: "scheduler_fire_completed",
 	} {
-		evs, err := events.ReadFiltered(logPath, events.Filter{SinceMin: since, Type: evType})
+		w, err := events.ReadWindow(logPath, events.Filter{SinceMin: since, Type: evType})
 		if err != nil {
-			return nil, err
+			return nil, Coverage{}, err
 		}
-		for _, ev := range evs {
+		// Both reads walk the same files, so their coverage agrees unless a
+		// rotation landed between them; OR the flags so that case errs toward
+		// "may have missed some".
+		cov.Truncated = cov.Truncated || w.Truncated
+		if cov.Floor.IsZero() || w.Floor.After(cov.Floor) {
+			cov.Floor = w.Floor
+		}
+		for _, ev := range w.Events {
 			at, perr := time.Parse(time.RFC3339Nano, ev.Timestamp)
 			if perr != nil {
 				continue
@@ -83,7 +112,7 @@ func ReadFireTimeline(logPath string, since, until time.Time) ([]FireEvent, erro
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
-	return out, nil
+	return out, cov, nil
 }
 
 // detailString reads a string detail, tolerating absence and a non-string
@@ -139,12 +168,18 @@ func ReadFailureEpisodes(logPath string, since, until time.Time) ([]FailureEpiso
 	}
 	var stream []transition
 
+	// Every retained file reaching into the window, not the live log alone
+	// (mg-a6c0): an episode detected before the last rotation otherwise opens
+	// with nothing, and its clear is dropped below as unmatched. Truncation is
+	// not reported from here — the timeline read over the same window carries
+	// it — and a detection lost to discarded history degrades the same way a
+	// detection before `since` does: its clear is dropped, never back-dated.
 	for _, evType := range []string{"synthetic_failure_detected", "synthetic_failure_cleared"} {
-		evs, err := events.ReadFiltered(logPath, events.Filter{SinceMin: since, Type: evType})
+		w, err := events.ReadWindow(logPath, events.Filter{SinceMin: since, Type: evType})
 		if err != nil {
 			return nil, err
 		}
-		for _, ev := range evs {
+		for _, ev := range w.Events {
 			at, perr := time.Parse(time.RFC3339Nano, ev.Timestamp)
 			if perr != nil {
 				continue
@@ -216,9 +251,19 @@ func RecentFires(logPath string, now time.Time, window time.Duration) Recent {
 		out.Err = "scheduler event log unreadable: " + statErr.Error()
 		return out
 	}
-	evs, err := ReadFireTimeline(logPath, now.Add(-window), now)
+	evs, cov, err := ReadFireTimeline(logPath, now.Add(-window), now)
 	if err != nil {
 		out.Err = err.Error()
+		return out
+	}
+	// A window reaching past discarded history cannot be read as a count of
+	// zero: the missing fires may simply have rotated away. That needs the
+	// whole retained log to span less than the window, which a 3h window over
+	// ~600MB never does in practice — but if it does, the arm is blind, not
+	// clear.
+	if cov.Truncated {
+		out.Err = "scheduler event log does not reach back over the window: retained history starts at " +
+			cov.Floor.UTC().Format(time.RFC3339)
 		return out
 	}
 	schedules := map[string]bool{}
@@ -299,8 +344,15 @@ const DisruptionEventType = "system_wake"
 // A missing or unreadable log yields a zero time — no suppression. That fails
 // toward alerting rather than toward silence, which is the correct direction
 // for a detector whose entire premise is that silence hid a fault for a week.
+//
+// Every retained file reaching into DisruptionWindow is read, not just the live
+// log (mg-a6c0): a rotation inside the window otherwise hid a wake that did
+// happen. Missing one failed toward alerting, so it was the safe direction,
+// but it was still a false reading of the log. A window reaching past
+// discarded history is not flagged: the only consequence is that same
+// fail-toward-alerting direction.
 func LastDisruption(logPath string, now time.Time) (time.Time, string) {
-	evs, err := events.ReadFiltered(logPath, events.Filter{
+	w, err := events.ReadWindow(logPath, events.Filter{
 		SinceMin: now.Add(-DisruptionWindow),
 		Type:     DisruptionEventType,
 	})
@@ -308,7 +360,7 @@ func LastDisruption(logPath string, now time.Time) (time.Time, string) {
 		return time.Time{}, ""
 	}
 	var latest time.Time
-	for _, ev := range evs {
+	for _, ev := range w.Events {
 		ts, perr := time.Parse(time.RFC3339Nano, ev.Timestamp)
 		if perr != nil {
 			continue

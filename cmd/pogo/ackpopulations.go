@@ -49,7 +49,7 @@ func runAckPopulations(sinceRaw, untilRaw string, asJSON bool) {
 	}
 	logPath := scheduler.EventLogPath(path)
 
-	evs, err := ackwatch.ReadFireTimeline(logPath, since, until)
+	evs, cov, err := ackwatch.ReadFireTimeline(logPath, since, until)
 	if err != nil {
 		// An events log we could not read is not an empty measurement. Saying so
 		// is the whole discipline this package was written under: a silence that
@@ -76,6 +76,14 @@ func runAckPopulations(sinceRaw, untilRaw string, asJSON bool) {
 	}
 
 	rep := ackwatch.SplitWithEpisodes(evs, episodes)
+	// The window reached back past history rotation has discarded (mg-a6c0):
+	// the counts below are what survived, not what happened. Carried on the
+	// report rather than printed here so --json readers get it too.
+	rep.HistoryTruncated = cov.Truncated
+	rep.HistoryFloor = cov.Floor
+	if cov.Truncated {
+		rep.RequestedFrom = since
+	}
 	if asJSON {
 		cli.PrintJSON(rep)
 		return

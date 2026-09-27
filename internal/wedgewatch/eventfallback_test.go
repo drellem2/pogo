@@ -3,6 +3,7 @@ package wedgewatch
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,7 @@ func observedLikeProduction(name, identity string, uptime time.Duration, out []b
 // fixedEvents returns an EventsFunc over a hand-built index, counting calls so
 // a test can assert the log was opened once, or not at all.
 func fixedEvents(idx EventsIndex, calls *int) EventsFunc {
-	return func() EventsIndex {
+	return func([]string) EventsIndex {
 		if calls != nil {
 			*calls++
 		}
@@ -294,7 +295,7 @@ func TestSystemEventsIndexesTheLastLinePerIdentity(t *testing.T) {
 		ev("pogod", "scheduler_fire_delivered", t0.Add(-time.Minute)),
 	})
 
-	idx := SystemEvents()
+	idx := SystemEvents(nil)
 	if !idx.Readable {
 		t.Fatalf("SystemEvents unreadable: %s", idx.Reason)
 	}
@@ -327,7 +328,7 @@ func TestSchedulerTrafficCannotKeepAWedgedAgentsClockWarm(t *testing.T) {
 		ev("pogod", "scheduler_fire_completed", t0.Add(-30*time.Second)),
 	})
 
-	idx := SystemEvents()
+	idx := SystemEvents(nil)
 	if !idx.Readable {
 		t.Fatalf("SystemEvents unreadable: %s", idx.Reason)
 	}
@@ -342,11 +343,79 @@ func TestSchedulerTrafficCannotKeepAWedgedAgentsClockWarm(t *testing.T) {
 // where it originates. An empty index and an unreadable one lead to opposite
 // blind messages, and only one of them is a claim about the log's contents.
 func TestAMissingEventLogIsUnreadableNotEmpty(t *testing.T) {
-	got := eventsIndexFrom(filepath.Join(t.TempDir(), "events.log"))
+	got := eventsIndexFrom(filepath.Join(t.TempDir(), "events.log"), nil)
 	if got.Readable {
 		t.Error("a nonexistent event log read as a successful scan that found nothing")
 	}
 	if got.Reason != ReasonEventLogAbsent {
 		t.Errorf("reason = %q, want %q", got.Reason, ReasonEventLogAbsent)
+	}
+}
+
+// writeRotatedChunk writes path.n holding evs, beside the live fixture.
+func writeRotatedChunk(t *testing.T, path string, n int, evs []events.Event) {
+	t.Helper()
+	var b strings.Builder
+	for _, e := range evs {
+		line, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	p := fmt.Sprintf("%s.%d", path, n)
+	// The fixture path is shared by every test in the package; a chunk left
+	// behind would be read by the next test's SystemEvents.
+	t.Cleanup(func() { os.RemoveAll(p) })
+	if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSystemEventsFindsAnIdentityWhoseLastLineRotatedOut is mg-a6c0. The index
+// used to read only the live log, so an agent whose last activity predated the
+// last rotation read as having no entry in the log at all.
+func TestSystemEventsFindsAnIdentityWhoseLastLineRotatedOut(t *testing.T) {
+	spawn := t0.Add(-30 * time.Hour)
+	path := writeFixtureLog(t, []events.Event{
+		ev("crew-mayor", "work_item_claimed", t0.Add(-20*time.Minute)),
+	})
+	writeRotatedChunk(t, path, 1, []events.Event{
+		ev("cat-old", "agent_spawned", spawn),
+		ev("crew-mayor", "agent_spawned", spawn),
+	})
+
+	idx := SystemEvents([]string{"cat-old", "crew-mayor"})
+	if !idx.Readable {
+		t.Fatalf("unreadable: %s", idx.Reason)
+	}
+	if got, ok := idx.LastSeen["cat-old"]; !ok || !got.Equal(spawn) {
+		t.Errorf("cat-old last seen = %s (present=%v), want its rotated spawn line %s", got, ok, spawn)
+	}
+	if got := idx.LastSeen["crew-mayor"]; !got.Equal(t0.Add(-20 * time.Minute)) {
+		t.Errorf("crew-mayor last seen = %s, want the live file's newer line, not the rotated spawn", got)
+	}
+}
+
+// TestSystemEventsStopsOnceEveryWantedIdentityIsFound pins the cost bound: the
+// rotated files are opened only when a wanted identity is missing from the
+// newer ones. .1 is a DIRECTORY here, so opening it fails the scan — which is
+// the instrument: a readable index proves it was never read, and the positive
+// control proves an unsatisfied want does reach it.
+func TestSystemEventsStopsOnceEveryWantedIdentityIsFound(t *testing.T) {
+	path := writeFixtureLog(t, []events.Event{
+		ev("cat-live", "agent_spawned", t0.Add(-time.Hour)),
+	})
+	t.Cleanup(func() { os.RemoveAll(path + ".1") })
+	if err := os.Mkdir(path+".1", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if idx := SystemEvents([]string{"cat-live"}); !idx.Readable {
+		t.Errorf("want satisfied by the live file, yet the rotated chunk was read: %s", idx.Reason)
+	}
+	if idx := SystemEvents([]string{"cat-live", "cat-gone"}); idx.Readable {
+		t.Error("control: an unsatisfied want should walk into .1 and fail on it; it did not, so the " +
+			"previous assertion proves nothing")
 	}
 }

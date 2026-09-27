@@ -182,7 +182,7 @@ func TestPogodsModalDismissalCannotRefreshTheStallClock(t *testing.T) {
 		ev("cat-architect", "rating_dialog_dismissed", t0.Add(-30*time.Second)),
 	})
 
-	idx := SystemEvents()
+	idx := SystemEvents(nil)
 	if !idx.Readable {
 		t.Fatalf("SystemEvents unreadable: %s", idx.Reason)
 	}
@@ -209,7 +209,7 @@ func TestSyntheticFailureCannotRefreshTheStallClock(t *testing.T) {
 		ev("cat-failing", "synthetic_failure_detected", t0.Add(-time.Minute)),
 	})
 
-	idx := SystemEvents()
+	idx := SystemEvents(nil)
 	if !idx.Readable {
 		t.Fatalf("SystemEvents unreadable: %s", idx.Reason)
 	}
@@ -232,7 +232,7 @@ func TestAnAgentsOwnEventsStillRefreshTheStallClock(t *testing.T) {
 		ev("cat-live", "work_item_claimed", t0.Add(-20*time.Minute)),
 	})
 
-	idx := SystemEvents()
+	idx := SystemEvents(nil)
 	if !idx.Readable {
 		t.Fatalf("SystemEvents unreadable: %s", idx.Reason)
 	}

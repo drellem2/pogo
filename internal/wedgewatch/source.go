@@ -45,7 +45,12 @@ type HostFunc func(ctx context.Context) HostView
 
 // EventsFunc yields the event-log recency index. Production binds SystemEvents;
 // tests inject a fixture.
-type EventsFunc func() EventsIndex
+//
+// want names the identities the caller needs an answer for. The index may hold
+// others; it is only obliged to keep reading older rotated files until every
+// wanted identity is found or the retained log is exhausted. A nil want asks
+// for every identity, which reads the whole retained log.
+type EventsFunc func(want []string) EventsIndex
 
 // RegistrySource adapts an agent registry into a SourceFunc.
 //
@@ -139,17 +144,16 @@ func attachEventFallback(obs []Observation, ev EventsFunc) []Observation {
 	if len(obs) == 0 || ev == nil {
 		return obs
 	}
-	need := false
+	var want []string
 	for _, o := range obs {
 		if _, ok := ParseDeclaredWork(o.Output); !ok {
-			need = true
-			break
+			want = append(want, o.identity())
 		}
 	}
-	if !need {
+	if len(want) == 0 {
 		return obs
 	}
-	idx := ev()
+	idx := ev(want)
 	if !idx.Readable {
 		return obs
 	}
@@ -271,7 +275,7 @@ const (
 	ReasonEventLogUnreadable = "the event log could not be read"
 )
 
-// SystemEvents builds the fallback stall index from the live event log.
+// SystemEvents builds the fallback stall index from the retained event log.
 //
 // # What this measures, and what it does NOT
 //
@@ -302,18 +306,20 @@ const (
 // events.CountsAsAgentActivity, which is shared with internal/claude's
 // events-stale gate because both indexes had the identical omission.
 //
-// Only the LIVE log is scanned, not the rotated files. An identity whose last
-// line has rotated out therefore reads as absent, which reports the agent as
-// unjudgeable rather than as stale. That understates a very stale agent, and it
-// is the safe direction: the alternative is scanning up to 600MB (six retained
-// files at maxLogBytes) on every sample to sharpen a signal that is already the
-// fallback.
-func SystemEvents() EventsIndex {
+// The live log is scanned first, then the rotated files newest-first, and the
+// walk stops as soon as every wanted identity has been seen (mg-a6c0). It used
+// to scan only the live log, so an identity whose last line had rotated out
+// read as absent from the log — "no entry", a claim about the log that was
+// false. The early stop is what keeps this cheap: a wanted identity is a LIVE
+// agent, whose own agent_spawned line is normally in the live file, so the
+// common case still opens one file. Reading every retained chunk (~600MB) is
+// reserved for an identity that genuinely appears in none of them.
+func SystemEvents(want []string) EventsIndex {
 	path, err := events.LogPath()
 	if err != nil {
 		return EventsIndex{Reason: ReasonNoEventLogPath}
 	}
-	return eventsIndexFrom(path)
+	return eventsIndexFrom(path, want)
 }
 
 // eventsIndexFrom is the scan, split out so tests can drive it against a
@@ -324,7 +330,12 @@ func SystemEvents() EventsIndex {
 // about the log — or that no fallback was available, and mg-20eb is a ticket
 // about the first sentence being printed 40 times by a detector that had never
 // opened the log at all.
-func eventsIndexFrom(path string) EventsIndex {
+//
+// Files are walked newest-first. Rotation keeps a contiguous suffix of history
+// (see events.LogFilesCovering), so an identity's newest line is in the newest
+// file that mentions it — but the max is kept across files anyway, so the
+// answer does not rest on that ordering.
+func eventsIndexFrom(path string, want []string) EventsIndex {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			return EventsIndex{Reason: ReasonEventLogAbsent}
@@ -332,32 +343,48 @@ func eventsIndexFrom(path string) EventsIndex {
 		return EventsIndex{Reason: ReasonEventLogUnreadable}
 	}
 	last := map[string]time.Time{}
-	if err := events.ScanFile(path, func(ev events.Event) {
-		if ev.Agent == "" {
-			return
+	files := events.LogFiles(path)
+	for i := len(files) - 1; i >= 0; i-- {
+		if err := events.ScanFile(files[i], func(ev events.Event) {
+			if ev.Agent == "" {
+				return
+			}
+			// pogod records some of its own interventions under the identity of
+			// the agent it intervened ON. Those are not evidence the agent is
+			// alive — they fire BECAUSE it is stuck — and counting them here is
+			// drellem2/pogo#138: the dismissal that proves an agent is wedged
+			// refreshes the clock this detector uses to decide it is not.
+			if !events.CountsAsAgentActivity(ev.EventType) {
+				return
+			}
+			ts, perr := time.Parse(time.RFC3339Nano, ev.Timestamp)
+			if perr != nil {
+				return
+			}
+			if prev, ok := last[ev.Agent]; !ok || ts.After(prev) {
+				last[ev.Agent] = ts
+			}
+		}); err != nil {
+			// A partial index is worse than none: an identity missing because
+			// the scan aborted is indistinguishable from one the log never
+			// mentioned, and the second reads as staleness.
+			return EventsIndex{Reason: ReasonEventLogUnreadable}
 		}
-		// pogod records some of its own interventions under the identity of the
-		// agent it intervened ON. Those are not evidence the agent is alive —
-		// they fire BECAUSE it is stuck — and counting them here is
-		// drellem2/pogo#138: the dismissal that proves an agent is wedged
-		// refreshes the clock this detector uses to decide it is not.
-		if !events.CountsAsAgentActivity(ev.EventType) {
-			return
+		if want != nil && allSeen(last, want) {
+			break
 		}
-		ts, perr := time.Parse(time.RFC3339Nano, ev.Timestamp)
-		if perr != nil {
-			return
-		}
-		if prev, ok := last[ev.Agent]; !ok || ts.After(prev) {
-			last[ev.Agent] = ts
-		}
-	}); err != nil {
-		// A partial index is worse than none: an identity missing because the
-		// scan aborted is indistinguishable from one the log never mentioned,
-		// and the second reads as staleness.
-		return EventsIndex{Reason: ReasonEventLogUnreadable}
 	}
 	return EventsIndex{Readable: true, LastSeen: last}
+}
+
+// allSeen reports whether every wanted identity has an entry.
+func allSeen(last map[string]time.Time, want []string) bool {
+	for _, w := range want {
+		if _, ok := last[w]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // hostViewFrom is the pure conversion, split out so tests can drive every

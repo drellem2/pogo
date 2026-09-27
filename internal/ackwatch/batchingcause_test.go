@@ -346,7 +346,7 @@ func TestReadTimelineAndEpisodes_JoinOnTheRealFieldNames(t *testing.T) {
 		ev("2026-08-09T14:25:00Z", "synthetic_failure_cleared", "architect"),
 	})
 
-	evs, err := ReadFireTimeline(path, time.Time{}, time.Time{})
+	evs, _, err := ReadFireTimeline(path, time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

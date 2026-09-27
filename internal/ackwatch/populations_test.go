@@ -613,7 +613,7 @@ func TestReadFireTimeline_ParsesDeliveriesAndCompletions(t *testing.T) {
 
 	since := time.Date(2026, 7, 29, 14, 0, 0, 0, time.UTC)
 	until := time.Date(2026, 7, 29, 16, 0, 0, 0, time.UTC)
-	evs, err := ReadFireTimeline(path, since, until)
+	evs, _, err := ReadFireTimeline(path, since, until)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -639,7 +639,7 @@ func TestReadFireTimeline_ParsesDeliveriesAndCompletions(t *testing.T) {
 // a nonexistent path, so the caller gets an empty timeline — the render then has
 // to say "nothing measured" rather than implying a clean fleet.
 func TestReadFireTimeline_MissingLogYieldsNothingMeasured(t *testing.T) {
-	evs, err := ReadFireTimeline(filepath.Join(t.TempDir(), "absent.log"), time.Time{}, time.Time{})
+	evs, _, err := ReadFireTimeline(filepath.Join(t.TempDir(), "absent.log"), time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatalf("a missing log is not an error here: %v", err)
 	}
