@@ -624,6 +624,11 @@ var ErrMGWorkItemAlreadyDone = errors.New("work item is already done")
 // the item is unclaimed and assigned to a non-dispatchable executive (`human`,
 // `parked`, `blocked:<agent>`), so nobody is working it and a merged branch is
 // not evidence that it is finished. See CloseMGWorkItemAtMerge.
+//
+// It covers UNCLAIMED items only, on purpose. A gated item that is CLAIMED has a
+// worker, the merging branch is that worker's, and CloseMGWorkItemAtMerge closes
+// it — so the absence of this error does not mean the item was ungated, and its
+// presence is never the answer for held work (gh#198).
 var ErrMGWorkItemGated = errors.New("work item is gated and was deliberately not closed")
 
 // ErrMGRemainderNoSuccessorFiled reports that the close was refused because the
@@ -825,6 +830,7 @@ func describeCandidates(candidates []successorCandidate) string {
 //
 //   - ALREADY TERMINAL -> ErrMGWorkItemAlreadyDone, without running `mg done`.
 //     The worker won the race; its result stands and must not be replaced.
+//
 //   - UNCLAIMED AND GATED -> ErrMGWorkItemGated, without claiming or closing.
 //     A `parked`/`human`/`blocked:` item that nobody holds is work somebody
 //     deliberately stopped; merging a hand-submitted branch is not a decision
@@ -832,10 +838,25 @@ func describeCandidates(candidates []successorCandidate) string {
 //     the mg-479c case, and leaving the item alone is what actually happened
 //     there — the defect was the report, not the outcome. A missing claim is
 //     never the reason on its own; the refusal says the gate is (mg-6275).
+//
 //   - UNCLAIMED AND DISPATCHABLE -> claim it, then close it. This is what makes
 //     mg-be37 work as intended rather than merely reporting that it did: the
 //     stranded branch of a dead polecat leaves its item in available/, where
 //     priority-wake advertises work that is already on the target.
+//
+//   - CLAIMED AND GATED -> closed by the plain `mg done` below, like any other
+//     claimed item. This is deliberate, not a gap in the case above (gh#198).
+//     `human`, `parked` and `blocked:<agent>` are DISPATCH gates: they say "do
+//     not hand this to a new worker", and a claimed item already has one — the
+//     branch that just merged is that worker's, so its merge is the ordinary
+//     completion the claim was taken to produce. Refusing here would leave every
+//     item that was held from dispatch while its own worker finished it open
+//     after merge. A gate meant as "a human must verify before this closes" is
+//     not what these assignees encode; nothing here reads one.
+//     TestCloseAtMergeClosesAClaimedGatedItem and the claimed half of
+//     TestTheGatedRefusalIsExactlyTheDispatchGatedPopulation pin this — change
+//     the guard only with them. Because the close applies, cmd/pogod/reap.go
+//     never reports such an item as merged-but-open, nor as gated.
 //
 // The gate is read off `assignee` only. `mg show --json` carries no stage/carrier
 // field — that state is pogod's own parse of the body — so config.IsStageGated
@@ -854,6 +875,9 @@ func CloseMGWorkItemAtMerge(id, resultJSON string) error {
 		case status == "done" || status == "archived":
 			return fmt.Errorf("%w: mg show %s reports status=%s, so there is nothing left to close", ErrMGWorkItemAlreadyDone, id, status)
 		case status == "available" && config.IsDispatchGated(assignee, nil):
+			// UNCLAIMED only: a claimed gated item is closed below — see "CLAIMED
+			// AND GATED" in the doc comment for why (gh#198).
+			//
 			// THE GATE IS THE CAUSE, AND THE SENTENCE MUST LEAD WITH IT (mg-6275).
 			// This text used to open "is unclaimed … no worker holds it", and the
 			// only reader it has ever had took that for the reason: mg-1530 merged
