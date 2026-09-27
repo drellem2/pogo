@@ -3,11 +3,11 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/refinery"
 )
 
@@ -187,11 +187,14 @@ func countMergedNotClosedEvents(t *testing.T) int {
 	if testEventLogPath == "" {
 		t.Skip("no throwaway event log was installed; TestMain could not make a temp dir")
 	}
-	raw, err := os.ReadFile(testEventLogPath)
+	// EXACT type, not a substring (mg-6275): the gated record and the
+	// undelivered record both carry this stem, and either would let the
+	// ordering assertion pass on an event the alert did not emit.
+	found, err := events.ReadFiltered(testEventLogPath, events.Filter{Type: "work_item_merged_not_closed"})
 	if err != nil {
 		return 0
 	}
-	return strings.Count(string(raw), "work_item_merged_not_closed")
+	return len(found)
 }
 
 // A GATED item is the one not-closed case that raises no alert, and this pins
@@ -244,5 +247,61 @@ func TestAGatedItemRaisesNoMergedNotClosedAlert(t *testing.T) {
 	}
 	if (*got)[0].WorkItemID != "mg-479c" {
 		t.Errorf("the alert does not identify the item: %+v", (*got)[0])
+	}
+}
+
+// THE GATED CASE IS ON THE SPINE, AND IT IS STILL NOT THE ALERT (mg-6275).
+//
+// mg-1530 merged on 2026-09-08 while `blocked:mayor`; the only record of the
+// state was a `work_item_completion_notice` with `closed:false`, so a census of
+// `event_type ~ merged_not_closed` came back empty and was read as "the alert did
+// not fire" — for the case where the alert is suppressed on purpose. This pins
+// both halves: the gated record exists and a stem query finds it, and an EXACT
+// query for the alert's own type does not, so no census of real alerts is
+// inflated by the suppressed case.
+func TestAGatedMergeIsRecordedOnTheSpineWithoutRaisingTheAlert(t *testing.T) {
+	log := spine(t)
+	alerts := captureMergedOpenAlerts(t, func(string) (bool, error) { return false, nil })
+	mr := &refinery.MergeRequest{ID: "mr-dag3", Branch: "polecat-t1530", Author: "mg-1530",
+		TargetRef: "main", MergedSHA: "5af51092", RepoPath: "/r"}
+
+	gated := fmt.Errorf("%w: mg-1530 is assigned to %q, a dispatch gate", client.ErrMGWorkItemGated, "blocked:mayor")
+	reapMergedPolecat(&fakeReaper{}, mr, func(string, string) error { return gated }, postMergeVerdict{}, nil,
+		&capturingFiler{})
+
+	rec, err := events.ReadFiltered(log, events.Filter{Type: EventMergedGatedNotClosed})
+	if err != nil {
+		t.Fatalf("reading the spine: %v", err)
+	}
+	if len(rec) != 1 {
+		t.Fatalf("a gated merge left %d %s records, want 1 — the spine again holds nothing "+
+			"merged-not-closed-shaped for it", len(rec), EventMergedGatedNotClosed)
+	}
+	if rec[0].WorkItemID != "mg-1530" || rec[0].Details["mr"] != "mr-dag3" ||
+		rec[0].Details["merged_sha"] != "5af51092" || !strings.Contains(fmt.Sprint(rec[0].Details["close_error"]), "blocked:mayor") {
+		t.Errorf("the gated record does not identify the merge and its gate: %+v", rec[0])
+	}
+	if !strings.Contains(EventMergedGatedNotClosed, "merged_not_closed") {
+		t.Errorf("%s must keep the merged_not_closed stem, or the census that missed mg-1530 misses it again",
+			EventMergedGatedNotClosed)
+	}
+	if real, _ := events.ReadFiltered(log, events.Filter{Type: "work_item_merged_not_closed"}); len(real) != 0 {
+		t.Errorf("a gated merge emitted the ALERT's own event type — mg-f17c's suppression was reversed: %+v", real)
+	}
+	if len(*alerts) != 0 {
+		t.Errorf("a gated merge mailed the coordinator: %+v", *alerts)
+	}
+
+	// Negative control: a refusal that is NOT a gate raises the alert and writes
+	// no gated record, so the assertions above cannot pass on a call site that
+	// emits the gated record for everything.
+	refused := errors.New("mg done failed: mg-1530 declares a remainder and names no successor (exit status 4)")
+	reapMergedPolecat(&fakeReaper{}, mr, func(string, string) error { return refused }, postMergeVerdict{}, nil,
+		&capturingFiler{})
+	if rec, _ := events.ReadFiltered(log, events.Filter{Type: EventMergedGatedNotClosed}); len(rec) != 1 {
+		t.Errorf("a non-gated refusal wrote a gated record (now %d)", len(rec))
+	}
+	if real, _ := events.ReadFiltered(log, events.Filter{Type: "work_item_merged_not_closed"}); len(real) != 1 {
+		t.Errorf("a non-gated refusal emitted %d alerts, want 1", len(real))
 	}
 }

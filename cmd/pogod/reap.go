@@ -436,12 +436,14 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		// here would make the routing right for `blocked:mayor` and wrong for every
 		// other `blocked:<agent>`, on top of shipping the wrong remedy text at 2.
 		// It belongs in filernotify or stallwatch.checkBlockedReminders.
+		who := ""
+		if a != nil {
+			who = a.Name
+		}
 		if !errors.Is(completeErr, client.ErrMGWorkItemGated) {
-			who := ""
-			if a != nil {
-				who = a.Name
-			}
 			reportMergedButOpen(mr, who, completeErr)
+		} else {
+			recordMergedGatedNotClosed(mr, who, completeErr)
 		}
 	}
 

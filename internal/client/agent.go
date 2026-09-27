@@ -830,7 +830,8 @@ func describeCandidates(candidates []successorCandidate) string {
 //     deliberately stopped; merging a hand-submitted branch is not a decision
 //     that it is finished, and it is not this daemon's decision to make. This is
 //     the mg-479c case, and leaving the item alone is what actually happened
-//     there — the defect was the report, not the outcome.
+//     there — the defect was the report, not the outcome. A missing claim is
+//     never the reason on its own; the refusal says the gate is (mg-6275).
 //   - UNCLAIMED AND DISPATCHABLE -> claim it, then close it. This is what makes
 //     mg-be37 work as intended rather than merely reporting that it did: the
 //     stranded branch of a dead polecat leaves its item in available/, where
@@ -853,8 +854,21 @@ func CloseMGWorkItemAtMerge(id, resultJSON string) error {
 		case status == "done" || status == "archived":
 			return fmt.Errorf("%w: mg show %s reports status=%s, so there is nothing left to close", ErrMGWorkItemAlreadyDone, id, status)
 		case status == "available" && config.IsDispatchGated(assignee, nil):
-			return fmt.Errorf("%w: %s is unclaimed and assigned to %q — no worker holds it, so its branch merging is not evidence that it is finished",
-				ErrMGWorkItemGated, id, strings.TrimSpace(assignee))
+			// THE GATE IS THE CAUSE, AND THE SENTENCE MUST LEAD WITH IT (mg-6275).
+			// This text used to open "is unclaimed … no worker holds it", and the
+			// only reader it has ever had took that for the reason: mg-1530 merged
+			// at 2026-09-08 17:00:29Z while `blocked:mayor`, this refusal reached the
+			// coordinator two seconds later, and it was diagnosed — and recorded in
+			// the item's own closing sidecar — as "a stopped builder released its
+			// claim". It was not: an unclaimed item with no gate is claimed and closed
+			// by the next case down, which is the mg-be37 path working. Saying so
+			// here is what stops the claim being blamed, and naming the lift-and-close
+			// is what stops the reader having to work it out.
+			a := strings.TrimSpace(assignee)
+			return fmt.Errorf("%w: %s is assigned to %q, a dispatch gate, and pogod does not lift a gate at merge — the gate is the ONLY "+
+				"reason it is still open: an unclaimed item with no gate is claimed and closed here. If the gate was only holding "+
+				"dispatch while this branch merged, lift it and close: `mg edit %s --assignee=\"\" && mg claim %s && mg done %s`",
+				ErrMGWorkItemGated, id, a, id, id, id)
 		case status == "available":
 			// The claim `mg done` requires. pogod's pid is the honest owner of
 			// record for the same reason it is at spawn (mg-7254): pogod is the

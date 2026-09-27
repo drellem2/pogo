@@ -144,6 +144,46 @@ func TestCloseAtMergeDeclinesAGatedUnclaimedItem(t *testing.T) {
 	}
 }
 
+// THE REFUSAL NAMES THE GATE AS THE CAUSE, NOT THE MISSING CLAIM (mg-6275).
+// mg-1530's refusal opened "is unclaimed … no worker holds it", and the reader
+// recorded "the builder was stopped and its claim released" as the reason in the
+// item's own closing sidecar. The claim is not a reason on its own — the same
+// unclaimed item with no gate is claimed and closed, which is the second half of
+// this test and the fact the message now states.
+func TestCloseAtMergeGatedRefusalBlamesTheGateAndNamesTheLift(t *testing.T) {
+	f := &fakeMG{show: item("available", "blocked:mayor")}
+	f.install(t)
+	err := CloseMGWorkItemAtMerge("mg-479c", `{"branch":"b"}`)
+	if !errors.Is(err, ErrMGWorkItemGated) {
+		t.Fatalf("expected a gated refusal, got %v", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		`assigned to "blocked:mayor", a dispatch gate`,
+		"the gate is the ONLY reason",
+		"an unclaimed item with no gate is claimed and closed",
+		`mg edit mg-479c --assignee="" && mg claim mg-479c && mg done mg-479c`,
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the gated refusal does not say %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "no worker holds it") {
+		t.Errorf("the refusal still offers the claim as the reason — the reading that misdiagnosed mg-1530:\n%s", msg)
+	}
+
+	// The sentence above is a claim about this function; hold it to it. Same
+	// unclaimed item, gate lifted: claimed and closed, no refusal.
+	f2 := &fakeMG{show: item("available", "")}
+	f2.install(t)
+	if err := CloseMGWorkItemAtMerge("mg-479c", `{"branch":"b"}`); err != nil {
+		t.Fatalf("the ungated twin was not closed, so the refusal's own claim is false: %v", err)
+	}
+	if !f2.didRun("mg claim mg-479c") || !f2.didRun("mg done mg-479c") {
+		t.Errorf("the ungated twin was not claimed and closed: %v", f2.ran)
+	}
+}
+
 // A gated item that IS claimed has a worker on it, and that worker's merge is
 // an ordinary completion. The gate is about unowned work, not about the
 // assignee field on its own.

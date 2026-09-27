@@ -528,6 +528,34 @@ and says so via `status_unknown`. Additive — no `schema_version` bump.
 {"schema_version":1,"timestamp":"2026-08-12T23:51:04.000000000Z","event_type":"work_item_merged_not_closed","agent":"pogod","work_item_id":"mg-ac0c","repo":"/Users/daniel/dev/pogo","details":{"worker":"ac0c","branch":"polecat-ac0c","mr":"mr-d9ugdoitjv1ohvj2fd20","target":"main","merged_sha":"abc123def4567890","close_error":"mg done failed: declares a remainder and names no successor (exit status 4)","status_unknown":false}}
 ```
 
+#### `work_item_merged_not_closed_gated`
+
+A branch merged and pogod **declined** to close its work item because the item is
+unclaimed behind a dispatch gate (`parked`, `human`, `blocked:<agent>`) — a gate is
+somebody's deliberate hold, and a merge does not lift it (mg-2b71). This is the one
+not-closed case that raises **no** `work_item_merged_not_closed` alert and no
+coordinator mail (mg-f17c): being gated already keeps the item from being
+dispatched, and the alert's "file its successor" remedy would be wrong. The filer
+is still told, via `work_item_completion_notice` with `closed:false`.
+
+It exists because until mg-6275 that notice was the only record, and a census of
+`event_type ~ merged_not_closed` over the only live instance in 30 days (mg-1530,
+`blocked:mayor`, 2026-09-08) came back empty and was read as the alert failing.
+The name keeps the stem so such a query finds it. **To count real alerts, match
+`work_item_merged_not_closed` exactly** — a substring match also counts this event
+and `_undelivered`. Additive — no `schema_version` bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `details`
+- **Optional envelope:** `repo`
+- **`details` fields:**
+  - `worker` (string, required): the polecat that did the work, or `""` when none was running
+  - `branch`, `mr`, `target`, `merged_sha` (string, required): the merge, as on `work_item_merged_not_closed`
+  - `close_error` (string, required): the refusal verbatim; it names the gating assignee and the lift-and-close command
+
+```json
+{"schema_version":1,"timestamp":"2026-09-08T17:00:31.000000000Z","event_type":"work_item_merged_not_closed_gated","agent":"pogod","work_item_id":"mg-1530","repo":"/Users/daniel/dev/pogo","details":{"worker":"","branch":"polecat-t1530","mr":"mr-dag3ma2tjv1hjkm214q0","target":"main","merged_sha":"5af510921f941efce03dd8ef95ce2c041f50bee0","close_error":"work item is gated and was deliberately not closed: mg-1530 is assigned to \"blocked:mayor\", a dispatch gate, and pogod does not lift a gate at merge — ..."}}
+```
+
 #### `work_item_merged_not_closed_undelivered`
 
 The mail half of the above bounced. The event above is already durable by the time

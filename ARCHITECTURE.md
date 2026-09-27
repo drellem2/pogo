@@ -506,7 +506,9 @@ genuinely owe work after its merge.
 
 The same moment is reported as well as refused. When the post-merge `mg done` is
 turned away for any reason other than the worker having already closed the item,
-pogod emits `work_item_merged_not_closed` and mails the coordinator. The
+pogod emits `work_item_merged_not_closed` and mails the coordinator — except for
+an unclaimed item behind a dispatch gate, which pogod declines to close and records
+as `work_item_merged_not_closed_gated` without alerting (mg-6275). The
 detection has to live in the daemon: pogod stops the polecat about half a second
 after the merge whether or not the close applied, so the worker is not slow to
 notice, it is gone.
