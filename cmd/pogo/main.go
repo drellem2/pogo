@@ -3106,22 +3106,8 @@ the tool call it is reporting on.`,
 	var cmdSchedule = &cobra.Command{
 		Use:   "schedule <agent>",
 		Short: "Register a sleep-resilient schedule with pogod",
-		Long: `Register a recurring or one-shot wakeup with pogod.
-
-Recurring (--cron required):
-
-  pogo schedule crew-research --cron "*/15 * * * *" --id research-poll \
-    --message "check the queue"
-
-One-shot (--once + --in):
-
-  pogo schedule cat-foo --once --in 30m --message "wake up"
-
-Schedules persist in ~/.pogo/schedules.json and fire from pogod's heartbeat
-loop — they survive host sleep, NTP steps, and pogod restarts (unlike Claude's
-in-process CronCreate). The default replay policy is "once": after a long sleep
-the schedule fires exactly once and reschedules to the next future occurrence.`,
-		Args: cobra.MinimumNArgs(1),
+		Long:  scheduleLong,
+		Args:  cobra.MinimumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			req := scheduler.AddRequest{
 				Agent:        args[0],
