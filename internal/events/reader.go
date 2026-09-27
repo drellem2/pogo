@@ -373,3 +373,65 @@ func FirstEventTime(path string) (time.Time, bool) {
 	}
 	return time.Time{}, false
 }
+
+// Window is the answer to "which events matched in this window", together with
+// how much of the window the retained log could actually answer.
+//
+// It exists because a count over a window is two claims — what was found, and
+// that the reader looked everywhere it should have — and a bare slice carries
+// only the first. `pogo events list --since` returned a clean, empty result for
+// a window whose two matching events sat in events.log.1, because it read only
+// the live file; a gate reading that count had no way to tell the zero from a
+// real one (mg-50b9, the reader-side sibling of mg-9d55).
+type Window struct {
+	Events []Event
+	// Files is every file the read walked, oldest first.
+	Files []string
+	// Floor is the first record of the oldest file walked. When the window
+	// reaches past every retained file that is the earliest instant the log can
+	// speak for; otherwise it is merely at or before the window's start. Zero
+	// when that file held no readable record.
+	Floor time.Time
+	// Truncated reports that the window reaches back before Floor AND rotation
+	// has discarded records (LogSpilled), so events inside the window may have
+	// existed and are gone. It is never set for an unbounded filter
+	// (SinceMin zero): that read asks for "everything retained", which is
+	// exactly what it gets.
+	Truncated bool
+}
+
+// ReadWindow reads every retained log file that can hold a record newer than
+// f.SinceMin — the live log and the rotated chunks that reach into the window
+// (LogFilesCovering) — and returns the matches in time order with the window's
+// coverage.
+//
+// A rotated file that exists and cannot be read is an error, not a skip: a
+// hole in the window reported as an empty stretch of it is the failure this
+// replaces.
+func ReadWindow(path string, f Filter) (Window, error) {
+	w := Window{Files: LogFilesCovering(path, f.SinceMin)}
+	for _, p := range w.Files {
+		if err := ScanFile(p, func(ev Event) {
+			if f.Match(ev) {
+				w.Events = append(w.Events, ev)
+			}
+		}); err != nil {
+			return w, fmt.Errorf("%s: %w", p, err)
+		}
+	}
+	if len(w.Files) > 0 {
+		// The oldest file walked is the oldest retained whenever the window
+		// reaches past it, because LogFilesCovering only stops early at a file
+		// that begins at or before the floor.
+		if first, ok := FirstEventTime(w.Files[0]); ok {
+			w.Floor = first
+		}
+	}
+	// An unknown floor on a spilled log counts as truncated: the direction
+	// that errs toward "I may not have seen everything" is the safe one.
+	if !f.SinceMin.IsZero() && len(w.Files) > 0 && LogSpilled(path) &&
+		(w.Floor.IsZero() || f.SinceMin.Before(w.Floor)) {
+		w.Truncated = true
+	}
+	return w, nil
+}
