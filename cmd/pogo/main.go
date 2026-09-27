@@ -5614,6 +5614,15 @@ By default prints a pretty one-line-per-event view (timestamp, event_type,
 agent, work_item_id, repo, summarized details). With --json each matching
 event is dumped as raw JSONL on stdout for piping into jq, etc.
 
+Reads the live log and every rotated file (events.log.1, .2, …) that reaches
+into the --since window, so a window crossing a rotation is answered in full.
+
+If the window starts before the oldest retained record AND rotation has
+discarded older files, the command prints what it found, then says
+"window starts before retained history at <ts>" on stderr and exits 3: the
+result is a lower bound, not a count. A log that has never discarded anything
+is complete however far back the window reaches, and exits 0.
+
 Examples:
   pogo events list --since=1h
   pogo events list --since=24h --type=refinery_merged
@@ -5641,22 +5650,32 @@ Examples:
 				filter.SinceMin = time.Now().Add(-d)
 			}
 
-			matches, err := events.ReadFiltered(path, filter)
+			// The live log AND the rotated chunks reaching into the window. Reading
+			// only the live file returned a clean zero for a window whose matches
+			// sat in events.log.1 (mg-50b9).
+			win, err := events.ReadWindow(path, filter)
 			if err != nil {
 				cli.ExitWithError(jsonOutput, "read log: "+err.Error(), cli.ExitError)
 			}
 
 			if jsonOutput {
 				enc := json.NewEncoder(os.Stdout)
-				for _, ev := range matches {
+				for _, ev := range win.Events {
 					if err := enc.Encode(ev); err != nil {
 						cli.ExitWithError(false, "encode: "+err.Error(), cli.ExitError)
 					}
 				}
-				return
+			} else {
+				for _, ev := range win.Events {
+					fmt.Println(events.FormatPretty(ev))
+				}
 			}
-			for _, ev := range matches {
-				fmt.Println(events.FormatPretty(ev))
+			if win.Truncated {
+				// Stderr, so --json stdout stays pure JSONL, and a distinct exit
+				// status, so a gate that reads only the count or the status
+				// cannot take a partial answer for a complete one.
+				fmt.Fprintln(os.Stderr, eventsWindowTruncatedMessage(filter.SinceMin, win.Floor, len(win.Events)))
+				os.Exit(cli.ExitUnknown)
 			}
 		},
 	}

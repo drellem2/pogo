@@ -2515,7 +2515,7 @@ A reader who wants the lifecycle of one work item filters with `jq 'select(.work
 
 - **No event ordering guarantees beyond per-writer order.** Two writers appending concurrently may interleave. Consumers ordering by `timestamp` is good enough.
 - **No querying by index.** `grep`, `jq`, and the `pogo events` CLI (F6) are the query surface. No SQL, no full-text search.
-- **No retention policy in the schema.** Rotation lives below the schema layer (mg-214a, F7): the live log is rotated to `events.log.1` once it exceeds 100MB, older rotations slide down to `events.log.5`, and anything beyond that is deleted. Readers that want full history must consume events as they happen — rotated tail data is not preserved indefinitely.
+- **No retention policy in the schema.** Rotation lives below the schema layer (mg-214a, F7): the live log is rotated to `events.log.1` once it exceeds 100MB, older rotations slide down to `events.log.5`, and anything beyond that is deleted. Readers that want full history must consume events as they happen — rotated tail data is not preserved indefinitely. `pogo events list --since` reads the live log and every rotated file reaching into its window; when the window reaches past the oldest retained record of a log that has discarded chunks, it prints what it found, says `window starts before retained history at <ts>` on stderr, and exits 3 — a lower bound is never returned as a clean count (mg-50b9).
 - **No event correlation IDs.** `work_item_id` and `merge_request_id` already correlate the events that matter most. A generic correlation ID can be added later as an additive `details` field without bumping `schema_version`.
 
 ## Open questions for F2+
