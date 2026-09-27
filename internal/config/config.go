@@ -2009,8 +2009,8 @@ type DoneReapConfig struct {
 //
 // ACTING, not report-only (see the "What runs by default" table in
 // docs/CONFIGURATION.md for every section that acts). Its action is bounded to
-// one thing: putting the daemon back into the mode it boots into. It cannot stop anything, and it cannot act at all while the fleet
-// is up.
+// one thing: putting the daemon back into the mode it boots into. It cannot
+// stop anything, and it cannot act at all while the fleet is up.
 //
 // TURNING IT OFF is a real choice and it is spelled out rather than left to a
 // zero value: `enabled = false` means the fleet coming back is once again

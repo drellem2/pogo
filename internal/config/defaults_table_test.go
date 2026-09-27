@@ -299,15 +299,20 @@ func TestDefaultsTableMatchesParser(t *testing.T) {
 		}
 		// A section with an on/off switch must be listed BY that switch, so the
 		// table names the key an operator sets to turn it off.
-		if keys["enabled"] {
+		// The same goes for every other on/off switch (`*_enabled`, such as
+		// [stall_watch]'s sub-switches), so a new one cannot ship unlisted.
+		for key := range keys {
+			if key != "enabled" && !strings.HasSuffix(key, "_enabled") {
+				continue
+			}
 			found := false
 			for _, r := range rows {
-				if r.section == sec && r.key == "enabled" {
+				if r.section == sec && r.key == key {
 					found = true
 				}
 			}
 			if !found {
-				t.Errorf("[%s] has an `enabled` key but no table row with Key `enabled`", sec)
+				t.Errorf("[%s] has an on/off key %q but no table row with that Key", sec, key)
 			}
 		}
 	}
