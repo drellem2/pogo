@@ -51,27 +51,93 @@ func TestMGRemainderDeclarerReadsTheTag(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d := MGRemainderDeclarer{Root: remainderStore(t, "mg-r001", tc.tags)}
-			if got := d.DeclaresRemainder("mg-r001"); got != tc.want {
+			got, _ := d.DeclaresRemainder("mg-r001")
+			if (got == RemainderDeclared) != tc.want || got == RemainderUnknown {
 				t.Errorf("DeclaresRemainder(tags=%q) = %v, want %v", tc.tags, got, tc.want)
 			}
 		})
 	}
 }
 
-// The quiet directions. None of them refuses anything — what is lost is a
-// paragraph — so all three must answer false rather than panic or block.
-func TestMGRemainderDeclarerIsQuietWhenItCannotAnswer(t *testing.T) {
+// The directions in which the declarer cannot say "declared" (mg-7231). None
+// refuses anything — what is at stake is a paragraph — but they are NOT all the
+// same answer any more. mg-a367 folded them into one `false`, so an item pogod
+// could not read got the same silence as an item without the tag, which is the
+// mg-a367 defect one level down: the warning present only where nothing failed.
+func TestMGRemainderDeclarerSeparatesUnknownFromUndeclared(t *testing.T) {
 	root := remainderStore(t, "mg-r002", "declares-remainder")
 	d := MGRemainderDeclarer{Root: root}
 
-	if d.DeclaresRemainder("") {
-		t.Error("an empty work item id must not produce a warning")
+	// No --id: there is no item for pogod's close-at-merge to be refused on, so
+	// this is genuinely undeclared rather than unknown.
+	if got, _ := d.DeclaresRemainder(""); got != RemainderUndeclared {
+		t.Errorf("an empty work item id = %v, want RemainderUndeclared", got)
 	}
-	if d.DeclaresRemainder("mg-nope") {
-		t.Error("an item absent from the store must not produce a warning")
+	// A named id the store does not answer for is NOT evidence of no tag.
+	if got, why := d.DeclaresRemainder("mg-nope"); got != RemainderUnknown || why == "" {
+		t.Errorf("an item absent from the store = (%v, %q), want RemainderUnknown with a reason", got, why)
 	}
-	if (MGRemainderDeclarer{Root: filepath.Join(root, "does-not-exist")}).DeclaresRemainder("mg-r002") {
-		t.Error("an unreadable store must not produce a warning")
+	if got, why := (MGRemainderDeclarer{Root: filepath.Join(root, "does-not-exist")}).DeclaresRemainder("mg-r002"); got != RemainderUnknown || why == "" {
+		t.Errorf("a missing store = (%v, %q), want RemainderUnknown with a reason", got, why)
+	}
+	// Positive control for the two above: the same declarer, the same store,
+	// the id it DOES hold — so the Unknowns are about the lookup, not a broken
+	// fixture.
+	if got, _ := d.DeclaresRemainder("mg-r002"); got != RemainderDeclared {
+		t.Fatalf("positive control: mg-r002 in its own store = %v, want RemainderDeclared", got)
+	}
+}
+
+// A store that exists but cannot be READ — the case the ticket names — must also
+// be Unknown, not Undeclared. Made unreadable by permissions, so it is skipped
+// where permissions do not bind (running as root).
+func TestMGRemainderDeclarerUnreadableStoreIsUnknown(t *testing.T) {
+	root := remainderStore(t, "mg-r010", "declares-remainder")
+	claimed := filepath.Join(root, "work", "claimed")
+	if err := os.MkdirAll(claimed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The item is not in available/ under its exact name, so the lookup has to
+	// scan claimed/ — which it cannot.
+	if err := os.Rename(filepath.Join(root, "work", "available", "mg-r010.md"),
+		filepath.Join(claimed, "mg-r010.md.4242")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(claimed, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(claimed, 0o755) })
+	if _, err := os.ReadDir(claimed); err == nil {
+		t.Skip("permissions do not bind for this user; cannot make the store unreadable")
+	}
+	got, why := MGRemainderDeclarer{Root: root}.DeclaresRemainder("mg-r010")
+	if got != RemainderUnknown || why == "" {
+		t.Errorf("an unreadable store = (%v, %q), want RemainderUnknown with a reason", got, why)
+	}
+}
+
+// The could-not-check block asserts only what is known: it must name the item,
+// the reason, the command that performs the check, and both ways out — and it
+// must NOT carry the full block's claim that the item declares a remainder.
+func TestRemainderUnknownPreludeTellsTheWorkerToCheck(t *testing.T) {
+	block := remainderUnknownPreludeFor("mg-r011", "reading it failed: boom")
+	for _, want := range []string{
+		"mg-r011",
+		"reading it failed: boom",
+		"mg show mg-r011 | grep '^Tags:'",
+		"--add-tags=predecessor:mg-r011",
+		"mg edit mg-r011 --rm-tags=" + DeclaresRemainderTag,
+		"could NOT check",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the could-not-check block is missing %q:\n%s", want, block)
+		}
+	}
+	if strings.Contains(block, "DECLARES A REMAINDER") {
+		t.Errorf("the could-not-check block asserts the declaration it could not read:\n%s", block)
+	}
+	if !strings.HasSuffix(block, "\n\n") {
+		t.Errorf("the block must end in a blank line so it cannot run into the prompt below it")
 	}
 }
 
@@ -278,5 +344,54 @@ func TestRemainderWarningDoesNotRefuseTheDispatch(t *testing.T) {
 	if rr.Code != 201 {
 		t.Fatalf("spawn on a declares-remainder item: status = %d, want 201 — the warning must "+
 			"not refuse the dispatch; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// THE mg-7231 HEADLINE: a dispatch naming an item pogod cannot read reaches the
+// worker WITH a block — the could-not-check one — above the brief, and still is
+// not refused. Before this the rendered prompt was byte-identical to an
+// undeclared item's, which is what "silent to the worker" meant.
+func TestSpawnPolecatOnAnUnreadableItemPrependsTheCheckBlock(t *testing.T) {
+	testsandbox.Isolate(t)
+	writeTemplate(t, "remunknown", "+++\nworktree = false\n+++\n# Polecat\n\n{{.Body}}\n")
+	// A real store that does not hold the id the dispatch names.
+	reg := remainderSpawnRegistry(t, remainderStore(t, "mg-other", "declares-remainder"))
+
+	const brief = "ordinary brief"
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name: "pc-remunknown", Template: "remunknown", Id: "mg-r012", Body: brief,
+	})
+	raw, err := os.ReadFile(a.PromptFile)
+	if err != nil {
+		t.Fatalf("read expanded prompt %s: %v", a.PromptFile, err)
+	}
+	prompt := string(raw)
+	checkAt := strings.Index(prompt, "mg show mg-r012 | grep '^Tags:'")
+	briefAt := strings.Index(prompt, brief)
+	if checkAt < 0 {
+		t.Fatalf("an item pogod could not read got NO block — the mg-7231 defect:\n%s", prompt)
+	}
+	if checkAt > briefAt || !strings.HasSuffix(prompt, "# Polecat\n\n"+brief+"\n") {
+		t.Errorf("the block must precede the template's own render, which must be unchanged:\n%s", prompt)
+	}
+}
+
+// And a spawn with NO --id stays byte-identical: no item means no close for
+// `mg done` to refuse, so there is nothing to warn about (and id-less dispatch is
+// legitimate, mg-2437).
+func TestSpawnPolecatWithoutAnIdRendersPromptUnchanged(t *testing.T) {
+	testsandbox.Isolate(t)
+	writeTemplate(t, "remnoid", "+++\nworktree = false\n+++\n# Polecat\n\n{{.Body}}\n")
+	reg := remainderSpawnRegistry(t, remainderStore(t, "mg-other", "declares-remainder"))
+
+	a := spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
+		Name: "pc-remnoid", Template: "remnoid", Body: "ordinary brief",
+	})
+	raw, err := os.ReadFile(a.PromptFile)
+	if err != nil {
+		t.Fatalf("read expanded prompt %s: %v", a.PromptFile, err)
+	}
+	if got, want := string(raw), "# Polecat\n\nordinary brief\n"; got != want {
+		t.Errorf("an id-less spawn's prompt = %q, want %q", got, want)
 	}
 }

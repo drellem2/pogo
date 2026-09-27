@@ -643,6 +643,20 @@ from a live one — `internal/workitem` does not read the archive. A redundant
 paragraph costs a worker seconds; a missing one costs the coordinator an item
 stuck in `available/`.
 
+**An item it cannot read gets a block too — a different one (mg-7231).** The
+first version answered a bool, so an unlocatable or unreadable store and an id
+not found in it produced the same silence as an item without the tag: the
+warning was present only where nothing had gone wrong, which is mg-a367's defect
+one level down. Those cases now prepend a short *could-not-check* block that
+asserts only what is known — pogod did not read the tags, and why — and hands
+the worker `mg show <id> | grep '^Tags:'` plus both ways out. It does not reuse
+the full warning, because that one asserts a declaration nobody read. A spawn
+with **no `--id`** still gets nothing, and that is not a gap: the refusal the
+block warns about is pogod's close-at-merge, which is keyed on a work item, so
+an item-less spawn has nothing for `mg done` to refuse. The id-less spawn itself
+stays legal — `--id` is optional by design (mg-2437), and the template router
+already refuses one that does not name its template.
+
 ### Inter-Agent Communication
 
 Two channels:
