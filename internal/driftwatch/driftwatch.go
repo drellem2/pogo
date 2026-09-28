@@ -56,11 +56,13 @@ import (
 // identity, mirroring how stall-watch mail is attributed.
 const mailFrom = "drift-watch"
 
-// mailTo is the recipient of every drift notice. Drift is a deploy failure a
-// human must resolve (report-only — the runner never fixes it), so it goes to
-// `human`, whose inbox the apple-side notifier surfaces, NOT to the mayor's
-// coordination inbox.
-const mailTo = "human"
+// DefaultMailTo is the default recipient of every drift notice. Drift is a
+// deploy failure a human must resolve (report-only — the runner never fixes it),
+// so it goes to `human`, whose inbox the apple-side notifier surfaces, NOT to
+// the mayor's coordination inbox. pogod passes [agents] escalation_box as
+// Options.MailTo, so a deployment that re-points escalations moves these
+// notices with the rest (drellem2/pogo#148).
+const DefaultMailTo = "human"
 
 // MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
 // recorder. It is the ONLY side-effect channel this package has — there is no
@@ -104,6 +106,9 @@ type Options struct {
 	// Mail delivers the drift notice. Required — a runner that cannot report is
 	// pointless.
 	Mail MailFunc
+	// MailTo is the box every notice goes to. pogod wires [agents]
+	// escalation_box. Empty means DefaultMailTo.
+	MailTo string
 	// Emit writes the drift_watch_fired event. Defaults to events.Emit.
 	Emit Emitter
 
@@ -160,14 +165,15 @@ type Options struct {
 	MaxNotices int
 }
 
-// Watcher samples the reconcile mirrors on a coarse interval and mails `human`
-// on drift. Report-only: it never reconciles.
+// Watcher samples the reconcile mirrors on a coarse interval and mails its box
+// (`human` by default) on drift. Report-only: it never reconciles.
 type Watcher struct {
 	enabled  bool
 	interval time.Duration
 	mirrors  []reconcile.Mirror
 	check    CheckFunc
 	mail     MailFunc
+	mailTo   string
 	emit     Emitter
 
 	// Revision-staleness check (mg-5bd2). See revision.go.
@@ -259,6 +265,10 @@ func New(cfg config.DriftWatchConfig, opts Options) *Watcher {
 	if noFireRenotify <= 0 {
 		noFireRenotify = DefaultNoFireRenotify
 	}
+	mailTo := opts.MailTo
+	if mailTo == "" {
+		mailTo = DefaultMailTo
+	}
 	noFireMaxNotices := opts.NoFireMaxNotices
 	if noFireMaxNotices == 0 {
 		noFireMaxNotices = DefaultNoFireMaxNotices
@@ -270,6 +280,7 @@ func New(cfg config.DriftWatchConfig, opts Options) *Watcher {
 		mirrors:          opts.Mirrors,
 		check:            check,
 		mail:             opts.Mail,
+		mailTo:           mailTo,
 		emit:             emit,
 		revision:         opts.Revision,
 		behind:           opts.Behind,
@@ -375,7 +386,7 @@ func (w *Watcher) sample(now time.Time) {
 
 	subject := fmt.Sprintf("deploy drift: %d host artifact(s) drifted (%s)", len(drifted), strings.Join(names, ", "))
 
-	mailErr := w.mail(mailTo, mailFrom, subject, body.String())
+	mailErr := w.mail(w.mailTo, mailFrom, subject, body.String())
 
 	details := map[string]any{
 		"drift_count":  len(drifted),

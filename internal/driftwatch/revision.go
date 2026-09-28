@@ -421,7 +421,7 @@ func (w *Watcher) sampleRevision(now time.Time) {
 
 	if mail {
 		subject := staleSubject(s)
-		if err := w.mail(mailTo, mailFrom, subject, staleBody(s, notice, w.maxNotices, w.behindRepo)); err != nil {
+		if err := w.mail(w.mailTo, mailFrom, subject, staleBody(s, notice, w.maxNotices, w.behindRepo)); err != nil {
 			// Detected but not reportable. Record it: a staleness notice that
 			// reaches nobody is the failure this detector exists to remove, and
 			// it must not vanish just because the mail channel is down.
@@ -429,7 +429,7 @@ func (w *Watcher) sampleRevision(now time.Time) {
 			log.Printf("pogod: revision-staleness notice (%s) could not be mailed: %v", s.Short(), err)
 		} else {
 			log.Printf("pogod: STALE revision %s (commit %s, %s old) — notice %d/%d mailed to %s",
-				s.Short(), s.CommitTime.Format("2006-01-02"), formatAge(s.Age), notice, w.maxNotices, mailTo)
+				s.Short(), s.CommitTime.Format("2006-01-02"), formatAge(s.Age), notice, w.maxNotices, w.mailTo)
 		}
 	}
 

@@ -14,11 +14,13 @@ import (
 // pogod-side identity.
 const mailFrom = "cred-expiry"
 
-// mailTo is `human`, not the mayor. Running `/login` is something ONLY a person
-// can do; routing it to a coordination inbox would put a human-gated action in
-// a queue no human reads promptly. `human` is what the apple-side notifier
-// surfaces.
-const mailTo = "human"
+// DefaultMailTo is `human`, not the mayor. Running `/login` is something ONLY a
+// person can do; routing it to a coordination inbox would put a human-gated
+// action in a queue no human reads promptly. `human` is what the apple-side
+// notifier surfaces. It is only the default: pogod passes [agents]
+// escalation_box as Options.MailTo, so a deployment that re-points escalations
+// moves these notices with the rest (drellem2/pogo#148).
+const DefaultMailTo = "human"
 
 // Event type names. Named rather than inlined because two of them are a matched
 // pair — one records grant HISTORY and the other records warning TIERS — and a
@@ -105,6 +107,9 @@ type Options struct {
 	Read Reader
 	// Mail delivers notices. Required — a warner that cannot report is pointless.
 	Mail MailFunc
+	// MailTo is the box every notice goes to. pogod wires [agents]
+	// escalation_box. Empty means DefaultMailTo.
+	MailTo string
 	// Emit writes cred_expiry_* events. Defaults to events.Emit.
 	Emit Emitter
 	// Interval is the coarse sampling gap. Zero means DefaultInterval.
@@ -116,8 +121,8 @@ type Options struct {
 	Enabled bool
 }
 
-// Watcher samples the credential on a coarse interval and mails `human` as the
-// expiry approaches.
+// Watcher samples the credential on a coarse interval and mails its box
+// (`human` by default) as the expiry approaches.
 //
 // It rides pogod's heartbeat rather than a launchd timer, for the same reason
 // drift-watch does: the nondemand-spawn wedge on this box (mg-50e0) leaves a
@@ -136,6 +141,7 @@ type Watcher struct {
 	blindRenotify time.Duration
 	read          Reader
 	mail          MailFunc
+	mailTo        string
 	emit          Emitter
 
 	mu      sync.Mutex
@@ -190,12 +196,17 @@ func New(opts Options) *Watcher {
 	if emit == nil {
 		emit = func(e events.Event) { events.Emit(context.Background(), e) }
 	}
+	mailTo := opts.MailTo
+	if mailTo == "" {
+		mailTo = DefaultMailTo
+	}
 	return &Watcher{
 		enabled:       opts.Enabled,
 		interval:      interval,
 		blindRenotify: blind,
 		read:          read,
 		mail:          opts.Mail,
+		mailTo:        mailTo,
 		emit:          emit,
 	}
 }
@@ -286,7 +297,7 @@ func (w *Watcher) sample(ctx context.Context, now time.Time) {
 	}
 
 	subject, body := WarningMail(tier, st, now)
-	err := w.mail(mailTo, mailFrom, subject, body)
+	err := w.mail(w.mailTo, mailFrom, subject, body)
 
 	details := map[string]any{
 		"tier":            tier.String(),
@@ -306,7 +317,7 @@ func (w *Watcher) sample(ctx context.Context, now time.Time) {
 		log.Printf("pogod: credential-expiry warning (%s) could not be mailed: %v", tier, err)
 	} else {
 		log.Printf("pogod: credential-expiry warning mailed to %s (tier=%s, expires %s, %s left)",
-			mailTo, tier, st.RefreshExpiry.Format(time.RFC3339), FormatRemaining(remaining))
+			w.mailTo, tier, st.RefreshExpiry.Format(time.RFC3339), FormatRemaining(remaining))
 	}
 	w.emit(events.Event{EventType: EventWarned, Agent: "pogod", Details: details})
 }
@@ -331,7 +342,7 @@ func (w *Watcher) reportBlind(st Status, now time.Time) {
 	}
 
 	subject, body := BlindMail(st, now)
-	err := w.mail(mailTo, mailFrom, subject, body)
+	err := w.mail(w.mailTo, mailFrom, subject, body)
 	details := map[string]any{"reason": st.Reason, "domain": DomainBlind}
 	if err != nil {
 		details["mail_error"] = err.Error()

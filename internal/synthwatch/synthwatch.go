@@ -164,12 +164,15 @@ const DefaultClearHold = 60 * time.Minute
 // item works under is that no true page is delayed.
 const DefaultMinPageInterval = 30 * time.Minute
 
-// mailFrom / mailTo follow driftwatch: the detector mails, a human acts. `human`
-// is the identity the apple-side notifier surfaces; the mayor's inbox is for
-// coordination and, in the fleet-wide case, the mayor is one of the casualties.
+// mailFrom / DefaultMailTo follow driftwatch: the detector mails, a human acts.
+// `human` is the identity the apple-side notifier surfaces; the mayor's inbox is
+// for coordination and, in the fleet-wide case, the mayor is one of the
+// casualties. DefaultMailTo is only the default: pogod passes [agents]
+// escalation_box as Options.MailTo, so a deployment that re-points escalations
+// moves this page with the rest (drellem2/pogo#148).
 const (
-	mailFrom = "pogod"
-	mailTo   = "human"
+	mailFrom      = "pogod"
+	DefaultMailTo = "human"
 )
 
 // Target is one agent to scan. pogod builds these from its registry.
@@ -203,6 +206,10 @@ type Options struct {
 	// Mail sends the page. nil disables paging (the scan still records state
 	// and still suppresses restarts).
 	Mail MailFunc
+	// MailTo is the box the pages go to — the box a PERSON reads, never the
+	// coordinator's. pogod wires [agents] escalation_box. Empty means
+	// DefaultMailTo.
+	MailTo string
 	// Emit writes events. Defaults to events.Emit.
 	Emit func(events.Event)
 	// Scan overrides the reader. Defaults to synthfail.Scan; tests substitute.
@@ -274,6 +281,9 @@ func New(opts Options) *Watcher {
 	}
 	if opts.Scan == nil {
 		opts.Scan = synthfail.Scan
+	}
+	if opts.MailTo == "" {
+		opts.MailTo = DefaultMailTo
 	}
 	if opts.Interval <= 0 {
 		opts.Interval = DefaultInterval
@@ -695,8 +705,8 @@ func (w *Watcher) sendMail(subject, body string) {
 	if w.opts.Mail == nil {
 		return
 	}
-	if err := w.opts.Mail(mailTo, mailFrom, subject, body); err != nil {
-		log.Printf("synthwatch: failed to page %s: %v", mailTo, err)
+	if err := w.opts.Mail(w.opts.MailTo, mailFrom, subject, body); err != nil {
+		log.Printf("synthwatch: failed to page %s: %v", w.opts.MailTo, err)
 	}
 }
 

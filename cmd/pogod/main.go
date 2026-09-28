@@ -1898,6 +1898,10 @@ Flags:
 	// which is what keeps the fleet usage-limit coordinator report-only while
 	// its state still suppresses a useless wake into a wedged harness.
 	agent.SetLimitEpisodeQuery(claude.UsageLimitEpisodeOpen)
+	// The fleet usage-limit coordinator's episode mails go where every other
+	// watcher escalation goes (drellem2/pogo#148). Set before any agent starts,
+	// so no modal-watcher OnHit can precede it.
+	claude.SetUsageLimitMailTo(escalationBox)
 
 	// Wire the post-spawn start-verification watcher (mg-feb3): after the initial
 	// nudge, pogod checks whether a polecat actually claimed its work item and, if
@@ -2019,6 +2023,7 @@ Flags:
 		Targets: func() []synthwatch.Target { return synthTargets(agentRegistry) },
 		Globs:   providers.SessionTranscriptGlobs,
 		Mail:    client.SendMGMail,
+		MailTo:  escalationBox,
 	})
 	// diagnose reports the verdict, and ShouldRespawnAgent consults it before
 	// any restart_on_crash respawn — installed whatever [synth_watch] says.
@@ -2048,7 +2053,7 @@ Flags:
 			Home:    homeDir(),
 			Targets: func() []refusalwatch.Target { return refusalTargets(agentRegistry) },
 			Globs:   providers.SessionTranscriptGlobs,
-			Sinks:   refusalSinks(),
+			Sinks:   refusalSinks(escalationBox),
 		})
 		log.Printf("pogod: consecutive-refusal alarm enabled (%s)", w.Describe())
 		return w
@@ -2449,6 +2454,7 @@ Flags:
 			// freeze after the first check (see driftwatch.Options.NewDeps).
 			NewDeps:    reconcile.HostDeps,
 			Mail:       client.SendMGMail,
+			MailTo:     escalationBox,
 			Revision:   driftwatch.BuildRevision,
 			StaleAfter: cfg.DriftWatch.SelfStaleAfter,
 		}
@@ -2527,6 +2533,7 @@ Flags:
 		credWatcher = credexpiry.New(credexpiry.Options{
 			Enabled:       true,
 			Mail:          client.SendMGMail,
+			MailTo:        escalationBox,
 			Interval:      cfg.CredExpiry.Interval,
 			BlindRenotify: cfg.CredExpiry.BlindRenotify,
 		})

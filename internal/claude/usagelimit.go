@@ -68,6 +68,11 @@ const UsageLimitEpisodeKind = "usage_limit"
 // page is needlessly delayed.
 const DefaultUsageLimitHoldDown = 45 * time.Second
 
+// DefaultUsageLimitMailTo is where the episode mails go when pogod has not
+// re-pointed them: the box a person reads, not the coordinator's — in a
+// fleet-wide usage limit the coordinator is one of the wedged agents.
+const DefaultUsageLimitMailTo = "human"
+
 // agentLimitInfo is one agent's membership in a usage-limit episode.
 type agentLimitInfo struct {
 	agentID    string
@@ -92,6 +97,11 @@ type usageLimitCoordinator struct {
 	active map[string]agentLimitInfo // currently rate-limited agents
 	roster map[string]agentLimitInfo // every agent limited during the open episode
 	send   func(to, from, subject, body string) error
+	// mailTo is the box the hit and clear mails go to. It defaults to
+	// DefaultUsageLimitMailTo; pogod re-points it at [agents] escalation_box via
+	// SetUsageLimitMailTo (drellem2/pogo#148). Read under mu at send time, so a
+	// set that lands after an episode opened still routes that episode's mails.
+	mailTo string
 	now    func() time.Time
 	emit   func(ev events.Event) // structured event sink (events.Emit in production)
 
@@ -139,6 +149,7 @@ func newUsageLimitCoordinatorWithHoldDown(send func(to, from, subject, body stri
 		active:   map[string]agentLimitInfo{},
 		roster:   map[string]agentLimitInfo{},
 		send:     send,
+		mailTo:   DefaultUsageLimitMailTo,
 		now:      now,
 		emit:     emit,
 		holdDown: holdDown,
@@ -192,11 +203,12 @@ func (c *usageLimitCoordinator) fireHoldDown() {
 	c.timer = nil
 	info := c.opener
 	send := c.send
+	to := c.mailTo
 	c.mu.Unlock()
 
 	if send != nil {
 		subject, body := hitMail(info)
-		if err := send("human", "pogod", subject, body); err != nil {
+		if err := send(to, "pogod", subject, body); err != nil {
 			log.Printf("usage-limit: failed to send hit mail: %v", err)
 		}
 	}
@@ -258,6 +270,7 @@ func (c *usageLimitCoordinator) OnClear(agentID string, when time.Time) {
 	c.episodeID = ""
 	c.openedAt = time.Time{}
 	send := c.send
+	to := c.mailTo
 	emit := c.emit
 	c.mu.Unlock()
 
@@ -266,7 +279,7 @@ func (c *usageLimitCoordinator) OnClear(agentID string, when time.Time) {
 	}
 	if send != nil {
 		subject, body := clearMail(roster, when)
-		if err := send("human", "pogod", subject, body); err != nil {
+		if err := send(to, "pogod", subject, body); err != nil {
 			log.Printf("usage-limit: failed to send clear mail: %v", err)
 		}
 	}
@@ -306,6 +319,24 @@ func (c *usageLimitCoordinator) episodeOpen() (bool, string) {
 // at startup; this package holds no reference to the nudge path in return.
 func UsageLimitEpisodeOpen() (bool, string) {
 	return defaultUsageLimitCoordinator().episodeOpen()
+}
+
+// setMailTo re-points the episode mails. Empty restores the default.
+func (c *usageLimitCoordinator) setMailTo(box string) {
+	if box == "" {
+		box = DefaultUsageLimitMailTo
+	}
+	c.mu.Lock()
+	c.mailTo = box
+	c.mu.Unlock()
+}
+
+// SetUsageLimitMailTo points the process-wide coordinator's hit and clear mails
+// at box. pogod calls it at startup with [agents] escalation_box, so a
+// deployment that re-points escalations moves these pages with the rest
+// (drellem2/pogo#148). Empty means DefaultUsageLimitMailTo.
+func SetUsageLimitMailTo(box string) {
+	defaultUsageLimitCoordinator().setMailTo(box)
 }
 
 // makeEpisodeID builds a stable per-episode id from the opening agent and the

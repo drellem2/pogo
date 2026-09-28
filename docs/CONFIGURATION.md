@@ -310,6 +310,24 @@ The default is `human` — the same box the whole fleet already writes — so an
 install that has never heard of this setting escalates exactly where it always
 did. **Most deployments should leave it alone.**
 
+**pogo ships NO reader for `human`.** Nothing in this repo polls that box or
+turns its mail into a notification: on this project's own host that is done by
+out-of-process launchd jobs (the pogo-reminders deadman/notifier), which a fresh
+install does not have. So on a fresh install every escalation below lands in a
+box nobody reads, until either this setting names a box a person actually reads
+or a reader (a notifier, or a relay agent) runs on `human` (drellem2/pogo#148).
+
+Five senders address this box **directly**, with no fleet agent first, because
+in the states they report the coordinator is a casualty or cannot act:
+`synthwatch` (agents failing turns), the fleet usage-limit coordinator (its
+episode-start and episode-cleared mails), `driftwatch` (mirror drift, a stale
+running revision, a nightly that did not fire), `credexpiry` (a credential
+approaching expiry, or unreadable) and the consecutive-refusal alarm
+(`refusalwatch`). They used to hard-code `human`; they now follow this setting
+like everything else. The refusal alarm still does not pass `--create`, so a
+mistyped box is a loud undelivered alarm (recorded in its ledger), not a new
+mailbox nobody reads.
+
 The same box is also copied, immediately and with no age gate, on every alarm
 whose trigger means **pogod is unhealthy or the coordinator is down** (mg-875d):
 pogod's own conditions for a scheduler that did not load, a coordinator that
@@ -343,9 +361,9 @@ apart from a working channel (mg-f04b).
 fact about the deployment, not a per-watcher preference, and four knobs that must
 agree are four knobs that can disagree — mg-b201 is the incident where three
 artifacts declaring one schedule drifted apart. `pogod` resolves the value once
-at startup and hands the same string to all four watchers; the log line for each
-watcher prints its `escalate_to=` so the running value is observable without
-reading config.
+at startup and hands the same string to every watcher that escalates and to the
+five direct senders above; the log line for each escalating watcher prints its
+`escalate_to=` so the running value is observable without reading config.
 
 Note that a watcher drops the second recipient when it equals the first, so
 setting this to a watcher's `notify_to` disables that watcher's escalation

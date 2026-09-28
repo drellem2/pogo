@@ -51,19 +51,22 @@ func refusalTargets(reg *agent.Registry) []refusalwatch.Target {
 // tried — and ALL of them are tried, because two channels that fail
 // independently is the only reason to have two.
 //
-// Neither requires an agent turn. The mail sink writes into the `human` mailbox
-// that the out-of-process com.pogo.deadman launchd job polls, which is the
-// channel with a measured record of working while the fleet was down; the ledger
+// Neither requires an agent turn. The mail sink writes into the escalation box
+// — [agents] escalation_box, `human` by default, the mailbox the out-of-process
+// com.pogo.deadman launchd job polls on this host — which is the channel with a
+// measured record of working while the fleet was down. A deployment that
+// re-points escalations moves this alarm with the rest (drellem2/pogo#148); the ledger
 // is a plain append under ~/.pogo/alarms, which needs no `mg`, no mailbox, and no
 // notifier at all.
 //
 // The mail sink does NOT pass --create. An unknown recipient must stay a refusal
-// (mg-d639): if `human` is not registered on this box, the correct outcome is a
-// loud undelivered alarm, not a phantom mailbox minted at the moment of an
-// outage and read by nobody thereafter.
-func refusalSinks() []refusalwatch.Sink {
+// (mg-d639): if the escalation box is not registered on this box — a mistyped
+// escalation_box included — the correct outcome is a loud undelivered alarm,
+// not a phantom mailbox minted at the moment of an outage and read by nobody
+// thereafter.
+func refusalSinks(escalationBox string) []refusalwatch.Sink {
 	return []refusalwatch.Sink{
-		refusalwatch.MailSink{To: "human", From: "pogod"},
+		refusalwatch.MailSink{To: escalationBox, From: "pogod"},
 		refusalwatch.LedgerSink{},
 	}
 }

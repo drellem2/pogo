@@ -94,7 +94,7 @@ mailed every 30s.
 | stallwatch (coordinator unread mail) | mayor mail stale | mayor (nudge) | mayor only | partial | **not changed.** A deaf mayor is deafwatch's case, and deafwatch escalates at once. |
 | wedgewatch | PTY frozen | **nobody** (log only) | n/a | n/a | **not changed.** Unrouted by design; blindwatch covers the detector. Noted. |
 | progresswatch | fleet landing no work | mayor | box after 2h | mostly no | unchanged |
-| synthwatch, refusalwatch, credexpiry, driftwatch | dead credential etc. | hard-coded `human` | never mayor | no | unchanged. They ignore `escalation_box`, which is a separate gap. |
+| synthwatch, refusalwatch, credexpiry, driftwatch | dead credential etc. | hard-coded `human` | never mayor | no | unchanged here. They ignored `escalation_box`, a separate gap — since closed: these four and the usage-limit coordinator now route through `escalation_box` (default `human`), drellem2/pogo#148. |
 | ghintake, ghteardown, carrierdrift, reviewdecl, refinery | workflow | mayor / notify_to | n/a | no | unchanged |
 
 ### Scripts and launchd jobs
@@ -124,4 +124,6 @@ mailed every 30s.
   static copy. The subject fix is not live until `pogo service install-deploy`,
   and the nightly is currently held (mg-39c0 / mg-ad53).
 - ackwatch's 24h mayor-only window, wedgewatch's unrouted findings, and the four
-  watchers that hard-code `human` are listed above and not changed.
+  watchers that hard-code `human` are listed above and not changed. (The last
+  was later closed by drellem2/pogo#148, which routes them through
+  `escalation_box`.)
