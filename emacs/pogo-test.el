@@ -486,6 +486,22 @@ running on this machine can never match it."
           (push pid hits))))
     hits))
 
+(defun pogo-test--wait-for-stand-in-up (log-file &optional seconds)
+  "Wait up to SECONDS for the stand-in pogod to announce itself in LOG-FILE.
+
+This is the condition to wait on before signalling a spawn.  Its argv is not:
+`pogo--logged-argv' wraps the spawn in a shell whose argv already contains the
+stand-in's path, and that shell has not yet exec'd nohup, so a pid found by
+`pogo-test--os-pids-matching' may still die of SIGHUP.  The line is written by
+the stand-in itself, which runs only after nohup has set SIGHUP to ignored."
+  (pogo-test--wait-until
+   (lambda ()
+     (and (file-exists-p log-file)
+          (with-temp-buffer
+            (insert-file-contents log-file)
+            (string-match-p "stand-in pogod is up" (buffer-string)))))
+   seconds))
+
 (defun pogo-test--emacs-pogod-processes ()
   "Return Emacs subprocesses whose argv mentions pogod."
   (seq-filter (lambda (proc)
@@ -681,16 +697,27 @@ SIGHUPs its subprocesses as it exits, so surviving that signal is the whole
 requirement."
   (pogo-test--call-with-fake-pogod
    (lambda (fake)
-     (let* ((pogo-debug-log nil)
-            (proc (pogo-start)))
-       (should proc)
-       (should (pogo-test--wait-until
-                (lambda () (pogo-test--os-pids-matching fake))))
-       (pogo-test--sighup-like-emacs-exit (process-id proc))
-       ;; Give the signal at least as long to land as the control test needs
-       ;; to observe a death, so this cannot pass by being checked too early.
-       (sit-for 1)
-       (should (pogo-test--os-pids-matching fake))))))
+     (let* ((log-dir (make-temp-file "pogo-test-log" t))
+            (pogo-server-log-file (expand-file-name "pogod.log" log-dir))
+            (pogo-debug-log nil))
+       (unwind-protect
+           (let ((proc (pogo-start)))
+             (should proc)
+             ;; Wait for the stand-in ITSELF, not for its path in some argv.
+             ;; The wrapper shell's argv carries FAKE from the moment it is
+             ;; forked (`pogo--logged-argv'), before it has exec'd nohup and so
+             ;; before SIGHUP is ignored; a signal sent then kills the wrapper,
+             ;; and the test failed on ubuntu runners about one run in six
+             ;; (mg-f1853).  Only the stand-in writes this line, and nohup has
+             ;; exec'd it by then, so the disposition under test is in place.
+             (should (pogo-test--wait-for-stand-in-up pogo-server-log-file))
+             (pogo-test--sighup-like-emacs-exit (process-id proc))
+             ;; Give the signal at least as long to land as the control test
+             ;; needs to observe a death, so this cannot pass by being checked
+             ;; too early.
+             (sit-for 1)
+             (should (pogo-test--os-pids-matching fake)))
+         (ignore-errors (delete-directory log-dir t)))))))
 
 (ert-deftest pogo-test-the-spawn-uses-a-pipe-and-leaves-no-nohup-out ()
   "The spawn must not run over a pty, and must not litter the user's directory.
@@ -718,16 +745,12 @@ reader once Emacs exits, which kills the pogod writing to it."
            (progn
              (ignore-errors (kill-buffer "*pogo-server*"))
              (should (pogo-start))
-             (should (pogo-test--wait-until
-                      (lambda () (pogo-test--os-pids-matching fake))))
-             (should-not (file-exists-p (expand-file-name "nohup.out")))
-             (should (pogo-test--wait-until
-                      (lambda ()
-                        (and (file-exists-p pogo-server-log-file)
-                             (with-temp-buffer
-                               (insert-file-contents pogo-server-log-file)
-                               (string-match-p "stand-in pogod is up"
-                                               (buffer-string))))))))
+             ;; nohup decides on nohup.out before it execs the stand-in, so
+             ;; once the stand-in has written its line the absence below is a
+             ;; finding, not a check made before nohup ran (mg-f1853).
+             (should (pogo-test--wait-for-stand-in-up pogo-server-log-file))
+             (should (pogo-test--os-pids-matching fake))
+             (should-not (file-exists-p (expand-file-name "nohup.out"))))
          (ignore-errors (delete-directory default-directory t))
          (ignore-errors (delete-directory log-dir t)))))))
 
