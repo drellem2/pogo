@@ -504,6 +504,62 @@ All optional; the defaults are the production values.
 | `POGO_DEPLOY_ZSHENV` | `~/.zshenv` | Where `GH_TOKEN` is read from. |
 | `GIT` | first candidate that prints `git version` | Pins a specific git. Still checked by execution — a pin that cannot run is the same outage as no pin. |
 | `POGO_DEPLOY_ALERT_TO` | `mayor` | First alert recipient; `human` is always copied. |
+| `POGO_DEPLOY_MG` | `1` | `0` disables the fleet-mg install (below). |
+| `POGO_DEPLOY_MG_SRC` | `~/.pogo/deploy-src-macguffin` | macguffin's dedicated checkout. Never `~/dev/macguffin`. |
+| `POGO_DEPLOY_MG_GOBIN` | the directory of the resolved `mg` (`~/go/bin`) | Where the fleet's `mg` lives. Point it at a scratch dir to rehearse. |
+| `POGO_DEPLOY_MG_TIMEOUT` | `600` | Seconds the macguffin build may take. |
+
+### The fleet's `mg` (mg-44ee4)
+
+Until mg-e42de the fleet's `~/go/bin/mg` changed only as a side effect of
+macguffin gates and polecat builds, which installed unmerged branch builds.
+Once that was removed, nothing updated it, and merged macguffin fixes stayed
+"merged but not live" with nothing reporting it. So every nightly fire that
+attempts a deploy now also installs macguffin `origin/main`. This is pm-pogo's
+decision (a):
+
+- **Clean checkout**: `~/.pogo/deploy-src-macguffin`, detached at `origin/main`.
+  The clone URL is read once from `~/dev/macguffin`'s `.git/config`. Nothing in
+  that tree is touched, and if the dedicated checkout is dirty the step refuses.
+- **Build and install only**: `./build.sh --install`. It never runs `test.sh`,
+  the e2e scripts or `go test`, because macguffin's test scripts have deleted
+  the live store (mg-9a40).
+- **Atomic**: `build.sh` installs into a staging dir inside the target's own
+  directory. The previous binary is kept as `mg.prev`, and the swap is a
+  `rename(2)`. At no point is there a partial file at `~/go/bin/mg`.
+- **Verified where it is installed**: the staged binary is checked before the
+  swap, and the binary at the target path is checked after it. `mg version`
+  must name the checked-out commit, and `mg list --json` (read-only) must exit
+  0. If the check after the swap fails, `mg.prev` is copied back and the
+  restore is checked by its bytes and its stamp.
+- **Independent of pogod, both ways**: the step runs from the exit path, after
+  pogod's outcome and the attempt record are written. It runs whatever pogod
+  did, and its rc never becomes the run's exit status. It runs *after* pogod
+  because pogod's build shells out to `mg`.
+
+Each attempting fire writes one line:
+
+```
+mg: installed <live sha> (origin/main <sha>) prev <sha> result=<ok|skipped|failed|rolled-back|rollback-failed> [reason=...] rc=<n>
+```
+
+`installed` is what the target reports *after* the step. After a failure or a
+rollback, that is the unchanged live binary. `failed` (rc 1) means nothing was
+swapped. `rolled-back` (rc 2) and `rollback-failed` (rc 3) are mailed, and so
+is `failed` unless the cause was the transport (the pogod sync owns that alert).
+An `ok` with `reason=current` means no build was needed. Each run also emits a
+`deploy_mg` event.
+
+Rehearse it without touching the live binary or store:
+
+```bash
+GOBIN=/tmp/r/gobin MG_ROOT=/tmp/r/store POGO_HOME=/tmp/r/pogo \
+POGO_DEPLOY_LOCK_DIR=/tmp/r/lock POGO_DEPLOY_MG_SRC=/tmp/r/src \
+POGO_DEPLOY_MG_GOBIN=/tmp/r/gobin  ~/.pogo/bin/pogo-deploy.sh --mg-only
+```
+
+(`/tmp/r/gobin/mg` must exist first. Copy the live one there as the "previous"
+binary.)
 
 ### Managing the deploy agent
 
@@ -514,6 +570,7 @@ All optional; the defaults are the production values.
 | Check status | `launchctl list \| grep com.pogo.deploy` |
 | Run it now, gates and all | `POGO_DEPLOY_SKIP_WINDOW=1 ~/.pogo/bin/pogo-deploy.sh` |
 | Rehearse without deploying | `POGO_DEPLOY_SKIP_WINDOW=1 ~/.pogo/bin/pogo-deploy.sh --dry-run` |
+| Install the fleet's `mg` now, nothing else | `~/.pogo/bin/pogo-deploy.sh --mg-only` |
 | View logs | `tail -f ~/Library/Logs/pogo/pogo-deploy.log` |
 
 Note that running it by hand from a terminal is **out of band** and therefore

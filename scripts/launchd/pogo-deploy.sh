@@ -398,6 +398,9 @@
 # USAGE
 #   pogo-deploy.sh              # the nightly run (what launchd invokes)
 #   pogo-deploy.sh --dry-run    # every gate, no redeploy — prints what it would do
+#   pogo-deploy.sh --mg-only    # ONLY the fleet-mg install (section 8c), no window,
+#                               # no pogod — for a rehearsal against a scratch
+#                               # POGO_DEPLOY_MG_GOBIN, or a deliberate by-hand install
 #
 # ENV overrides (all optional; defaults are the production values):
 #   POGO_DEPLOY_SRC          dedicated checkout to build from (~/.pogo/deploy-src)
@@ -461,6 +464,23 @@
 #                            it the deploy's 1200s would zero its budget on every
 #                            night the vigil used the window — i.e. exactly the
 #                            nights it exists for
+#   POGO_DEPLOY_MG           0 disables the fleet-mg install (section 8c); default 1
+#   POGO_DEPLOY_MG_SRC       macguffin's dedicated checkout (~/.pogo/deploy-src-macguffin)
+#   POGO_DEPLOY_MG_REMOTE    clone URL used to create it if absent
+#   POGO_DEPLOY_MG_BOOTSTRAP_REPO  repo to read that URL from ($HOME/dev/macguffin;
+#                            its .git/config is READ, nothing in it is touched)
+#   POGO_DEPLOY_MG_REF       the branch installed (main)
+#   POGO_DEPLOY_MG_GOBIN     directory holding the fleet's mg (default: the
+#                            directory of the mg this run resolved, ~/go/bin)
+#   POGO_DEPLOY_MG_TIMEOUT   seconds the macguffin build may take (600)
+#
+# THE FLEET'S mg IS INSTALLED HERE TOO (mg-44ee4, pm-pogo decision (a)). After
+# pogod's outcome is settled, every attempting fire installs macguffin
+# origin/main into the fleet's mg from its own clean checkout, verifies the
+# stamp it installed, and writes ONE line:
+#     mg: installed <sha> (origin/main <sha>) prev <sha> result=<...>
+# with its own rc. It never changes this run's exit status and pogod's outcome
+# never gates it — see section 8c.
 #
 # HOW THE RED ALERT KNOWS WHAT FAILED (mg-0155). Not from the exit code. This
 # runner passes POGO_DEPLOY_REASON_FILE to pogo-self-deploy, which writes the
@@ -662,6 +682,11 @@ ATTEMPT_N=0
 GIT="${GIT:-}"
 MG=""
 POGO_CLI=""
+
+# Set at the same moment as ATTEMPT_ARMED, but ALSO on a dry run: a dry run owes
+# the fleet-mg step its "skipped reason=dry-run" line, which ATTEMPT_ARMED (false
+# on a dry run by design) cannot ask for. Read only by on_exit (section 8c).
+MG_STEP_DUE=false
 
 ts()  { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*"; }
@@ -4291,6 +4316,360 @@ answers, the agents that are still there are alive. Diagnose:
 }
 
 # ---------------------------------------------------------------------------
+# 8c. The fleet's mg (mg-44ee4 — pm-pogo decision (a))
+# ---------------------------------------------------------------------------
+# Until mg-e42de the fleet's ~/go/bin/mg was updated only as a SIDE EFFECT of
+# macguffin's gates and polecat builds, which installed UNMERGED branch builds.
+# mg-e42de removed that, and then nothing updated it at all: merged macguffin
+# fixes were "merged but not live" and nothing said so. mg is the task store
+# every agent calls on every turn, so it now follows pogod's path — merged,
+# installed at the next nightly, run on this box — and the soak (mg-8382)
+# covers macguffin too.
+#
+# THE RULES, each one a thing that has already gone wrong somewhere:
+#
+#   CLEAN CHECKOUT. Its own dedicated clone ($MG_SRC), detached at
+#     origin/$MG_REF. Never ~/dev/macguffin, which polecats and humans work in;
+#     that tree's .git/config is READ once, for the clone URL, exactly as
+#     section 5 reads ~/dev/pogo's. A dirty dedicated clone refuses.
+#   BUILD AND INSTALL ONLY. `./build.sh --install` and nothing else. NEVER
+#     test.sh, the e2e scripts or `go test`: macguffin's test scripts have
+#     deleted the live ~/.macguffin store (mg-9a40). build.sh runs no tests
+#     today, and nothing here may add one.
+#   NO WINDOW WITH A PARTIAL FILE. The fleet calls mg constantly. build.sh
+#     installs into a STAGING dir inside the target's own directory (so the
+#     final step is a rename(2) on one filesystem, which is atomic), the
+#     previous binary is kept as mg.prev by the same copy-then-rename, and
+#     the swap is `mv`. Nothing is ever written in place at $target.
+#   VERIFY THE STAMP YOU INSTALLED (the mg-0af6 lesson). The staged binary is
+#     checked before the swap, and — the check that counts — the binary AT THE
+#     TARGET PATH is checked again after it: `mg version` must name the commit
+#     this step checked out, and a READ-ONLY smoke (`mg list --json`) must exit
+#     0. If either fails after the swap, mg.prev is put back by the same
+#     copy-then-rename and result=rolled-back.
+#   INDEPENDENT OF pogod, BOTH WAYS. It runs from on_exit, after pogod's
+#     outcome and the night's attempt record are written, so a bad macguffin
+#     commit cannot fail or roll back the pogod redeploy — and it runs on
+#     every attempting fire WHATEVER pogod did (no drift, a failed sync, a
+#     RED), so a bad pogod night does not hold mg back either. Its own rc is
+#     on its own line and never becomes the run's exit status. It runs AFTER
+#     pogod rather than before because pogod's build shells out to mg: a new mg
+#     installed first would be a macguffin change failing pogod's deploy.
+#
+# THE LINE, every attempting fire, whatever happened — the positive control
+# that lets the absence of a failure mean something:
+#
+#   mg: installed <live sha> (origin/main <sha>) prev <sha> result=<r> [reason=<why>] rc=<n>
+#
+#   ok           the live mg reports origin/main (installed tonight, or already
+#                current — reason=current). rc 0.
+#   skipped      nothing was attempted: disabled, dry run, the run deadline,
+#                no clone URL, no mg/git resolved. Live mg untouched. rc 0.
+#   failed       something broke BEFORE the swap (sync, build, the staged
+#                binary's stamp or smoke). Live mg untouched. rc 1.
+#   rolled-back  the INSTALLED binary failed its check; mg.prev restored. rc 2.
+#   rollback-failed  ...and putting mg.prev back failed too. rc 3, and the
+#                loudest alert this step has: the fleet's mg is suspect.
+#
+# `installed` is what the target path reports AFTER the step — on a failure,
+# that is the unchanged live binary, not the one that was attempted.
+MG_ENABLED="${POGO_DEPLOY_MG:-1}"
+MG_SRC="${POGO_DEPLOY_MG_SRC:-$HOME/.pogo/deploy-src-macguffin}"
+MG_REMOTE="${POGO_DEPLOY_MG_REMOTE:-}"
+MG_BOOTSTRAP_REPO="${POGO_DEPLOY_MG_BOOTSTRAP_REPO:-$HOME/dev/macguffin}"
+MG_REF="${POGO_DEPLOY_MG_REF:-main}"
+MG_GOBIN="${POGO_DEPLOY_MG_GOBIN:-}"
+MG_TIMEOUT="${POGO_DEPLOY_MG_TIMEOUT:-600}"
+MG_ONLY=false
+
+MG_RESULT=""
+MG_REASON=""
+MG_RC=0
+MG_WANT=""
+MG_LIVE=""
+MG_PREV=""
+MG_DETAIL=""
+
+# mg_stamp_sha BIN — the commit BIN names in `mg version`, or empty.
+#
+# `mg version` prints e.g. "mg v0.4.1-dev.8+gc6344db (c6344db, 2026-09-27)";
+# the commit is the first field in the parentheses. A build from a dirty tree
+# carries ".dirty" in the version, and gets "+dirty" appended here so it can
+# never prefix-match a clean sha. An unstamped build ("dev", no parens) and a
+# binary that will not run both yield empty — never a guess.
+mg_stamp_sha() {
+    local out sha
+    [ -x "${1:-}" ] || return 0
+    out="$(run_bounded "$TOOL_PROBE_TIMEOUT" "$1" version 2>/dev/null)" || return 0
+    sha="$(printf '%s\n' "$out" | sed -n 's/.*(\([0-9a-f]\{7,40\}\),.*/\1/p' | head -1)"
+    [ -n "$sha" ] || return 0
+    case "$out" in *.dirty*) sha="$sha+dirty" ;; esac
+    printf '%s' "$sha"
+}
+
+# mg_stamp_matches STAMP FULL_SHA — does a reported stamp name that commit?
+# A stamp is a (short) prefix; the empty stamp matches nothing, and so does a
+# "+dirty" one, because the full sha contains no '+'.
+mg_stamp_matches() {
+    local stamp="${1:-}" full="${2:-}"
+    [ -n "$stamp" ] && [ -n "$full" ] || return 1
+    case "$full" in "$stamp"*) return 0 ;; esac
+    return 1
+}
+
+# mg_smoke BIN — the READ-ONLY smoke. `mg list` reads the store and writes
+# nothing; it is the call every agent makes, so it is the one that has to work.
+mg_smoke() {
+    run_bounded "$TOOL_PROBE_TIMEOUT" "$1" list --json >/dev/null 2>&1
+}
+
+# mg_sync — bring $MG_SRC to origin/$MG_REF, detached. Returns 2 when there is
+# no clone URL to bootstrap from (nothing was attempted), 1 on a failure, and
+# sets MG_REASON either way.
+mg_sync() {
+    local remote=""
+    if [ ! -d "$MG_SRC/.git" ]; then
+        remote="$MG_REMOTE"
+        if [ -z "$remote" ]; then
+            remote="$(git_q "$GIT" -C "$MG_BOOTSTRAP_REPO" remote get-url origin 2>/dev/null)"
+        fi
+        if [ -z "$remote" ]; then
+            MG_REASON="no-remote"
+            MG_DETAIL="no POGO_DEPLOY_MG_REMOTE, and 'git -C $MG_BOOTSTRAP_REPO remote get-url origin' produced nothing"
+            return 2
+        fi
+        log "mg: bootstrapping macguffin's dedicated checkout at $MG_SRC from $remote"
+        if ! git_step "$GIT" clone --quiet "$remote" "$MG_SRC"; then
+            MG_REASON="clone"; MG_DETAIL="$SYNC_DETAIL"; return 1
+        fi
+    fi
+    # --tags --force: build.sh derives the version from the nearest tag, so the
+    # tags must be there, and a moved tag must not wedge the fetch.
+    if ! git_step "$GIT" -C "$MG_SRC" fetch --quiet --tags --force origin; then
+        MG_REASON="fetch"; MG_DETAIL="$SYNC_DETAIL"; return 1
+    fi
+    if [ -n "$(git_q "$GIT" -C "$MG_SRC" status --porcelain 2>/dev/null)" ]; then
+        MG_REASON="dirty"
+        MG_DETAIL="$MG_SRC is DIRTY — nothing but this step should write there, and a reset would destroy the evidence of whatever did:
+$(git_q "$GIT" -C "$MG_SRC" status --short 2>&1)"
+        return 1
+    fi
+    if ! git_step "$GIT" -C "$MG_SRC" checkout --quiet --detach "origin/$MG_REF"; then
+        MG_REASON="checkout"; MG_DETAIL="$SYNC_DETAIL"; return 1
+    fi
+    return 0
+}
+
+# mg_replace SRC DEST — put a copy of SRC at DEST by copy-then-rename, so DEST
+# is at every instant either the old file or the whole new one. The temp file
+# lives in DEST's own directory: rename(2) is atomic only within a filesystem.
+mg_replace() {
+    local src="$1" dest="$2" tmp
+    tmp="$(mktemp "$(dirname "$dest")/.mg-deploy-copy.XXXXXX")" || return 1
+    if cp -p "$src" "$tmp" && mv -f "$tmp" "$dest"; then return 0; fi
+    rm -f "$tmp"
+    return 1
+}
+
+# mg_report — the one line, the event, and (on anything but ok/skipped) the
+# alert. Sets MG_RC from MG_RESULT so the two cannot disagree.
+mg_report() {
+    case "$MG_RESULT" in
+        ok|skipped)      MG_RC=0 ;;
+        failed)          MG_RC=1 ;;
+        rolled-back)     MG_RC=2 ;;
+        *)               MG_RC=3 ;;
+    esac
+    log "mg: installed ${MG_LIVE:-unknown} (origin/$MG_REF ${MG_WANT:-unknown}) prev ${MG_PREV:-unknown} result=$MG_RESULT${MG_REASON:+ reason=$MG_REASON} rc=$MG_RC"
+    if [ -n "$POGO_CLI" ]; then
+        run_bounded 30 "$POGO_CLI" events emit --type=deploy_mg --agent=pogo-deploy \
+            --details="{\"result\":\"$MG_RESULT\",\"reason\":\"$MG_REASON\",\"rc\":$MG_RC,\"installed\":\"${MG_LIVE:-}\",\"origin\":\"${MG_WANT:-}\",\"prev\":\"${MG_PREV:-}\"}" >/dev/null 2>&1 || true
+    fi
+    # A transport failure is not mailed from here: the pogod sync, which reaches
+    # the same network a minute earlier, owns that alert and its classification.
+    case "$MG_RESULT:$MG_REASON" in
+        ok:*|skipped:*|failed:fetch|failed:clone) return 0 ;;
+    esac
+    local subject="[pogo-deploy] fleet mg: result=$MG_RESULT (${MG_REASON:-no reason recorded})" note
+    # Computed here, not in a $( case ... ) inside the body: bash 3.2 misparses
+    # a case pattern's `)` inside a command substitution.
+    case "$MG_RESULT" in
+        failed) note="Nothing was swapped: the fleet is still on the mg it had. Merged macguffin
+fixes after ${MG_LIVE:-that} are NOT live until this is fixed." ;;
+        rolled-back) note="The new binary WAS installed, failed its check at the target path, and
+mg.prev was put back. Check the live binary: ${MG_TARGET:-mg} version" ;;
+        *) note="The installed binary failed its check AND mg.prev could not be put back.
+Restore by hand NOW:  cp -p ${MG_TARGET:-mg}.prev ${MG_TARGET:-mg}.tmp && mv -f ${MG_TARGET:-mg}.tmp ${MG_TARGET:-mg}" ;;
+    esac
+    [ "$MG_RESULT" = "rollback-failed" ] && subject="[pogo-deploy] fleet mg: ROLLBACK FAILED — the fleet's mg is suspect"
+    alert "$subject" \
+"The nightly fleet-mg install (mg-44ee4) did not land. This is independent of
+the pogod redeploy, whose outcome is on its own line in the same log.
+
+  result:    $MG_RESULT (${MG_REASON:-none})
+  live mg:   ${MG_LIVE:-unknown} at ${MG_TARGET:-?}
+  origin:    $MG_REF ${MG_WANT:-unknown}
+  prev:      ${MG_PREV:-unknown} (kept at ${MG_TARGET:-?}.prev)
+  checkout:  $MG_SRC
+  log:       $HOME/Library/Logs/pogo/pogo-deploy.log
+
+$note
+
+WHAT IT SAW, verbatim:
+
+${MG_DETAIL:-(nothing recorded)}" "\"mg_result\":\"$MG_RESULT\",\"mg_rc\":$MG_RC" deploy_mg_failed
+    return 0
+}
+
+# mg_deploy_step — the whole step. Never exits, never touches the run's rc.
+MG_TARGET=""
+mg_deploy_step() {
+    MG_RESULT=""; MG_REASON=""; MG_RC=0; MG_WANT=""; MG_LIVE=""; MG_PREV=""; MG_DETAIL=""
+    local gobin target want budget left stage staged buildlog st got
+
+    if [ "$MG_ENABLED" = "0" ]; then
+        MG_RESULT=skipped; MG_REASON=disabled; mg_report; return 0
+    fi
+    if [ -z "$MG" ]; then
+        MG_RESULT=skipped; MG_REASON=no-mg; mg_report; return 0
+    fi
+    gobin="${MG_GOBIN:-$(dirname "$MG")}"
+    target="$gobin/mg"
+    MG_TARGET="$target"
+    MG_LIVE="$(mg_stamp_sha "$target")"
+    MG_PREV="$MG_LIVE"
+    if $DRY_RUN; then
+        log "mg: dry-run — would sync $MG_SRC to origin/$MG_REF, run ./build.sh --install into a staging dir under $gobin, and swap it in at $target"
+        MG_RESULT=skipped; MG_REASON=dry-run; mg_report; return 0
+    fi
+    if [ -z "${GIT:-}" ]; then
+        MG_RESULT=skipped; MG_REASON=no-git; mg_report; return 0
+    fi
+
+    # The build must not outlive the run's own deadline: a watchdog kill in the
+    # middle of it is survivable (nothing is swapped until the build is done)
+    # but it costs the night's terminal line. Two minutes are kept back for the
+    # checks, the swap and the rest of on_exit.
+    budget="$MG_TIMEOUT"
+    if [ "${DEADLINE_S:-0}" -gt 0 ] && [ "$RUN_T0" -gt 0 ]; then
+        left=$(( DEADLINE_S - ( $(date +%s) - RUN_T0 ) - 120 ))
+        if [ "$left" -lt 120 ]; then
+            MG_RESULT=skipped; MG_REASON=no-time
+            MG_DETAIL="${left}s of the ${DEADLINE_S}s run deadline would be left for the build"
+            mg_report; return 0
+        fi
+        [ "$left" -lt "$budget" ] && budget="$left"
+    fi
+
+    local src_rc=0
+    mg_sync || src_rc=$?
+    if [ "$src_rc" -ne 0 ]; then
+        if [ "$src_rc" -eq 2 ]; then MG_RESULT=skipped; else MG_RESULT=failed; fi
+        mg_report; return 0
+    fi
+    want="$(git_q "$GIT" -C "$MG_SRC" rev-parse HEAD 2>/dev/null)"
+    MG_WANT="$(printf '%s' "$want" | cut -c1-7)"
+    if [ -z "$want" ]; then
+        MG_RESULT=failed; MG_REASON=rev-parse; mg_report; return 0
+    fi
+
+    if mg_stamp_matches "$MG_LIVE" "$want" && mg_smoke "$target"; then
+        MG_RESULT=ok; MG_REASON=current; mg_report; return 0
+    fi
+
+    stage="$(mktemp -d "$gobin/.mg-deploy.XXXXXX")" || {
+        MG_RESULT=failed; MG_REASON=stage; MG_DETAIL="could not create a staging dir in $gobin"
+        mg_report; return 0
+    }
+    staged="$stage/mg"
+    buildlog="$stage/build.log"
+    log "mg: building origin/$MG_REF $MG_WANT — ./build.sh --install with GOBIN=$stage (bounded at ${budget}s)"
+    if ! run_bounded "$budget" env GOBIN="$stage" MG_BUILD_DIR="$stage/build" \
+            /bin/sh "$MG_SRC/build.sh" --install >"$buildlog" 2>&1; then
+        MG_RESULT=failed
+        if $BOUNDED_TIMED_OUT; then MG_REASON=build-timeout; else MG_REASON=build; fi
+        MG_DETAIL="$(tail -40 "$buildlog" 2>/dev/null)"
+        sed 's/^/mg-build: /' "$buildlog" 2>/dev/null
+        rm -rf "$stage"; mg_report; return 0
+    fi
+    sed 's/^/mg-build: /' "$buildlog" 2>/dev/null
+
+    # BEFORE the swap: a binary that does not name the commit, or cannot read
+    # the store, never reaches the fleet.
+    st="$(mg_stamp_sha "$staged")"
+    if ! mg_stamp_matches "$st" "$want"; then
+        MG_RESULT=failed; MG_REASON="staged-stamp"
+        MG_DETAIL="the staged binary reports '${st:-no stamp}', and this step checked out $want"
+        rm -rf "$stage"; mg_report; return 0
+    fi
+    if ! mg_smoke "$staged"; then
+        MG_RESULT=failed; MG_REASON="staged-smoke"
+        MG_DETAIL="the staged binary ($st) exited non-zero on the read-only '$staged list --json'"
+        rm -rf "$stage"; mg_report; return 0
+    fi
+
+    # Keep the previous binary, then swap. Both by rename.
+    if [ -e "$target" ] && ! mg_replace "$target" "$target.prev"; then
+        MG_RESULT=failed; MG_REASON=prev-copy
+        MG_DETAIL="could not keep $target as $target.prev, so there would be nothing to roll back to — not swapping"
+        rm -rf "$stage"; mg_report; return 0
+    fi
+    if ! mv -f "$staged" "$target"; then
+        MG_RESULT=failed; MG_REASON=swap; MG_DETAIL="mv $staged $target failed"
+        rm -rf "$stage"; MG_LIVE="$(mg_stamp_sha "$target")"; mg_report; return 0
+    fi
+    rm -rf "$stage"
+    log "mg: swapped $st into $target (prev ${MG_PREV:-none} kept at $target.prev) — verifying the INSTALLED binary"
+
+    # AFTER the swap: the check that counts is on the path the fleet runs.
+    got="$(mg_stamp_sha "$target")"
+    if mg_stamp_matches "$got" "$want" && mg_smoke "$target"; then
+        MG_LIVE="$got"; MG_RESULT=ok; mg_report; return 0
+    fi
+    if mg_stamp_matches "$got" "$want"; then
+        MG_REASON="installed-smoke"
+        MG_DETAIL="$target reports $got but exited non-zero on the read-only '$target list --json'"
+    else
+        MG_REASON="installed-stamp"
+        MG_DETAIL="$target reports '${got:-no stamp}' after the swap, and this step checked out $want"
+    fi
+    err "mg: the INSTALLED binary failed its check ($MG_REASON) — restoring $target.prev"
+    # The restore is checked by what is AT THE TARGET afterwards, not by the
+    # copy's exit status: byte-identical to mg.prev, and reporting the stamp
+    # the fleet had before this step (when it had one — an unstamped `dev`
+    # build can only be checked by its bytes).
+    [ -e "$target.prev" ] && mg_replace "$target.prev" "$target"
+    MG_LIVE="$(mg_stamp_sha "$target")"
+    if [ -e "$target.prev" ] && cmp -s "$target" "$target.prev" \
+            && { [ -z "$MG_PREV" ] || [ "$MG_LIVE" = "$MG_PREV" ]; }; then
+        MG_RESULT=rolled-back
+    else
+        MG_RESULT=rollback-failed
+        MG_DETAIL="$MG_DETAIL
+AND the restore did not take: $target reports '${MG_LIVE:-no stamp}', the fleet had '${MG_PREV:-no stamp}'"
+    fi
+    mg_report
+    return 0
+}
+
+# run_mg_only — `--mg-only`: the step alone, for a rehearsal or a deliberate
+# install outside the window. It takes the same lock as the nightly, so it can
+# never race one.
+run_mg_only() {
+    resolve_mg || { err "mg-only: no macguffin mg resolved — nothing to install over"; exit 1; }
+    resolve_pogo || true
+    resolve_git || { err "mg-only: no working git"; exit 1; }
+    harden_git_transport
+    if ! acquire_lock; then
+        log "lock: another pogo-deploy run holds $LOCK_DIR — exiting 0"
+        exit 0
+    fi
+    LOCK_HELD=true
+    mg_deploy_step
+    exit "$MG_RC"
+}
+
+# ---------------------------------------------------------------------------
 # 9. Lock
 # ---------------------------------------------------------------------------
 # A redeploy can legitimately take an hour (the drain waits for polecats). If a
@@ -4602,17 +4981,15 @@ LOCK_HELD=false
 
 on_exit() {
     local rc="$1" elapsed=0
-    if [ "$RUN_T0" -gt 0 ]; then
-        elapsed=$(( $(date +%s) - RUN_T0 ))
-    fi
+    # A TERM from here on — the deadline watchdog, mid fleet-mg build — must not
+    # abandon the bookkeeping below: `exit` inside an EXIT trap ends the shell
+    # without re-running it, which would leave the lock held and no terminal
+    # line. The watchdog kills the tree leaves first, so the build it interrupts
+    # still returns, and its SIGKILL backstop still bounds this function.
+    trap 'err "terminated (SIGTERM) during the exit path — finishing the bookkeeping"' TERM
 
-    # First, because everything below is bookkeeping and the watchdog must not
-    # fire against a pid this run is about to stop owning.
-    if [ -n "$WATCHDOG_PID" ]; then
-        kill_tree "$WATCHDOG_PID" TERM
-        WATCHDOG_PID=""
-    fi
-
+    # The attempt record FIRST: it is pogod's outcome, and nothing the fleet-mg
+    # step below does may delay, change or lose it.
     if $ATTEMPT_ARMED; then
         ATTEMPT_N=$(( ATTEMPT_N + 1 ))
         if stamp_write "$STAMP" "$(deploy_date)" "$ATTEMPT_N" "$rc"; then
@@ -4620,6 +4997,26 @@ on_exit() {
         else
             err "could not write the attempt record at $STAMP — a later fire tonight may repeat this attempt"
         fi
+    fi
+
+    # The fleet's mg (section 8c) — after pogod's outcome is recorded and while
+    # the watchdog still bounds the run. Its rc is its own line; `rc` above is
+    # untouched, and it is what this script exits with.
+    if $MG_STEP_DUE; then
+        if [ "$rc" = "$DEADLINE_RC" ]; then
+            MG_RESULT=skipped; MG_REASON=deadline
+            MG_LIVE="$(mg_stamp_sha "${MG_GOBIN:-$(dirname "${MG:-.}")}/mg")"; MG_PREV="$MG_LIVE"
+            mg_report
+        else
+            mg_deploy_step
+        fi
+    fi
+
+    # Before anything that gives up this run's ownership: the watchdog must not
+    # fire against a pid this run is about to stop owning.
+    if [ -n "$WATCHDOG_PID" ]; then
+        kill_tree "$WATCHDOG_PID" TERM
+        WATCHDOG_PID=""
     fi
     if $LOCK_HELD; then
         rmdir "$LOCK_DIR" 2>/dev/null || true
@@ -4636,6 +5033,9 @@ on_exit() {
     if $ATTEMPT_ARMED; then
         report_dispatch_state "$rc"
     fi
+    if [ "$RUN_T0" -gt 0 ]; then
+        elapsed=$(( $(date +%s) - RUN_T0 ))
+    fi
     log "pogo-deploy: end (rc=$rc after ${elapsed}s)"
 }
 
@@ -4646,6 +5046,7 @@ main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) DRY_RUN=true ;;
+            --mg-only) MG_ONLY=true ;;
             # Bounded by the `set -u` sentinel, not by a line number. The header
             # is long and grows, and a hardcoded range starts truncating --help
             # mid-thought the first time anybody documents anything — the old
@@ -4671,6 +5072,11 @@ main() {
     # through the trap above with a status of its own, instead of killing the
     # shell outright and leaving the night unrecorded and the lock held.
     trap 'err "terminated (SIGTERM) — the run deadline or an operator ended this run"; exit '"$DEADLINE_RC" TERM
+
+    # --mg-only: section 8c alone — no window, no pogod, no attempt record.
+    if $MG_ONLY; then
+        run_mg_only
+    fi
 
     # --- gate 1: the window -------------------------------------------------
     parse_window "$WINDOW" || { err "bad POGO_DEPLOY_WINDOW '$WINDOW' (want START-END)"; exit 2; }
@@ -4741,6 +5147,9 @@ main() {
     # outcome is the night's outcome. A dry run never arms — it decides nothing
     # and must not settle a night it did not attempt.
     $DRY_RUN || ATTEMPT_ARMED=true
+    # The fleet-mg step (section 8c) is owed by every fire that got this far,
+    # dry runs included — they get its "skipped reason=dry-run" line.
+    MG_STEP_DUE=true
 
     # --- tools + credentials ------------------------------------------------
     # Resolve the alert path BEFORE anything that can fail, so a failure has
