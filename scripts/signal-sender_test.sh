@@ -50,6 +50,31 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1" >&2; }
 
+# wait_armed PID — wait until PID has exec'd into the compiled binary AND that
+# binary has forked its child, which it does only after sigaction() has armed
+# the handler. Returns non-zero if that never happens within ~15s.
+#
+# "PID has a child" alone is NOT readiness (mg-68f4d): signal-sender.sh forks
+# before it execs — `$(shasum ...)`, `$(uname -m)`, the binary's self-check —
+# and a poll that lands on one of those signals the bash front-end, which has
+# no handler. The front-end then dies of the signal with no SENDER line and a
+# 143 status, which is the exact 21-passed/2-failed shape a merge gate recorded
+# at load 9. A `sleep 1` instead of a poll has the same hole whenever the
+# front-end takes longer than a second to reach its exec.
+wait_armed() {
+    local pid="$1" comm
+    for _ in $(seq 1 150); do
+        kill -0 "$pid" 2>/dev/null || return 1
+        comm="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+        case "$comm" in
+            */signal-sender-*|signal-sender-*)
+                pgrep -P "$pid" >/dev/null 2>&1 && return 0 ;;
+        esac
+        sleep 0.1
+    done
+    return 1
+}
+
 echo "=== signal-sender tests ==="
 
 WORK="$POGO_SANDBOX_DIR/work"
@@ -114,12 +139,10 @@ else
     bash "$SENDER" sleep 30 2>"$ERR3" &
     WRAPPER_SHELL=$!
     # Wait for the wrapper to be the process actually running: the front-end
-    # execs into the binary, so $WRAPPER_SHELL is the wrapper itself.
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-        kill -0 "$WRAPPER_SHELL" 2>/dev/null || break
-        pgrep -P "$WRAPPER_SHELL" >/dev/null 2>&1 && break
-        sleep 0.2
-    done
+    # execs into the binary, so $WRAPPER_SHELL becomes the wrapper itself —
+    # but only once it has exec'd, which is what wait_armed checks.
+    ARMED3=1
+    wait_armed "$WRAPPER_SHELL" || ARMED3=0
     # The sender: a subshell whose pid is captured from inside itself, so the
     # expected value is read from the sending process rather than assumed.
     SENDER_PID_FILE="$WORK/senderpid"
@@ -128,6 +151,9 @@ else
     RC3=$?
     set -e
     EXPECT_PID="$(cat "$SENDER_PID_FILE" 2>/dev/null || echo unknown)"
+    if [ "$ARMED3" -eq 0 ]; then
+        fail "the wrapper never reached its armed binary within ~15s (pid $WRAPPER_SHELL was still $(ps -o comm= -p "$WRAPPER_SHELL" 2>/dev/null || echo gone)) — the signal went to the front-end, so the checks below say nothing about si_pid"
+    fi
     if grep -q "SENDER pid=${EXPECT_PID} " "$ERR3"; then
         pass "si_pid = ${EXPECT_PID}, the pid that sent the signal"
     else
@@ -165,7 +191,7 @@ CHILD
     set +e
     bash "$SENDER" sh "$WORK/forward-child.sh" >"$OUT4" 2>/dev/null &
     W4=$!
-    sleep 1
+    wait_armed "$W4" || fail "the Test 4 wrapper never reached its armed binary within ~15s"
     kill -TERM "$W4"
     wait "$W4" >/dev/null 2>&1
     set -e
@@ -350,7 +376,7 @@ else
     set +e
     POGO_SIGNAL_WITNESS_DIR="$W13DIR" bash "$SENDER" sleep 30 2>"$ERR13" &
     W13=$!
-    sleep 1
+    wait_armed "$W13" || fail "the Test 13 wrapper never reached its armed binary within ~15s"
     # The sender STAYS ALIVE for a few seconds after signalling, deliberately:
     # if it exits first, `ps` resolves nothing and the truncation path this test
     # exists for is never executed — the test would pass while checking nothing.
