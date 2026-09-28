@@ -298,3 +298,73 @@ func TestUnreadableStoreIsAnErrorNotSilence(t *testing.T) {
 		t.Fatal("an unreadable store must not read as zero carriers")
 	}
 }
+
+func TestParseReviews(t *testing.T) {
+	body := "> reviews: mg-decoy\nworkflow: gh-issue\nstage: review\ngh: drellem2/macguffin#39\nreviews: mg-715a2 (the build)\n"
+	if got := ParseReviews(body); got != "mg-715a2" {
+		t.Errorf("ParseReviews = %q, want mg-715a2", got)
+	}
+	if got := ParseReviews("reviews: mg-715a2\n"); got != "" {
+		t.Errorf("a non-carrier body must name no reviewed build, got %q", got)
+	}
+}
+
+// mg-47df3, end to end against a real mg store: a triage retired with
+// `mg done --successor` while its build is claimed, and a review ticket done
+// while the build it names is claimed, are in flight. Once the build is done
+// with the issue still open, the build AND the chain behind it are misses.
+func TestMGSourceWalksTheHandOffChain(t *testing.T) {
+	if !mgAvailable(t) {
+		t.Skip("mg binary not on PATH")
+	}
+	root := t.TempDir()
+	run := func(args ...string) string {
+		cmd := exec.Command("mg", append([]string{"--root", root}, args...)...)
+		cmd.Env = append(os.Environ(), "MG_ROOT="+root)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("mg %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+	file := func(title, body string) string {
+		out := run("new", "--type=task", "--tags=gh-issue", "--no-repo", "--title="+title, "--body="+body)
+		_, rest, _ := strings.Cut(out, "Created ")
+		id, _, _ := strings.Cut(rest, ":")
+		if !strings.HasPrefix(id, "mg-") {
+			t.Fatalf("could not read fixture id from %q", out)
+		}
+		return id
+	}
+	run("init")
+	build := file("FIXTURE build", "workflow: gh-issue\nstage: build\ngh: drellem2/pogo#203\n")
+	triage := file("FIXTURE triage", "workflow: gh-issue\nstage: triage\ngh: drellem2/pogo#203\n")
+	review := file("FIXTURE review", "workflow: gh-issue\nstage: review\ngh: drellem2/pogo#203\nreviews: "+build+"\n")
+	run("claim", build)
+	run("claim", triage)
+	run("done", triage, "--successor", build)
+	run("claim", review)
+	run("done", review)
+
+	open := func(string, int) (IssueState, error) { return StateOpen, nil }
+	carriers, err := (MGSource{Root: root}).Carriers()
+	if err != nil {
+		t.Fatalf("Carriers: %v", err)
+	}
+	rep := Detect(carriers, open)
+	if len(rep.Misses) != 0 || len(rep.InFlight) != 2 {
+		t.Fatalf("build still claimed: want triage+review in flight and no miss, got %+v", rep)
+	}
+
+	// The build merges but the issue is left open: now it is a miss, and the
+	// carriers that handed off to it are audited again.
+	run("done", build)
+	carriers, err = (MGSource{Root: root}).Carriers()
+	if err != nil {
+		t.Fatalf("Carriers: %v", err)
+	}
+	rep = Detect(carriers, open)
+	if len(rep.InFlight) != 0 || len(rep.Misses) != 3 {
+		t.Fatalf("build done + issue open: want 3 misses, got %+v", rep)
+	}
+}

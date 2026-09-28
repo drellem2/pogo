@@ -145,6 +145,54 @@ type Carrier struct {
 	// human declares this issue is open deliberately. Empty for the vast
 	// majority of carriers. A carrier that sets it is reported but never mailed.
 	DeclaredOpenReason string
+	// Chain is every item reachable from this carrier through its declared
+	// hand-offs — `successor:` links (written by `mg done --successor`) and,
+	// for a review carrier, the build named on its `reviews:` line — followed
+	// transitively, with the status each had when the source read it. Empty
+	// for a carrier that hands off to nothing, which is the ordinary case for
+	// a build. See KindInFlight for what the detector does with it (mg-47df3).
+	Chain []Link
+}
+
+// Link is one item on a carrier's hand-off chain.
+type Link struct {
+	// ID is the linked item, e.g. "mg-4b01".
+	ID string
+	// Via names how it was reached: "successor of mg-xxxx" or
+	// "reviewed by mg-xxxx". Carried so a report can say WHY a carrier counts
+	// as in flight rather than asking the reader to trust it.
+	Via string
+	// Status is the linked item's mg status. Empty when Err is set.
+	Status string
+	// Err is why the link could not be read (a successor id naming nothing, an
+	// unreadable item). An unreadable link never makes a carrier in flight.
+	Err string
+}
+
+// Live reports whether the linked item is still being worked. Only the
+// statuses that mean "someone will act on this" count: done and archived are
+// terminal, and shelved, unknown and unreadable links fail toward noticing — a
+// carrier whose only successor was shelved has nobody left to close its issue.
+func (l Link) Live() bool {
+	if l.Err != "" {
+		return false
+	}
+	switch strings.ToLower(l.Status) {
+	case "available", "claimed", "pending":
+		return true
+	}
+	return false
+}
+
+// LiveLink returns the first link on the chain that is still in flight, and
+// whether there is one.
+func (c Carrier) LiveLink() (Link, bool) {
+	for _, l := range c.Chain {
+		if l.Live() {
+			return l, true
+		}
+	}
+	return Link{}, false
 }
 
 // Ref renders the canonical `owner/repo#n` form used in the `gh:` line, in mail
@@ -181,6 +229,22 @@ const (
 	// KindDeclaredOpen is a carrier whose issue is open and which carries a
 	// `gh-open:` declaration explaining why. Reported, never mailed.
 	KindDeclaredOpen FindingKind = "declared_open"
+	// KindInFlight is a done carrier that handed its issue on to an item that
+	// is still being worked: a triage retired with `mg done --successor=<build>`
+	// while the build runs, or a review ticket closed by its reviewer while the
+	// build it reviewed is still claimed (mg-47df3).
+	//
+	// On the gh-issue track that is the NORMAL state, not a miss: the issue
+	// closes when the BUILD merges, so the live successor — not the retired
+	// carrier — owns the close. Reporting these as misses put five false
+	// findings for pogo#147/#203/#204 and macguffin#39 in one notice, and a
+	// detector whose findings are routinely wrong is read as noise.
+	//
+	// The check does not go away, it moves to the end of the chain: once every
+	// link is terminal the carrier is audited as before, so a chain whose LAST
+	// carrier is done while the issue is open is still a miss. Reported, never
+	// mailed, and no lookup is spent on it.
+	KindInFlight FindingKind = "in_flight"
 )
 
 // Finding is one carrier's verdict.
@@ -210,11 +274,18 @@ type Report struct {
 	Blocked []Finding
 	// DeclaredOpen are carriers open on purpose, per an explicit `gh-open:` line.
 	DeclaredOpen []Finding
+	// InFlight are done carriers whose hand-off chain is still live, so the
+	// issue is not theirs to close yet. See KindInFlight. Never actionable.
+	InFlight []Finding
 	// Scanned is the number of carriers evaluated, so a report can distinguish
 	// "checked 12, all clean" from "checked 0 because the store read failed" —
 	// two very different facts that both otherwise render as "no findings".
+	// It includes InFlight carriers, which were evaluated but not looked up.
 	Scanned int
 }
+
+// lookedUp is the number of carriers whose issue state was actually asked for.
+func (r Report) lookedUp() int { return r.Scanned - len(r.InFlight) }
 
 // Actionable reports whether the scan found anything a human must look at.
 // Indeterminate and blocked both count: a detector that cannot see is itself
@@ -238,8 +309,12 @@ func (r Report) Actionable() bool {
 // and a no-verdict carrier are the same observation, and claiming instrument
 // failure from a sample of one would be inventing the distinction rather than
 // detecting it.
+//
+// Only carriers that were looked up count: an in-flight carrier asked the
+// instrument nothing, so it can neither witness nor mask its failure.
 func (r Report) InstrumentFailure() bool {
-	return r.Scanned >= 2 && len(r.Blocked)+len(r.Indeterminate) == r.Scanned
+	n := r.lookedUp()
+	return n >= 2 && len(r.Blocked)+len(r.Indeterminate) == n
 }
 
 // FailureClasses lists the distinct causes behind the no-verdict findings, in a
@@ -275,7 +350,8 @@ type LookupFunc func(repo string, number int) (IssueState, error)
 //
 // A carrier whose status does not claim completion is skipped entirely — the
 // detector audits a claim of doneness, and a carrier still in flight has made
-// no such claim.
+// no such claim. A done carrier whose hand-off chain is still live is reported
+// as InFlight without a lookup: its successor owns the close (mg-47df3).
 func Detect(carriers []Carrier, lookup LookupFunc) Report {
 	var rep Report
 	for _, c := range carriers {
@@ -283,6 +359,14 @@ func Detect(carriers []Carrier, lookup LookupFunc) Report {
 			continue
 		}
 		rep.Scanned++
+
+		if l, ok := c.LiveLink(); ok {
+			rep.InFlight = append(rep.InFlight, Finding{
+				Carrier: c, Kind: KindInFlight,
+				Detail: fmt.Sprintf("%s (%s) is %s", l.ID, l.Via, l.Status),
+			})
+			continue
+		}
 
 		state, err := lookup(c.Repo, c.Number)
 		switch {
@@ -324,7 +408,7 @@ func Detect(carriers []Carrier, lookup LookupFunc) Report {
 	// Stable order so repeated scans of an unchanged store produce byte-identical
 	// reports — a report that reshuffles looks like it changed, and a human
 	// watching for change would learn to stop reading it.
-	for _, s := range [][]Finding{rep.Misses, rep.Indeterminate, rep.Blocked, rep.DeclaredOpen} {
+	for _, s := range [][]Finding{rep.Misses, rep.Indeterminate, rep.Blocked, rep.DeclaredOpen, rep.InFlight} {
 		sort.SliceStable(s, func(i, j int) bool { return s[i].Carrier.ID < s[j].Carrier.ID })
 	}
 	return rep
@@ -410,7 +494,17 @@ func (r Report) Render() string {
 			"absence this detector exists to catch. Re-read them occasionally.\n\n")
 	}
 
-	if !r.Actionable() && len(r.DeclaredOpen) == 0 {
+	if len(r.InFlight) > 0 {
+		fmt.Fprintf(&b, "in flight — %d done carrier(s) handed on to an item still being worked, not counted as misses:\n\n", len(r.InFlight))
+		for _, f := range r.InFlight {
+			fmt.Fprintf(&b, "  %s  %s\n      %s\n\n", f.Carrier.ID, f.Carrier, f.Detail)
+		}
+		b.WriteString("On the gh-issue track the issue closes when the BUILD merges, so a retired\n" +
+			"triage or review carrier is the normal state while its build runs. Once every\n" +
+			"item on the chain is done or archived, the carrier is audited again.\n\n")
+	}
+
+	if !r.Actionable() && len(r.DeclaredOpen) == 0 && len(r.InFlight) == 0 {
 		fmt.Fprintf(&b, "no teardown misses: %d done gh-issue carrier(s) scanned, every issue confirmed closed.\n", r.Scanned)
 		return b.String()
 	}

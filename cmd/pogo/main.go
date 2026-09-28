@@ -1169,7 +1169,7 @@ This command REPORTS ONLY. It never closes an issue and never comments —
 closing an external issue is outward-facing and stays human-gated. Its job is to
 make the miss impossible to sit on, not to post on anyone's behalf.
 
-Findings come in three kinds:
+Findings come in these kinds:
 
   teardown miss   a done carrier whose issue is still OPEN, with no declaration
                   that it is open on purpose. The finding this exists to produce.
@@ -1189,6 +1189,14 @@ Findings come in three kinds:
                   ` + "`gh-open: <reason>`" + ` line in its body. Listed, but not a miss
                   and not an alert — a detector that cries wolf gets muted long
                   before the run that matters.
+  in flight       a done carrier that handed its issue on to an item still being
+                  worked (available, claimed or pending): a triage retired with
+                  ` + "`mg done --successor=<build>`" + `, or a review ticket whose
+                  ` + "`reviews:`" + ` build is still claimed. The issue closes when the
+                  build merges, so the live item owns the close. Listed, not a
+                  miss, and not looked up. Once every item on the chain is done
+                  or archived the carrier is audited again, so a build done with
+                  its issue open is still a miss (mg-47df3).
 
 A run in which NO carrier reached a verdict is reported as a SUSPECTED
 INSTRUMENT FAILURE rather than as a result, and exits ` + fmt.Sprint(exitInstrumentFailure) + `. Twelve carriers
@@ -1271,7 +1279,10 @@ something" from "the check could not run" without parsing the report).`,
 					"not_checked":   conv(rep.Blocked),
 					"misses":        conv(rep.Misses),
 					"declared_open": conv(rep.DeclaredOpen),
-					"actionable":    rep.Actionable(),
+					// Done carriers whose successor (or reviewed build) is still
+					// being worked: the live item owns the close (mg-47df3).
+					"in_flight":  conv(rep.InFlight),
+					"actionable": rep.Actionable(),
 					// A machine consumer must be able to tell a result from a
 					// run that measured nothing WITHOUT counting findings —
 					// counting is exactly what made "12 indeterminate" read as

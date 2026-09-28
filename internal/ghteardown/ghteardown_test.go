@@ -260,3 +260,100 @@ func TestUnresolvableRefIsIndeterminate(t *testing.T) {
 		t.Fatalf("an unresolvable ref must surface as indeterminate, got %+v", rep)
 	}
 }
+
+// mg-47df3: a triage retired with `mg done --successor=<build>` while the build
+// is still being worked is the NORMAL state on the gh-issue track — the build
+// owns the close. It is reported as in flight, not as a miss, and no lookup is
+// spent on it.
+func TestDoneTriageWithALiveBuildIsInFlightNotAMiss(t *testing.T) {
+	triage := Carrier{
+		ID: "mg-7a1a", Status: "done", Stage: "triage", Repo: "drellem2/pogo", Number: 203,
+		Chain: []Link{{ID: "mg-b01d", Via: "successor of mg-7a1a", Status: "claimed"}},
+	}
+	review := Carrier{
+		ID: "mg-4e71", Status: "done", Stage: "review", Repo: "drellem2/macguffin", Number: 39,
+		Chain: []Link{{ID: "mg-b02d", Via: "reviewed by mg-4e71", Status: "claimed"}},
+	}
+	rep := Detect([]Carrier{triage, review}, func(string, int) (IssueState, error) {
+		t.Fatal("lookup must not be spent on a carrier whose successor owns the close")
+		return StateUnknown, nil
+	})
+	if len(rep.Misses) != 0 || rep.Actionable() {
+		t.Fatalf("a done carrier with a live successor is not a miss: %+v", rep)
+	}
+	if len(rep.InFlight) != 2 || rep.Scanned != 2 {
+		t.Fatalf("want both carriers reported in flight, got %+v", rep)
+	}
+	if rep.InstrumentFailure() {
+		t.Error("carriers that were never looked up cannot witness an instrument failure")
+	}
+	out := rep.Render()
+	for _, want := range []string{"in flight", "mg-b01d (successor of mg-7a1a) is claimed", "mg-b02d (reviewed by mg-4e71) is claimed"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "confirmed closed") {
+		t.Errorf("an in-flight chain was reported as confirmed closed:\n%s", out)
+	}
+}
+
+// The other half of mg-47df3: the check moves to the END of the chain, it does
+// not go away. Build done + issue open is a miss, and so is the triage whose
+// every successor is terminal (or unreadable, or shelved — nobody is left to
+// close the issue).
+func TestTerminalChainIsStillAMiss(t *testing.T) {
+	build := Carrier{ID: "mg-b01d", Status: "done", Stage: "merge", Repo: "drellem2/pogo", Number: 203}
+	cases := []Carrier{
+		build,
+		{ID: "mg-7a1a", Status: "done", Repo: "drellem2/pogo", Number: 203,
+			Chain: []Link{{ID: "mg-b01d", Via: "successor of mg-7a1a", Status: "done"}}},
+		{ID: "mg-7a1b", Status: "done", Repo: "drellem2/pogo", Number: 203,
+			Chain: []Link{{ID: "mg-b01e", Via: "successor of mg-7a1b", Status: "archived"}}},
+		{ID: "mg-7a1c", Status: "done", Repo: "drellem2/pogo", Number: 203,
+			Chain: []Link{{ID: "mg-b01f", Via: "successor of mg-7a1c", Status: "shelved"}}},
+		{ID: "mg-7a1d", Status: "done", Repo: "drellem2/pogo", Number: 203,
+			Chain: []Link{{ID: "mg-dead", Via: "successor of mg-7a1d", Err: "no such item"}}},
+	}
+	for _, c := range cases {
+		rep := Detect([]Carrier{c}, lookupTable(t, map[string]IssueState{"drellem2/pogo#203": StateOpen}))
+		if len(rep.Misses) != 1 || len(rep.InFlight) != 0 {
+			t.Errorf("%s (chain %+v): want a miss, got %+v", c.ID, c.Chain, rep)
+		}
+	}
+}
+
+// A chain with a live item ANYWHERE on it is in flight: triage -> gated (done)
+// -> build (claimed).
+func TestLiveLinkDeeperInTheChainCounts(t *testing.T) {
+	c := Carrier{ID: "mg-7a1a", Status: "done", Repo: "drellem2/pogo", Number: 147,
+		Chain: []Link{
+			{ID: "mg-9a7e", Via: "successor of mg-7a1a", Status: "done"},
+			{ID: "mg-b01d", Via: "successor of mg-9a7e", Status: "available"},
+		}}
+	rep := Detect([]Carrier{c}, func(string, int) (IssueState, error) { return StateOpen, nil })
+	if len(rep.InFlight) != 1 || len(rep.Misses) != 0 {
+		t.Fatalf("want in flight via mg-b01d, got %+v", rep)
+	}
+	if !strings.Contains(rep.InFlight[0].Detail, "mg-b01d") {
+		t.Errorf("detail = %q", rep.InFlight[0].Detail)
+	}
+}
+
+// In-flight carriers do not count toward the instrument-failure denominator
+// either way: two blocked lookups next to one in-flight carrier is still a run
+// that measured nothing.
+func TestInFlightDoesNotMaskAnInstrumentFailure(t *testing.T) {
+	carriers := []Carrier{
+		{ID: "mg-0001", Status: "done", Repo: "drellem2/pogo", Number: 1},
+		{ID: "mg-0002", Status: "done", Repo: "drellem2/pogo", Number: 2},
+		{ID: "mg-0003", Status: "done", Repo: "drellem2/pogo", Number: 3,
+			Chain: []Link{{ID: "mg-b01d", Via: "successor of mg-0003", Status: "claimed"}}},
+	}
+	rep := Detect(carriers, func(string, int) (IssueState, error) {
+		return StateUnknown, errors.New("dial tcp: lookup api.github.com: no such host")
+	})
+	if !rep.InstrumentFailure() {
+		t.Errorf("all looked-up carriers blocked must still read as instrument failure: %+v", rep)
+	}
+}

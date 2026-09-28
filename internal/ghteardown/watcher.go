@@ -309,6 +309,7 @@ func (w *Watcher) sample(now time.Time) {
 		"indeterminate_count": len(rep.Indeterminate),
 		"blocked_count":       len(rep.Blocked),
 		"declared_open_count": len(rep.DeclaredOpen),
+		"in_flight_count":     len(rep.InFlight),
 		"scanned":             rep.Scanned,
 		"notified":            strings.Join(recipients, ","),
 		"escalated":           stalled,

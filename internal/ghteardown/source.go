@@ -24,6 +24,7 @@ const (
 	keyStage    = "stage"
 	keyGH       = "gh"
 	keyGHOpen   = "gh-open"
+	keyReviews  = "reviews"
 
 	workflowGHIssue = "gh-issue"
 )
@@ -44,6 +45,29 @@ const (
 // position would silently stop recognising exactly the carriers under active
 // management — the ones that matter most.
 func ParseBody(body string) (workflow, stage, ghRef, declaredOpen string, ok bool) {
+	seen := carrierLines(body)
+	if !strings.EqualFold(seen[keyWorkflow], workflowGHIssue) {
+		return "", "", "", "", false
+	}
+	return seen[keyWorkflow], seen[keyStage], seen[keyGH], seen[keyGHOpen], true
+}
+
+// ParseReviews returns the `reviews:` line of a gh-issue carrier body — the id
+// of the BUILD a review ticket covers — under the same rules as ParseBody. Empty
+// for a body that is not a carrier or names no build.
+func ParseReviews(body string) string {
+	seen := carrierLines(body)
+	if !strings.EqualFold(seen[keyWorkflow], workflowGHIssue) {
+		return ""
+	}
+	// First word only: the line is an id, and anything after it is commentary.
+	if f := strings.Fields(seen[keyReviews]); len(f) > 0 {
+		return f[0]
+	}
+	return ""
+}
+
+func carrierLines(body string) map[string]string {
 	seen := map[string]string{}
 	for _, line := range strings.Split(body, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -60,17 +84,13 @@ func ParseBody(body string) (workflow, stage, ghRef, declaredOpen string, ok boo
 			continue
 		}
 		switch key {
-		case keyWorkflow, keyStage, keyGH, keyGHOpen:
+		case keyWorkflow, keyStage, keyGH, keyGHOpen, keyReviews:
 			if _, dup := seen[key]; !dup {
 				seen[key] = val
 			}
 		}
 	}
-
-	if !strings.EqualFold(seen[keyWorkflow], workflowGHIssue) {
-		return "", "", "", "", false
-	}
-	return seen[keyWorkflow], seen[keyStage], seen[keyGH], seen[keyGHOpen], true
+	return seen
 }
 
 // ParseRef splits a `gh:` ref of the form owner/repo#number.
@@ -104,6 +124,9 @@ type mgShowItem struct {
 	Title  string `json:"title"`
 	Status string `json:"status"`
 	Body   string `json:"body"`
+	// Successor is what `mg done --successor` recorded (mg list/show emit it
+	// parsed from the successor:<id> tags).
+	Successor []string `json:"successor"`
 }
 
 // MGSource reads gh-issue carriers out of a macguffin store by shelling out to
@@ -215,6 +238,7 @@ func (s MGSource) Statuses() []string {
 // was built to catch, reproduced inside itself.
 func (s MGSource) Carriers() ([]Carrier, error) {
 	var out []Carrier
+	cache := map[string]mgShowItem{}
 	for _, status := range s.Statuses() {
 		listed, err := s.run("list", "--status="+status, "--json")
 		if err != nil {
@@ -232,7 +256,7 @@ func (s MGSource) Carriers() ([]Carrier, error) {
 			if item.ID == "" {
 				continue
 			}
-			c, ok, err := s.carrier(item.ID)
+			c, ok, err := s.carrier(item.ID, cache)
 			if err != nil {
 				return nil, err
 			}
@@ -244,15 +268,73 @@ func (s MGSource) Carriers() ([]Carrier, error) {
 	return out, nil
 }
 
-// carrier loads one item and decides whether it is a gh-issue carrier.
-func (s MGSource) carrier(id string) (Carrier, bool, error) {
+// show reads one item, memoised for the duration of one Carriers call so a
+// build named by both a triage and a review is read once.
+func (s MGSource) show(id string, cache map[string]mgShowItem) (mgShowItem, error) {
+	if item, ok := cache[id]; ok {
+		return item, nil
+	}
 	raw, err := s.run("show", id, "--json")
 	if err != nil {
-		return Carrier{}, false, fmt.Errorf("reading work item %s: %w", id, err)
+		return mgShowItem{}, fmt.Errorf("reading work item %s: %w", id, err)
 	}
 	var item mgShowItem
 	if err := json.Unmarshal(raw, &item); err != nil {
-		return Carrier{}, false, fmt.Errorf("parsing work item %s: %w", id, err)
+		return mgShowItem{}, fmt.Errorf("parsing work item %s: %w", id, err)
+	}
+	cache[id] = item
+	return item, nil
+}
+
+// maxChain bounds a chain walk. Real chains are two or three links (triage ->
+// gated -> build); the bound exists so a malformed store cannot make one
+// sample unbounded.
+const maxChain = 16
+
+// chain walks a carrier's hand-offs: its successors and, for a review carrier,
+// the build its `reviews:` line names — then each of those items' successors,
+// transitively (mg-47df3).
+//
+// Only CARRIER state is read and nothing is inferred: a link that cannot be
+// read is recorded with its error rather than dropped or failing the scan,
+// and Link.Live treats it as not in flight — so a rotted successor id makes
+// the carrier audited as before, never quietly excused.
+func (s MGSource) chain(item mgShowItem, cache map[string]mgShowItem) []Link {
+	type next struct{ id, via string }
+	var queue []next
+	for _, id := range item.Successor {
+		queue = append(queue, next{id, "successor of " + item.ID})
+	}
+	if r := ParseReviews(item.Body); r != "" {
+		queue = append(queue, next{r, "reviewed by " + item.ID})
+	}
+	seen := map[string]bool{item.ID: true}
+	var out []Link
+	for len(queue) > 0 && len(out) < maxChain {
+		n := queue[0]
+		queue = queue[1:]
+		if n.id == "" || seen[n.id] {
+			continue
+		}
+		seen[n.id] = true
+		linked, err := s.show(n.id, cache)
+		if err != nil {
+			out = append(out, Link{ID: n.id, Via: n.via, Err: err.Error()})
+			continue
+		}
+		out = append(out, Link{ID: n.id, Via: n.via, Status: linked.Status})
+		for _, id := range linked.Successor {
+			queue = append(queue, next{id, "successor of " + n.id})
+		}
+	}
+	return out
+}
+
+// carrier loads one item and decides whether it is a gh-issue carrier.
+func (s MGSource) carrier(id string, cache map[string]mgShowItem) (Carrier, bool, error) {
+	item, err := s.show(id, cache)
+	if err != nil {
+		return Carrier{}, false, err
 	}
 
 	_, stage, ghRef, declaredOpen, ok := ParseBody(item.Body)
@@ -267,11 +349,12 @@ func (s MGSource) carrier(id string) (Carrier, bool, error) {
 		// than vanishing.
 		return Carrier{
 			ID: item.ID, Title: item.Title, Status: item.Status, Stage: stage,
-			Repo: ghRef, Number: 0,
+			Repo: ghRef, Number: 0, Chain: s.chain(item, cache),
 		}, true, nil
 	}
 	return Carrier{
 		ID: item.ID, Title: item.Title, Status: item.Status, Stage: stage,
 		Repo: repo, Number: number, DeclaredOpenReason: declaredOpen,
+		Chain: s.chain(item, cache),
 	}, true, nil
 }
