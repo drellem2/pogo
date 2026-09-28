@@ -166,6 +166,31 @@ var frictionScanProperties = []struct {
 			"across all of them is a different problem from the one being fixed.",
 	},
 	{
+		what: "a count restricted to user/assistant message content",
+		re:   regexp.MustCompile(`select\(\.type == "user" or \.type == "assistant"\)`),
+		why: "Every transcript carries the harness system prompt as an attachment " +
+			"record, and it contains \"frustration with Claude Code\" and \"confuse " +
+			"the two\". A raw grep therefore hits every file — 43 of 44 on the " +
+			"2026-09-28 sweep, 45 of 46 re-measured — and the ranking is session " +
+			"length plus boilerplate. Counting in message content took the same " +
+			"corpus to 13 of 46 (mg-c6097).",
+	},
+	{
+		what: "the hit rate with its denominator, and the raw rate as its control",
+		re:   regexp.MustCompile(`sessions with hits: %d of %d by content \| raw %d of %d`),
+		why: "A hit that every session has carries no information, and nothing " +
+			"about a ranking shows that. Printing hits-of-scanned makes an ~100% " +
+			"rate visible; the raw rate beside it is the positive control that " +
+			"the pattern and grep still fire at all (mg-c6097).",
+	},
+	{
+		what: "a warning when ~all sessions still hit after exclusion",
+		re:   regexp.MustCompile(`WARNING: ~all sessions still hit after exclusion`),
+		why: "If new boilerplate reaches message content, the content rate climbs " +
+			"back to ~100% and the scan is uninformative again; it must say so " +
+			"rather than leave the reader to notice (mg-c6097).",
+	},
+	{
 		what: "that the output is a candidate list, not a finding",
 		re:   regexp.MustCompile(`(?i)candidate list, not a finding`),
 		why: "The corrected scan's first run yielded a real Daniel complaint AND a " +

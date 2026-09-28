@@ -195,11 +195,28 @@ const (
 	plantedHits    = 9
 	crewSessions   = 12 // hits 20..31 — every one above the plant
 	workerSessions = 20 // hits 1..8 — every one below the plant
+	quietSessions  = 10 // worker sessions whose only "hit" is the system prompt
 )
 
+// systemPromptRecord stands in for the harness system prompt every real
+// transcript carries as an attachment record. The real one contains both
+// phrases (mg-c6097), so a raw grep hits every session through it and a
+// content-only count must not.
+const systemPromptRecord = `{"type":"attachment","attachment":{"type":"prompt_snapshot","content":"...frustration with Claude Code... do not confuse the two — ScheduleWakeup..."}}`
+
+// userRecord and assistantRecord wrap text the way Claude Code's JSONL does.
+func userRecord(text string) string {
+	return `{"type":"user","message":{"role":"user","content":"` + text + `"}}`
+}
+
+func assistantRecord(text string) string {
+	return `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + text + `"}]}}`
+}
+
 // writeCorpus builds a $HOME whose ~/.claude/projects looks like a 24h window
-// of fleet sessions, and returns the home directory. Sessions are one JSONL
-// line per hit; the scan counts matching LINES, so the count is exact.
+// of fleet sessions, and returns the home directory. Each session opens with
+// the system-prompt attachment record, then one message record per hit; the
+// scan counts matching lines of message content, so the count is exact.
 func writeCorpus(t *testing.T) string {
 	t.Helper()
 	// A short root, deliberately. BSD xargs -I{} caps the assembled command
@@ -229,23 +246,30 @@ func writeCorpus(t *testing.T) string {
 		}
 	}
 	hitLines := func(n int, last string) []string {
-		out := make([]string, 0, n)
+		out := []string{systemPromptRecord}
 		for i := 0; i < n-1; i++ {
-			out = append(out, `{"text":"this step was confusing"}`)
+			if i%2 == 0 {
+				out = append(out, userRecord("this step was confusing"))
+			} else {
+				out = append(out, assistantRecord("this step was confusing"))
+			}
 		}
 		return append(out, last)
 	}
 
 	for i := 0; i < crewSessions; i++ {
-		write(fmt.Sprintf("agents-crew%02d", i), hitLines(20+i, `{"text":"confusing"}`))
+		write(fmt.Sprintf("agents-crew%02d", i), hitLines(20+i, assistantRecord("confusing")))
 	}
 	for i := 0; i < workerSessions; i++ {
-		write(fmt.Sprintf("polecats-w%02d", i), hitLines(1+i%8, `{"text":"confusing"}`))
+		write(fmt.Sprintf("polecats-w%02d", i), hitLines(1+i%8, userRecord("confusing")))
+	}
+	for i := 0; i < quietSessions; i++ {
+		write(fmt.Sprintf("polecats-q%02d", i), []string{systemPromptRecord, userRecord("all green, merged")})
 	}
 	// The finding. First-person, product-shaped, and invisible to a crew-weighted
 	// sample — the class of hit this source exists to catch.
 	write(plantedSession, hitLines(plantedHits,
-		`{"text":"I had to manually re-stamp the claim because pogo schedule ack said stale token — annoying"}`))
+		assistantRecord("I had to manually re-stamp the claim because pogo schedule ack said stale token — annoying")))
 	return home
 }
 
@@ -375,7 +399,17 @@ func TestPMFrictionScanSurfacesAWorkerSessionTheMergedRankingBuries(t *testing.T
 					"if it is not first the classes are not being ranked separately."), indent(newOut))
 	}
 
-	// And the denominator is on the output, without a further command.
+	// And the denominator is on the output, without a further command. The
+	// counts are of message content, so they come from the fixture, not from
+	// the old raw ranking — that one also counts every session's system-prompt
+	// record (mg-c6097).
+	crewHits, workerHits = 0, plantedHits
+	for i := 0; i < crewSessions; i++ {
+		crewHits += 20 + i
+	}
+	for i := 0; i < workerSessions; i++ {
+		workerHits += 1 + i%8
+	}
 	wantSplit := fmt.Sprintf("polecat %d in %d sessions", workerHits, workerSessions+1)
 	if !strings.Contains(newOut, wantSplit) {
 		t.Errorf("the scan did not print the worker denominator %q.\n%s\noutput:\n%s",
@@ -389,5 +423,30 @@ func TestPMFrictionScanSurfacesAWorkerSessionTheMergedRankingBuries(t *testing.T
 			crewHits, crewSessions, indent(
 				"Both classes print, always. A missing line and a zero must not look alike."),
 			indent(newOut))
+	}
+
+	// The hit rate prints with its denominator, and the raw rate beside it is
+	// the control: every session carries the system-prompt record, so raw is
+	// all of them, while the quiet sessions drop out by content (mg-c6097).
+	total := crewSessions + workerSessions + 1 + quietSessions
+	wantRate := fmt.Sprintf("sessions with hits: %d of %d by content | raw %d of %d",
+		total-quietSessions, total, total, total)
+	if !strings.Contains(newOut, wantRate) {
+		t.Errorf("the scan did not print the hit rate %q.\n%s\noutput:\n%s", wantRate, indent(
+			"A raw grep hits every transcript through the harness system prompt, so a "+
+				"ranking with no rate beside it cannot show that every row is positive."),
+			indent(newOut))
+	}
+	if strings.Contains(newOut, "WARNING") {
+		t.Errorf("the scan warned over a corpus whose content rate is well under 100%%.\n%s",
+			indent(newOut))
+	}
+	if indexOfSession(merged, "polecats-q00") < 0 {
+		t.Errorf("fixture premise not met: a quiet session is absent from the old raw ranking, " +
+			"so the system-prompt record is not what a raw grep hits")
+	}
+	if at := indexOfSession(workerList, "polecats-q00"); at >= 0 {
+		t.Errorf("a session whose only match is the system prompt ranked #%d of the worker list.\n%s",
+			at+1, indent(newOut))
 	}
 }

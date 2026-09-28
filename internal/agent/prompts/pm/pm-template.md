@@ -677,9 +677,41 @@ means no release exists.
           xargs -0 -r -I{} find {} -name '*.jsonl' -newermt "$since" 2>/dev/null)
   echo "scanned $(printf '%s\n' "$files" | grep -c .) transcripts since '$since'"
 
-  ranked=$(printf '%s\n' "$files" | grep -v '^$' | tr '\n' '\0' |
-           xargs -0 -r grep -icE "$pat" 2>/dev/null |
-           awk -F: '$2>0 {print $2"\t"$1}' | sort -rn | sed "s|$proj/$slug-||")
+  # Count in MESSAGE CONTENT only (mg-c6097). Every transcript carries the
+  # harness system prompt as an `attachment` record, and that prompt contains
+  # "frustration with Claude Code" and "confuse the two", so a raw grep hits
+  # every file. The grep pre-filter keeps jq off the non-matching lines.
+  body='fromjson? | select(.type == "user" or .type == "assistant") | .message.content
+    | if type == "string" then . else .[]?
+      | if .type == "text" then .text
+        elif .type == "tool_use" then (.input | tojson)
+        elif .type == "tool_result" then (.content | if type == "string" then .
+             else ([.[]? | .text? // empty] | join("\n")) end)
+        else empty end end'
+  command -v jq >/dev/null || echo "WARNING: no jq — every content count below reads 0"
+
+  # One row per transcript: raw hits, content hits, path (dir prefix stripped).
+  rows=$(printf '%s\n' "$files" | while IFS= read -r f; do
+           [ -n "$f" ] || continue
+           r=$(grep -ciE -- "$pat" "$f")
+           c=$(grep -ihE -- "$pat" "$f" | jq -rR "$body" 2>/dev/null | grep -icE -- "$pat")
+           printf '%s\t%s\t%s\n' "$r" "$c" "${f#"$proj/$slug-"}"
+         done)
+  ranked=$(printf '%s\n' "$rows" | awk -F'\t' '$2 > 0 {print $2"\t"$3}' | sort -rn)
+
+  # The positive control and the hit rate. The raw count is the control: the
+  # system prompt guarantees a raw hit in (nearly) every transcript, so raw
+  # well below the scanned count means grep or the pattern is broken. The
+  # content count is the one to read; if it is near the scanned count too, the
+  # exclusion has stopped working and every row is positive again.
+  printf '%s\n' "$rows" | awk -F'\t' '
+    $3 != "" {n++; if ($1 > 0) r++; if ($2 > 0) c++}
+    END {printf "sessions with hits: %d of %d by content | raw %d of %d (control: expect ~all)\n",
+                c, n, r, n
+         if (n > 0 && c * 10 >= n * 9)
+           print "WARNING: ~all sessions still hit after exclusion — boilerplate is leaking into the count and the ranking carries no information"
+         if (n > 0 && r * 2 < n)
+           print "WARNING: under half the sessions hit even raw — the system prompt should hit ~all; grep or the pattern is broken"}'
 
   # Hits per class. BOTH lines print even at zero, so "the polecats were quiet"
   # and "the polecat half of the scan broke" stay distinguishable.
@@ -695,11 +727,37 @@ means no release exists.
   ```
 
   Each ranking is a **candidate list, not a finding**. Read the top of the
-  **{{.Worker}}** list in the same shell (`$pat` is still set):
+  **{{.Worker}}** list in the same shell (`$pat` and `$body` are still set),
+  through the same content filter, so the boilerplate the count excluded does
+  not come back when you read:
 
   ```bash
-  grep -ihoE "($pat).{0,200}" "$proj/$slug-polecats-<id>/<session>.jsonl"
+  grep -ihE -- "$pat" "$proj/$slug-polecats-<id>/<session>.jsonl" |
+    jq -rR "$body" | grep -ioE -- "($pat).{0,200}"
   ```
+
+  **Always pass an absolute path, or put `--` first.** Every session dir name
+  starts with `-` (`-Users-…-polecats-<id>`), so after a `cd "$proj"` a
+  relative `grep … -Users-…/x.jsonl` or `ls -Users-…` parses the dir as a
+  bundle of option letters and fails or answers a different question. The
+  commands above use `$proj/…` for that reason.
+
+  **Why the count reads message content, not the file (mg-c6097).** Every
+  transcript carries the harness's own system prompt as an `attachment`
+  record, and that prompt contains *"frustration with Claude Code"* (a tool
+  description) and *"confuse the two"*. So `frustrat` and `confus` hit **every
+  transcript** before a single word of the session is read: on the 2026-09-28
+  morning sweep 43 of 44 {{.Worker}} transcripts "hit", the ranking was session
+  length plus boilerplate, and the top 5 held only quoted material. A row that
+  is positive in every case carries no information. Over a 16h window the same
+  corpus went **45 of 46 raw → 13 of 46 by content**. That is why the scan
+  prints both rates: the raw one is the positive control (it should stay ~all,
+  because the boilerplate is always there; if it drops, grep or the pattern
+  broke), and the content one is the reading (if it climbs back to ~all, new
+  boilerplate has found its way into message content — a tool description, a
+  standard kickoff — and the scan says so). Excluding the two known phrases
+  by string would have worked only until the harness reworded its prompt;
+  selecting `user`/`assistant` records is what survives that.
 
   **Why the two classes are ranked separately, and why you read the
   {{.Worker}} one (mg-08f7).** Until that ticket this scan emitted one merged
