@@ -290,12 +290,12 @@ func (w *Watcher) sampleNoFire(now time.Time) {
 
 	if mail {
 		subject := noFireSubject(rep)
-		if err := w.mail(mailTo, mailFrom, subject, noFireBody(rep, notice, w.noFireMaxNotices, w.schedule)); err != nil {
+		if err := w.mail(w.mailTo, mailFrom, subject, noFireBody(rep, notice, w.noFireMaxNotices, w.schedule)); err != nil {
 			details["mail_error"] = err.Error()
 			log.Printf("pogod: no-fire notice (%s) could not be mailed: %v", rep.Summary(), err)
 		} else {
 			log.Printf("pogod: NO-FIRE — %s; notice %d/%d mailed to %s",
-				rep.Summary(), notice, w.noFireMaxNotices, mailTo)
+				rep.Summary(), notice, w.noFireMaxNotices, w.mailTo)
 		}
 	}
 

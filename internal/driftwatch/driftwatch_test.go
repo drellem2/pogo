@@ -113,6 +113,44 @@ func TestDetectsDriftAndMailsHuman(t *testing.T) {
 	}
 }
 
+// TestNoticesFollowMailTo: every notice goes where [agents] escalation_box
+// points, not to a hard-coded `human` (drellem2/pogo#148). The mirror-drift and
+// revision-staleness notices are both sampled in one Check; the empty arm is the
+// positive control that the default is still `human`.
+func TestNoticesFollowMailTo(t *testing.T) {
+	for _, tc := range []struct{ mailTo, want string }{
+		{"", "human"},
+		{"daniel-phone", "daniel-phone"},
+	} {
+		rec := &recorder{}
+		calls := 0
+		check, _ := driftFor(map[string]bool{"pogod": true}, &calls)
+		now := mustTime(t, measuredAt)
+
+		w := New(baseCfg(), Options{
+			Mirrors: []reconcile.Mirror{
+				{Name: "pogod", Source: "/src/pogod", Target: "/host/pogod", Label: "com.pogo.pogod"},
+			},
+			Check:    check,
+			Revision: fixedRevision(staleRevisionSHA, mustTime(t, staleCommitTime)),
+			Mail:     rec.mail,
+			MailTo:   tc.mailTo,
+			Emit:     rec.emit,
+		})
+
+		w.Check(now)
+
+		if rec.mailCount() != 2 {
+			t.Fatalf("MailTo=%q: sent %d mails, want the drift and the staleness notice", tc.mailTo, rec.mailCount())
+		}
+		for _, m := range rec.mails {
+			if m.to != tc.want {
+				t.Errorf("MailTo=%q: %q went to %q, want %q", tc.mailTo, m.subject, m.to, tc.want)
+			}
+		}
+	}
+}
+
 // TestNoMailWhenClean confirms the runner is silent when nothing drifted — it
 // still SAMPLES every mirror, but a clean sample produces no mail and no event.
 func TestNoMailWhenClean(t *testing.T) {

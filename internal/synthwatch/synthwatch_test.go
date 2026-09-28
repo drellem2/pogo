@@ -108,6 +108,38 @@ func build(rec *recorder, targets []Target, verdicts map[string]synthfail.Report
 // PAGE
 // ---------------------------------------------------------------------------
 
+// The page goes where [agents] escalation_box points, not to a hard-coded
+// `human`: a deployment that re-points escalations must move this page with the
+// rest (drellem2/pogo#148). The default arm is the positive control.
+func TestCheck_PageFollowsMailTo(t *testing.T) {
+	for _, tc := range []struct{ mailTo, want string }{
+		{"", "human"},
+		{"daniel-phone", "daniel-phone"},
+	} {
+		rec := &recorder{}
+		targets := []Target{{Name: "pm-pogo", Identity: "crew-pm-pogo", Workdir: "/w/pm-pogo"}}
+		globs, scan := scanByWorkdir(map[string]synthfail.Report{"/w/pm-pogo": failing(synthfail.ReasonAuthFailed)})
+		w := New(Options{
+			Targets:  func() []Target { return targets },
+			Globs:    globs,
+			Scan:     scan,
+			Mail:     rec.send,
+			MailTo:   tc.mailTo,
+			Emit:     rec.emit,
+			Interval: time.Nanosecond,
+		})
+
+		w.Check(time.Now())
+
+		if len(rec.mails) != 1 {
+			t.Fatalf("MailTo=%q: sent %d mails, want 1", tc.mailTo, len(rec.mails))
+		}
+		if got := rec.mails[0].to; got != tc.want {
+			t.Errorf("MailTo=%q: paged %q, want %q", tc.mailTo, got, tc.want)
+		}
+	}
+}
+
 func TestCheck_PagesHumanOnDetection(t *testing.T) {
 	rec := &recorder{}
 	targets := []Target{{Name: "pm-pogo", Identity: "crew-pm-pogo", Workdir: "/w/pm-pogo"}}

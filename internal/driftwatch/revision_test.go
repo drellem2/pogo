@@ -79,8 +79,8 @@ func TestPositiveControlAgainstTheMeasuredStaleDaemon(t *testing.T) {
 		t.Fatalf("the measured 8-day-old daemon must raise exactly one notice, got %d", rec.mailCount())
 	}
 	m := rec.mails[0]
-	if m.to != mailTo {
-		t.Errorf("staleness notice must go to %q, went to %q", mailTo, m.to)
+	if m.to != DefaultMailTo {
+		t.Errorf("staleness notice must go to %q, went to %q", DefaultMailTo, m.to)
 	}
 	// The subject is what travels: it must carry the age, the revision and the
 	// commits-behind number without the reader opening the body.
@@ -808,8 +808,8 @@ func TestLiveDaemonStaleness(t *testing.T) {
 			formatAge(liveS.Age), liveRec.mailCount())
 	}
 	m := liveRec.mails[0]
-	if m.to != mailTo {
-		t.Errorf("staleness notice must go to %q, went to %q", mailTo, m.to)
+	if m.to != DefaultMailTo {
+		t.Errorf("staleness notice must go to %q, went to %q", DefaultMailTo, m.to)
 	}
 	for _, want := range []string{liveS.Short(), liveS.CommitTime.Format("2006-01-02")} {
 		if !strings.Contains(m.subject, want) {

@@ -121,8 +121,8 @@ func TestFiresOnImminentExpiry(t *testing.T) {
 				t.Fatalf("expected exactly one warning, got %d: %v", len(rec.mails), rec.subjects())
 			}
 			got := rec.mails[0]
-			if got.to != mailTo {
-				t.Errorf("warning went to %q, want %q — only a human can run /login", got.to, mailTo)
+			if got.to != DefaultMailTo {
+				t.Errorf("warning went to %q, want %q — only a human can run /login", got.to, DefaultMailTo)
 			}
 			if TierFor(expiry.Sub(tc.now)) != tc.wantTier {
 				t.Errorf("tier = %v, want %v", TierFor(expiry.Sub(tc.now)), tc.wantTier)
@@ -353,6 +353,38 @@ func TestUnreadableCredentialMailsRatherThanPassingSilently(t *testing.T) {
 		}
 		if !strings.Contains(body, reason) {
 			t.Errorf("blind mail omits the reason %q:\n%s", reason, body)
+		}
+	}
+}
+
+// TestNoticesFollowMailTo: both the tier warning and the unreadable-credential
+// notice go where [agents] escalation_box points, not to a hard-coded `human`
+// (drellem2/pogo#148). The empty arm is the positive control for the default.
+func TestNoticesFollowMailTo(t *testing.T) {
+	expiry := mustTime(t, nextOutage)
+	for _, tc := range []struct{ mailTo, want string }{
+		{"", "human"},
+		{"daniel-phone", "daniel-phone"},
+	} {
+		for _, st := range []Status{presentAt(expiry), {State: StateUnreadable, Reason: ReasonDecodeFailed}} {
+			rec := &recorder{}
+			w := New(Options{
+				Enabled:  true,
+				Read:     fixedReader(st),
+				Mail:     rec.send,
+				MailTo:   tc.mailTo,
+				Emit:     func(events.Event) {},
+				Interval: time.Minute,
+			})
+
+			w.Check(context.Background(), expiry.Add(-23*time.Hour))
+
+			if len(rec.mails) != 1 {
+				t.Fatalf("MailTo=%q state=%v: sent %d mails, want 1", tc.mailTo, st.State, len(rec.mails))
+			}
+			if got := rec.mails[0].to; got != tc.want {
+				t.Errorf("MailTo=%q state=%v: %q went to %q, want %q", tc.mailTo, st.State, rec.mails[0].subject, got, tc.want)
+			}
 		}
 	}
 }

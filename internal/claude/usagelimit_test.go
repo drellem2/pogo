@@ -511,3 +511,32 @@ func TestAgentNameFromID(t *testing.T) {
 		}
 	}
 }
+
+// The episode mails go where [agents] escalation_box points once pogod has
+// re-pointed them (drellem2/pogo#148): both the hit and the clear mail, and a
+// set that lands AFTER the episode opened still routes that episode. The
+// default arm is the positive control; empty restores the default.
+func TestUsageLimitCoordinator_MailsFollowSetMailTo(t *testing.T) {
+	for _, tc := range []struct{ set, want string }{
+		{"", "human"},
+		{"daniel-phone", "daniel-phone"},
+	} {
+		sink := &mailSink{}
+		c, h, _ := newHeldCoordinator(sink.send)
+		now := fixedNow()()
+
+		c.OnHit("cat-mg-7ffa", "mg-7ffa", now)
+		c.setMailTo(tc.set)
+		h.fire()
+		c.OnClear("cat-mg-7ffa", now.Add(time.Hour))
+
+		if sink.count() != 2 {
+			t.Fatalf("set=%q: sent %d mails, want hit + clear", tc.set, sink.count())
+		}
+		for i, kind := range []string{"hit", "clear"} {
+			if got := sink.at(i).to; got != tc.want {
+				t.Errorf("set=%q: %s mail to = %q, want %q", tc.set, kind, got, tc.want)
+			}
+		}
+	}
+}
