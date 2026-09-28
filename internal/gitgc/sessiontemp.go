@@ -95,6 +95,15 @@ func sweepOrphanSessionTemp(opts Options, tickets TicketIndex, res *Result) {
 	if opts.SessionTempDirs == nil || opts.PolecatsDir == "" {
 		return
 	}
+	// Dirs phases 1 and 1b already reclaimed beside their tree this pass. In
+	// an apply they are gone and never listed; in a dry run they still exist,
+	// and their owner's directory does too, so without this they would be
+	// reported a second time as kept — and a dry run would stop previewing
+	// what --apply does (review round 1, mg-d0c10).
+	taken := map[string]bool{}
+	for _, a := range res.SessionTempRemoved {
+		taken[a.Path] = true
+	}
 	for _, probe := range opts.SessionTempDirs(filepath.Join(opts.PolecatsDir, sessionTempProbeName)) {
 		root, base := filepath.Dir(probe), filepath.Base(probe)
 		if strings.Count(base, sessionTempProbeName) != 1 {
@@ -117,7 +126,7 @@ func sweepOrphanSessionTemp(opts Options, tickets TicketIndex, res *Result) {
 			}
 			name := entry[len(pre) : len(entry)-len(suf)]
 			path := filepath.Join(root, entry)
-			if !constructsPath(opts, name, path) {
+			if taken[path] || !constructsPath(opts, name, path) {
 				continue
 			}
 			if reason, keep := keepSessionTemp(opts, tickets, name); keep {
