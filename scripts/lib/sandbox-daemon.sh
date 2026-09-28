@@ -138,6 +138,9 @@ sandbox_port_reserve() {
     # Age-based because that is the only evidence available for a lock with no
     # readable owner; an hour is far longer than any control's runtime.
     find "$SANDBOX_PORT_LOCKDIR" -type f -mmin +60 -delete 2>/dev/null
+    # Likewise a reaper killed while holding its mutex, which would otherwise
+    # leave that port's dead claim unreapable for good.
+    find "$SANDBOX_PORT_LOCKDIR" -mindepth 1 -type d -name '*.reap' -mmin +60 -delete 2>/dev/null
 
     # Start where nobody else starts. Two runs walking 18500 upward would collide
     # on their first candidate every time and then walk in lockstep; offsetting by
@@ -157,7 +160,16 @@ sandbox_port_reserve() {
             owner="$(cat "$lockpath" 2>/dev/null)"
             [ -n "$owner" ] || continue
             kill -0 "$owner" 2>/dev/null && continue
-            rm -f "$lockpath" 2>/dev/null
+            # Reap under a per-port mutex, and re-read the owner once we hold it.
+            # A bare read-check-rm is not atomic: every claimant that read the
+            # dead owner goes on to rm, and a late one deletes the claim an early
+            # one has just re-created, so two runs walk away with one port. With
+            # six claimants on one stale lock that happened in 26 of 30 trials
+            # (mg-35ad8). The mkdir admits one reaper at a time; the re-read
+            # proves the file is still the dead claim and not a live successor.
+            mkdir "$lockpath.reap" 2>/dev/null || continue
+            [ "$(cat "$lockpath" 2>/dev/null)" = "$owner" ] && rm -f "$lockpath" 2>/dev/null
+            rmdir "$lockpath.reap" 2>/dev/null
             ( set -o noclobber; printf '%s\n' "$$" > "$lockpath" ) 2>/dev/null || continue
         fi
 

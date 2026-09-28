@@ -260,10 +260,17 @@ for i in 1 2 3 4 5 6; do
     (
         sandbox_port_reserve
         echo "$SANDBOX_PORT" > "$RES_DIR/$i"
-        # Hold the claim while the others race, exactly as a real run does for
-        # its whole lifetime. Releasing here would let a later claimant take the
-        # same port legitimately and the control would prove nothing.
-        sleep 3
+        # Hold the claim until ALL six have reserved, exactly as a real run holds
+        # it for its whole lifetime. Releasing early would let a later claimant
+        # take the same port legitimately and the control would prove nothing.
+        # A barrier, not a sleep: under load one claimant's reserve can outlast
+        # any fixed hold, and a fixed hold then reads as a collision (mg-35ad8).
+        # The deadline only stops a claimant that died before writing from
+        # hanging the run; the count below reports it.
+        for _ in $(seq 1 240); do
+            [ "$(ls "$RES_DIR" | grep -c .)" -ge 6 ] && break
+            sleep 0.25
+        done
         sandbox_port_release
     ) &
 done
@@ -274,6 +281,55 @@ if [ "$RES_TOTAL" = "6" ] && [ "$RES_UNIQ" = "6" ]; then
     pass "six CONCURRENT claimants got six DISTINCT ports ($(cat "$RES_DIR"/* | sort -n | tr '\n' ' ')) — the port is reserved, not probed, so the load that broke mg-3412 cannot hand two runs one daemon"
 else
     fail "six concurrent claimants produced $RES_TOTAL reservations over $RES_UNIQ distinct ports — the allocator is not exclusive, and concurrent live controls will share a daemon again"
+fi
+
+# A DEAD CLAIM IS REAPED BY ONE CLAIMANT, NOT BY ALL OF THEM (mg-35ad8).
+#
+# The race above only ever meets LIVE claims. A claim whose owner has died is
+# reclaimed, and that path used to be read-owner / rm / re-create — not atomic, so
+# every claimant that read the dead owner went on to rm, and a late one deleted
+# the claim an early one had just made. Six claimants on one stale lock came away
+# with duplicates in 26 of 30 trials, which is how §3 failed once in a full
+# build: a killed run elsewhere had left a lock on the port every claimant starts
+# from (they share $$, so they share the starting offset).
+#
+# Private lockdir and range, so the planted locks cannot touch a real run's
+# claims. Every port in the range carries a dead owner, so every claimant goes
+# through the reap path. Three rounds for margin: against the old code, round 1
+# alone failed in 3 of 3 runs.
+DEAD_PID="$( (sleep 0 & echo $!) )"; sleep 0.2
+REAP_OK=1; REAP_DETAIL=""
+for round in 1 2 3; do
+    REAP_RES="$WORK/reap-$round"; mkdir -p "$REAP_RES"
+    REAP_LOCKS="$WORK/reap-locks-$round"; mkdir -p "$REAP_LOCKS"
+    for p in $(seq 18980 18989); do echo "$DEAD_PID" > "$REAP_LOCKS/$p"; done
+    for i in 1 2 3 4 5 6; do
+        (
+            SANDBOX_PORT_LOCKDIR="$REAP_LOCKS"
+            SANDBOX_PORT_LO=18980; SANDBOX_PORT_HI=18989
+            sandbox_port_reserve
+            echo "$SANDBOX_PORT" > "$REAP_RES/$i"
+            for _ in $(seq 1 240); do
+                [ "$(ls "$REAP_RES" | grep -c .)" -ge 6 ] && break
+                sleep 0.25
+            done
+            sandbox_port_release
+        ) >/dev/null 2>&1 &
+    done
+    wait
+    t="$(cat "$REAP_RES"/* 2>/dev/null | grep -c .)"
+    u="$(cat "$REAP_RES"/* 2>/dev/null | sort -u | grep -c .)"
+    if [ "$t" != "6" ] || [ "$u" != "6" ]; then
+        REAP_OK=0; REAP_DETAIL="round $round: $t reservations over $u ports ($(cat "$REAP_RES"/* 2>/dev/null | tr '\n' ' '))"
+        break
+    fi
+done
+if kill -0 "$DEAD_PID" 2>/dev/null; then
+    fail "the stale-lock control's 'dead' owner pid $DEAD_PID is alive — the control did not exercise the reap path, so it says nothing"
+elif [ "$REAP_OK" = 1 ]; then
+    pass "six concurrent claimants over ten DEAD claims got six distinct ports, three rounds running — a stale lock is reaped by one claimant, not deleted out from under another"
+else
+    fail "concurrent claimants reaping DEAD claims shared a port — $REAP_DETAIL: the reclaim is not atomic, and one stale lock hands two live controls one daemon"
 fi
 
 # CONDITIONAL, not a leak: a released port must become claimable again. An
