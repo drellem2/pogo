@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/workitem"
 )
 
 // fakeStranded is a scripted Stranded probe. It counts calls so a test can
@@ -365,6 +366,41 @@ func TestLocalOnlyStrandedBranchPrintsNoSubmit(t *testing.T) {
 	if !strings.Contains(msg, "LOCAL-ONLY") {
 		t.Errorf("the notice does not say the work is not on origin, which is the half that "+
 			"changes how urgent this is: %q", msg)
+	}
+}
+
+// TestFoldedStrandedBranchSubmitsNoContainer (mg-dbb75 review round 1): a
+// branch whose work is on origin only INSIDE a longer branch is pushed, but no
+// origin name lands exactly its commits — the container carries somebody
+// else's later work too. The notice must not print a submit of either name;
+// the per-branch remedy (push, then submit) lives in check-stranded.
+func TestFoldedStrandedBranchSubmitsNoContainer(t *testing.T) {
+	work := strandedIn("mg-77aa", "polecat-p77aa", 1)
+	b := work.Items["mg-77aa"][0]
+	b.Ref = "refs/heads/polecat-p77aa" // on origin only as part of polecat-p88bb
+	b.SubmitAs = ""
+	work.Items["mg-77aa"] = []StrandedBranch{b}
+
+	probe := &fakeStranded{work: work}
+	w, rec, workRoot := strandedEnv(t, baseConfig(), nil, nil, probe)
+	now := time.Now()
+	writeItemForRepo(t, workRoot, "mg-77aa", "mayor", "", "/Users/daniel/dev/pogo", now.Add(-20*time.Minute))
+
+	w.Check(now)
+
+	msg := strings.Join(nudgeMessages(rec), " ")
+	if strings.Contains(msg, "pogo refinery submit") {
+		t.Errorf("a paste-ready submit was printed for folded work, which no origin name lands exactly: %q", msg)
+	}
+	if !strings.Contains(msg, "pogo check-stranded") {
+		t.Errorf("the notice does not send the reader to the per-branch remedy: %q", msg)
+	}
+
+	// Positive control: the same branch cross-pushed as an exact tip names it.
+	b.SubmitAs = "feature-x"
+	work.Items["mg-77aa"] = []StrandedBranch{b}
+	if got := submitHint([]workitem.WorkItem{{ID: "mg-77aa"}}, work.Items); !strings.Contains(got, "pogo refinery submit feature-x") {
+		t.Errorf("exact-tip cross-push: hint = %q, want a submit of feature-x", got)
 	}
 }
 

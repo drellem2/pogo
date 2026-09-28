@@ -107,9 +107,10 @@ type StrandedBranch struct {
 	// submit` also REFUSES a branch that is not on origin (mg-586d), so a remedy
 	// that assumed pushed would be unrunnable for exactly the urgent half.
 	Pushed bool
-	// OriginBranch is the name the work is on origin under — Branch, or another
-	// branch it was cross-pushed to. It is what a submit names; "" means Branch.
-	OriginBranch string
+	// SubmitAs is the origin branch holding exactly this branch's commits —
+	// Branch, or another name they were cross-pushed to — and "" when there is
+	// none (see strandedwork.Finding.SubmitBranch). It is what a submit names.
+	SubmitAs string
 	// Unmerged is how many commits the target does not have.
 	Unmerged int
 	// Target is the ref the branch was compared against.
@@ -545,9 +546,15 @@ func submitHint(items []workitem.WorkItem, found map[string][]StrandedBranch) st
 	if n != 1 || !only.Pushed || only.Queued != nil {
 		return "`pogo check-stranded` names the branch and the remedy for each"
 	}
-	name := only.OriginBranch
-	if name == "" {
+	name := only.SubmitAs
+	if name == "" && only.Ref == "refs/remotes/origin/"+only.Branch {
 		name = only.Branch
+	}
+	if name == "" {
+		// On origin only inside a longer branch: no origin name lands exactly
+		// these commits, so the per-branch remedy (push, then submit) is the
+		// one to read (mg-dbb75).
+		return "`pogo check-stranded` names the branch and the remedy for each"
 	}
 	return fmt.Sprintf("`pogo refinery submit %s --repo=%s --author=%s`", name, only.Repo, id)
 }

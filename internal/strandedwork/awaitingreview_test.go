@@ -98,8 +98,8 @@ func TestOriginRefPrefersAnExactTip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
-	if f.OriginRef != "refs/remotes/origin/z-exact" {
-		t.Errorf("OriginRef = %q, want refs/remotes/origin/z-exact (exact tip beats the earlier-sorting container)", f.OriginRef)
+	if f.OriginRef != "refs/remotes/origin/z-exact" || !f.OriginIsTip {
+		t.Errorf("OriginRef = %q (tip %t), want refs/remotes/origin/z-exact as an exact tip (it beats the earlier-sorting container)", f.OriginRef, f.OriginIsTip)
 	}
 
 	// Folded only: the container is still ON ORIGIN, so still Pushed.
@@ -109,8 +109,58 @@ func TestOriginRefPrefersAnExactTip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
-	if !f.Pushed || f.OriginRef != "refs/remotes/origin/a-folded" {
-		t.Errorf("Pushed=%t OriginRef=%q, want true and refs/remotes/origin/a-folded", f.Pushed, f.OriginRef)
+	if !f.Pushed || f.OriginRef != "refs/remotes/origin/a-folded" || f.OriginIsTip {
+		t.Errorf("Pushed=%t OriginRef=%q OriginIsTip=%t, want true, refs/remotes/origin/a-folded, false", f.Pushed, f.OriginRef, f.OriginIsTip)
+	}
+	if got := f.SubmitBranch(); got != "" {
+		t.Errorf("SubmitBranch = %q for a head on origin only inside a longer branch, want \"\"", got)
+	}
+}
+
+// TestFoldedWorkIsNeverSubmittedUnderTheContainer is review round 1's
+// reproduction (mg-dbb75). polecat-p77aa's one commit is on origin only inside
+// polecat-p88bb, which adds mg-88bb's later work. Submitting polecat-p88bb
+// "for" mg-77aa lands mg-88bb's work under the wrong --author and around its
+// review. The remedy has to keep to the branch's own name: push it, then
+// submit it — the only command that lands exactly these commits. The work is
+// still durable, so the LOCAL-ONLY warning stays off.
+func TestFoldedWorkIsNeverSubmittedUnderTheContainer(t *testing.T) {
+	r := newRepo(t)
+	r.branch("polecat-p77aa", "main")
+	r.commit("f.md", "feat: the work (mg-77aa)")
+	r.branch("polecat-p88bb", "polecat-p77aa")
+	r.commit("g.md", "feat: somebody's later work (mg-88bb)")
+	r.push("polecat-p88bb")
+	r.checkout("main")
+
+	f, err := Inspect(r.dir, "polecat-p77aa", "main")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if f.Disposition != DispositionResubmit || !f.Pushed {
+		t.Fatalf("disposition=%q pushed=%t, want resubmit and pushed", f.Disposition, f.Pushed)
+	}
+	for name, text := range map[string]string{
+		"Summary":      f.Summary(),
+		"RemedyPhrase": RemedyPhrase(CellResubmit, f, "mg-77aa"),
+	} {
+		if strings.Contains(text, "submit polecat-p88bb") {
+			t.Errorf("%s submits the container, which carries mg-88bb's work: %s", name, text)
+		}
+		if !strings.Contains(text, "push origin polecat-p77aa && pogo refinery submit polecat-p77aa") {
+			t.Errorf("%s does not push-then-submit the branch's own name: %s", name, text)
+		}
+		if strings.Contains(text, LocalOnlyWarning) {
+			t.Errorf("%s calls durable work local-only: %s", name, text)
+		}
+	}
+
+	// The container IS the right thing to ask GitHub about: if its PR is open,
+	// this work is tracked by it.
+	var asked string
+	f.CheckOpenPR(r.dir, func(_, b string) (int, error) { asked = b; return 0, nil })
+	if asked != "polecat-p88bb" {
+		t.Errorf("PR probe asked about %q, want the container polecat-p88bb", asked)
 	}
 }
 
@@ -126,8 +176,8 @@ func TestPushedUnderOwnNameKeepsItsOwnRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
-	if !f.Pushed || f.OriginRef != f.Ref || f.OriginBranch() != "polecat-9a19" {
-		t.Errorf("Pushed=%t OriginRef=%q Ref=%q OriginBranch=%q", f.Pushed, f.OriginRef, f.Ref, f.OriginBranch())
+	if !f.Pushed || f.OriginRef != f.Ref || !f.OriginIsTip || f.SubmitBranch() != "polecat-9a19" {
+		t.Errorf("Pushed=%t OriginRef=%q Ref=%q OriginIsTip=%t SubmitBranch=%q", f.Pushed, f.OriginRef, f.Ref, f.OriginIsTip, f.SubmitBranch())
 	}
 }
 
