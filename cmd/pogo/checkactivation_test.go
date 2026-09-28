@@ -20,6 +20,7 @@ package main
 //     `service` would let an old binary answer a scheduled caller with a 0.
 
 import (
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -378,8 +379,14 @@ func TestActivationNeverPassesWhatTheDoctorRowWarnsAbout(t *testing.T) {
 func TestUnknownSubcommandOfAParentSucceedsButUnknownRootCommandDoesNot(t *testing.T) {
 	newTree := func() (*cobra.Command, *cobra.Command) {
 		root := &cobra.Command{Use: "pogo"}
-		root.SetOut(os.NewFile(0, os.DevNull))
-		root.SetErr(os.NewFile(0, os.DevNull))
+		// io.Discard, never os.NewFile(0, os.DevNull): that wraps the process's
+		// fd 0 (stdin), not /dev/null, and each wrapper's GC finalizer closes
+		// fd 0. The first closes stdin; the rest close whatever the process
+		// opened next at the reused number — in the gate, the /dev/null or pipe
+		// exec.Cmd had just opened for a child, which surfaced in the checkprompts
+		// test as `fork/exec …: bad file descriptor` (mg-fbe7b).
+		root.SetOut(io.Discard)
+		root.SetErr(io.Discard)
 		parent := &cobra.Command{Use: "service"}
 		parent.AddCommand(&cobra.Command{Use: "install", Run: func(*cobra.Command, []string) {}})
 		root.AddCommand(parent)
