@@ -9,6 +9,7 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/providers"
 )
 
 // startGitGC wires the polecat git garbage collector into pogod. It runs
@@ -122,6 +123,10 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig, notify string) {
 			LivePolecats: live,
 			Tickets:      tickets,
 			PolecatsDir:  polecatsDir,
+			// A dead polecat's harness session temp dir goes with its tree,
+			// and orphaned ones under the same gate (gh #203). Supplied by the
+			// providers, so gitgc names no harness's temp root.
+			SessionTempDirs: providers.SessionTempDirs,
 			// One line per ACTION, not just the counts below. The sweep
 			// already assembles path, owner, branch and reason for every
 			// decision and used to throw all of it away — so a removal in a
@@ -141,9 +146,9 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig, notify string) {
 			continue
 		}
 		conditions.Clear(rowA9SweepFailedPrefix+repo, time.Now())
-		if len(res.BranchesDeleted) > 0 || len(res.WorktreesRemoved) > 0 || len(res.Errors) > 0 {
-			log.Printf("pogod: git GC %s — deleted %d branches, removed %d worktrees, %d errors",
-				repo, len(res.BranchesDeleted), len(res.WorktreesRemoved), len(res.Errors))
+		if len(res.BranchesDeleted) > 0 || len(res.WorktreesRemoved) > 0 || len(res.SessionTempRemoved) > 0 || len(res.Errors) > 0 {
+			log.Printf("pogod: git GC %s — deleted %d branches, removed %d worktrees, %d session temp dirs, %d errors",
+				repo, len(res.BranchesDeleted), len(res.WorktreesRemoved), len(res.SessionTempRemoved), len(res.Errors))
 			for _, e := range res.Errors {
 				log.Printf("pogod: git GC %s error: %s", repo, e)
 			}

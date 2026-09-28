@@ -55,6 +55,14 @@ type Options struct {
 	// from a live polecat in the first place. The scan stays for the legacy
 	// dirs it left behind, and for the pogod-died-mid-polecat case.
 	PolecatsDir string
+	// SessionTempDirs, when set, returns the absolute harness session temp
+	// dirs made for an agent working in workdir (in practice
+	// providers.SessionTempDirs; see agent.Provider.SessionTempDir). A
+	// polecat's temp dirs are reclaimed beside its worktree or orphan dir,
+	// under the same verdict, and a further phase reclaims those whose
+	// PolecatsDir entry is already gone (gh #203). nil skips all of it — this
+	// package never names a harness's temp root itself.
+	SessionTempDirs func(workdir string) []string
 	// DryRun reports what would be done without deleting anything.
 	DryRun bool
 	// Force reclaims worktrees holding uncommitted work. Off by default: a
@@ -143,8 +151,12 @@ type Result struct {
 	BranchesKept     []BranchAction
 	WorktreesRemoved []WorktreeAction
 	WorktreesKept    []WorktreeAction
-	PruneOutput      string
-	Errors           []string
+	// SessionTempRemoved lists polecat session temp dirs removed (or, in a
+	// dry run, that would be); SessionTempKept the orphan ones kept, with why.
+	SessionTempRemoved []SessionTempAction
+	SessionTempKept    []SessionTempAction
+	PruneOutput        string
+	Errors             []string
 }
 
 // Sweep runs one GC pass over opts.Repo:
@@ -155,6 +167,10 @@ type Result struct {
 //     survive the deletion — done only once merged into the target branch,
 //     archived only once some origin ref holds the head or its patches landed
 //     (mg-0a43) — skipping any branch that is live or still checked out.
+//
+// When Options.SessionTempDirs is set, a reclaimed worktree or orphan dir takes
+// its harness session temp dirs with it, and orphan temp dirs whose owner's
+// directory is already gone are reclaimed under the same gate (gh #203).
 //
 // Worktrees are handled before branches so that removing a worktree frees
 // its branch for deletion in the same pass. Sweep is conservative: an
@@ -246,6 +262,7 @@ func Sweep(opts Options) (Result, error) {
 			// and none can fail.
 			freed[wt.Branch] = true
 			opts.logf("would remove worktree %s", action.String())
+			reclaimSessionTemp(opts, owner, wt.Path, action.Reason, &res)
 		} else {
 			// --force goes straight to the executor: an operator's explicit
 			// --force is a positive reason to discard, and that must not
@@ -281,6 +298,10 @@ func Sweep(opts Options) (Result, error) {
 			// reproduced in the wild).
 			freed[wt.Branch] = true
 			opts.logf("removed worktree %s", action.String())
+			// The harness's scratch for this tree goes with it, under the
+			// same verdict (gh #203). Only after the tree itself went: a kept
+			// tree keeps its scratch too.
+			reclaimSessionTemp(opts, owner, wt.Path, action.Reason, &res)
 		}
 		res.WorktreesRemoved = append(res.WorktreesRemoved, action)
 	}
@@ -303,6 +324,11 @@ func Sweep(opts Options) (Result, error) {
 			registered[wt.Path] = true
 		}
 		sweepOrphanDirs(opts, tickets, registered, &res)
+		// --- Phase 1c: orphan session temp dirs --------------------------
+		// After 1 and 1b, so a tree reclaimed this pass has had its temp dir
+		// taken beside it; what is left is scratch whose owner's directory
+		// was already gone (gh #203).
+		sweepOrphanSessionTemp(opts, tickets, &res)
 	}
 
 	// Drop registrations whose directory is already gone.
@@ -614,6 +640,7 @@ func sweepOrphanDirs(opts Options, tickets TicketIndex, registered map[string]bo
 			}
 			opts.logf("removed orphan dir %s", action.String())
 		}
+		reclaimSessionTemp(opts, name, path, action.Reason, res)
 		res.WorktreesRemoved = append(res.WorktreesRemoved, action)
 	}
 }
@@ -632,6 +659,9 @@ func (r Result) Summary() string {
 	fmt.Fprintf(&b, "git GC sweep of %s%s\n", r.Repo, dryRunTag(r.DryRun))
 	fmt.Fprintf(&b, "  worktrees: %s %d, kept %d\n", verb, len(r.WorktreesRemoved), len(r.WorktreesKept))
 	fmt.Fprintf(&b, "  branches:  %s %d, kept %d\n", delVerb, len(r.BranchesDeleted), len(r.BranchesKept))
+	if len(r.SessionTempRemoved) > 0 || len(r.SessionTempKept) > 0 {
+		fmt.Fprintf(&b, "  session temp dirs: %s %d, kept %d\n", verb, len(r.SessionTempRemoved), len(r.SessionTempKept))
+	}
 
 	if len(r.WorktreesRemoved) > 0 {
 		fmt.Fprintf(&b, "  worktrees %s:\n", verb)
@@ -649,6 +679,12 @@ func (r Result) Summary() string {
 		fmt.Fprintf(&b, "  worktrees kept:\n")
 		for _, w := range sortedWorktrees(r.WorktreesKept) {
 			fmt.Fprintf(&b, "    %s\n", w.String())
+		}
+	}
+	if len(r.SessionTempRemoved) > 0 {
+		fmt.Fprintf(&b, "  session temp dirs %s:\n", verb)
+		for _, s := range r.SessionTempRemoved {
+			fmt.Fprintf(&b, "    %s\n", s.String())
 		}
 	}
 	if len(r.BranchesDeleted) > 0 {

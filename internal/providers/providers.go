@@ -99,6 +99,27 @@ func AgentMemoryStoreIndexes(workdir string) []string {
 	return paths
 }
 
+// SessionTempDirs returns the absolute session temp dirs every known provider
+// would create for an agent working in workdir, in All's stable order and
+// without duplicates. It is the composition point that keeps internal/gitgc
+// free of any harness's temp root (gh #203), exactly as the functions above do
+// for their consumers, and it spans All for the same reason: the sweep asking
+// about a dead polecat does not know which harness ran it.
+func SessionTempDirs(workdir string) []string {
+	var dirs []string
+	seen := map[string]bool{}
+	for _, p := range All() {
+		if p.SessionTempDir == nil {
+			continue
+		}
+		if d := p.SessionTempDir(workdir); d != "" && !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	return dirs
+}
+
 // Resolve maps a config provider id to its agent.Provider descriptor.
 //
 // "" and "claude" resolve to Claude (the default); "codex" resolves to Codex;

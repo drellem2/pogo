@@ -4435,6 +4435,11 @@ no .git when a polecat's exit teardown never ran (e.g. pogod died mid-polecat,
 gh #31). The submit-time worktree unlink that used to strand these was removed
 (gh #88), so these are now legacy leftovers rather than a still-active leak.
 
+A reclaimed polecat's harness session temp dir (Claude Code's
+${CLAUDE_CODE_TMPDIR:-/tmp}/claude-<uid>/<slug-of-workdir>) is deleted with its
+tree, and one whose polecat directory is already gone is deleted under the same
+live/concluded gate (gh #203). Crew and non-pogo session dirs are never touched.
+
 It is the manual entry point to the same internal/gitgc logic pogod runs
 on startup and on a periodic ticker. Branches and worktrees of in-flight
 work items, of currently-running polecats, and anything that cannot be
@@ -4566,6 +4571,9 @@ parseable document while a human can still watch the scan move.`,
 				DryRun:       !gcApply,
 				PolecatsDir:  polecatsDir,
 				Force:        gcForce,
+				// Dead polecats' harness session temp dirs (gh #203); a dry
+				// run lists them like everything else.
+				SessionTempDirs: providers.SessionTempDirs,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)

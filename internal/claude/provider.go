@@ -1,7 +1,9 @@
 package claude
 
 import (
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/drellem2/pogo/internal/agent"
@@ -86,6 +88,10 @@ var Provider = agent.Provider{
 	// direction is worth its own function.
 	AgentMemoryStoreIndex: AgentMemoryStoreIndex,
 
+	// Claude Code's per-cwd scratch dir under its per-uid temp root, which
+	// nothing but gitgc ever reclaims (gh #203).
+	SessionTempDir: SessionTempDir,
+
 	// Claude Code's UserPromptSubmit hook fires once per submitted prompt,
 	// which is the receipt a PTY write cannot produce for itself. It is what
 	// lets a nudge be confirmed instead of assumed (mg-ebee).
@@ -137,6 +143,46 @@ func AgentMemoryStoreIndex(workdir string) string {
 		return ""
 	}
 	return filepath.Join(".claude", "projects", projectSlug(workdir), "memory", "MEMORY.md")
+}
+
+// SessionTempDir returns the absolute path of the scratch directory Claude Code
+// keeps for sessions whose working directory is workdir, or "" when workdir is
+// unknown.
+//
+// Claude Code's temp root is $CLAUDE_CODE_TMPDIR (trailing separators trimmed)
+// when set, else /tmp — deliberately NOT $TMPDIR, which on macOS is a
+// /var/folders path the harness does not use — and under it a per-uid
+// "claude-<uid>" directory, then the same slug projectSlug builds for
+// ~/.claude/projects. Read from Claude Code 2.1.x's bundle and checked against
+// this machine on 2026-09-28: /private/tmp/claude-501/-Users-daniel--pogo-
+// polecats-p8c8a1 (/tmp is a symlink to /private/tmp on macOS).
+//
+// The environment read is pogo's own, which is the one a spawned agent
+// inherits. Like the other slug functions, a wrong model here constructs a
+// path that matches nothing, so the reclaiming sweep misses rather than
+// over-deletes.
+func SessionTempDir(workdir string) string {
+	if workdir == "" {
+		return ""
+	}
+	return filepath.Join(sessionTempRoot(os.Getenv("CLAUDE_CODE_TMPDIR"), os.Getuid()), projectSlug(workdir))
+}
+
+// sessionTempRoot is Claude Code's per-uid temp root for an override value
+// (CLAUDE_CODE_TMPDIR, possibly empty) and uid.
+func sessionTempRoot(override string, uid int) string {
+	base := override
+	switch {
+	case base == "":
+		base = "/tmp"
+	case len(base) > 1:
+		base = strings.TrimRight(base, `/\`)
+	}
+	if uid < 0 {
+		// os.Getuid is -1 on Windows; Claude Code falls back to 0.
+		uid = 0
+	}
+	return filepath.Join(base, "claude-"+strconv.Itoa(uid))
 }
 
 // projectSlug applies Claude Code's path-to-directory-name encoding.

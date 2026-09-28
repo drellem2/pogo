@@ -186,6 +186,24 @@ type Provider struct {
 	// stopped matching must not report all-clear.
 	AgentMemoryStoreIndex func(workdir string) string
 
+	// SessionTempDir returns the ABSOLUTE path of the per-workdir scratch
+	// directory this harness creates for sessions running in workdir (e.g.
+	// Claude Code's /tmp/claude-<uid>/<slug-of-workdir>), or "" when workdir is
+	// unknown or the harness keeps no such directory.
+	//
+	// internal/gitgc reclaims a dead polecat's session temp dir under the same
+	// verdict that reclaims its worktree (gh #203): nothing else ever deletes
+	// it, and on a host with no /tmp age-out the root grows without bound. It
+	// is absolute rather than home-relative because the root is a temp root,
+	// not a dotdir — and it is a provider field for the reason every field
+	// above is: the root and the slug encoding are harness details, so gitgc
+	// receives the path and never names a harness's directory itself.
+	//
+	// The path is CONSTRUCTED, never discovered, so a drift in the harness's
+	// encoding or root makes gitgc miss directories rather than delete the
+	// wrong ones. nil means "this harness has no per-workdir temp dir".
+	SessionTempDir func(workdir string) string
+
 	// SubmitReceiptHook installs this harness's prompt-submission hook into an
 	// agent's working directory. dir is that directory; hookCommand is the
 	// command line the harness should run on every submitted prompt (pogod
