@@ -642,6 +642,29 @@ spawn a worker without complaint. Both paths now read one predicate,
 `config.IsDispatchGated`, so the vocabulary cannot mean one thing to the watcher
 and another to the dispatcher.
 
+**Tags never gate — not watching, not dispatch (pogo#211).** A tag is advisory.
+No tag, whatever it spells, holds an item: `config.IsDispatchGated` reads the
+assignee and nothing else, and it has exactly the two callers above. A tag
+exclusion added to only one of them recreates the watch/dispatch drift mg-4798
+closed (an item the watcher ignores but the dispatcher sends, or the reverse),
+and one added to both is a second gate channel whose vocabulary is spelling —
+`blocked-on-x`, `blocked_on_x`, `hold`, `wip` — so every variant nobody listed
+fails open, silently. The reasoning is also recorded on
+`config.BlockTagPrefix`. To hold an item, use a hold something reads:
+
+- `--assignee=parked`, `--assignee=human`, or `--assignee=blocked:<agent>`;
+- a sentinel of your own, added to `[stall_watch] non_dispatchable_assignees`;
+- `mg snooze` (hold until a time) or `mg new --depends` (hold until another item
+  is done). mg keeps both in `pending/`, which nothing dispatches from.
+
+A `blocked-on-*` tag on an item whose assignee leaves it dispatchable produces
+the `[block-intent]` advisory (see below) and is still watched and still
+dispatched. That is the only tag read for *hold* intent, and it is read only to
+advise. Other tags are read for other questions. The opt-in
+[`[dispatch_pairing]`](#dispatch-pairing--items-that-owe-a-paired-work-item)
+reads its pair, waiver and require tags to decide whether an item owes a paired
+item. None of them expresses "not yet", and none reaches `IsDispatchGated`.
+
 The refusal is `409 Conflict`, deliberately **not** the retryable `503` the
 redeploy drain uses: retrying an unchanged request will be refused identically
 forever. Reassign the item or clear its assignee. The refusal is recorded as an
