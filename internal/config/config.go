@@ -611,6 +611,14 @@ const (
 	DefaultHeartWatchHoldDown = 10 * time.Minute
 	// DefaultHeartWatchRenotify is how long an unchanged roster stays quiet.
 	DefaultHeartWatchRenotify = 6 * time.Hour
+	// DefaultCrewResetAfter is the crew session uptime at which pogod asks the
+	// agent to write a handoff note and restart itself (mg-5b58d). Four hours
+	// is Daniel's number; mg-c2d5's audit estimated ~22% of crew tokens saved.
+	DefaultCrewResetAfter = 4 * time.Hour
+	// DefaultCrewResetRenoticeAfter is the gap before the one re-notice.
+	DefaultCrewResetRenoticeAfter = time.Hour
+	// DefaultCrewResetInterval is the sample cadence.
+	DefaultCrewResetInterval = 5 * time.Minute
 
 	// DefaultBlindWatchInterval is how often pogod's detector-blindness
 	// consumer samples.
@@ -960,6 +968,9 @@ type Config struct {
 	// HeartWatch is the pogod-resident reader of the crew heartbeat (mg-d616).
 	// See HeartWatchConfig.
 	HeartWatch HeartWatchConfig
+	// CrewReset asks long-running crew agents to reset their context
+	// (mg-5b58d). See CrewResetConfig.
+	CrewReset CrewResetConfig
 	// BlindWatch is the consumer for a detector that declines to answer
 	// (mg-d616). See BlindWatchConfig.
 	BlindWatch BlindWatchConfig
@@ -1791,6 +1802,37 @@ type HeartWatchConfig struct {
 	RenotifyAfter time.Duration
 }
 
+// CrewResetConfig configures pogod's crew CONTEXT-RESET notice (mg-5b58d):
+// when a crew agent's session passes After, pogod mails it once asking it to
+// write a handoff note at its next safe point and run `pogo agent stop
+// <itself>`, which restart_on_crash turns into a fresh session. One re-notice
+// after RenoticeAfter if the same session is still up, then silence.
+//
+// It ASKS and never stops anything. Only running crew agents with
+// restart_on_crash, auto_start and no park flag are asked — the ones for which a
+// self-stop is a reset and not an outage. Polecats are out of scope.
+//
+// Enabled defaults to TRUE. The behaviour it changes is an agent's own choice
+// (it may decline, and is asked at most twice a session), the only agents asked
+// are ones whose respawn is already the supervisor's contract, and the saving
+// (mg-c2d5: ~22% of crew tokens) accrues to every operator running crew. The
+// changelog says so; `enabled = false` turns it off.
+type CrewResetConfig struct {
+	// Enabled turns the notice on. Defaults to true.
+	Enabled bool
+	// After is the session uptime that triggers the first notice. Zero falls
+	// back to DefaultCrewResetAfter.
+	After time.Duration
+	// RenoticeAfter is the gap before the single re-notice. Zero falls back
+	// to DefaultCrewResetRenoticeAfter.
+	RenoticeAfter time.Duration
+	// Interval is the sample cadence. Zero falls back to
+	// DefaultCrewResetInterval.
+	Interval time.Duration
+	// Exclude lists agent names that are never asked.
+	Exclude []string
+}
+
 // BlindWatchConfig configures pogod's DETECTOR-BLINDNESS consumer (mg-d616):
 // the heartbeat-driven runner that watches internal/wedgewatch's own judgement
 // state and reports when it has been declining to answer.
@@ -2346,9 +2388,13 @@ type parsedConfig struct {
 	wakeWatchEnabledSet      bool
 	absentWatchEnabledSet    bool
 	heartWatchEnabledSet     bool
-	blindWatchEnabledSet     bool
-	progressWatchEnabledSet  bool
-	firstTurnEnabledSet      bool
+	crewResetEnabledSet      bool
+	// crewResetExcludeSet lets a later layer's `exclude = []` clear an earlier
+	// layer's list, which a length test cannot tell from an absent key.
+	crewResetExcludeSet     bool
+	blindWatchEnabledSet    bool
+	progressWatchEnabledSet bool
+	firstTurnEnabledSet     bool
 	// synthWatchEnabledSet, refusalWatchEnabledSet and turnWatchEnabledSet exist
 	// because the shipped default is TRUE: without them a layered file that
 	// omits the key would merge its zero value and silently disarm the detector.
@@ -2525,6 +2571,12 @@ func Load() *Config {
 			Grace:         DefaultHeartWatchGrace,
 			HoldDown:      DefaultHeartWatchHoldDown,
 			RenotifyAfter: DefaultHeartWatchRenotify,
+		},
+		CrewReset: CrewResetConfig{
+			Enabled:       true,
+			After:         DefaultCrewResetAfter,
+			RenoticeAfter: DefaultCrewResetRenoticeAfter,
+			Interval:      DefaultCrewResetInterval,
 		},
 		BlindWatch: BlindWatchConfig{
 			Enabled:       true,
@@ -2871,6 +2923,21 @@ func Load() *Config {
 		}
 		if fileCfg.HeartWatch.RenotifyAfter > 0 {
 			cfg.HeartWatch.RenotifyAfter = fileCfg.HeartWatch.RenotifyAfter
+		}
+		if fileCfg.crewResetEnabledSet {
+			cfg.CrewReset.Enabled = fileCfg.CrewReset.Enabled
+		}
+		if fileCfg.CrewReset.After > 0 {
+			cfg.CrewReset.After = fileCfg.CrewReset.After
+		}
+		if fileCfg.CrewReset.RenoticeAfter > 0 {
+			cfg.CrewReset.RenoticeAfter = fileCfg.CrewReset.RenoticeAfter
+		}
+		if fileCfg.CrewReset.Interval > 0 {
+			cfg.CrewReset.Interval = fileCfg.CrewReset.Interval
+		}
+		if fileCfg.crewResetExcludeSet {
+			cfg.CrewReset.Exclude = fileCfg.CrewReset.Exclude
 		}
 		if fileCfg.blindWatchEnabledSet {
 			cfg.BlindWatch.Enabled = fileCfg.BlindWatch.Enabled
@@ -3953,6 +4020,27 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.HeartWatch.RenotifyAfter = d
 				}
+			}
+		case "crew_reset":
+			switch key {
+			case "enabled":
+				cfg.CrewReset.Enabled = val == "true"
+				cfg.crewResetEnabledSet = true
+			case "after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CrewReset.After = d
+				}
+			case "renotice_after":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CrewReset.RenoticeAfter = d
+				}
+			case "interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.CrewReset.Interval = d
+				}
+			case "exclude":
+				cfg.CrewReset.Exclude = parseStringArray(val)
+				cfg.crewResetExcludeSet = true
 			}
 		case "blind_watch":
 			switch key {
