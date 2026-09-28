@@ -190,15 +190,22 @@ jobs:
       - name: Run CI-vs-gate coverage instrument tests
         run: scripts/ci-coverage_test.sh
 
+  # Was `if: false` from mg-2cc8 until mg-cb8dc: the old rule ("no tag exists
+  # for this version") fails on main between every two cuts, so it was switched
+  # off, and a text grep that a comment could break went unnoticed for months.
+  # check-version.sh now checks something main can pass: one declaration, and
+  # not behind the newest release tag. fetch-depth: 0 brings the tags.
   version-check:
-    if: false  # Disabled — re-enable by removing this line
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Check for duplicate version tag
+      - name: Run version check tests
+        run: scripts/check-version_test.sh
+
+      - name: Check version.go against release tags
         run: ./scripts/check-version.sh
 
   build:

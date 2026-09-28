@@ -391,6 +391,13 @@ gate_step "Testing changelog coverage check" bash scripts/changelog-coverage_tes
 # entrenched the corruption by giving the spurious headings link targets.
 gate_step "Testing changelog release-roll and link references" bash scripts/roll-changelog_test.sh
 
+# Version read/write (mg-cb8dc). bump-version.sh and check-version.sh read the
+# version with a text grep a comment could match; at the v0.11.0 cut one did,
+# and the bump aborted (mg-3225). The fixtures here quote the pattern in
+# comments, and Test 1 is the positive control that the OLD grep breaks on them.
+# CI's version-check job runs this file too.
+gate_step "Testing the version declaration read/write and check-version.sh" bash scripts/check-version_test.sh
+
 # The work-item scope guard (mg-f1d5). Every case runs against a stub `mg` and a
 # fixture worktree in a temp dir, so the suite never reads the developer's live
 # ~/.macguffin. The load-bearing case is the opt-in one: a guard that blocked an
