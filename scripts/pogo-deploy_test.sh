@@ -4592,6 +4592,243 @@ case "$REM" in
     *) fail "the 143 remedy dropped the withdrawal entirely: a reader who acted on the old sentence has nothing telling them it was wrong" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# mg-44ee4 — THE FLEET'S mg: clean checkout, build, stamp, swap, rollback
+# ---------------------------------------------------------------------------
+# The rehearsal the ticket's acceptance asks for, with a scratch GOBIN and a
+# scratch "macguffin": a real git repo whose build.sh installs a fake mg that
+# reports the checked-out HEAD in the same `mg version` shape the real one uses.
+# NOTHING here can reach the live ~/go/bin/mg or ~/.macguffin: the target is
+# POGO_DEPLOY_MG_GOBIN under $WORK, and the only mg that is ever RUN is the fake
+# (its `list --json` touches no store at all).
+#
+# The fake's behaviour is steered by files in $MGX/ctl, read AT RUN TIME, so one
+# build can be made to lie only at the target path — the "the binary you
+# installed is not the one you built" case (mg-0af6), which is the only way to
+# reach the post-swap rollback without breaking the pre-swap check first.
+MGX="$WORK/mgx"
+REALGIT="$(command -v git)"
+mkdir -p "$MGX/ctl" "$MGX/gobin"
+"$REALGIT" init -q "$MGX/origin"
+cat > "$MGX/origin/build.sh" <<'BEOF'
+#!/bin/sh
+set -e
+cd "$(dirname "$0")"
+CTL="$MGX_CTL"
+echo "fake build of $(git rev-parse --short HEAD)"
+echo x >> "$CTL/builds"
+[ -f "$CTL/build_fails" ] && { echo "compile error: deliberate" >&2; exit 1; }
+[ "${1:-}" = "--install" ] || exit 0
+sha="$(git rev-parse --short HEAD)"
+[ -f "$CTL/staged_bad" ] && sha="0000000"
+mkdir -p "$GOBIN"
+cat > "$GOBIN/mg" <<MEOF
+#!/bin/sh
+case "\$1" in
+  version)
+    case "\$0" in */.mg-deploy.*) echo "mg v9.9.9-dev.1+g$sha ($sha, 2026-09-28)"; exit 0 ;; esac
+    [ "\$(cat "$CTL/bad_at_target" 2>/dev/null)" = "$sha" ] && { echo "mg v9.9.9-dev.1+gdeadbee (deadbee, 2026-09-28)"; exit 0; }
+    echo "mg v9.9.9-dev.1+g$sha ($sha, 2026-09-28)"; exit 0 ;;
+  list)
+    case "\$0" in */.mg-deploy.*) exit 0 ;; esac
+    [ "\$(cat "$CTL/smoke_fails_at_target" 2>/dev/null)" = "$sha" ] && exit 1
+    exit 0 ;;
+esac
+exit 0
+MEOF
+chmod +x "$GOBIN/mg"
+BEOF
+chmod +x "$MGX/origin/build.sh"
+( cd "$MGX/origin" && "$REALGIT" add build.sh && "$REALGIT" -c user.email=t@t -c user.name=t commit -qm one && "$REALGIT" branch -M main )
+# The build finds its control dir through the environment, which run_bounded's
+# `env` passes through — so the fake's behaviour is not part of the commit.
+export MGX_CTL="$MGX/ctl"
+# The PREVIOUS fleet mg: a binary stamped with a sha that is not origin/main.
+cat > "$MGX/gobin/mg" <<'PEOF'
+#!/bin/sh
+[ "$1" = "version" ] && { echo "mg v0.0.1 (abcdef0, 2026-01-01)"; exit 0; }
+exit 0
+PEOF
+chmod +x "$MGX/gobin/mg"
+
+# mgstep — one run of the step against the scratch world. Prints the log.
+mgstep() (
+    MG="$MGX/gobin/mg"
+    GIT="$REALGIT"
+    POGO_CLI=""
+    DRY_RUN="${MGSTEP_DRY:-false}"
+    MG_ENABLED=1
+    MG_SRC="${MGSTEP_SRC:-$MGX/src}"
+    MG_REMOTE="${MGSTEP_REMOTE-$MGX/origin}"
+    MG_BOOTSTRAP_REPO="$MGX/nonexistent"
+    MG_REF=main
+    MG_GOBIN="$MGX/gobin"
+    MG_TIMEOUT=60
+    DEADLINE_S=0
+    alert() { echo "ALERT-SUBJECT: $1"; echo "$2"; }
+    if [ -n "${MGSTEP_BREAK_RESTORE:-}" ]; then
+        # Keeping mg.prev still works; putting it BACK does not.
+        eval "real_$(declare -f mg_replace)"
+        mg_replace() { case "$2" in *.prev) real_mg_replace "$@" ;; *) return 1 ;; esac; }
+    fi
+    mg_deploy_step 2>&1
+)
+mgline() { grep '^\[[^]]*\] mg: installed ' | tail -1; }
+MGWANT="$(cd "$MGX/origin" && "$REALGIT" rev-parse --short HEAD)"
+
+# --- 1. the happy path: swap, stamp, prev kept --------------------------
+INO_BEFORE="$(ls -i "$MGX/gobin/mg" | awk '{print $1}')"
+OUT="$(mgstep)"
+L="$(printf '%s\n' "$OUT" | mgline)"
+case "$L" in
+    *"mg: installed $MGWANT (origin/main $MGWANT) prev abcdef0 result=ok rc=0") pass "mg-44ee4: the step installs origin/main and writes the one line — installed <sha> (origin/main <sha>) prev <sha> result=ok" ;;
+    *) fail "mg-44ee4: happy path line wrong: [$L] — $(printf '%s' "$OUT" | tail -8)" ;;
+esac
+"$MGX/gobin/mg" version | grep -q "($MGWANT," \
+    && pass "mg-44ee4: and the binary AT THE TARGET now reports origin/main" \
+    || fail "mg-44ee4: target reports $("$MGX/gobin/mg" version)"
+"$MGX/gobin/mg.prev" version 2>/dev/null | grep -q "(abcdef0," \
+    && pass "mg-44ee4: the previous binary is kept as mg.prev" \
+    || fail "mg-44ee4: mg.prev missing or wrong"
+[ "$(ls -i "$MGX/gobin/mg" | awk '{print $1}')" != "$INO_BEFORE" ] \
+    && pass "mg-44ee4: the target is a NEW inode — replaced by rename, never rewritten in place under a running fleet" \
+    || fail "mg-44ee4: the target kept its inode, so it was written in place"
+[ -z "$(ls -A "$MGX/gobin" | grep '^\.mg-deploy')" ] \
+    && pass "mg-44ee4: no staging or copy leftovers in the GOBIN" \
+    || fail "mg-44ee4: leftovers in gobin: $(ls -A "$MGX/gobin")"
+[ -z "$("$REALGIT" -C "$MGX/src" status --porcelain)" ] \
+    && pass "mg-44ee4: the dedicated checkout is still clean after a build (MG_BUILD_DIR is outside it)" \
+    || fail "mg-44ee4: the build dirtied the checkout: $("$REALGIT" -C "$MGX/src" status --short)"
+
+# --- 2. already current: no build ---------------------------------------
+BUILDS_BEFORE="$(wc -l < "$MGX/ctl/builds" | tr -d ' ')"
+L="$(mgstep | mgline)"
+case "$L" in
+    *"result=ok reason=current rc=0") pass "mg-44ee4: a rerun on a current mg is result=ok reason=current" ;;
+    *) fail "mg-44ee4: current case: [$L]" ;;
+esac
+[ "$(wc -l < "$MGX/ctl/builds" | tr -d ' ')" = "$BUILDS_BEFORE" ] \
+    && pass "mg-44ee4: and it does not rebuild (a 04:00 retry fire costs nothing)" \
+    || fail "mg-44ee4: a current mg was rebuilt"
+
+# Each failure case below needs work to be owed: a new origin/main commit.
+mgadvance() { ( cd "$MGX/origin" && echo "$1" >> notes && "$REALGIT" add notes && "$REALGIT" -c user.email=t@t -c user.name=t commit -qm "$1" ) ; MGWANT="$(cd "$MGX/origin" && "$REALGIT" rev-parse --short HEAD)"; }
+mglive() { "$MGX/gobin/mg" version | sed -n 's/.*(\([0-9a-f]*\),.*/\1/p'; }
+
+# --- 3. build failure: nothing swapped ----------------------------------
+LIVE="$(mglive)"; mgadvance three; : > "$MGX/ctl/build_fails"
+OUT="$(mgstep)"; L="$(printf '%s\n' "$OUT" | mgline)"; rm -f "$MGX/ctl/build_fails"
+case "$L" in
+    *"mg: installed $LIVE (origin/main $MGWANT) prev $LIVE result=failed reason=build rc=1") pass "mg-44ee4: a failed build is result=failed reason=build, and the line names the UNCHANGED live sha" ;;
+    *) fail "mg-44ee4: build failure line: [$L]" ;;
+esac
+[ "$(mglive)" = "$LIVE" ] && pass "mg-44ee4: and the live mg is untouched" || fail "mg-44ee4: a failed build changed the live mg"
+printf '%s' "$OUT" | grep -q 'compile error: deliberate' \
+    && pass "mg-44ee4: the build's own output reaches the log and the alert" \
+    || fail "mg-44ee4: build output lost"
+
+# --- 4. the staged binary lies about its stamp: rejected before the swap -
+: > "$MGX/ctl/staged_bad"
+L="$(mgstep | mgline)"; rm -f "$MGX/ctl/staged_bad"
+case "$L" in
+    *"installed $LIVE "*"result=failed reason=staged-stamp rc=1") pass "mg-44ee4: a staged binary whose stamp is not origin/main never reaches the fleet (failed, live untouched)" ;;
+    *) fail "mg-44ee4: staged-stamp line: [$L]" ;;
+esac
+
+# --- 5. THE ROLLBACK: the INSTALLED binary reports a bad stamp -----------
+# The lie is keyed to ONE build's sha, so mg.prev (an earlier build of the same
+# fake) keeps telling the truth — otherwise the restored binary would lie too.
+printf '%s' "$MGWANT" > "$MGX/ctl/bad_at_target"
+OUT="$(mgstep)"; L="$(printf '%s\n' "$OUT" | mgline)"; rm -f "$MGX/ctl/bad_at_target"
+case "$L" in
+    *"result=rolled-back reason=installed-stamp rc=2") pass "mg-44ee4: ACCEPTANCE — a bad stamp at the TARGET after the swap is result=rolled-back" ;;
+    *) fail "mg-44ee4: rollback line: [$L] — $(printf '%s' "$OUT" | tail -6)" ;;
+esac
+[ "$(mglive)" = "$LIVE" ] \
+    && pass "mg-44ee4: ACCEPTANCE — and mg.prev ($LIVE) is what the fleet runs again" \
+    || fail "mg-44ee4: after rollback the live mg reports [$(mglive)], want $LIVE"
+case "$L" in *"mg: installed $LIVE "*) pass "mg-44ee4: the line reports what is live AFTER the rollback, not what was attempted" ;;
+    *) fail "mg-44ee4: rollback line names the wrong live sha: [$L]" ;; esac
+printf '%s' "$OUT" | grep -q 'ALERT-SUBJECT: .*result=rolled-back' \
+    && pass "mg-44ee4: a rollback is alerted" || fail "mg-44ee4: a rollback mailed nothing"
+
+# --- 6. the installed binary cannot read the store: rolled back too ------
+printf '%s' "$MGWANT" > "$MGX/ctl/smoke_fails_at_target"
+L="$(mgstep | mgline)"; rm -f "$MGX/ctl/smoke_fails_at_target"
+case "$L" in
+    *"installed $LIVE "*"result=rolled-back reason=installed-smoke rc=2") pass "mg-44ee4: a failed read-only smoke at the target also restores mg.prev" ;;
+    *) fail "mg-44ee4: smoke rollback line: [$L]" ;;
+esac
+
+# --- 6b. the restore itself fails: the loudest case ----------------------
+printf '%s' "$MGWANT" > "$MGX/ctl/bad_at_target"
+OUT="$(MGSTEP_BREAK_RESTORE=1 mgstep)"; L="$(printf '%s\n' "$OUT" | mgline)"; rm -f "$MGX/ctl/bad_at_target"
+case "$L" in
+    *"result=rollback-failed reason=installed-stamp rc=3") pass "mg-44ee4: a restore that does not take is rollback-failed — judged by what the target reports, not by the copy's exit status" ;;
+    *) fail "mg-44ee4: broken-restore line: [$L]" ;;
+esac
+printf '%s' "$OUT" | grep -q 'ALERT-SUBJECT: .*ROLLBACK FAILED' \
+    && pass "mg-44ee4: and it is alerted as ROLLBACK FAILED, with the by-hand restore in the body" \
+    || fail "mg-44ee4: rollback-failed was not alerted loudly"
+# Put the fleet back by hand, exactly as that alert says to.
+cp -p "$MGX/gobin/mg.prev" "$MGX/gobin/mg.tmp" && mv -f "$MGX/gobin/mg.tmp" "$MGX/gobin/mg"
+[ "$(mglive)" = "$LIVE" ] && pass "mg-44ee4: the alert's by-hand restore works" || fail "mg-44ee4: by-hand restore left [$(mglive)]"
+
+# --- 7. and with nothing wrong, the owed commit lands --------------------
+L="$(mgstep | mgline)"
+case "$L" in
+    *"installed $MGWANT (origin/main $MGWANT) prev $LIVE result=ok rc=0") pass "mg-44ee4: once the fault is gone the next run installs the owed commit" ;;
+    *) fail "mg-44ee4: recovery line: [$L]" ;;
+esac
+
+# --- 8. skips ------------------------------------------------------------
+L="$(MGSTEP_DRY=true mgstep | mgline)"
+case "$L" in *"result=skipped reason=dry-run rc=0") pass "mg-44ee4: a dry run writes the line as skipped reason=dry-run" ;;
+    *) fail "mg-44ee4: dry-run line: [$L]" ;; esac
+L="$(MGSTEP_SRC="$WORK/mg-no-such-src" MGSTEP_REMOTE="" mgstep | mgline)"
+case "$L" in *"result=skipped reason=no-remote rc=0") pass "mg-44ee4: no clone URL is skipped (nothing attempted), not failed" ;;
+    *) fail "mg-44ee4: no-remote line: [$L]" ;; esac
+
+# --- 9. independence from pogod: on_exit, rc, ordering -------------------
+ON_EXIT_BODY="$(sed -n '/^on_exit() {/,/^}/p' "$RUNNER")"
+printf '%s\n' "$ON_EXIT_BODY" | awk '
+    /stamp_write "\$STAMP"/ && !a {a=NR} /^[[:space:]]*mg_deploy_step$/ && !b {b=NR}
+    /kill_tree "\$WATCHDOG_PID"/ && !c {c=NR} /rmdir "\$LOCK_DIR"/ && !d {d=NR}
+    END {exit !(a && b && c && d && a < b && b < c && c < d)}' \
+    && pass "mg-44ee4: on_exit order — pogod's attempt record, THEN the mg step (still under the watchdog), THEN disarm, THEN the lock" \
+    || fail "mg-44ee4: on_exit order changed: $(printf '%s' "$ON_EXIT_BODY" | grep -n 'stamp_write\|mg_deploy_step\|WATCHDOG_PID"\|LOCK_DIR' | tr '\n' ' ')"
+grep -v '^[[:space:]]*#' "$RUNNER" | grep -qE 'exit[[:space:]]+"?\$MG_RC' \
+    && [ "$(grep -v '^[[:space:]]*#' "$RUNNER" | grep -cE 'exit[[:space:]]+"?\$MG_RC')" -eq 1 ] \
+    && sed -n '/^run_mg_only() {/,/^}/p' "$RUNNER" | grep -q 'exit "\$MG_RC"' \
+    && pass "mg-44ee4: MG_RC becomes an exit status ONLY in --mg-only — never the nightly's" \
+    || fail "mg-44ee4: MG_RC leaks into an exit status outside run_mg_only"
+
+# End to end, through the real runner: the same healthy night as the `ok` arm,
+# but with the mg step pointed at a checkout it cannot build — the e2e GIT is
+# the answer-nothing fake the pogod sync relies on, so the mg step's rev-parse
+# comes back empty and it FAILS. The run's rc must not move.
+rm -rf "$MGX/src"
+(
+    export POGO_DEPLOY_MG_SRC="$MGX/src" POGO_DEPLOY_MG_REMOTE="$MGX/origin" POGO_DEPLOY_MG_GOBIN="$MGX/gobin"
+    run_e2e mgbad "$FAKEBIN/workinggit" 5 600
+)
+grep -q '\] mg: installed .* result=failed' "$E2E/mgbad.log" \
+    && pass "mg-44ee4: premise — the e2e mg step really did fail" \
+    || fail "mg-44ee4: premise not met, the e2e mg step did not fail: $(grep '\] mg: installed' "$E2E/mgbad.log" | tail -1)"
+[ "$(cat "$E2E/mgbad.rc")" = "$(cat "$E2E/ok.rc")" ] \
+    && pass "mg-44ee4: an mg step that does not land leaves the nightly's rc exactly as the healthy run's ($(cat "$E2E/ok.rc"))" \
+    || fail "mg-44ee4: the mg step changed the run's rc: $(cat "$E2E/mgbad.rc") vs $(cat "$E2E/ok.rc")"
+grep -q '\] mg: installed .* result=' "$E2E/mgbad.log" \
+    && pass "mg-44ee4: the real runner writes the mg line on a nightly path" \
+    || fail "mg-44ee4: no mg line in the e2e log: $(tail -5 "$E2E/mgbad.log")"
+awk '/\] mg: installed /{m=NR} /pogo-deploy: end \(rc=/{e=NR} END{exit !(m && e && m < e)}' "$E2E/mgbad.log" \
+    && pass "mg-44ee4: and it precedes the terminal line — it is part of the run's record" \
+    || fail "mg-44ee4: mg line missing or after the terminal line"
+grep -q '\] mg: installed .* result=' "$E2E/ok.log" \
+    && pass "mg-44ee4: the ordinary healthy e2e night writes the mg line too — the positive control, every attempting fire" \
+    || fail "mg-44ee4: the healthy e2e night wrote no mg line: $(grep 'mg:' "$E2E/ok.log" | tail -3)"
+
+
 # THE LEAK CHECK. REAL_STATE_DIR and REAL_STATE_BEFORE were both captured at the
 # top of this file, BEFORE `export POGO_HOME="$WORK"` — reading them now would
 # resolve to $WORK and assert nothing, which is this ticket's own defect
