@@ -1,8 +1,10 @@
 package gitgc
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -246,7 +248,10 @@ func TestSessionTempReclaimedWithOrphanDir(t *testing.T) {
 			t.Errorf("dry=%v: SessionTempRemoved = %+v, want exactly one", dry, res.SessionTempRemoved)
 		}
 		assertNotAlsoKept(t, dry, res, temp)
-		if !strings.Contains(res.Summary(), " 1, kept 0\n") {
+		// Anchored to the session-temp line: a bare " 1, kept 0" also
+		// matches the worktrees line, which counts the orphan dir itself.
+		verb := map[bool]string{true: "would remove", false: "removed"}[dry]
+		if !strings.Contains(res.Summary(), "  session temp dirs: "+verb+" 1, kept 0\n") {
 			t.Errorf("dry=%v: summary should count the reclaimed temp dir once:\n%s", dry, res.Summary())
 		}
 	}
@@ -278,4 +283,82 @@ func TestSessionTempNilProviderIsInert(t *testing.T) {
 	if !exists(temp) || len(res.SessionTempRemoved)+len(res.SessionTempKept) != 0 {
 		t.Errorf("nil SessionTempDirs touched session temp: exists=%v res=%+v", exists(temp), res)
 	}
+}
+
+// TestSessionTempDryRunMatchesApplyForSubdirOfReclaimedTree: a session started
+// in a subdirectory of a polecat's tree spells like a polecat named
+// "<name>-<sub>", and the orphan-temp phase keeps such a slug while
+// PolecatsDir/<name> exists. When phase 1 or 1b reclaims <name> in the same
+// pass, an apply has deleted that dir before phase 1c looks and a dry run has
+// not — so the dry run must count the dir as gone, or it keeps a temp dir the
+// apply removes (review of PR #215, mg-fd3e5). The two runs are compared whole.
+func TestSessionTempDryRunMatchesApplyForSubdirOfReclaimedTree(t *testing.T) {
+	for _, source := range []string{"worktree", "orphan"} {
+		t.Run(source, func(t *testing.T) {
+			// Each mode in its own subtest: newTestRepo's polecats dir sits
+			// beside the repo in the test's temp dir, so two fixtures built
+			// under one test would share it.
+			var dry, apply sessionTempOutcome
+			t.Run("dry", func(t *testing.T) { dry = subdirOfReclaimedTreeSweep(t, source, true) })
+			t.Run("apply", func(t *testing.T) { apply = subdirOfReclaimedTreeSweep(t, source, false) })
+			if dry.removed != apply.removed || dry.kept != apply.kept {
+				t.Errorf("dry run and --apply disagree:\n  dry:   removed %v kept %v\n  apply: removed %v kept %v",
+					dry.removed, dry.kept, apply.removed, apply.kept)
+			}
+			if want := "[aaaa aaaa-cmd]"; apply.removed != want {
+				t.Errorf("apply removed owners %s, want %s", apply.removed, want)
+			}
+			// The summary's session-temp line, as each mode prints it.
+			if !strings.Contains(dry.summary, "session temp dirs: would remove 2, kept 0\n") ||
+				!strings.Contains(apply.summary, "session temp dirs: removed 2, kept 0\n") {
+				t.Errorf("summaries disagree:\n%s\n%s", dry.summary, apply.summary)
+			}
+		})
+	}
+}
+
+type sessionTempOutcome struct{ removed, kept, summary string }
+
+// subdirOfReclaimedTreeSweep builds a fresh fixture — polecat aaaa's tree
+// (registered worktree or orphan dir, ticket done) with a temp dir for the
+// tree and one for its "cmd" subdirectory — sweeps it, and returns the owners
+// removed and kept, in a form two runs can be compared by.
+func subdirOfReclaimedTreeSweep(t *testing.T, source string, dry bool) sessionTempOutcome {
+	t.Helper()
+	r := newTestRepo(t)
+	polecats := r.polecatsDir()
+	tree := filepath.Join(polecats, "aaaa")
+	switch source {
+	case "worktree":
+		r.branch("polecat-aaaa")
+		r.worktree("polecat-aaaa")
+	case "orphan":
+		if err := os.MkdirAll(tree, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fn := fakeSessionTemp(filepath.Join(t.TempDir(), "claude-501"))
+	target := filepath.Join(t.TempDir(), "t")
+	mkSessionTemp(t, fn, tree, target)
+	mkSessionTemp(t, fn, filepath.Join(tree, "cmd"), target)
+
+	res, err := Sweep(Options{
+		Repo: r.dir, Tickets: TicketIndex{"mg-aaaa": TicketDone},
+		PolecatsDir: polecats, SessionTempDirs: fn, DryRun: dry,
+	})
+	if err != nil {
+		t.Fatalf("dry=%v Sweep: %v", dry, err)
+	}
+	if len(res.Errors) != 0 {
+		t.Errorf("dry=%v: unexpected errors: %v", dry, res.Errors)
+	}
+	owners := func(as []SessionTempAction) string {
+		var o []string
+		for _, a := range as {
+			o = append(o, a.Owner)
+		}
+		sort.Strings(o)
+		return fmt.Sprint(o)
+	}
+	return sessionTempOutcome{owners(res.SessionTempRemoved), owners(res.SessionTempKept), res.Summary()}
 }

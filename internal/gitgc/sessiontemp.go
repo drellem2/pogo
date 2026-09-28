@@ -104,6 +104,12 @@ func sweepOrphanSessionTemp(opts Options, tickets TicketIndex, res *Result) {
 	for _, a := range res.SessionTempRemoved {
 		taken[a.Path] = true
 	}
+	// Trees phases 1 and 1b reclaimed this pass. The keeps below ask whether
+	// a polecat's directory still exists; an apply has deleted these before
+	// this phase runs and a dry run has not, so without this a dry run keeps a
+	// "<name>-<sub>" temp dir (a session in a subdirectory of <name>'s tree)
+	// that --apply removes (mg-fd3e5).
+	reclaimed := reclaimedTrees(res)
 	for _, probe := range opts.SessionTempDirs(filepath.Join(opts.PolecatsDir, sessionTempProbeName)) {
 		root, base := filepath.Dir(probe), filepath.Base(probe)
 		if strings.Count(base, sessionTempProbeName) != 1 {
@@ -129,7 +135,7 @@ func sweepOrphanSessionTemp(opts Options, tickets TicketIndex, res *Result) {
 			if taken[path] || !constructsPath(opts, name, path) {
 				continue
 			}
-			if reason, keep := keepSessionTemp(opts, tickets, name); keep {
+			if reason, keep := keepSessionTemp(opts, tickets, reclaimed, name); keep {
 				res.SessionTempKept = append(res.SessionTempKept, SessionTempAction{Path: path, Owner: name, Reason: reason})
 				continue
 			}
@@ -155,16 +161,57 @@ func constructsPath(opts Options, name, path string) bool {
 	return false
 }
 
+// reclaimedTrees returns the directories phases 1 and 1b removed (or, in a dry
+// run, would remove) this pass, under both the spelling they were reported
+// with and their resolved path, since a worktree path comes from git, which
+// canonicalises it, and PolecatsDir may not be.
+func reclaimedTrees(res *Result) map[string]bool {
+	out := map[string]bool{}
+	for _, w := range res.WorktreesRemoved {
+		out[filepath.Clean(w.Path)] = true
+		if real, err := filepath.EvalSymlinks(w.Path); err == nil {
+			out[real] = true
+		}
+	}
+	return out
+}
+
+// polecatDirPresent reports whether PolecatsDir/<name> will still exist once
+// this pass has done what it is doing: in a dry run a dir reclaimed this pass
+// counts as absent, although it has not actually gone, so that the dry run
+// keeps and removes exactly what --apply does. An apply asks the filesystem
+// alone — the reclaimed dir is gone, and one recreated under the same name
+// since phase 1 is really there and keeps its temp dirs. err is a failure to
+// check.
+func polecatDirPresent(opts Options, reclaimed map[string]bool, name string) (bool, error) {
+	path := filepath.Join(opts.PolecatsDir, name)
+	if opts.DryRun {
+		if reclaimed[path] {
+			return false, nil
+		}
+		if real, err := filepath.EvalSymlinks(path); err == nil && reclaimed[real] {
+			return false, nil
+		}
+	}
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // keepSessionTemp applies the orphan-session-temp gate to one recovered owner
 // name, returning the keep reason when the dir must stay.
-func keepSessionTemp(opts Options, tickets TicketIndex, name string) (string, bool) {
+func keepSessionTemp(opts Options, tickets TicketIndex, reclaimed map[string]bool, name string) (string, bool) {
 	if opts.LivePolecats[name] {
 		return "live polecat " + name, true
 	}
-	if _, err := os.Lstat(filepath.Join(opts.PolecatsDir, name)); err == nil {
-		return "owner's directory still exists; the worktree phases own it", true
-	} else if !os.IsNotExist(err) {
+	if present, err := polecatDirPresent(opts, reclaimed, name); err != nil {
 		return fmt.Sprintf("owner's directory could not be checked (%v)", err), true
+	} else if present {
+		return "owner's directory still exists; the worktree phases own it", true
 	}
 	for i := 0; i < len(name); i++ {
 		if name[i] != '-' {
@@ -177,7 +224,7 @@ func keepSessionTemp(opts Options, tickets TicketIndex, name string) (string, bo
 		if opts.LivePolecats[prefix] {
 			return "may be a subdirectory session of live polecat " + prefix, true
 		}
-		if _, err := os.Lstat(filepath.Join(opts.PolecatsDir, prefix)); err == nil || !os.IsNotExist(err) {
+		if present, err := polecatDirPresent(opts, reclaimed, prefix); present || err != nil {
 			return "may be a subdirectory session of polecat dir " + prefix, true
 		}
 	}
