@@ -207,6 +207,12 @@ func testSessionTempReclaimedWithWorktree(t *testing.T, dry bool) {
 	if len(res.SessionTempRemoved) != 1 || res.SessionTempRemoved[0].Path != goneTemp {
 		t.Errorf("dry=%v: SessionTempRemoved = %+v, want exactly %s", dry, res.SessionTempRemoved, goneTemp)
 	}
+	assertNotAlsoKept(t, dry, res, goneTemp)
+	// Exactly one keep: the live polecat's, for being live.
+	if len(res.SessionTempKept) != 1 || res.SessionTempKept[0].Path != liveTemp ||
+		!strings.Contains(res.SessionTempKept[0].Reason, "live polecat bbbb") {
+		t.Errorf("dry=%v: SessionTempKept = %+v, want only %s kept as live", dry, res.SessionTempKept, liveTemp)
+	}
 	if len(res.Errors) != 0 {
 		t.Errorf("dry=%v: unexpected errors: %v", dry, res.Errors)
 	}
@@ -238,6 +244,22 @@ func TestSessionTempReclaimedWithOrphanDir(t *testing.T) {
 		}
 		if len(res.SessionTempRemoved) != 1 {
 			t.Errorf("dry=%v: SessionTempRemoved = %+v, want exactly one", dry, res.SessionTempRemoved)
+		}
+		assertNotAlsoKept(t, dry, res, temp)
+		if !strings.Contains(res.Summary(), " 1, kept 0\n") {
+			t.Errorf("dry=%v: summary should count the reclaimed temp dir once:\n%s", dry, res.Summary())
+		}
+	}
+}
+
+// assertNotAlsoKept fails when a temp dir reclaimed beside its tree is ALSO
+// listed as kept — the dry-run double report review round 1 found, where the
+// orphan-temp phase saw the not-yet-deleted owner dir and kept the same path.
+func assertNotAlsoKept(t *testing.T, dry bool, res Result, path string) {
+	t.Helper()
+	for _, k := range res.SessionTempKept {
+		if k.Path == path {
+			t.Errorf("dry=%v: %s is reported both removed and kept (%s)", dry, path, k.Reason)
 		}
 	}
 }

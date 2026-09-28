@@ -44,10 +44,15 @@ func TestSessionTempDir_MatchesThisMachine(t *testing.T) {
 	}
 }
 
-// TestSessionTempDir_ExistsForThisSession is the end-to-end check, when run
-// from inside a Claude Code session: the harness has already created the temp
-// dir for the working directory. Skips everywhere else.
-func TestSessionTempDir_ExistsForThisSession(t *testing.T) {
+// TestSessionTempDir_ObservedForThisSession_Informational is INFORMATIONAL,
+// not a drift detector: it logs when the constructed dir exists for the module
+// root, and skips otherwise. It cannot fail on a missing dir, because the tests
+// are routinely run from a directory no Claude session was started in (the
+// refinery gate's worktree, a nested package) while CLAUDECODE is still set,
+// so a miss there is not evidence of drift. The pin that DOES fail is
+// TestSessionTempDir_MatchesThisMachine above. A skip here is
+// not a pass (review round 1 advisory, mg-d0c10).
+func TestSessionTempDir_ObservedForThisSession_Informational(t *testing.T) {
 	if os.Getenv("CLAUDECODE") == "" {
 		t.Skip("not running under Claude Code")
 	}
