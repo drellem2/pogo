@@ -264,7 +264,7 @@ mkdir -p "$T/internal/version" "$T/scripts/lib"
 printf 'package version\n\nconst Version = "0.5.0"\n' > "$T/internal/version/version.go"
 cp "$COVERAGE" "$BUMP" "$SCRIPT_DIR/assemble-changelog.sh" \
    "$SCRIPT_DIR/roll-changelog.sh" "$SCRIPT_DIR/changelog-links.sh" "$T/scripts/"
-cp "$SCRIPT_DIR/lib/common.sh" "$T/scripts/lib/"
+cp "$SCRIPT_DIR/lib/common.sh" "$SCRIPT_DIR/lib/version.sh" "$T/scripts/lib/"
 # One described change so assembly has something to emit — otherwise the
 # separate LOUD-EMPTY guard fires and we would not be testing THIS gate.
 printf -- '- a described change (mg-8888).\n' > "$T/changelog.d/mg-8888.added.md"

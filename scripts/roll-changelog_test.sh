@@ -497,7 +497,7 @@ mkdir -p "$T/internal/version" "$T/scripts/lib" "$T/changelog.d"
 printf 'package version\n\nconst Version = "0.5.0"\n' > "$T/internal/version/version.go"
 cp "$BUMP" "$ROLL" "$LINKS" "$SCRIPT_DIR/assemble-changelog.sh" \
    "$SCRIPT_DIR/changelog-coverage.sh" "$T/scripts/"
-cp "$SCRIPT_DIR/lib/common.sh" "$T/scripts/lib/"
+cp "$SCRIPT_DIR/lib/common.sh" "$SCRIPT_DIR/lib/version.sh" "$T/scripts/lib/"
 make_changelog "$T/CHANGELOG.md"
 printf -- '- a described change (mg-8888).\n' > "$T/changelog.d/mg-8888.added.md"
 git -C "$T" init -q -b main 2>/dev/null || git -C "$T" init -q

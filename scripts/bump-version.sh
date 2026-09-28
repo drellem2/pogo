@@ -25,6 +25,7 @@ set -e
 # Source common functions
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
+source "$SCRIPT_DIR/lib/version.sh"
 
 # Usage message
 usage() {
@@ -72,9 +73,11 @@ validate_version() {
     fi
 }
 
-# Get current version from version.go
+# Get current version from version.go. Matches the declaration, not the text
+# 'Version = ' — a comment quoting that text aborted the v0.11.0 cut (mg-3225,
+# mg-cb8dc). See scripts/lib/version.sh.
 get_current_version() {
-    grep 'Version = ' internal/version/version.go | sed 's/.*"\(.*\)".*/\1/'
+    read_version internal/version/version.go
 }
 
 # Update CHANGELOG.md: move [Unreleased] to [version], and maintain the
@@ -245,9 +248,9 @@ main() {
 
     # 1. Update internal/version/version.go
     echo "  • internal/version/version.go"
-    update_file "internal/version/version.go" \
-        "Version = \"$CURRENT_VERSION\"" \
-        "Version = \"$NEW_VERSION\""
+    # write_version rewrites the declaration only, so a comment quoting the old
+    # value is left alone (update_file's s|..|..|g would rewrite it too).
+    write_version internal/version/version.go "$NEW_VERSION"
 
     # 2. Assemble changelog.d/ fragments into [Unreleased], then roll it to the
     #    new version. Assembly is a HARD gate (mg-d917): if it produces an empty
@@ -281,7 +284,7 @@ main() {
 
     # Verify version matches
     echo "Verifying version consistency..."
-    VERSION_GO=$(grep 'Version = ' internal/version/version.go | sed 's/.*"\(.*\)".*/\1/')
+    VERSION_GO=$(read_version internal/version/version.go)
 
     if [ "$VERSION_GO" = "$NEW_VERSION" ]; then
         echo -e "${GREEN}✓ Version matches: $NEW_VERSION${NC}"

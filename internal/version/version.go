@@ -4,13 +4,13 @@ package version
 // resolve.go for what happens when they are NOT set, which — until mg-3141 —
 // was every binary this fleet actually ran.
 //
-// KEEP EXACTLY ONE LINE IN THIS FILE MATCHING `Version<space>=<space>` (spelled
-// that way so this comment is not itself a match). scripts/bump-version.sh and
-// scripts/check-version.sh both read the version by grepping for that string
-// and taking the quoted value, which yields a multi-line answer the moment a
-// second line matches — as this comment did, quoting the pattern verbatim,
-// until the v0.11.0 cut tripped on it (mg-3225). That is why the resolution
-// logic lives in resolve.go rather than here.
+// KEEP EXACTLY ONE `var Version = "X.Y.Z"` DECLARATION IN THIS FILE, at the
+// start of its line. scripts/bump-version.sh and scripts/check-version.sh read
+// and rewrite it through scripts/lib/version.sh, which matches that anchored
+// declaration and refuses unless exactly one line matches. Comments are free to
+// quote it: they used to break a plain `grep 'Version = '`, which is how the
+// v0.11.0 cut aborted (mg-3225, mg-cb8dc). The resolution logic lives in
+// resolve.go rather than here.
 
 // Version is set by goreleaser ldflags or bump-version.sh
 var Version = "0.11.0"
