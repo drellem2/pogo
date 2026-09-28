@@ -61,13 +61,26 @@ func ttyInputPending(slave *os.File) (int, error) {
 // tty, the deadline passes, or the queue cannot be read. It reports whether the
 // queue was observed empty. Caller holds a.mu (so a.slave cannot be closed
 // underneath it).
+//
+// An empty queue is believed only once the last write can have reached it:
+// either the queue was seen non-empty since the write (it landed, and has now
+// been read), or inputLandingWindow has passed. On darwin a master write lands
+// synchronously and the window is zero. On Linux it does not: the write goes
+// to the pty's flip buffer and a kworker pushes it to the line discipline
+// later, so FIONREAD reads 0 for bytes that are in flight — and a gate that
+// trusted that 0 let pieces coalesce (CI measured reads of [1024, 120] and
+// [512, 631, 1] for 512-byte pieces), the very paste-then-type the pieces
+// exist to prevent (mg-f208).
 func (a *Agent) waitInputDrained(deadline time.Time) bool {
+	landBy := time.Now().Add(inputLandingWindow)
 	for {
 		n, err := ttyInputPending(a.slave)
 		if err != nil {
 			return false
 		}
-		if n == 0 {
+		if n > 0 {
+			landBy = time.Time{}
+		} else if !time.Now().Before(landBy) {
 			return true
 		}
 		if !time.Now().Before(deadline) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -154,7 +155,15 @@ func lastSubmit(t *testing.T, receipt string) SubmitRecord {
 // tty queue limit and the harness submits only the tail. If this ever stops
 // reproducing, the fake no longer models the defect and the green test below
 // proves nothing.
+//
+// Darwin only: the split it reproduces is darwin's 1022-byte input queue. Linux
+// queues 4096 bytes in the line discipline, so the same write arrives whole
+// (CI measured reads of [1144] — body and terminator in one read) and there is
+// no head to lose. The drain gate still runs there, and the tests below pin it.
 func TestLongNudgeSingleWriteLosesItsHead(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skipf("the 1022-byte tty queue split is darwin's; %s delivers a %d-byte write whole", runtime.GOOS, len(longFireMessage))
+	}
 	reg, err := NewRegistry(shortSocketDir(t))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
@@ -214,6 +223,11 @@ func TestLongNudgeArrivesWholeInDrainGatedPieces(t *testing.T) {
 // TestNudgeConfirmReportsAMangledDelivery pins the detection half: when the
 // harness submits only the tail, confirm mode no longer logs success — it
 // returns ErrNudgeMangled and records nudge_unconfirmed outcome=mangled.
+//
+// The mangle is produced with a 1000-byte piece rather than chunking off: that
+// is darwin's [1022, rest] split made on purpose, so a paste-sized read followed
+// by typing reaches the harness on any kernel, not only one whose tty queue
+// splits the write for us (mg-f208).
 func TestNudgeConfirmReportsAMangledDelivery(t *testing.T) {
 	logPath := useTempEventLog(t)
 	reg, err := NewRegistry(shortSocketDir(t))
@@ -223,7 +237,11 @@ func TestNudgeConfirmReportsAMangledDelivery(t *testing.T) {
 	defer reg.StopAll(2 * time.Second)
 
 	a, _, _ := spawnPasteHarness(t, reg, "paste-confirm", 150)
-	a.nudge.InputChunkBytes = 0 // reproduce the pre-fix write
+	a.nudge.InputChunkBytes = 1000 // a paste-sized read, then the typed tail
+	if a.nudge.InputChunkBytes < pasteHelperThreshold || a.nudge.InputChunkBytes >= len(longFireMessage) {
+		t.Fatalf("piece %d must be a paste (>= %d) and leave a tail of %d bytes",
+			a.nudge.InputChunkBytes, pasteHelperThreshold, len(longFireMessage))
+	}
 
 	err = a.NudgeWithModeCorrelated(longFireMessage, NudgeConfirm, 9*time.Second, "0590a095")
 	if !errors.Is(err, ErrNudgeMangled) {
