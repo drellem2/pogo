@@ -4,14 +4,16 @@ package version
 // resolve.go for what happens when they are NOT set, which — until mg-3141 —
 // was every binary this fleet actually ran.
 //
-// KEEP EXACTLY ONE LINE IN THIS FILE MATCHING `Version = `. scripts/
-// bump-version.sh and scripts/check-version.sh both read the version with
-// `grep 'Version = ' internal/version/version.go | sed 's/.*"\(.*\)".*/\1/'`,
-// which yields a multi-line answer the moment a second line matches. That is
-// why the resolution logic lives in resolve.go rather than here.
+// KEEP EXACTLY ONE LINE IN THIS FILE MATCHING `Version<space>=<space>` (spelled
+// that way so this comment is not itself a match). scripts/bump-version.sh and
+// scripts/check-version.sh both read the version by grepping for that string
+// and taking the quoted value, which yields a multi-line answer the moment a
+// second line matches — as this comment did, quoting the pattern verbatim,
+// until the v0.11.0 cut tripped on it (mg-3225). That is why the resolution
+// logic lives in resolve.go rather than here.
 
 // Version is set by goreleaser ldflags or bump-version.sh
-var Version = "0.10.0"
+var Version = "0.11.0"
 
 // Build is the short commit hash, set by ldflags (build.sh, pogo-self-deploy,
 // goreleaser). Empty means unstamped; resolve.go turns that into "unknown"
