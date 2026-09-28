@@ -43,6 +43,15 @@
 // make detection stricter, and the emitted event now carries per-item repeat
 // counts so the distinction stays countable.
 //
+// The two DISPATCH categories (priority_wake, unclaimed_items) are quieter
+// again since mg-b12da, on the operator's word that they were "somewhat
+// annoying" (drellem2/pogo#211): each has its own per-item base — 4h, so a held
+// item is named once and then at most every 4h — and a category-level
+// DispatchNoticeInterval (1h) batches first notices, which arrive one item at a
+// time and so were most of what the per-item keying could not reduce. See
+// selectDispatchDue for why that interval is not the per-category cooldown
+// mg-1693 removed.
+//
 // Why pogod rather than an Ocean-side watcher: if the mayor's loop is dropping
 // its own check-work / check-mail steps (prompt drift, LLM cycle-skip), a
 // watcher living in that same loop can't catch it — watcher and watched drift
@@ -235,6 +244,10 @@ type Watcher struct {
 	// mail category, which has no item identity, keys it by category alone. See
 	// fireKey and repeatCooldown.
 	lastNudge map[string]fireRecord
+	// lastDispatchNotice records, per dispatch category, when that category
+	// last SENT a notice. It gates only when the next notice may go out — see
+	// selectDispatchDue — and records nothing about any item.
+	lastDispatchNotice map[string]time.Time
 }
 
 // fireRecord is the per-key cooldown state: when the key last fired, and how
@@ -333,6 +346,8 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		paused:    opts.Paused,
 		lastNudge: make(map[string]fireRecord),
 		selfMail:  make(map[string]bool),
+
+		lastDispatchNotice: make(map[string]time.Time),
 	}
 }
 
@@ -376,6 +391,7 @@ func (w *Watcher) pausedNow() bool {
 	if w.wasPaused {
 		w.wasPaused = false
 		w.lastNudge = make(map[string]fireRecord)
+		w.lastDispatchNotice = make(map[string]time.Time)
 	}
 	return false
 }
@@ -502,7 +518,7 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 	// and a tick where every stale item is cooling down produces no nudge at
 	// all — which is the whole point: a queue the coordinator is deliberately
 	// holding goes quiet instead of re-reporting itself every cooldown.
-	due, sel := w.selectDue(categoryUnclaimedItems, stale, now, w.cfg.NudgeCooldown)
+	due, sel := w.selectDispatchDue(categoryUnclaimedItems, stale, now, w.unclaimedItemCooldown())
 	if len(due) == 0 {
 		return
 	}
@@ -541,10 +557,12 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 		"item_ids":           ids,
 		"age_threshold":      w.cfg.UnclaimedItemAgeThreshold.String(),
 		"oldest_age_seconds": now.Sub(oldestModTime(due)).Seconds(),
+		"item_cooldown":      w.unclaimedItemCooldown().String(),
 	}
 	if len(advisedIDs) > 0 {
 		details["block_intent_mismatch_ids"] = advisedIDs
 	}
+	w.stampNoticeInterval(details)
 	sel.stampDetails(details)
 	split.stampDetails(details)
 	w.fire(categoryUnclaimedItems, Notice{
@@ -566,12 +584,15 @@ func (w *Watcher) checkUnclaimedItems(now time.Time) {
 //   - Only available/ is listed. An item with unmet deps sits in pending/ and
 //     an already-claimed item in claimed/, so neither is ever seen here — a
 //     blocked or claimed high-priority item cannot trigger a wake at all.
-//   - The dedicated HighPriorityWakeCooldown gates repeats PER ITEM and
-//     escalates, so a ready high-priority item that simply stays available
-//     (e.g. the coordinator can't dispatch it yet) draws one nudge, then one a
-//     cooldown later, then one at twice that, out to RepeatBackoffCap — not one
-//     per heartbeat tick, and not one per cooldown forever. This is the
-//     category mg-1693 was measured on; see selectDue.
+//   - The dedicated HighPriorityWakeCooldown gates repeats PER ITEM, so a
+//     ready high-priority item that simply stays available (e.g. the
+//     coordinator can't dispatch it yet) draws one nudge and then at most one
+//     per cooldown (4h by default since mg-b12da, 3m doubling before) — not one
+//     per heartbeat tick. This is the category mg-1693 was measured on; see
+//     selectDue.
+//   - DispatchNoticeInterval spaces whole notices (1h by default), so items
+//     that become ready at different times inside an hour share one notice
+//     instead of drawing one each. See selectDispatchDue.
 func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, flight WorkInFlight, held PreservedWork, strand StrandedWork) {
 	if !w.cfg.PriorityWakeEnabled {
 		return
@@ -626,7 +647,7 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, fl
 	// category the mg-1693 measurement was dominated by: the three worst
 	// offenders (mg-61f4, mg-0e24, mg-7c95) were all ready high-priority items
 	// the coordinator was holding on purpose behind its polecat cap.
-	due, sel := w.selectDue(categoryPriorityWake, ready, now, w.cfg.HighPriorityWakeCooldown)
+	due, sel := w.selectDispatchDue(categoryPriorityWake, ready, now, w.cfg.HighPriorityWakeCooldown)
 	if len(due) == 0 {
 		return
 	}
@@ -672,6 +693,7 @@ func (w *Watcher) checkPriorityWake(now time.Time, items []workitem.WorkItem, fl
 	if len(advisedIDs) > 0 {
 		details["block_intent_mismatch_ids"] = advisedIDs
 	}
+	w.stampNoticeInterval(details)
 	sel.stampDetails(details)
 	split.stampDetails(details)
 	w.fire(categoryPriorityWake, Notice{
@@ -1149,6 +1171,65 @@ func (s selection) repeatNotice() string {
 		strings.Join(parts, ", "), s.nextBackoff)
 }
 
+// unclaimedItemCooldown is the per-item base for the standard unclaimed-items
+// notice. Load() sets UnclaimedItemCooldown (4h since mg-b12da); a hand-built
+// config that leaves it zero keeps NudgeCooldown, the base this category used
+// before the knob existed, so no pre-existing caller changes behaviour by
+// accident.
+func (w *Watcher) unclaimedItemCooldown() time.Duration {
+	if w.cfg.UnclaimedItemCooldown > 0 {
+		return w.cfg.UnclaimedItemCooldown
+	}
+	return w.cfg.NudgeCooldown
+}
+
+// stampNoticeInterval records the dispatch-notice interval on a dispatch
+// category's event when one is in force, so a notice that went out late
+// because of it can be told from one that went out late for any other reason.
+func (w *Watcher) stampNoticeInterval(details map[string]any) {
+	if w.cfg.DispatchNoticeInterval > 0 {
+		details["notice_interval"] = w.cfg.DispatchNoticeInterval.String()
+	}
+}
+
+// selectDispatchDue is selectDue for the two dispatch categories
+// (priority_wake, unclaimed_items), plus a minimum gap between two notices of
+// the same category: DispatchNoticeInterval (mg-b12da).
+//
+// Inside the gap it selects NOTHING and records nothing about any item — it
+// only prunes, exactly as selectDue would, so an item that leaves available/
+// during the gap is still forgotten. An item that came due inside the gap is
+// therefore still due when the gap ends, and is named then, as a first notice
+// if it never had one. That is the difference from the per-category cooldown
+// mg-1693 removed: that one marked the CATEGORY as told and so read the next
+// new item as already reported, which silently swallowed it. This one delays a
+// notice; it cannot drop one.
+//
+// Why a category-level gap at all, after mg-1693 moved everything per item:
+// the per-item cooldown bounds repeats, and after mg-b12da raised it to 4h,
+// repeats were no longer the bulk of the traffic — first notices were, because
+// high-priority items reach available/ one at a time (109 distinct items in the
+// 55h measured) and each drew its own notice. Only a gap across items batches
+// them.
+//
+// The gap opens only on a tick that actually sends: a tick on which every
+// candidate is still inside its own per-item cooldown leaves it where it was.
+func (w *Watcher) selectDispatchDue(category string, candidates []workitem.WorkItem, now time.Time, base time.Duration) ([]workitem.WorkItem, selection) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if iv := w.cfg.DispatchNoticeInterval; iv > 0 {
+		if last, ok := w.lastDispatchNotice[category]; ok && now.Sub(last) < iv {
+			w.pruneLocked(category, candidates)
+			return nil, selection{}
+		}
+	}
+	due, sel := w.selectDueLocked(category, candidates, now, base)
+	if len(due) > 0 {
+		w.lastDispatchNotice[category] = now
+	}
+	return due, sel
+}
+
 // selectDue applies the per-item cooldown to a category's candidate items and
 // returns the subset that may be notified now, plus a selection describing what
 // was held back.
@@ -1169,7 +1250,12 @@ func (s selection) repeatNotice() string {
 func (w *Watcher) selectDue(category string, candidates []workitem.WorkItem, now time.Time, base time.Duration) ([]workitem.WorkItem, selection) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.selectDueLocked(category, candidates, now, base)
+}
 
+// pruneLocked forgets every key under category whose item is not a candidate.
+// See selectDue for why. The caller holds w.mu.
+func (w *Watcher) pruneLocked(category string, candidates []workitem.WorkItem) {
 	live := make(map[string]bool, len(candidates))
 	for _, it := range candidates {
 		live[fireKey(category, it.ID)] = true
@@ -1180,6 +1266,11 @@ func (w *Watcher) selectDue(category string, candidates []workitem.WorkItem, now
 			delete(w.lastNudge, k)
 		}
 	}
+}
+
+// selectDueLocked is selectDue with w.mu already held.
+func (w *Watcher) selectDueLocked(category string, candidates []workitem.WorkItem, now time.Time, base time.Duration) ([]workitem.WorkItem, selection) {
+	w.pruneLocked(category, candidates)
 
 	sel := selection{repeats: make(map[string]int)}
 	var due []workitem.WorkItem

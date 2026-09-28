@@ -497,6 +497,17 @@ about that same item waits twice as long as the last, ceilinged at
 tick on which every offending item is still inside its own backoff sends
 nothing.
 
+Since mg-b12da the two work-item **dispatch** categories take their per-item
+base from their own knobs — `high_priority_wake_cooldown` and
+`unclaimed_item_cooldown`, both 4h, equal to the cap, so a held item is named
+once and then at most every 4h — and each category also waits
+`dispatch_notice_interval` (1h) between two notices. An item that comes due
+inside that interval is held and named in the next notice; nothing is recorded
+against it, so it cannot be swallowed the way the pre-mg-1693 per-category
+cooldown swallowed new items. Measured before/after and the reasoning are in
+[../CONFIGURATION.md](../CONFIGURATION.md) §"The dispatch notices are quiet by
+default".
+
 `unread_mail` is a single aggregate condition with no item identity, so it keeps
 **one** key for the category — but since gh drellem2/pogo#190 that key escalates
 on the same doubling, `nudge_cooldown` out to `repeat_backoff_cap`. It used to
@@ -687,6 +698,8 @@ unread_mail_age_threshold = "10m"
 max_unread_mail_count = 5
 nudge_cooldown = "5m"
 repeat_backoff_cap = "4h"
+unclaimed_item_cooldown = "4h"
+dispatch_notice_interval = "1h"
 mail_fallback_backlog_cap = 3
 
 # Threshold C (mg-f398) — read-only, releases nothing.
