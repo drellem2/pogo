@@ -4829,6 +4829,211 @@ grep -q '\] mg: installed .* result=' "$E2E/ok.log" \
     || fail "mg-44ee4: the healthy e2e night wrote no mg line: $(grep 'mg:' "$E2E/ok.log" | tail -3)"
 
 
+# ---------------------------------------------------------------------------
+# mg-cba69 — THE RUNNER REFRESHES ITSELF, for the next night
+# ---------------------------------------------------------------------------
+# The rehearsal the ticket's acceptance asks for: a scratch "pogo" repo whose
+# scripts/launchd/pogo-deploy.sh moves between commits, a scratch deploy-src
+# cloned from it, and a scratch INSTALL DIR standing in for ~/.pogo/bin. The
+# live runner is never named: RUNNER_TARGET is under $WORK in every call, and
+# POGO_HOME is $WORK for the whole file.
+RX="$WORK/rx"
+mkdir -p "$RX/bin"
+"$REALGIT" init -q "$RX/origin"
+rxcommit() {   # rxcommit MSG — commit whatever is staged in the scratch origin
+    ( cd "$RX/origin" && "$REALGIT" add -A && "$REALGIT" -c user.email=t@t -c user.name=t commit -qm "$1" )
+}
+mkdir -p "$RX/origin/scripts/launchd" "$RX/origin/internal/service"
+printf '#!/bin/bash\necho runner v1\n' > "$RX/origin/scripts/launchd/pogo-deploy.sh"
+printf 'package service\nconst deployPlistTemplate = `<plist v1/>`\nvar deployHours = []int{3, 4, 5}\nconst deployMinute = 0\n' \
+    > "$RX/origin/internal/service/deploy.go"
+rxcommit v1
+( cd "$RX/origin" && "$REALGIT" branch -M main )
+V1="$RX/v1.sh"; cp "$RX/origin/scripts/launchd/pogo-deploy.sh" "$V1"
+# The installed runner: exactly v1, as install-deploy would have written it.
+cp "$V1" "$RX/bin/pogo-deploy.sh"
+printf '#!/bin/bash\necho runner v2 — merged, not yet live\n' > "$RX/origin/scripts/launchd/pogo-deploy.sh"
+rxcommit v2
+"$REALGIT" clone -q "$RX/origin" "$RX/src"
+RXT="$RX/bin/pogo-deploy.sh"
+
+# rxsync — what gate 5 does for this step: bring src to origin/main.
+rxsync() { "$REALGIT" -C "$RX/src" pull -q --ff-only >/dev/null 2>&1; }
+# runnerstep — one run of the step against the scratch world. Prints the log.
+runnerstep() (
+    SRC="$RX/src"
+    GIT="$REALGIT"
+    POGO_CLI=""
+    DRY_RUN="${RSTEP_DRY:-false}"
+    RUNNER_ENABLED=1
+    RUNNER_TARGET="${RSTEP_TARGET:-$RXT}"
+    RUNNER_SYNCED_SHA="${RSTEP_SHA-$("$REALGIT" -C "$RX/src" rev-parse HEAD)}"
+    alert() { echo "ALERT-SUBJECT: $1"; echo "$2"; }
+    if [ -n "${RSTEP_LIE_AFTER_SWAP:-}" ]; then
+        # The file AT THE TARGET hashes wrong once it has been swapped in — the
+        # only way to reach the post-swap restore without breaking the staging
+        # checks first. The first hash of the target is RUNNER_OLD; the second
+        # is the post-swap check.
+        eval "real_$(declare -f runner_blob)"
+        runner_blob() {
+            if [ "$1" = "$RUNNER_TARGET" ]; then
+                n=$(( $(cat "$RX/blobcalls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$RX/blobcalls"
+                [ "$n" -eq 2 ] && { echo 0000000000000000000000000000000000000000; return 0; }
+            fi
+            real_runner_blob "$@"
+        }
+    fi
+    runner_refresh_step 2>&1
+)
+rline() { grep '^\[[^]]*\] runner: ' | grep -v '\] runner: plist' | tail -1; }
+rblob() { "$REALGIT" hash-object "$1" | cut -c1-12; }
+V1B="$(rblob "$V1")"
+V2B="$(cd "$RX/origin" && "$REALGIT" rev-parse HEAD:scripts/launchd/pogo-deploy.sh | cut -c1-12)"
+V2C="$(cd "$RX/origin" && "$REALGIT" rev-parse --short=7 HEAD)"
+
+# --- 1. ACCEPTANCE: a stale runner is refreshed, with a backup -------------
+INO_BEFORE="$(ls -i "$RXT" | awk '{print $1}')"
+OUT="$(runnerstep)"; L="$(printf '%s\n' "$OUT" | rline)"
+case "$L" in
+    *"runner: refreshed $V1B -> $V2B (effective next run) deploy-src $V2C, prev kept at $RXT.prev") pass "mg-cba69: ACCEPTANCE — a stale installed runner is refreshed, and the line is 'runner: refreshed <old> -> <new> (effective next run)'" ;;
+    *) fail "mg-cba69: refresh line wrong: [$L] — $(printf '%s' "$OUT" | tail -5)" ;;
+esac
+cmp -s "$RXT" "$RX/origin/scripts/launchd/pogo-deploy.sh" \
+    && pass "mg-cba69: the installed runner is now byte-for-byte the committed one" \
+    || fail "mg-cba69: the installed runner is not the committed v2: $(cat "$RXT")"
+cmp -s "$RXT.prev" "$V1" \
+    && pass "mg-cba69: ACCEPTANCE — the previous runner is kept as pogo-deploy.sh.prev" \
+    || fail "mg-cba69: .prev missing or not the old runner"
+[ -x "$RXT" ] && pass "mg-cba69: the refreshed runner is executable (launchd execs it directly)" \
+    || fail "mg-cba69: the refreshed runner lost its x bit"
+[ "$(ls -i "$RXT" | awk '{print $1}')" != "$INO_BEFORE" ] \
+    && pass "mg-cba69: the target is a NEW inode — swapped by rename, so a running copy keeps reading the file it opened" \
+    || fail "mg-cba69: the target kept its inode, so it was written in place under a running shell"
+[ -z "$(ls -A "$RX/bin" | grep '^\.')" ] \
+    && pass "mg-cba69: no staging or copy leftovers in the install dir" \
+    || fail "mg-cba69: leftovers: $(ls -A "$RX/bin")"
+printf '%s' "$OUT" | grep -q '\] runner: plist' \
+    && fail "mg-cba69: a runner-only change reported a plist change: $(printf '%s' "$OUT" | grep 'runner: plist')" \
+    || pass "mg-cba69: a change to the runner alone says nothing about the plist"
+
+# --- 2. ACCEPTANCE: a current runner reports current -----------------------
+L="$(runnerstep | rline)"
+case "$L" in
+    *"runner: current $V2C (blob $V2B, $RXT)") pass "mg-cba69: ACCEPTANCE — the current runner reports 'runner: current <sha>'" ;;
+    *) fail "mg-cba69: current line wrong: [$L]" ;;
+esac
+cmp -s "$RXT.prev" "$V1" && pass "mg-cba69: and a current run leaves .prev alone" || fail "mg-cba69: a current run rewrote .prev"
+
+# --- 3. a dry run says stale and touches nothing ---------------------------
+cp "$V1" "$RXT"
+L="$(RSTEP_DRY=true runnerstep | rline)"
+case "$L" in *"runner: stale $V1B -> $V2B (dry-run — not refreshed)"*) pass "mg-cba69: a dry run reports the stale runner without refreshing it" ;;
+    *) fail "mg-cba69: dry-run line: [$L]" ;; esac
+cmp -s "$RXT" "$V1" && pass "mg-cba69: and the installed runner is untouched by the dry run" || fail "mg-cba69: a dry run changed the runner"
+
+# --- 4. not-checked: never guess, never create, never follow a link --------
+L="$(RSTEP_SHA="" runnerstep | rline)"
+case "$L" in *"runner: not-checked reason=no-sync"*) pass "mg-cba69: with no synced commit the step says not-checked reason=no-sync" ;;
+    *) fail "mg-cba69: no-sync line: [$L]" ;; esac
+L="$(RSTEP_TARGET="$RX/nobin/pogo-deploy.sh" runnerstep | rline)"
+case "$L" in *"runner: not-checked reason=not-installed"*) pass "mg-cba69: a missing installed runner is not-installed" ;;
+    *) fail "mg-cba69: not-installed line: [$L]" ;; esac
+[ ! -e "$RX/nobin" ] && pass "mg-cba69: and nothing is created there — installing is install-deploy's job" \
+    || fail "mg-cba69: the step created $RX/nobin"
+ln -s "$V1" "$RX/bin/linked.sh"
+L="$(RSTEP_TARGET="$RX/bin/linked.sh" runnerstep | rline)"
+case "$L" in *"runner: not-checked reason=symlink"*) pass "mg-cba69: a symlinked runner is not-checked reason=symlink" ;;
+    *) fail "mg-cba69: symlink line: [$L]" ;; esac
+[ -L "$RX/bin/linked.sh" ] && cmp -s "$V1" "$RX/v1.sh" && pass "mg-cba69: and the link and its target are untouched" \
+    || fail "mg-cba69: the symlink case changed something"
+rm -f "$RX/bin/linked.sh"
+
+# --- 5. a runner that does not parse is never installed --------------------
+printf '#!/bin/bash\nif then fi (\n' > "$RX/origin/scripts/launchd/pogo-deploy.sh"; rxcommit broken; rxsync
+OUT="$(runnerstep)"; L="$(printf '%s\n' "$OUT" | rline)"
+case "$L" in *"runner: refresh-failed $V1B -> "*"reason=staged-syntax — installed runner is now $V1B"*) pass "mg-cba69: a committed runner that fails bash -n is refused before the swap (refresh-failed reason=staged-syntax)" ;;
+    *) fail "mg-cba69: staged-syntax line: [$L]" ;; esac
+cmp -s "$RXT" "$V1" && pass "mg-cba69: and the installed runner is unchanged" || fail "mg-cba69: a broken runner was installed"
+printf '%s' "$OUT" | grep -q 'ALERT-SUBJECT: .*runner self-refresh FAILED' \
+    && pass "mg-cba69: a failed refresh is alerted — merged-not-live must not be silent" \
+    || fail "mg-cba69: a failed refresh mailed nothing"
+
+# --- 6. the INSTALLED file hashes wrong after the swap: .prev goes back ----
+printf '#!/bin/bash\necho runner v3\n' > "$RX/origin/scripts/launchd/pogo-deploy.sh"; rxcommit v3; rxsync
+rm -f "$RX/blobcalls"
+OUT="$(RSTEP_LIE_AFTER_SWAP=1 runnerstep)"; L="$(printf '%s\n' "$OUT" | rline)"
+case "$L" in *"runner: refresh-failed $V1B -> "*"reason=installed-hash "*) pass "mg-cba69: a target that does not hash to the commit after the swap is refresh-failed reason=installed-hash" ;;
+    *) fail "mg-cba69: installed-hash line: [$L] — $(printf '%s' "$OUT" | tail -4)" ;; esac
+cmp -s "$RXT" "$V1" && pass "mg-cba69: and .prev (the old runner) is what launchd runs again" \
+    || fail "mg-cba69: after the restore the target is: $(cat "$RXT")"
+
+# --- 7. the plist: said, never acted on ------------------------------------
+PLIST_BEFORE="$(cksum < "$RX/origin/internal/service/deploy.go")"
+printf 'package service\nconst deployPlistTemplate = `<plist v2 NEEDS-NEW-KEY/>`\nvar deployHours = []int{3, 4, 5}\nconst deployMinute = 0\n' \
+    > "$RX/origin/internal/service/deploy.go"
+printf '#!/bin/bash\necho runner v4 needs a new plist key\n' > "$RX/origin/scripts/launchd/pogo-deploy.sh"; rxcommit v4-plist; rxsync
+FAKE_PLIST="$RX/com.pogo.deploy.plist"; echo "installed plist" > "$FAKE_PLIST"
+OUT="$(runnerstep)"
+printf '%s' "$OUT" | grep -q '\] runner: plist source changed between the installed runner.s commit .* NOT acting on it' \
+    && pass "mg-cba69: when the plist's source changed since the installed runner's commit, the step says so on a runner: plist line" \
+    || fail "mg-cba69: no plist line: $(printf '%s' "$OUT" | grep 'runner:')"
+printf '%s' "$OUT" | rline | grep -q 'runner: refreshed ' \
+    && pass "mg-cba69: and the runner is still refreshed — the plist note does not block it" \
+    || fail "mg-cba69: plist case line: $(printf '%s' "$OUT" | rline)"
+[ "$(cat "$FAKE_PLIST")" = "installed plist" ] \
+    && ! sed -n '/^runner_refresh_step() {/,/^}/p;/^runner_report() {/,/^}/p' "$RUNNER" | grep -v '^[[:space:]]*#' | grep -q 'LaunchAgents\|LAUNCHCTL\|launchctl \|DEPLOY_PLIST' \
+    && pass "mg-cba69: the step never touches a plist or launchctl" \
+    || fail "mg-cba69: runner_refresh_step references a plist/launchctl"
+# A hand-edited installed runner is no committed blob: the plist is unknowable.
+printf '#!/bin/bash\necho hand edited\n' > "$RXT"
+OUT="$(runnerstep)"
+printf '%s' "$OUT" | grep -q '\] runner: plist unknown — the installed runner' \
+    && pass "mg-cba69: a hand-edited installed runner gets 'runner: plist unknown' rather than a guess" \
+    || fail "mg-cba69: hand-edited case: $(printf '%s' "$OUT" | grep 'runner:')"
+
+# --- 8. structure: order in on_exit, and the rc ----------------------------
+ON_EXIT_BODY="$(sed -n '/^on_exit() {/,/^}/p' "$RUNNER")"
+printf '%s\n' "$ON_EXIT_BODY" | awk '
+    /stamp_write "\$STAMP"/ && !a {a=NR} /^[[:space:]]*mg_deploy_step$/ && !b {b=NR}
+    /^[[:space:]]*runner_refresh_step$/ && !r {r=NR}
+    /kill_tree "\$WATCHDOG_PID"/ && !c {c=NR}
+    END {exit !(a && b && r && c && a < b && b < r && r < c)}' \
+    && pass "mg-cba69: on_exit order — pogod's attempt record, the mg step, THEN the runner refresh (last of the work, still under the watchdog)" \
+    || fail "mg-cba69: on_exit order: $(printf '%s' "$ON_EXIT_BODY" | grep -n 'stamp_write\|mg_deploy_step\|runner_refresh_step\|WATCHDOG_PID"' | tr '\n' ' ')"
+[ "$(grep -v '^[[:space:]]*#' "$RUNNER" | grep -cE 'exit[[:space:]]+"?\$RUNNER_RC')" -eq 1 ] \
+    && sed -n '/^run_runner_only() {/,/^}/p' "$RUNNER" | grep -q 'exit "\$RUNNER_RC"' \
+    && pass "mg-cba69: RUNNER_RC becomes an exit status ONLY in --runner-only — never the nightly's" \
+    || fail "mg-cba69: RUNNER_RC leaks into an exit status outside run_runner_only"
+sed -n '/^runner_refresh_step() {/,/^}/p' "$RUNNER" | grep -v '^[[:space:]]*#' | grep -qE '>[[:space:]]*"\$RUNNER_TARGET"|cp[^|]*"\$RUNNER_TARGET"[[:space:]]*$' \
+    && fail "mg-cba69: runner_refresh_step writes the target in place somewhere" \
+    || pass "mg-cba69: runner_refresh_step never writes \$RUNNER_TARGET in place (only mv/mg_replace)"
+
+# --- 9. the real runner: --runner-only rehearsal, and the nightly line -----
+cp "$V1" "$RXT"; rm -f "$RXT.prev"
+rrun() {
+    HOME="$E2E" POGO_HOME="$E2E" GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" \
+    POGO_BIN="$E2E/go/bin/pogo" GIT="$REALGIT" \
+    POGO_DEPLOY_SRC="$RX/src" POGO_DEPLOY_RUNNER="$RXT" POGO_DEPLOY_LOCK_DIR="$RX/lock" \
+        bash "$RUNNER" --runner-only > "$RX/$1.log" 2>&1
+    echo "$?" > "$RX/$1.rc"
+}
+rrun r1
+V4B="$(cd "$RX/origin" && "$REALGIT" rev-parse HEAD:scripts/launchd/pogo-deploy.sh | cut -c1-12)"
+grep -q "\] runner: refreshed $V1B -> $V4B (effective next run)" "$RX/r1.log" && cmp -s "$RXT.prev" "$V1" \
+    && pass "mg-cba69: REHEARSAL through the real runner (--runner-only, scratch install dir): stale -> refreshed, .prev kept" \
+    || fail "mg-cba69: --runner-only rehearsal: $(grep 'runner' "$RX/r1.log" | tail -3)"
+rrun r2
+grep -q "\] runner: current " "$RX/r2.log" && [ "$(cat "$RX/r2.rc")" = 0 ] \
+    && pass "mg-cba69: REHEARSAL: the second run reports current, rc 0" \
+    || fail "mg-cba69: --runner-only second run: rc=$(cat "$RX/r2.rc") $(grep 'runner' "$RX/r2.log" | tail -3)"
+[ ! -e "$RX/lock" ] && pass "mg-cba69: --runner-only releases the lock" || fail "mg-cba69: --runner-only left the lock"
+grep -q '\] runner: ' "$E2E/ok.log" \
+    && pass "mg-cba69: the ordinary healthy e2e night writes a runner line — every attempting fire" \
+    || fail "mg-cba69: the healthy e2e night wrote no runner line: $(tail -5 "$E2E/ok.log")"
+awk '/\] runner: /{m=NR} /pogo-deploy: end \(rc=/{e=NR} END{exit !(m && e && m < e)}' "$E2E/ok.log" \
+    && pass "mg-cba69: and it precedes the terminal line" \
+    || fail "mg-cba69: runner line missing or after the terminal line"
+
 # THE LEAK CHECK. REAL_STATE_DIR and REAL_STATE_BEFORE were both captured at the
 # top of this file, BEFORE `export POGO_HOME="$WORK"` — reading them now would
 # resolve to $WORK and assert nothing, which is this ticket's own defect

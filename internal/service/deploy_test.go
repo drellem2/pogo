@@ -471,3 +471,58 @@ func TestFindNetControlSourceHonorsOverride(t *testing.T) {
 		t.Errorf("findNetControlSource() = %q; want the override %q", got, lib)
 	}
 }
+
+// TestInstallRunnerFileKeepsPrevAndSwapsByRename pins mg-3bb3's half of
+// mg-cba69: install-deploy used to overwrite the installed runner with no
+// backup. A changed runner must now leave the old bytes at .prev and arrive by
+// rename (a new inode, so a nightly reading the old file is not disturbed); an
+// unchanged one must be left alone, .prev included.
+func TestInstallRunnerFileKeepsPrevAndSwapsByRename(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "pogo-deploy.sh")
+
+	// Fresh install: nothing to keep.
+	backed, err := installRunnerFile(dst, []byte("v1\n"))
+	if err != nil || backed {
+		t.Fatalf("fresh install: backed=%v err=%v, want false/nil", backed, err)
+	}
+	if _, err := os.Stat(dst + ".prev"); !os.IsNotExist(err) {
+		t.Fatalf("fresh install wrote a .prev (stat err=%v)", err)
+	}
+	st1, _ := os.Stat(dst)
+	if st1.Mode().Perm() != 0755 {
+		t.Errorf("mode = %v, want 0755 — launchd execs the runner directly", st1.Mode().Perm())
+	}
+
+	// Same bytes: no .prev, same inode.
+	if backed, err := installRunnerFile(dst, []byte("v1\n")); err != nil || backed {
+		t.Fatalf("identical reinstall: backed=%v err=%v, want false/nil", backed, err)
+	}
+	if _, err := os.Stat(dst + ".prev"); !os.IsNotExist(err) {
+		t.Fatalf("identical reinstall wrote a .prev")
+	}
+	if st, _ := os.Stat(dst); !os.SameFile(st, st1) {
+		t.Error("identical reinstall replaced the file")
+	}
+
+	// Changed bytes: old kept at .prev, new at dst, new inode.
+	backed, err = installRunnerFile(dst, []byte("v2\n"))
+	if err != nil || !backed {
+		t.Fatalf("changed install: backed=%v err=%v, want true/nil", backed, err)
+	}
+	if got, _ := os.ReadFile(dst); string(got) != "v2\n" {
+		t.Errorf("dst = %q, want v2", got)
+	}
+	if got, _ := os.ReadFile(dst + ".prev"); string(got) != "v1\n" {
+		t.Errorf(".prev = %q, want the previous runner v1", got)
+	}
+	if st, _ := os.Stat(dst); os.SameFile(st, st1) {
+		t.Error("changed install kept the inode: it was written in place, under a possibly running nightly")
+	}
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".") {
+			t.Errorf("staging leftover %s", e.Name())
+		}
+	}
+}
