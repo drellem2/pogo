@@ -68,6 +68,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/drellem2/pogo/internal/ghpr"
 )
 
 // PreRegistrationPrefix is the commit-subject prefix that marks a
@@ -141,6 +143,33 @@ const (
 	// that caught it on 2026-08-12 was a human noticing that every "stranded"
 	// commit subject named a different work item.
 	DispositionCarried Disposition = "carried"
+
+	// DispositionAwaitingReview means the branch has commits the target does
+	// not, and its head is on origin under a branch that has an OPEN pull
+	// request. Nothing is stranded: the work is durable, it is tracked by the
+	// PR, and it merges when the PR's review passes.
+	//
+	// WHY IT EXISTS (drellem2/pogo#147, mg-dbb75). The agent-driven emitters
+	// compare a stopped polecat's branch against the DEFAULT branch, so on the
+	// PR track every builder that opened a PR and was stopped to wait for its
+	// review looked exactly like mg-9a19: finished, pushed, unmerged. The
+	// reported tally was 0 true positives in 151 notices, and the remedy they
+	// printed — `pogo refinery submit` — lands the change by pushing the target
+	// directly, WITHOUT the review the PR exists for.
+	//
+	// IT IS NEVER DECIDED BY Inspect. Asking GitHub is a network call, and
+	// Inspect runs over hundreds of branches per sweep; a caller that wants
+	// this verdict asks for it with CheckOpenPR, on the one finding it is
+	// about to alert on. And, like DispositionCarried, a caller that applies it
+	// must LOG AND EMIT it rather than drop the finding silently.
+	//
+	// AN OPEN PR IS THE DISCRIMINATOR, NOT A PUSHED REF. "A pushed carrier
+	// makes the work durable regardless of who owns it" was proposed for #147
+	// and declined: a branch's own remote-tracking twin trivially carries it
+	// (see carriedBy), so that rule would silence every pushed branch in the
+	// repo, and mg-9a19's work was pushed and lost anyway. Pushed is not
+	// tracked. An open PR is a tracking artifact; a bare origin ref is not.
+	DispositionAwaitingReview Disposition = "awaiting_review"
 )
 
 // Commit is one commit on a branch, as `git cherry -v` reports it.
@@ -287,8 +316,31 @@ type Finding struct {
 	// is on origin" and "the work is only in a local worktree git-gc is about to
 	// reap" are different emergencies.
 	Ref string `json:"ref"`
-	// Pushed is true when Ref was a remote-tracking ref.
+	// Pushed is true when Ref's tip is ON ORIGIN — reachable from some
+	// refs/remotes/origin/* ref — and OriginRef names that ref.
+	//
+	// IT USED TO MEAN "Ref IS origin/<Branch>", a name lookup rather than an
+	// on-origin fact (drellem2/pogo#147, mg-dbb75). A polecat whose commits were
+	// pushed under ANOTHER branch's name — cross-pushed onto a PR's head, or a
+	// reviewer that checked the PR head out — read as LOCAL-ONLY, and every
+	// renderer then printed two false things about durable work: LocalOnlyWarning
+	// ("THE WORK IS NOT ON ORIGIN ... git-gc reaps that worktree"), and a remedy
+	// that began `git push origin <branch> &&`.
+	//
+	// It is computed for a branch with unmerged commits only; a clean branch has
+	// nothing to lose, and asking would cost a ref walk on every branch a scan
+	// reads.
 	Pushed bool `json:"pushed"`
+	// OriginRef is the origin ref Ref's tip is on, when Pushed: Ref itself when
+	// the branch is pushed under its own name, otherwise another origin ref —
+	// one whose tip IS Ref's tip when there is one, else one that contains it.
+	// It is the branch a submit has to name, because the refinery merges from
+	// origin (see SubmitRemedy and OriginBranch).
+	OriginRef string `json:"origin_ref,omitempty"`
+	// OriginProbeError records that the any-ref-on-origin probe failed. Pushed
+	// then stays false, which keeps the LOCAL-ONLY warning: a probe that can
+	// only ever REMOVE an urgent warning must not remove one it did not run.
+	OriginProbeError string `json:"origin_probe_error,omitempty"`
 	// Target is the ref the branch was compared against.
 	Target string `json:"target"`
 	// Found is false when neither a remote-tracking ref nor a local head exists
@@ -364,6 +416,16 @@ type Finding struct {
 	// ever SUPPRESS a report must not suppress one it did not actually run.
 	CarrierProbeError string `json:"carrier_probe_error,omitempty"`
 
+	// PR is the number of the open pull request whose head is OriginBranch().
+	// Set only for DispositionAwaitingReview. See CheckOpenPR.
+	PR int `json:"pr,omitempty"`
+	// PRBranch is the branch PR was found on.
+	PRBranch string `json:"pr_branch,omitempty"`
+	// PRProbeError records that CheckOpenPR's probe failed. The disposition
+	// then stays what it was — the finding is REPORTED — for the reason given on
+	// CheckOpenPR.
+	PRProbeError string `json:"pr_probe_error,omitempty"`
+
 	// WorkItemID is the id recovered from the unmerged commit subjects, when one
 	// is present (commit convention: a trailing "(mg-xxxx)"). Best-effort: it is
 	// how a scan attributes an orphaned branch to an item, and it is empty for a
@@ -430,6 +492,14 @@ func localOnlyNote(pushed bool) string {
 	return " — " + LocalOnlyWarning
 }
 
+// OriginBranch is the branch name OriginRef has on origin, or "" when the tip
+// is on no origin ref. It is what a submit must name: the refinery merges
+// origin/<branch>, so a submit of a branch that is only on origin under
+// another name is refused, exactly like an unpushed one.
+func (f Finding) OriginBranch() string {
+	return strings.TrimPrefix(f.OriginRef, "refs/remotes/origin/")
+}
+
 // SubmitRemedy renders the command that gets a stranded branch merged.
 //
 // IT IS ONE FUNCTION BECAUSE THE COMMAND IS NOT THE SAME FOR BOTH CASES, and
@@ -446,15 +516,27 @@ func localOnlyNote(pushed bool) string {
 // of a stranded-work remedy is deciding what to paste, and a prose caveat next to
 // a runnable command loses to the command.
 //
+// originBranch is Finding.OriginBranch(): "" when the work is on no origin ref,
+// which is the only case that gets the push. When the work is on origin under
+// ANOTHER name the submit names THAT branch, and nothing is pushed
+// (drellem2/pogo#147, mg-dbb75): the commits are already on the server, and a
+// push would only mint a second origin ref for them. Before that, a pushed
+// branch was one whose own name was on origin, so the two names never
+// differed.
+//
 // It lives here rather than in each caller for the reason given on
 // BranchMatchesItem: several callers depend on exactly this rule, and a second
 // copy is a second rule the day one of them changes.
-func SubmitRemedy(repo, branch, author string, pushed bool) string {
-	submit := fmt.Sprintf("pogo refinery submit %s --repo=%s", branch, repo)
+func SubmitRemedy(repo, branch, author, originBranch string) string {
+	name := originBranch
+	if name == "" {
+		name = branch
+	}
+	submit := fmt.Sprintf("pogo refinery submit %s --repo=%s", name, repo)
 	if author != "" {
 		submit += " --author=" + author
 	}
-	if pushed {
+	if originBranch != "" {
 		return submit
 	}
 	return fmt.Sprintf("git -C %s push origin %s && %s", repo, branch, submit)
@@ -492,6 +574,13 @@ func (f Finding) SummaryIn(c Cell) string {
 				"another item's work, and %s is what merges it. Do NOT submit %s — that would submit "+
 				"%s's work a second time, under the wrong authorship",
 			f.Branch, len(f.Unmerged), f.Target, f.Carrier, f.WorkItemID, f.Carrier, f.Branch, f.WorkItemID)
+	case DispositionAwaitingReview:
+		return fmt.Sprintf(
+			"%s has %d commit(s) %s does not have, and they are on origin as %s, the head of OPEN "+
+				"pull request #%d. Nothing is stranded: the work is durable and awaiting review, and "+
+				"the PR's review is what merges it. Do NOT `pogo refinery submit` it around that "+
+				"review — the refinery lands a branch by pushing %s directly",
+			f.Branch, len(f.Unmerged), f.Target, f.PRBranch, f.PR, f.Target)
 	case DispositionResubmit:
 		// "do NOT dispatch a worker at this item" is what this used to say, and it
 		// was wrong in one direction that mattered (mg-ba32): it treats ANY
@@ -578,6 +667,9 @@ func inspectResolved(repo, branch, targetRef string) (Finding, error) {
 		return f, nil
 	}
 	f.Ref, f.Pushed, f.Found = ref, pushed, true
+	if pushed {
+		f.OriginRef = ref
+	}
 	f.TipTime, f.TipTimeError = tipTime(repo, ref)
 
 	unmerged, equivalent, err := cherry(repo, targetRef, ref)
@@ -596,6 +688,17 @@ func inspectResolved(repo, branch, targetRef string) (Finding, error) {
 
 	f.Disposition = DispositionResubmit
 	f.WorkItemID = workItemID(unmerged)
+
+	// Read from a local head: is the tip on origin under some OTHER name? See
+	// Pushed. A probe failure keeps the LOCAL-ONLY verdict — see
+	// OriginProbeError.
+	if !f.Pushed {
+		if oref, oerr := onOrigin(repo, ref); oerr != nil {
+			f.OriginProbeError = oerr.Error()
+		} else if oref != "" {
+			f.OriginRef, f.Pushed = oref, true
+		}
+	}
 
 	// Who else already has these commits? Head containment is the strict form of
 	// the question: every unmerged commit is an ancestor of the head, so a branch
@@ -723,6 +826,102 @@ func carriedBy(repo, head, branch string) ([]string, error) {
 		names = append(names, line)
 	}
 	return names, nil
+}
+
+// onOrigin names an origin ref that head is on, or "" when no origin ref
+// reaches it.
+//
+// A ref whose tip IS head is preferred over one that merely contains it,
+// because it is the one a submit can name without also merging somebody else's
+// later commits, and the one whose PR (if any) has exactly this work as its
+// head. Ties go to the first in refname order, so the answer is stable.
+//
+// All of refs/remotes/origin/ and not only the polecat namespace carriedBy
+// searches: the question here is not who OWNS the commits but whether git-gc of
+// this worktree can destroy them, and a commit on any origin ref survives it —
+// the same reasoning as LocalOnlyCommits' `--not --remotes`.
+func onOrigin(repo, head string) (string, error) {
+	sha, err := git(repo, "rev-parse", "--verify", "--quiet", head+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("resolve %s in %s: %w", head, repo, err)
+	}
+	sha = strings.TrimSpace(sha)
+	out, err := git(repo, "for-each-ref", "--contains", sha,
+		"--format=%(objectname) %(refname)", "refs/remotes/origin/")
+	if err != nil {
+		return "", fmt.Errorf("list origin refs containing %s in %s: %w", head, repo, err)
+	}
+	containing := ""
+	for _, line := range strings.Split(out, "\n") {
+		tip, name, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || name == "refs/remotes/origin/HEAD" {
+			continue
+		}
+		if tip == sha {
+			return name, nil
+		}
+		if containing == "" {
+			containing = name
+		}
+	}
+	return containing, nil
+}
+
+// PRProbeTimeout bounds CheckOpenPR's call to GitHub. It sits on the
+// polecat-stop path, so it is shorter than the refinery's; a probe that times
+// out is a failed probe, and a failed probe keeps the alert.
+const PRProbeTimeout = 15 * time.Second
+
+// PRProbe reports the number of the open pull request whose head is branch in
+// the GitHub repository dir's origin points at: >0 for an open PR, 0 for none
+// (or one that is not open), and an error when the question could not be
+// answered.
+type PRProbe func(dir, branch string) (int, error)
+
+// GitHubOpenPR is the production PRProbe: `gh pr view`, through the same
+// helper the refinery uses to find a branch's PR (internal/ghpr).
+func GitHubOpenPR(dir, branch string) (int, error) {
+	return ghpr.OpenNumber(dir, branch, PRProbeTimeout)
+}
+
+// CheckOpenPR reclassifies a DispositionResubmit finding as
+// DispositionAwaitingReview when its work is on origin under a branch that has
+// an open pull request (drellem2/pogo#147, mg-dbb75).
+//
+// It touches nothing else. Not a pre-registration finding: that verdict must
+// not be crowded out by a suppression (see inspectResolved's carried check),
+// and an open PR does not stop a re-dispatch from writing predictions after the
+// results. Not an unpushed finding: a PR's head is on origin by definition, so
+// a local-only branch has none to find.
+//
+// A PROBE FAILURE KEEPS THE ALERT, AND THAT DIRECTION IS THE POINT — do not
+// fold the error path into "no PR" or into "suppress" when tidying this up.
+// The probe can only ever REMOVE an alert, and it fails exactly when the
+// network does: gh absent, unauthenticated, rate-limited, or a DNS fault. On
+// 2026-08-14 this host had an intermittent resolution fault lasting at least
+// five hours across github.com, proxy.golang.org and the model API (mg-57d9).
+// Failing toward suppress would blind this detector silently, on the
+// polecat-stop path, during precisely a network incident — the incident that
+// produced it (mg-9a19) was a network failure. Failing toward alert costs a
+// reader one duplicate comparison. So the error is recorded on PRProbeError, the
+// disposition is left as found, and the caller reports as it did before this
+// check existed. TestCheckOpenPRProbeFailureKeepsTheAlert pins it.
+func (f *Finding) CheckOpenPR(dir string, probe PRProbe) {
+	if f.Disposition != DispositionResubmit || !f.Pushed || probe == nil {
+		return
+	}
+	branch := f.OriginBranch()
+	if branch == "" {
+		return
+	}
+	num, err := probe(dir, branch)
+	if err != nil {
+		f.PRProbeError = err.Error()
+		return
+	}
+	if num > 0 {
+		f.PR, f.PRBranch, f.Disposition = num, branch, DispositionAwaitingReview
+	}
 }
 
 // FetchTimeout bounds the best-effort refresh in Fetch. It is short because

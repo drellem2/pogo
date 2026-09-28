@@ -2,7 +2,6 @@ package refinery
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -13,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/drellem2/pogo/internal/ghpr"
 )
 
 // defaultMaxAttempts is the fallback retry budget when no per-repo
@@ -856,50 +857,16 @@ func (r *Refinery) pushBackForPR(wtDir string, mr *MergeRequest, attempt int) {
 // openPRNumber returns the number of the open GitHub PR whose head is
 // branch, or 0 when the branch has a PR that is not open. A branch with no PR
 // at all is reported as (0, nil); anything else that goes wrong is returned as
-// an error for the caller to fail soft on. See lookupPR.
+// an error for the caller to fail soft on. See ghpr.Lookup.
 func openPRNumber(wtDir, branch string) (int, error) {
-	num, state, err := lookupPR(wtDir, branch)
-	if err != nil || !strings.EqualFold(state, "OPEN") {
-		return 0, err
-	}
-	return num, nil
+	return ghpr.OpenNumber(wtDir, branch, prLookupTimeout)
 }
 
 // lookupPR returns the number and state ("OPEN", "MERGED", "CLOSED") of the
-// GitHub PR whose head is branch. gh infers the GitHub repo from the
-// worktree's origin remote. A branch with no PR at all is reported as
-// (0, "", nil); anything else that goes wrong (gh not installed, no network,
-// non-GitHub remote, output drift) is returned as an error for the caller to
-// fail soft on.
+// GitHub PR whose head is branch; see ghpr.Lookup, which the stranded-work
+// detector shares (mg-dbb75). Every error is for the caller to fail soft on.
 func lookupPR(wtDir, branch string) (int, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), prLookupTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch, "--json", "state,number")
-	cmd.Dir = wtDir
-	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1")
-	out, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			stderr := strings.TrimSpace(string(ee.Stderr))
-			// gh exits 1 with this message when the branch simply has no
-			// PR — a normal state for internal mg-track branches, not a
-			// lookup failure.
-			if strings.Contains(strings.ToLower(stderr), "no pull requests found") {
-				return 0, "", nil
-			}
-			return 0, "", fmt.Errorf("gh pr view %s: %s: %w", branch, stderr, err)
-		}
-		return 0, "", fmt.Errorf("gh pr view %s: %w", branch, err)
-	}
-	var pr struct {
-		State  string `json:"state"`
-		Number int    `json:"number"`
-	}
-	if err := json.Unmarshal(out, &pr); err != nil {
-		return 0, "", fmt.Errorf("parse gh pr view output: %w", err)
-	}
-	return pr.Number, pr.State, nil
+	return ghpr.Lookup(wtDir, branch, prLookupTimeout)
 }
 
 // closePRAndReap closes out a merged branch's GitHub PR and deletes the

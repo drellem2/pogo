@@ -75,6 +75,11 @@ func TestMain(m *testing.M) {
 	// not do is stop a unit test from manufacturing a fleet drift alarm at all.
 	restoreDriftSink := StubDriftSinkForTesting()
 
+	// The open-PR probe answers "no PR" by default, so no stranded-work test
+	// shells out to the real gh — and through it to GitHub — about a fixture
+	// repository (mg-dbb75). Tests of the probe's effect install their own.
+	strandedPRProbe = func(string, string) (int, error) { return 0, nil }
+
 	code := m.Run()
 
 	restoreDriftSink()

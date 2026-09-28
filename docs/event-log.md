@@ -392,7 +392,10 @@ an event. Additive — no `schema_version` bump.
 - **`details` fields:**
   - `branch` (string, required): the polecat branch carrying the work
   - `ref` (string, required): the ref the commits were read from — `refs/remotes/origin/<branch>` when pushed, `refs/heads/<branch>` when the polecat committed but never pushed
-  - `pushed` (bool, required): whether `ref` was a remote-tracking ref. `false` is the **more** urgent case: git-gc reaps the worktree holding the only copy
+  - `pushed` (bool, required): whether `ref`'s tip is on origin under **any** ref — `refs/remotes/origin/<branch>` itself, or another origin branch the commits were cross-pushed to (mg-dbb75; before that it meant only "`ref` is a remote-tracking ref"). `false` is the **more** urgent case: git-gc reaps the worktree holding the only copy
+  - `origin_ref` (string, optional): the origin ref the work was found on, present only when it is NOT `ref` — the cross-pushed case. It is the branch the remedy submits (mg-dbb75)
+  - `pr_probe_error` (string, optional): the open-PR check (see `work_item_push_awaiting_review`) could not answer, so this alert went out **because** GitHub could not be asked, not because there was no PR. The check fails toward alerting on purpose (mg-dbb75)
+  - `origin_probe_error` (string, optional): the any-ref-on-origin check failed, so `pushed` stayed `false`
   - `target` (string, required): the ref the branch was compared against
   - `disposition` (string, required): `"resubmit"` or `"pre_registration"`. The second means an unmerged commit whose subject begins `predictions:` — a re-dispatch that branches from the target destroys the control it records, and the resulting artifact looks valid
   - `unmerged` (int, required): how many commits the target does not have
@@ -401,6 +404,40 @@ an event. Additive — no `schema_version` bump.
 
 ```json
 {"schema_version":1,"timestamp":"2026-08-05T09:55:02.000000000Z","event_type":"work_item_stranded_push","agent":"cat-9a19","work_item_id":"mg-9a19","repo":"/Users/daniel/dev/pogo","details":{"branch":"polecat-9a19","ref":"refs/remotes/origin/polecat-9a19","pushed":true,"target":"refs/remotes/origin/main","disposition":"resubmit","unmerged":1,"reason":"agent_stopped","summary":"polecat-9a19 has 1 unmerged commit(s) on refs/remotes/origin/main ..."}}
+```
+
+#### `work_item_push_awaiting_review`
+
+A stopped polecat's branch had commits the target lacks, but they are on origin
+as the head of an **open pull request**, so no `work_item_stranded_push` was
+emitted and no `[stranded-push]` mail was sent (drellem2/pogo#147, mg-dbb75).
+On the PR track a builder is stopped to wait for its review with its work
+pushed and unmerged, which against the default branch looks exactly like lost
+work. Emitted by the release gate and by the startup sweep (whose
+`work_item_stranded_sweep` also counts these under `awaiting_review`).
+
+The check is `gh pr view <branch>` on the origin branch the head is on. **A
+failed check never produces this event**: the alert goes out as before, with
+`pr_probe_error` on its `work_item_stranded_push`. This event exists so the
+suppression is countable — without it, "correctly suppressed" and "the
+detector stopped working" are the same silence. Additive — no `schema_version`
+bump.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `work_item_id`, `repo`, `details`
+- **`details` fields:**
+  - `branch` (string, required): the polecat branch
+  - `ref` (string, required): the ref the commits were read from
+  - `origin_ref` (string, required): the origin ref the head is on
+  - `target` (string, required): the ref the branch was compared against
+  - `pr` (int, required): the open PR's number
+  - `pr_branch` (string, required): the branch the PR was found on — `branch` itself, or the PR head a reviewer checked out
+  - `owner_item` (string, required): the work-item id the commit subjects name, or `""`
+  - `unmerged` (int, required): how many commits the target does not have
+  - `reason` (string, required): the release reason, or the sweep's
+  - `route` (string, required): `"release"` or `"restart_sweep"`
+
+```json
+{"schema_version":1,"timestamp":"2026-09-28T17:30:00.000000000Z","event_type":"work_item_push_awaiting_review","agent":"cat-pa95f","work_item_id":"mg-a95f","repo":"/Users/daniel/dev/pogo","details":{"branch":"polecat-pa95f","ref":"refs/remotes/origin/polecat-pa95f","origin_ref":"refs/remotes/origin/polecat-pa95f","target":"refs/remotes/origin/main","pr":146,"pr_branch":"polecat-pa95f","owner_item":"mg-a95f","unmerged":1,"reason":"agent_stopped","route":"release"}}
 ```
 
 #### `dispatch_stranded_work_overridden`

@@ -99,13 +99,17 @@ type StrandedBranch struct {
 	// Ref is what the commits were read from — the remote-tracking ref when one
 	// exists, otherwise the local head.
 	Ref string
-	// Pushed is true when Ref was a remote-tracking ref. It is the field that
+	// Pushed is true when Ref's tip is on origin under some ref (mg-dbb75;
+	// see strandedwork.Finding.Pushed). It is the field that
 	// separates two different emergencies and it is never flattened into the
 	// prose: pushed work is durable and recoverable at leisure, local-only work
 	// exists in one worktree on one host and git-gc reaps it. `pogo refinery
 	// submit` also REFUSES a branch that is not on origin (mg-586d), so a remedy
 	// that assumed pushed would be unrunnable for exactly the urgent half.
 	Pushed bool
+	// OriginBranch is the name the work is on origin under — Branch, or another
+	// branch it was cross-pushed to. It is what a submit names; "" means Branch.
+	OriginBranch string
 	// Unmerged is how many commits the target does not have.
 	Unmerged int
 	// Target is the ref the branch was compared against.
@@ -541,7 +545,11 @@ func submitHint(items []workitem.WorkItem, found map[string][]StrandedBranch) st
 	if n != 1 || !only.Pushed || only.Queued != nil {
 		return "`pogo check-stranded` names the branch and the remedy for each"
 	}
-	return fmt.Sprintf("`pogo refinery submit %s --repo=%s --author=%s`", only.Branch, only.Repo, id)
+	name := only.OriginBranch
+	if name == "" {
+		name = only.Branch
+	}
+	return fmt.Sprintf("`pogo refinery submit %s --repo=%s --author=%s`", name, only.Repo, id)
 }
 
 // strandedDetails stamps the item->branch attribution onto the emitted event, so
