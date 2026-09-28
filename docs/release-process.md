@@ -71,10 +71,11 @@ Cut vX.Y.Z from release/vX.Y.Z (already at the soaked candidate CAND).
       --target=release/vX.Y.Z --post-merge-tag=vX.Y.Z --verdict-file=...
 Do NOT pass --tag to bump-version.sh. Do NOT open a PR to main. After the
 merge, confirm the tag (step 4), then submit the back-port (step 5):
-  pogo refinery submit release/vX.Y.Z --repo=/Users/daniel/dev/pogo --target=main
+  pogo refinery submit release/vX.Y.Z --repo=/Users/daniel/dev/pogo \
+      --author=<release-cut-item> --target=main
 Mail the coordinator the back-port MR id, then STOP. Do NOT wait for the
-back-port to merge and do NOT run `mg done`: the coordinator runs `mg done`
-on this item once the back-port MR merges.
+back-port to merge and do NOT run `mg done`: the refinery closes this item
+when the back-port merges.
 EOF
 ```
 
@@ -104,10 +105,10 @@ commit. So "the release-branch merge" is the rebased bump commit. Its first
 
 A target that is not the default branch is treated as an **integration
 branch**, so the MR is `pr_flow`. pogod therefore does **not** auto-complete
-the item or stop the polecat. Nobody closes it automatically: the
-coordinator runs `mg done` after the step-5 back-port merges (see step 5 for
-who owns that close and why). A bounded backstop reaps the polecat. If the tag
-step fails, the item is not completed and the mayor is mailed.
+the item or stop the polecat at this merge. The item closes later, when the
+step-5 back-port merges into main (see step 5 for why nobody runs `mg done`).
+A bounded backstop reaps the polecat. If the tag step fails, the item is not
+completed and the mayor is mailed.
 
 ### 4. Verify against origin, never a local tag
 
@@ -126,8 +127,12 @@ reports the old version, and `changelog.d/` still holds the fragments the
 release consumed. The next cut would then ship them a second time.
 
 ```bash
-pogo refinery submit release/vX.Y.Z --repo=/Users/daniel/dev/pogo --target=main
+pogo refinery submit release/vX.Y.Z --repo=/Users/daniel/dev/pogo \
+    --author=<release-cut-item> --target=main
 ```
+
+`--author=<release-cut-item>` is what lets the refinery close the item when
+this merge lands (below). Leave it off and nothing closes the item.
 
 The refinery rebases the release branch onto main. Everything before the bump
 is already on main, so only the bump commit is replayed. It removes the consumed
@@ -145,26 +150,33 @@ check therefore still passes.
 This step is mechanics that the policy did not spell out. `mg-d734` added it
 because the cut is not complete without it.
 
-#### Who runs `mg done`: the coordinator, after the back-port merges
+#### Who closes the release-cut item: the refinery, on the back-port merge
 
 The cutting polecat submits the back-port and **stops**. It does not wait for
-the back-port MR to merge, and it does not run `mg done`. The **coordinator**
-(mayor) runs `mg done <release-cut-item>` once the back-port MR shows
-`merged`:
+the back-port MR to merge, and it does not run `mg done`. Nobody runs
+`mg done`. The back-port targets main, the default branch, so it is not
+`pr_flow`: when it merges, pogod closes the item named by `--author` itself
+(`completed_by: refinery`), even if the coordinator holds the claim. The
+coordinator only confirms the close and archives the item:
 
 ```bash
-pogo refinery show <backport-mr> --json | jq -r .status   # wait for: merged
-mg done <release-cut-item> --result='{"tag": "vX.Y.Z", "backport_mr": "<backport-mr>"}'
+pogo refinery show <backport-mr> --json | jq -r .status     # merged
+mg show <release-cut-item> | grep '^Status:'                # done
+mg archive <release-cut-item>
 ```
 
-The coordinator owns this close because a polecat cannot outlive the wait.
-The back-port queues behind whatever else is in the refinery, and nothing
-bounds how long that takes. The release target is `pr_flow`, so pogod never
-auto-completes the item, and the defer-done backstop reaps a polecat that
-lingers. In the v0.11.0 cut (`mg-3225`), the cutting polecat submitted the
-back-port (`mr-dastnv2`) and was reaped while waiting to run `mg done`. The
-mayor had to claim the item so it would not be redispatched, and then closed
-it. Nothing was lost only because the submit had already reached the queue.
+If the MR merged and the item is still open, the submit lacked `--author`, so
+the refinery had no item to close. Only then does the coordinator close it by
+hand.
+
+The polecat must not wait, because it cannot outlive the wait. The back-port
+queues behind whatever else is in the refinery, and nothing bounds how long
+that takes, while the defer-done backstop reaps a polecat that lingers. In the
+v0.11.0 cut (`mg-3225`), the cutting polecat submitted the back-port
+(`mr-dastnv2`) and was reaped while waiting to run `mg done`. The mayor claimed
+the item so that it would not be redispatched. When the back-port merged
+(`75fd78e`), pogod closed `mg-3225` itself with `completed_by: refinery`.
+Nobody ran `mg done`.
 
 This supersedes the 2026-09-26 policy note on `mg-8382`, which said "the
 cutting polecat runs `mg done` itself". That holds only for a cut with no
