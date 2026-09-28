@@ -52,6 +52,10 @@ func stallCapacityFrom(occ agent.RepoOccupancy) (stallwatch.RepoCapacity, bool) 
 		Polecats:   occ.Polecats,
 		AtCap:      occ.WouldRefuse,
 		Unresolved: occ.Unresolvable,
+		// The two-slot charge for a gh-issue build, copied for the same
+		// reason as AtCap (mg-1acf2).
+		AtCapGHIssueBuild: occ.WouldRefuseGHIssueBuild,
+		ReviewSlotsHeld:   len(occ.ReviewSlotHolds),
 	}
 	// An unresolvable repo is the mg-cd4a case: the item names a repository
 	// this host cannot identify, so no count was TAKEN. Reporting Count 0 as

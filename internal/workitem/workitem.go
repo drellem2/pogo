@@ -550,6 +550,23 @@ type Carrier struct {
 	Unreadable bool `json:"carrier_unreadable,omitempty"`
 }
 
+// GHIssueWorkflow is the `workflow:` carrier value of the gh-issue track.
+const GHIssueWorkflow = "gh-issue"
+
+// ChargedAsGHIssueBuild reports whether dispatching an item carrying c is
+// charged TWO slots by the per-repo cap: a gh-issue BUILD, whose builder stays
+// alive through review so its reviewer will need a slot beside it (mg-bf42).
+// Only `stage: build` with no `reviews:` line — a `reviews:` line marks the
+// review ticket, and an item arriving at `stage: review` without one is let
+// into a held slot rather than charged as a build.
+//
+// It is the ONE predicate both the spawn gate (agent.reviewSlotVerdictFor) and
+// the dispatch notices (stallwatch.splitByCapacity) classify with, so the
+// notice cannot recommend a dispatch the gate refuses (mg-1acf2).
+func (c Carrier) ChargedAsGHIssueBuild() bool {
+	return c.Workflow == GHIssueWorkflow && c.Reviews == "" && c.Stage == "build"
+}
+
 // ParseCarrier reads the state carrier block out of a work item BODY — the text
 // as `mg show --json` returns it in `.body`, with no frontmatter and starting at
 // or above the `# title` heading.

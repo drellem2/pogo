@@ -145,3 +145,28 @@ func TestNewStallCapacityReportsAnAbsentRepoAsUNKNOWN(t *testing.T) {
 		t.Errorf("Unresolved = %q, want the unresolvable path named", c.Unresolved)
 	}
 }
+
+// TestStallCapacityCopiesTheGHIssueBuildVerdict (mg-1acf2): the two-slot charge
+// for a gh-issue build is the gate's verdict too, and the notice must carry it
+// rather than classify gh builds by the plain count. Here an ordinary dispatch
+// fits and a gh-issue build does not.
+func TestStallCapacityCopiesTheGHIssueBuildVerdict(t *testing.T) {
+	c, known := stallCapacityFrom(agent.RepoOccupancy{
+		Repo: "/Users/daniel/dev/macguffin", Count: 1, Cap: 3,
+		Polecats:                []string{"p28dcf"},
+		ReviewSlotHolds:         []agent.ReviewSlotHold{{Polecat: "p28dcf", Build: "mg-28dcf"}},
+		WouldRefuseGHIssueBuild: true,
+	})
+	if !known {
+		t.Fatal("known = false with a readable witness")
+	}
+	if c.AtCap {
+		t.Error("AtCap = true while an ordinary dispatch fits")
+	}
+	if !c.AtCapGHIssueBuild {
+		t.Error("AtCapGHIssueBuild = false while the gate refuses a gh-issue build — the wake would offer it")
+	}
+	if c.ReviewSlotsHeld != 1 {
+		t.Errorf("ReviewSlotsHeld = %d, want 1", c.ReviewSlotsHeld)
+	}
+}

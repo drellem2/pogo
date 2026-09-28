@@ -37,7 +37,7 @@ import (
 // is now what the gate computes.
 
 // GHIssueWorkflow is the `workflow:` carrier value of the gh-issue track.
-const GHIssueWorkflow = "gh-issue"
+const GHIssueWorkflow = workitem.GHIssueWorkflow
 
 // FlowCarrier is the part of a work item's state carrier the review-slot
 // reserve reads.
@@ -215,7 +215,7 @@ func (r *Registry) reviewSlotVerdictFor(occ RepoOccupancy, workItemID string) re
 	// is for, which is this ticket's deadlock re-entered through the fix; it is
 	// instead let into any hold, since which builder it covers cannot be read.
 	gh := incoming.Workflow == GHIssueWorkflow
-	if gh && incoming.Reviews == "" && incoming.Stage == "build" {
+	if (workitem.Carrier{Workflow: incoming.Workflow, Stage: incoming.Stage, Reviews: incoming.Reviews}).ChargedAsGHIssueBuild() {
 		v.Need = 2
 	}
 	undeclaredReviewer := gh && incoming.Reviews == "" && incoming.Stage == "review"

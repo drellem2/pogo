@@ -33,6 +33,19 @@ type RepoCapacity struct {
 	// than recomputed from Count and Cap, so this watcher can never disagree
 	// with the gate it is reporting on.
 	AtCap bool
+	// AtCapGHIssueBuild is what the spawn point would do with a gh-issue BUILD
+	// (workitem.Carrier.ChargedAsGHIssueBuild), which is charged two slots —
+	// itself and its future reviewer — against Count plus the slots already
+	// held for live builders' reviewers (mg-bf42). It is true whenever AtCap
+	// is, and can be true when AtCap is not: a cap-3 repo with one live
+	// builder and its held review slot admits an ordinary item but refuses a
+	// new gh-issue build. Taken from the enforcing side for the same reason as
+	// AtCap (mg-1acf2).
+	AtCapGHIssueBuild bool
+	// ReviewSlotsHeld is how many slots are held back for the reviewers of
+	// live gh-issue builders. Rendered so a gh-issue build refused below the
+	// plain worker count says which slots it is missing.
+	ReviewSlotsHeld int
 	// Unresolved, when non-empty, is why the repository could not be identified
 	// at all — the item's `repo` field is a bare NAME that matched no known
 	// repository, or a path that is not there. It accompanies known=false, and
@@ -172,6 +185,10 @@ func (w *Watcher) splitByCapacity(items []workitem.WorkItem) capacitySplit {
 			bucketAdd(unknownAcc, key, p.cap, it.ID)
 		case p.cap.AtCap:
 			bucketAdd(cappedAcc, key, p.cap, it.ID)
+		case p.cap.AtCapGHIssueBuild && chargedAsGHIssueBuild(it):
+			// The repo admits an ordinary item but not this one: the spawn
+			// gate charges a gh-issue build two slots (mg-1acf2).
+			bucketAdd(cappedAcc, key, p.cap, it.ID)
 		default:
 			s.free = append(s.free, it.ID)
 			if p.cap.Uncertain != "" {
@@ -186,6 +203,17 @@ func (w *Watcher) splitByCapacity(items []workitem.WorkItem) capacitySplit {
 		s.uncertain = append(s.uncertain, fmt.Sprintf("%s (%s)", repo, uncertain[repo]))
 	}
 	return s
+}
+
+// chargedAsGHIssueBuild classifies an item exactly as the spawn gate does. An
+// unreadable carrier is NOT charged, because the gate's flow reader treats it
+// as declaring no flow (agent.MGFlowReader) — the notice follows the gate, in
+// both directions.
+func chargedAsGHIssueBuild(it workitem.WorkItem) bool {
+	if it.CarrierUnreadable {
+		return false
+	}
+	return workitem.Carrier{Workflow: it.Workflow, Stage: it.Stage, Reviews: it.Reviews}.ChargedAsGHIssueBuild()
 }
 
 func bucketAdd(acc map[string]*repoBucket, repo string, c RepoCapacity, id string) {
@@ -334,6 +362,15 @@ func capSentences(buckets []repoBucket) []string {
 		who := strings.Join(b.cap.Polecats, ", ")
 		if who == "" {
 			who = "workers unnamed"
+		}
+		if !b.cap.AtCap {
+			// Only gh-issue builds land here: the plain count has room, the
+			// two-slot charge does not. Saying "at its cap" with a count
+			// below the cap would read as a miscount.
+			out[i] = fmt.Sprintf("%s cannot take a gh-issue BUILD, which needs 2 slots (builder + reviewer), "+
+				"under its cap of %d (%d worker(s): %s; %d slot(s) held for reviewers of live gh-issue builds): %s",
+				b.repo, b.cap.Cap, b.cap.Count, who, b.cap.ReviewSlotsHeld, strings.Join(b.ids, ", "))
+			continue
 		}
 		out[i] = fmt.Sprintf("%s is at its cap of %d (%d worker(s): %s): %s",
 			b.repo, b.cap.Cap, b.cap.Count, who, strings.Join(b.ids, ", "))
