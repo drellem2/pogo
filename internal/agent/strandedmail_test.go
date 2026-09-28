@@ -176,16 +176,62 @@ func TestStrandedAlertMessageWarnsWhenTheWorkIsNotOnOrigin(t *testing.T) {
 			Unmerged:    []strandedwork.Commit{{SHA: "abc123abc123abc", Subject: "feat: x (mg-9a19)"}},
 		},
 	}
-	_, body := local.Message()
+	subject, body := local.Message()
 	if !strings.Contains(body, "THE WORK IS NOT ON ORIGIN") {
 		t.Errorf("a local-only branch did not say so:\n%s", body)
 	}
+	// drellem2/pogo#137: the same mail used to say "already pushed" in its
+	// subject and do-not-dispatch paragraph while warning that the work was not
+	// on origin. The prefix and the prohibition must survive the rewording.
+	assertNotPushedWording := func(name, subject, body string) {
+		t.Helper()
+		for _, bad := range []string{"already pushed", "pushed work behind", "pushed copy"} {
+			if strings.Contains(subject, bad) || strings.Contains(body, bad) {
+				t.Errorf("%s: a local-only branch's mail says %q:\n%s\n\n%s", name, bad, subject, body)
+			}
+		}
+		if !strings.HasPrefix(subject, "[stranded-push] ") || !strings.Contains(subject, "LOCAL-ONLY work behind") {
+			t.Errorf("%s: subject lost its prefix or does not say LOCAL-ONLY: %q", name, subject)
+		}
+	}
+	assertNotPushedWording("release", subject, body)
+	if !strings.Contains(subject, "do NOT dispatch at mg-9a19") || !strings.Contains(body, "DO NOT DISPATCH A WORKER AT mg-9a19") {
+		t.Errorf("a local-only branch's mail lost the prohibition:\n%s\n\n%s", subject, body)
+	}
 
+	// The restart sweep's still-running paragraph said "already pushed" too.
+	alive := local
+	alive.Route, alive.StillAlive = RouteRestartSweep, true
+	subject, body = alive.Message()
+	if !strings.Contains(body, "THE POLECAT IS STILL RUNNING") {
+		t.Fatalf("fixture did not reach the still-running paragraph:\n%s", body)
+	}
+	assertNotPushedWording("sweep, still alive", subject, body)
+
+	noItem := local
+	noItem.WorkItemID = ""
+	subject, body = noItem.Message()
+	assertNotPushedWording("no work item", subject, body)
+
+	closed := local
+	closed.ItemStatus = "done"
+	subject, body = closed.Message()
+	assertNotPushedWording("closed item", subject, body)
+
+	// Positive control: a pushed branch keeps the pushed wording, so the
+	// negative checks above are not passing on text that no longer exists.
 	pushed := local
 	pushed.Finding.Pushed = true
 	pushed.Finding.Ref = "refs/remotes/origin/polecat-9a19"
-	if _, body := pushed.Message(); strings.Contains(body, "THE WORK IS NOT ON ORIGIN") {
+	subject, body = pushed.Message()
+	if strings.Contains(body, "THE WORK IS NOT ON ORIGIN") {
 		t.Errorf("a pushed branch was described as local-only:\n%s", body)
+	}
+	if !strings.Contains(subject, "[stranded-push] 9a19 left pushed work behind on polecat-9a19 — do NOT dispatch at mg-9a19") {
+		t.Errorf("a pushed branch's subject changed: %q", subject)
+	}
+	if !strings.Contains(body, "is already pushed") || strings.Contains(subject+body, "LOCAL-ONLY") {
+		t.Errorf("a pushed branch's mail lost the pushed wording or gained LOCAL-ONLY:\n%s", body)
 	}
 }
 

@@ -2299,7 +2299,7 @@ that reading would select all 634 polecat branches here.
 
 A swept polecat may still be **running** (that is the orphan case, and the
 orphaned-polecat alert covers the same process from the other side). Its mail says
-so: the work is real and already pushed, but the branch may still grow, so do not
+so: the work is real, but the branch may still grow, so do not
 submit under it until you have established it is finished.
 
 ### What both mails carry, and what they will not do

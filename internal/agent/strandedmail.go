@@ -303,17 +303,26 @@ func (a StrandedAlert) Message() (subject, body string) {
 	if item == "" {
 		item = "(none recorded — the branch's commits named no work item)"
 	}
-	subject = fmt.Sprintf("[stranded-push] %s left pushed work behind on %s — do NOT dispatch at %s",
-		a.Polecat, a.Finding.Branch, a.WorkItemID)
+	// The subject must not contradict the body (drellem2/pogo#137): a branch
+	// read from a LOCAL head is the more urgent case, and "pushed" in the half
+	// that travels furthest tells the reader it is the relaxed one. The
+	// "[stranded-push]" prefix and "do NOT dispatch" stay verbatim in both —
+	// docs, filters and stallwatch/stranded.go key on them.
+	work := "pushed work"
+	if !a.Finding.Pushed {
+		work = "LOCAL-ONLY work"
+	}
+	subject = fmt.Sprintf("[stranded-push] %s left %s behind on %s — do NOT dispatch at %s",
+		a.Polecat, work, a.Finding.Branch, a.WorkItemID)
 	switch {
 	case a.WorkItemID == "":
-		subject = fmt.Sprintf("[stranded-push] %s left pushed work behind on %s",
-			a.Polecat, a.Finding.Branch)
+		subject = fmt.Sprintf("[stranded-push] %s left %s behind on %s",
+			a.Polecat, work, a.Finding.Branch)
 	case a.itemIsClosed():
 		// The prohibition has to be true in the half that travels furthest, and
 		// "do NOT dispatch" is not true of an item nothing will be dispatched at.
-		subject = fmt.Sprintf("[stranded-push] %s is %s but %s never merged — %s left pushed work behind",
-			a.WorkItemID, a.ItemStatus, a.Finding.Branch, a.Polecat)
+		subject = fmt.Sprintf("[stranded-push] %s is %s but %s never merged — %s left %s behind",
+			a.WorkItemID, a.ItemStatus, a.Finding.Branch, a.Polecat, work)
 	}
 
 	// "carries" is a claim only the absent cell backs. In every other cell the
@@ -383,6 +392,17 @@ func (a StrandedAlert) Message() (subject, body string) {
 			"Establish which; a closed item with unmerged commits is exactly the state nobody is\n"+
 			"looking for.\n\n",
 			strings.ToUpper(a.ItemStatus), a.WorkItemID, a.WorkItemID, a.Finding.Target)
+	} else if a.WorkItemID != "" && !a.Finding.Pushed {
+		// Still DO NOT DISPATCH: the commits exist, and a worker sent at the item
+		// re-derives them. Only the rationale changes — there is no pushed copy,
+		// so saying there is would contradict the warning below (drellem2/pogo#137).
+		fmt.Fprintf(&b, "DO NOT DISPATCH A WORKER AT %s. The work already exists as commits on %s on\n"+
+			"this host, and is NOT on origin; a worker sent at this item re-derives it from scratch,\n"+
+			"and git gc of the old worktree throws the only copy away. mg-9a19 lost 1026 lines to a\n"+
+			"re-dispatch. The board shows the item as available and priority-wake will advertise it\n"+
+			"as unclaimed and ready — that advice is wrong for as long as this branch is unmerged,\n"+
+			"and nothing on the board says so.\n\n",
+			a.WorkItemID, a.Finding.Ref)
 	} else if a.WorkItemID != "" {
 		fmt.Fprintf(&b, "DO NOT DISPATCH A WORKER AT %s. The work already exists and is already pushed;\n"+
 			"a worker sent at this item re-derives it from scratch and the pushed copy is what gets\n"+
@@ -413,8 +433,10 @@ func (a StrandedAlert) Message() (subject, body string) {
 			"startup sweep that exists for exactly that population, so the finding may be hours or\n"+
 			"days old.\n\n")
 		if a.StillAlive {
-			fmt.Fprintf(&b, "THE POLECAT IS STILL RUNNING (witnessed alive at sweep time). Its work is real and\n"+
-				"already pushed, but the branch is not necessarily final — it may still commit more.\n"+
+			// Provenance-neutral on purpose: whether the work is on origin is said
+			// once, by pushed= above and the LOCAL-ONLY warning (drellem2/pogo#137).
+			fmt.Fprintf(&b, "THE POLECAT IS STILL RUNNING (witnessed alive at sweep time). Its work is real,\n"+
+				"but the branch is not necessarily final — it may still commit more.\n"+
 				"Do not submit under a working polecat unless you have established it is finished;\n"+
 				"see the orphaned-polecat alert for the same process, which carries the identity\n"+
 				"re-check you need before acting on its pid. What is certain either way is the\n"+

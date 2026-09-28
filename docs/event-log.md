@@ -393,7 +393,7 @@ an event. Additive — no `schema_version` bump.
   - `branch` (string, required): the polecat branch carrying the work
   - `ref` (string, required): the ref the commits were read from — `refs/remotes/origin/<branch>` when pushed, `refs/heads/<branch>` when the polecat committed but never pushed
   - `pushed` (bool, required): whether `ref`'s tip is on origin under **any** ref — `refs/remotes/origin/<branch>` itself, or another origin branch the commits were cross-pushed to (mg-dbb75; before that it meant only "`ref` is a remote-tracking ref"). `false` is the **more** urgent case: git-gc reaps the worktree holding the only copy
-  - `origin_ref` (string, optional): the origin ref the work was found on, present only when it is NOT `ref` — the cross-pushed case. It is the branch the remedy submits (mg-dbb75)
+  - `origin_ref` (string, optional): the origin ref the work was found on, present only when it is NOT `ref` — the cross-pushed case. The remedy submits that branch only when its tip IS `ref`'s tip (the two names hold exactly the same commits); when it merely contains the work, folded into a longer branch, the remedy pushes and submits `branch` under its own name instead, because submitting the container would merge another item's later commits under this item's author (mg-dbb75)
   - `pr_probe_error` (string, optional): the open-PR check (see `work_item_push_awaiting_review`) could not answer, so this alert went out **because** GitHub could not be asked, not because there was no PR. The check fails toward alerting on purpose (mg-dbb75)
   - `origin_probe_error` (string, optional): the any-ref-on-origin check failed, so `pushed` stayed `false`
   - `target` (string, required): the ref the branch was compared against
