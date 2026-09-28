@@ -231,9 +231,13 @@ Idempotent. It does **not** clone the build checkout — the runner does that on
 its first real run, keeping a network operation out of an install an operator
 may be running because the box is already unhealthy.
 
-**A merged change to `scripts/launchd/pogo-deploy.sh` is not live until it is
-installed.** launchd executes `~/.pogo/bin/pogo-deploy.sh` — a static copy that
-nothing refreshes, not the nightly and not a `pogo` upgrade. Twice now a runner
+**A merged change to `scripts/launchd/pogo-deploy.sh` goes live one night late,
+and only once the runner can refresh itself.** launchd executes
+`~/.pogo/bin/pogo-deploy.sh`, a static copy. Until mg-cba69 nothing refreshed
+it, not the nightly and not a `pogo` upgrade. Now the nightly refreshes it at
+the end of each run, for the NEXT night. See "The runner refreshes itself"
+below. A runner installed before mg-cba69 does not contain that step, so it
+has to be installed by hand once. Twice now a runner
 fix has sat on `main` while 03:00 ran the pre-fix file (mg-bcc1 2026-07-29,
 mg-45b9 2026-08-19; the second was mg-9fc9's fleet bounce, three revisions
 behind). **Something detects it now (mg-30f8):** `pogo doctor --check`'s
@@ -561,6 +565,49 @@ POGO_DEPLOY_MG_GOBIN=/tmp/r/gobin  ~/.pogo/bin/pogo-deploy.sh --mg-only
 (`/tmp/r/gobin/mg` must exist first. Copy the live one there as the "previous"
 binary.)
 
+### The runner refreshes itself (mg-cba69)
+
+At the end of every attempting fire, the runner compares the installed runner
+(`$POGO_DEPLOY_RUNNER`, default `~/.pogo/bin/pogo-deploy.sh`) with
+`scripts/launchd/pogo-deploy.sh` at the commit gate 5 synced `deploy-src` to.
+This happens after pogod's attempt record and the fleet-`mg` step. It writes
+one line:
+
+```
+runner: current <sha> (blob <blob>, <path>)
+runner: refreshed <old-blob> -> <new-blob> (effective next run) deploy-src <sha>, prev kept at <path>.prev
+runner: stale <old-blob> -> <new-blob> (dry-run — not refreshed) deploy-src <sha>
+runner: not-checked reason=<no-sync|not-installed|symlink|deadline|...> — <what>
+runner: refresh-failed <old-blob> -> <new-blob> reason=<why> ...   (also mailed)
+```
+
+- **The next night, never tonight.** The new bytes come from the commit
+  (`git cat-file blob`), not the working tree. They must hash to that blob and
+  pass `bash -n` before the swap. The old file is kept as `pogo-deploy.sh.prev`,
+  and the swap is a rename, so the running shell keeps reading the file it
+  opened. After the swap the file at the path must hash to the blob, or `.prev`
+  is put back.
+- **Never the plist.** If the plist's source changed between the installed
+  runner's commit and the synced one, the step logs `runner: plist ...` and does
+  nothing else. The source is the template region of
+  `internal/service/deploy.go` plus `com.pogo.deploy.plist`. The plist belongs to
+  `install-deploy`, and `pogo check-activation` reports plist drift nightly.
+- **Never the run's rc.** A failed refresh is its own line and its own mail.
+- **Not `net-control.sh`.** Only the runner is refreshed. Its sibling library is
+  still refreshed only by `install-deploy`.
+
+`install-deploy` now keeps a changed runner as `.prev` too, and swaps by rename
+(mg-3bb3).
+
+Rehearse against a scratch install dir, never the live one. `--runner-only`
+compares against `deploy-src`'s HEAD as it stands (read-only, no fetch):
+
+```bash
+mkdir -p /tmp/rr && cp ~/.pogo/bin/pogo-deploy.sh /tmp/rr/pogo-deploy.sh
+POGO_DEPLOY_RUNNER=/tmp/rr/pogo-deploy.sh POGO_DEPLOY_LOCK_DIR=/tmp/rr/lock \
+    bash scripts/launchd/pogo-deploy.sh --runner-only
+```
+
 ### Managing the deploy agent
 
 | Action | Command |
@@ -571,6 +618,7 @@ binary.)
 | Run it now, gates and all | `POGO_DEPLOY_SKIP_WINDOW=1 ~/.pogo/bin/pogo-deploy.sh` |
 | Rehearse without deploying | `POGO_DEPLOY_SKIP_WINDOW=1 ~/.pogo/bin/pogo-deploy.sh --dry-run` |
 | Install the fleet's `mg` now, nothing else | `~/.pogo/bin/pogo-deploy.sh --mg-only` |
+| Compare/refresh the runner only (no sync) | `~/.pogo/bin/pogo-deploy.sh --runner-only` |
 | View logs | `tail -f ~/Library/Logs/pogo/pogo-deploy.log` |
 
 Note that running it by hand from a terminal is **out of band** and therefore

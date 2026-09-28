@@ -305,8 +305,9 @@ func renderDeployPlist() (string, deployData, error) {
 	return buf.String(), data, nil
 }
 
-// InstallDeploy sets up the nightly deploy agent: copies pogo-deploy.sh into
-// ~/.pogo/bin/, writes the plist, and bootstraps it. Idempotent.
+// InstallDeploy sets up the nightly deploy agent: installs pogo-deploy.sh into
+// ~/.pogo/bin/ (keeping a changed previous copy as .prev — installRunnerFile),
+// writes the plist, and bootstraps it. Idempotent.
 //
 // It does NOT create or populate the deploy checkout. The runner clones it on
 // first use, which keeps a network operation out of an install that an operator
@@ -332,8 +333,12 @@ func InstallDeploy() error {
 		return fmt.Errorf("failed to read %s: %w", src, err)
 	}
 	dst := deployScriptInstallPath()
-	if err := os.WriteFile(dst, scriptBytes, 0755); err != nil {
-		return fmt.Errorf("failed to write %s: %w", dst, err)
+	backedUp, err := installRunnerFile(dst, scriptBytes)
+	if err != nil {
+		return err
+	}
+	if backedUp {
+		fmt.Printf("Runner changed; previous copy kept at %s.prev\n", dst)
 	}
 
 	// The runner's positive control (mg-db96). It ships as a separate library
@@ -390,6 +395,58 @@ func InstallDeploy() error {
 		data.Hours[0], data.Minute, retryFireList(data.Hours, data.Minute))
 	fmt.Printf("Logs:     %s/pogo-deploy.log\n", data.LogDir)
 	return nil
+}
+
+// installRunnerFile puts content at dst the way the nightly's own self-refresh
+// does (scripts/launchd/pogo-deploy.sh, section 8d — mg-cba69), so the two
+// writers of this file cannot disagree about how it is replaced:
+//
+//   - an identical file is left alone (no .prev churn, same inode);
+//   - a DIFFERENT existing file is kept as dst+".prev" first (mg-3bb3 —
+//     install-deploy used to overwrite it with no backup and no word);
+//   - the new bytes are staged in dst's own directory and renamed over dst, so
+//     a nightly that is running the old file keeps reading the inode it
+//     opened, and dst is never a half-written script.
+//
+// It reports whether a .prev was written.
+func installRunnerFile(dst string, content []byte) (bool, error) {
+	existing, rerr := os.ReadFile(dst)
+	if rerr == nil && bytes.Equal(existing, content) {
+		return false, os.Chmod(dst, 0755)
+	}
+	backedUp := false
+	if rerr == nil {
+		if err := writeFileByRename(dst+".prev", existing, 0755); err != nil {
+			return false, fmt.Errorf("failed to keep %s as %s.prev (not replacing it): %w", dst, dst, err)
+		}
+		backedUp = true
+	}
+	if err := writeFileByRename(dst, content, 0755); err != nil {
+		return backedUp, fmt.Errorf("failed to write %s: %w", dst, err)
+	}
+	return backedUp, nil
+}
+
+// writeFileByRename writes content to a temp file beside dst and renames it
+// into place; rename(2) within one directory is atomic.
+func writeFileByRename(dst string, content []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".install-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name) // a no-op once the rename has happened
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(name, mode); err != nil {
+		return err
+	}
+	return os.Rename(name, dst)
 }
 
 // UninstallDeploy removes the deploy plist and stops the agent. The checkout

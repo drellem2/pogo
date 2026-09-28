@@ -401,6 +401,10 @@
 #   pogo-deploy.sh --mg-only    # ONLY the fleet-mg install (section 8c), no window,
 #                               # no pogod — for a rehearsal against a scratch
 #                               # POGO_DEPLOY_MG_GOBIN, or a deliberate by-hand install
+#   pogo-deploy.sh --runner-only  # ONLY the runner self-refresh (section 8d),
+#                               # from $POGO_DEPLOY_SRC's HEAD as it stands (no
+#                               # sync) — for a rehearsal against a scratch
+#                               # POGO_DEPLOY_RUNNER
 #
 # ENV overrides (all optional; defaults are the production values):
 #   POGO_DEPLOY_SRC          dedicated checkout to build from (~/.pogo/deploy-src)
@@ -473,6 +477,10 @@
 #   POGO_DEPLOY_MG_GOBIN     directory holding the fleet's mg (default: the
 #                            directory of the mg this run resolved, ~/go/bin)
 #   POGO_DEPLOY_MG_TIMEOUT   seconds the macguffin build may take (600)
+#   POGO_DEPLOY_RUNNER_REFRESH  0 disables the runner self-refresh (section 8d)
+#   POGO_DEPLOY_RUNNER       the INSTALLED runner that step compares and refreshes
+#                            (${POGO_HOME:-~/.pogo}/bin/pogo-deploy.sh — the file the
+#                            plist runs; never created, only replaced)
 #
 # THE FLEET'S mg IS INSTALLED HERE TOO (mg-44ee4, pm-pogo decision (a)). After
 # pogod's outcome is settled, every attempting fire installs macguffin
@@ -481,6 +489,16 @@
 #     mg: installed <sha> (origin/main <sha>) prev <sha> result=<...>
 # with its own rc. It never changes this run's exit status and pogod's outcome
 # never gates it — see section 8c.
+#
+# AND IT REFRESHES ITSELF, FOR THE NEXT NIGHT (mg-cba69). Last of all, every
+# attempting fire whose sync reached the tree compares the installed runner
+# (this file, as launchd runs it) with scripts/launchd/pogo-deploy.sh AT THE
+# COMMIT IT JUST SYNCED TO, and writes ONE line:
+#     runner: current <blob> (deploy-src <sha>)
+#     runner: refreshed <old-blob> -> <new-blob> (effective next run) ...
+# A refresh keeps the old file as pogo-deploy.sh.prev and swaps by rename, so
+# this run keeps executing the inode it opened. It never touches the plist and
+# never changes this run's exit status — see section 8d.
 #
 # HOW THE RED ALERT KNOWS WHAT FAILED (mg-0155). Not from the exit code. This
 # runner passes POGO_DEPLOY_REASON_FILE to pogo-self-deploy, which writes the
@@ -687,6 +705,12 @@ POGO_CLI=""
 # the fleet-mg step its "skipped reason=dry-run" line, which ATTEMPT_ARMED (false
 # on a dry run by design) cannot ask for. Read only by on_exit (section 8c).
 MG_STEP_DUE=false
+# Same moment, same reason, for the runner self-refresh (section 8d).
+RUNNER_STEP_DUE=false
+# The commit gate 5 synced $SRC to, recorded at the moment the sync succeeded.
+# Empty means no sync reached the tree this run, and then there is no commit to
+# compare the installed runner against — section 8d says so rather than guess.
+RUNNER_SYNCED_SHA=""
 
 ts()  { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*"; }
@@ -4670,6 +4694,267 @@ run_mg_only() {
 }
 
 # ---------------------------------------------------------------------------
+# 8d. The runner refreshes ITSELF, for the next night (mg-cba69)
+# ---------------------------------------------------------------------------
+# launchd runs a STATIC COPY of this file ($RUNNER_TARGET, written by
+# `pogo service install-deploy`), and until this section nothing ever rewrote
+# it. So a merged change to the runner — the one component whose job is to make
+# merged things live — was itself merged-but-not-live until somebody ran the
+# installer by hand, and nothing said so: on 2026-09-28 the installed copy
+# predated 86f5ac2 and mg-44ee4's mg step would not have run that night.
+#
+# THE RULES, each one a way a self-replacing script goes wrong:
+#
+#   LAST, NEVER MID-RUN. It runs from on_exit after pogod's attempt record and
+#     after the fleet-mg step, so nothing that decides tonight's outcome can be
+#     executed from a file this step wrote. The refresh is for the NEXT fire.
+#   RENAME, NEVER WRITE IN PLACE. bash reads a script as it goes, through the
+#     fd it opened. Writing into that file would change the bytes under the
+#     rest of THIS run's on_exit; rename(2) gives the path a new inode and
+#     leaves the running shell on the old one. The new file is staged in the
+#     target's own directory (so the rename is atomic, one filesystem), and the
+#     old one is kept as .prev by the same copy-then-rename (mg_replace).
+#   FROM THE COMMIT, NOT THE WORKING TREE. The new bytes are the blob at the
+#     commit gate 5 synced to (`git cat-file blob`), and the staged file must
+#     hash to that blob and pass `bash -n` before it is swapped in; afterwards
+#     the file AT THE TARGET must hash to it too, or .prev is put back.
+#   NEVER THE PLIST. The plist is launchd config and install-deploy owns it.
+#     When the plist's source (the deploy.go template region and the shipped
+#     com.pogo.deploy.plist) changed between the installed runner's commit and
+#     this one, the step SAYS so on its own line and does nothing about it.
+#   NEVER CREATES, NEVER FOLLOWS A LINK. A missing target is an uninstalled
+#     job (install-deploy's business), and a symlink points at a file something
+#     else owns; both are reported as not-checked and left alone.
+#   NEVER THE RUN'S RC. RUNNER_RC is its own number and becomes an exit status
+#     only under --runner-only.
+#
+# THE LINE, every attempting fire:
+#
+#   runner: current <sha> (blob <blob>, <target>)
+#   runner: refreshed <old-blob> -> <new-blob> (effective next run) deploy-src <sha>, prev kept at <target>.prev
+#   runner: stale <old-blob> -> <new-blob> (dry-run — not refreshed) deploy-src <sha>
+#   runner: not-checked reason=<why> — <what>
+#   runner: refresh-failed <old-blob> -> <new-blob> reason=<why> ...   (alerted)
+#
+# plus, only when it applies, `runner: plist ...`.
+#
+# THIS SECTION BOOTSTRAPS ITSELF: a runner installed before it existed does not
+# contain it, so the first copy that can refresh itself has to be installed by
+# hand once (`pogo service install-deploy`). Every refresh after that is here.
+RUNNER_ENABLED="${POGO_DEPLOY_RUNNER_REFRESH:-1}"
+RUNNER_TARGET="${POGO_DEPLOY_RUNNER:-${POGO_HOME:-$HOME/.pogo}/bin/pogo-deploy.sh}"
+RUNNER_REPO_PATH="scripts/launchd/pogo-deploy.sh"
+RUNNER_ONLY=false
+
+RUNNER_RESULT=""
+RUNNER_REASON=""
+RUNNER_RC=0
+RUNNER_OLD=""
+RUNNER_NEW=""
+RUNNER_DETAIL=""
+RUNNER_PLIST=""
+
+# runner_short HASH — the 12-character form the line prints.
+runner_short() { printf '%s' "${1:-unknown}" | cut -c1-12; }
+
+# runner_blob FILE — the git blob id of FILE's bytes, or empty. A blob id rather
+# than a checksum because it is directly comparable with `git rev-parse
+# <sha>:<path>` and searchable with `git log --find-object`.
+runner_blob() {
+    [ -f "${1:-}" ] || return 0
+    git_q "$GIT" -C "$SRC" hash-object -- "$1" 2>/dev/null
+}
+
+# runner_plist_source SHA — a checksum of what the deploy plist is rendered
+# from at SHA: the template-and-schedule region of internal/service/deploy.go
+# and the shipped example plist. Missing files contribute nothing, so two
+# commits that both lack them compare equal.
+runner_plist_source() {
+    {
+        git_q "$GIT" -C "$SRC" show "$1:internal/service/deploy.go" 2>/dev/null \
+            | sed -n '/^const deployPlistTemplate = /,/^const deployMinute/p'
+        git_q "$GIT" -C "$SRC" show "$1:scripts/launchd/com.pogo.deploy.plist" 2>/dev/null
+    } | cksum
+}
+
+# runner_plist_check — did the plist's source change between the commit the
+# installed runner came from and the synced one? Sets RUNNER_PLIST to a
+# sentence when there is something to say; never acts on it.
+runner_plist_check() {
+    local intro
+    # --find-object lists the commits where the blob appears or disappears on
+    # that path; the oldest is the one that introduced it.
+    intro="$(git_q "$GIT" -C "$SRC" log --format=%H --find-object="$RUNNER_OLD" \
+        "$RUNNER_SYNCED_SHA" -- "$RUNNER_REPO_PATH" 2>/dev/null | tail -1)"
+    if [ -z "$intro" ]; then
+        RUNNER_PLIST="unknown — the installed runner ($(runner_short "$RUNNER_OLD")) is no committed version of $RUNNER_REPO_PATH reachable from $(runner_short "$RUNNER_SYNCED_SHA"), so the plist it was installed with cannot be read from history (hand-edited, or installed from a commit this checkout does not have). Not acting on it; 'pogo check-activation' compares the installed plist."
+        return 0
+    fi
+    if [ "$(runner_plist_source "$intro")" != "$(runner_plist_source "$RUNNER_SYNCED_SHA")" ]; then
+        RUNNER_PLIST="source changed between the installed runner's commit $(printf '%s' "$intro" | cut -c1-7) and $(printf '%s' "$RUNNER_SYNCED_SHA" | cut -c1-7) — this runner may need a plist change. NOT acting on it (the plist is launchd config): read 'pogo check-activation', then run 'pogo service install-deploy'."
+    fi
+    return 0
+}
+
+# runner_report — the one line (plus the plist line when there is one), the
+# event, and on refresh-failed the alert. Sets RUNNER_RC from RUNNER_RESULT.
+runner_report() {
+    local commit; commit="$(printf '%s' "${RUNNER_SYNCED_SHA:-}" | cut -c1-7)"
+    case "$RUNNER_RESULT" in
+        current)
+            RUNNER_RC=0
+            log "runner: current ${commit:-unknown} (blob $(runner_short "$RUNNER_NEW"), $RUNNER_TARGET)" ;;
+        refreshed)
+            RUNNER_RC=0
+            log "runner: refreshed $(runner_short "$RUNNER_OLD") -> $(runner_short "$RUNNER_NEW") (effective next run) deploy-src $commit, prev kept at $RUNNER_TARGET.prev" ;;
+        stale)
+            RUNNER_RC=0
+            log "runner: stale $(runner_short "$RUNNER_OLD") -> $(runner_short "$RUNNER_NEW") (dry-run — not refreshed) deploy-src $commit" ;;
+        not-checked)
+            RUNNER_RC=0
+            log "runner: not-checked reason=$RUNNER_REASON${RUNNER_DETAIL:+ — $RUNNER_DETAIL}" ;;
+        *)
+            RUNNER_RC=1
+            log "runner: refresh-failed $(runner_short "$RUNNER_OLD") -> $(runner_short "$RUNNER_NEW") reason=$RUNNER_REASON — installed runner is now $(runner_short "$(runner_blob "$RUNNER_TARGET")") (deploy-src $commit)" ;;
+    esac
+    [ -n "$RUNNER_PLIST" ] && log "runner: plist $RUNNER_PLIST"
+    if [ -n "$POGO_CLI" ]; then
+        run_bounded 30 "$POGO_CLI" events emit --type=deploy_runner --agent=pogo-deploy \
+            --details="{\"result\":\"$RUNNER_RESULT\",\"reason\":\"$RUNNER_REASON\",\"rc\":$RUNNER_RC,\"old\":\"$RUNNER_OLD\",\"new\":\"$RUNNER_NEW\",\"commit\":\"${RUNNER_SYNCED_SHA:-}\",\"plist_note\":$([ -n "$RUNNER_PLIST" ] && echo true || echo false)}" >/dev/null 2>&1 || true
+    fi
+    [ "$RUNNER_RESULT" = "refresh-failed" ] || return 0
+    alert "[pogo-deploy] runner self-refresh FAILED (${RUNNER_REASON}) — merged runner changes are NOT live" \
+"The nightly could not refresh its own runner (mg-cba69). Tonight's pogod and
+mg outcomes are on their own lines and are unaffected; what this means is that
+the NEXT nightly runs the old runner, and any merged change to
+$RUNNER_REPO_PATH stays dead until this is fixed.
+
+  installed: $RUNNER_TARGET (blob $(runner_short "$(runner_blob "$RUNNER_TARGET")"))
+  wanted:    blob $(runner_short "$RUNNER_NEW") at deploy-src $commit
+  prev:      $RUNNER_TARGET.prev
+  log:       $HOME/Library/Logs/pogo/pogo-deploy.log
+
+Refresh by hand: pogo service install-deploy   (not while a nightly is running)
+
+WHAT IT SAW:
+
+${RUNNER_DETAIL:-(nothing recorded)}" "\"runner_result\":\"$RUNNER_RESULT\",\"runner_reason\":\"$RUNNER_REASON\"" deploy_runner_failed
+    return 0
+}
+
+# runner_refresh_step — the whole step. Never exits, never touches the run's rc.
+runner_refresh_step() {
+    RUNNER_RESULT=""; RUNNER_REASON=""; RUNNER_RC=0; RUNNER_OLD=""; RUNNER_NEW=""
+    RUNNER_DETAIL=""; RUNNER_PLIST=""
+    local dir tmp got synerr
+
+    if [ "$RUNNER_ENABLED" = "0" ]; then
+        RUNNER_RESULT=not-checked; RUNNER_REASON=disabled; runner_report; return 0
+    fi
+    if [ -z "$RUNNER_SYNCED_SHA" ]; then
+        RUNNER_RESULT=not-checked; RUNNER_REASON=no-sync
+        RUNNER_DETAIL="no sync reached $SRC this run, so there is no commit to compare the installed runner against"
+        runner_report; return 0
+    fi
+    if [ -z "${GIT:-}" ]; then
+        RUNNER_RESULT=not-checked; RUNNER_REASON=no-git; runner_report; return 0
+    fi
+    if [ -L "$RUNNER_TARGET" ]; then
+        RUNNER_RESULT=not-checked; RUNNER_REASON=symlink
+        RUNNER_DETAIL="$RUNNER_TARGET is a symlink (to $(readlink "$RUNNER_TARGET" 2>/dev/null)); the file it names belongs to something else"
+        runner_report; return 0
+    fi
+    if [ ! -f "$RUNNER_TARGET" ]; then
+        RUNNER_RESULT=not-checked; RUNNER_REASON=not-installed
+        RUNNER_DETAIL="$RUNNER_TARGET does not exist; installing is 'pogo service install-deploy', which writes the plist too"
+        runner_report; return 0
+    fi
+    RUNNER_NEW="$(git_q "$GIT" -C "$SRC" rev-parse -q --verify "$RUNNER_SYNCED_SHA:$RUNNER_REPO_PATH" 2>/dev/null)"
+    if [ -z "$RUNNER_NEW" ]; then
+        RUNNER_RESULT=not-checked; RUNNER_REASON=no-runner-at-sha
+        RUNNER_DETAIL="no $RUNNER_REPO_PATH at $(runner_short "$RUNNER_SYNCED_SHA") in $SRC"
+        runner_report; return 0
+    fi
+    RUNNER_OLD="$(runner_blob "$RUNNER_TARGET")"
+    if [ -z "$RUNNER_OLD" ]; then
+        RUNNER_RESULT=not-checked; RUNNER_REASON=unreadable
+        RUNNER_DETAIL="could not hash $RUNNER_TARGET"
+        runner_report; return 0
+    fi
+
+    if [ "$RUNNER_OLD" = "$RUNNER_NEW" ]; then
+        RUNNER_RESULT=current; runner_report; return 0
+    fi
+    runner_plist_check
+    if $DRY_RUN; then
+        RUNNER_RESULT=stale; runner_report; return 0
+    fi
+
+    RUNNER_RESULT=refresh-failed
+    dir="$(dirname "$RUNNER_TARGET")"
+    tmp="$(mktemp "$dir/.pogo-deploy-refresh.XXXXXX" 2>/dev/null)" || {
+        RUNNER_REASON=stage; RUNNER_DETAIL="could not create a staging file in $dir"
+        runner_report; return 0
+    }
+    if ! git_q "$GIT" -C "$SRC" cat-file blob "$RUNNER_NEW" > "$tmp" 2>/dev/null; then
+        RUNNER_REASON=read-blob; RUNNER_DETAIL="git cat-file blob $RUNNER_NEW failed in $SRC"
+        rm -f "$tmp"; runner_report; return 0
+    fi
+    got="$(runner_blob "$tmp")"
+    if [ "$got" != "$RUNNER_NEW" ]; then
+        RUNNER_REASON=staged-hash; RUNNER_DETAIL="the staged copy hashes to '${got:-nothing}', wanted $RUNNER_NEW"
+        rm -f "$tmp"; runner_report; return 0
+    fi
+    if ! synerr="$("${BASH:-bash}" -n "$tmp" 2>&1)"; then
+        RUNNER_REASON=staged-syntax; RUNNER_DETAIL="bash -n rejected the runner at $(runner_short "$RUNNER_SYNCED_SHA"):
+$synerr"
+        rm -f "$tmp"; runner_report; return 0
+    fi
+    chmod 755 "$tmp" 2>/dev/null
+    if ! mg_replace "$RUNNER_TARGET" "$RUNNER_TARGET.prev" || ! cmp -s "$RUNNER_TARGET" "$RUNNER_TARGET.prev"; then
+        RUNNER_REASON=prev-copy; RUNNER_DETAIL="could not keep $RUNNER_TARGET as $RUNNER_TARGET.prev, so there would be nothing to go back to — not swapping"
+        rm -f "$tmp"; runner_report; return 0
+    fi
+    if ! mv -f "$tmp" "$RUNNER_TARGET"; then
+        RUNNER_REASON=swap; RUNNER_DETAIL="mv $tmp $RUNNER_TARGET failed"
+        rm -f "$tmp"; runner_report; return 0
+    fi
+    # The check that counts is on the path launchd runs.
+    got="$(runner_blob "$RUNNER_TARGET")"
+    if [ "$got" = "$RUNNER_NEW" ]; then
+        RUNNER_RESULT=refreshed; runner_report; return 0
+    fi
+    RUNNER_REASON=installed-hash
+    RUNNER_DETAIL="$RUNNER_TARGET hashes to '${got:-nothing}' after the swap, wanted $RUNNER_NEW — putting $RUNNER_TARGET.prev back"
+    mg_replace "$RUNNER_TARGET.prev" "$RUNNER_TARGET"
+    if ! cmp -s "$RUNNER_TARGET" "$RUNNER_TARGET.prev"; then
+        RUNNER_REASON=installed-hash-restore-failed
+        RUNNER_DETAIL="$RUNNER_DETAIL
+AND the restore did not take. Restore by hand: cp -p $RUNNER_TARGET.prev $RUNNER_TARGET.tmp && mv -f $RUNNER_TARGET.tmp $RUNNER_TARGET"
+    fi
+    runner_report
+    return 0
+}
+
+# run_runner_only — `--runner-only`: the step alone, against $SRC's HEAD AS IT
+# STANDS (no fetch, no sync — say so), for a rehearsal against a scratch
+# POGO_DEPLOY_RUNNER. Same lock as the nightly, so it can never race one.
+run_runner_only() {
+    resolve_mg || true
+    resolve_pogo || true
+    resolve_git || { err "runner-only: no working git"; exit 1; }
+    if ! acquire_lock; then
+        log "lock: another pogo-deploy run holds $LOCK_DIR — exiting 0"
+        exit 0
+    fi
+    LOCK_HELD=true
+    RUNNER_SYNCED_SHA="$(git_q "$GIT" -C "$SRC" rev-parse -q --verify HEAD 2>/dev/null)"
+    log "runner-only: comparing against $SRC HEAD ${RUNNER_SYNCED_SHA:-(none)} as it stands — NOT synced"
+    runner_refresh_step
+    exit "$RUNNER_RC"
+}
+
+# ---------------------------------------------------------------------------
 # 9. Lock
 # ---------------------------------------------------------------------------
 # A redeploy can legitimately take an hour (the drain waits for polecats). If a
@@ -5012,6 +5297,22 @@ on_exit() {
         fi
     fi
 
+    # The runner itself (section 8d) — LAST of the work, after everything this
+    # run decided, so no outcome tonight is executed from a file it wrote. The
+    # swap is by rename, so the rest of this function still reads the inode the
+    # shell opened. Its rc is its own line, like the mg step's.
+    # Not after a deadline kill: the run was ended because something wedged,
+    # most often a git call, and this step is git calls.
+    if $RUNNER_STEP_DUE; then
+        if [ "$rc" = "$DEADLINE_RC" ]; then
+            RUNNER_RESULT=not-checked; RUNNER_REASON=deadline
+            RUNNER_DETAIL="the run hit its deadline; the installed runner was not compared tonight"
+            runner_report
+        else
+            runner_refresh_step
+        fi
+    fi
+
     # Before anything that gives up this run's ownership: the watchdog must not
     # fire against a pid this run is about to stop owning.
     if [ -n "$WATCHDOG_PID" ]; then
@@ -5047,6 +5348,7 @@ main() {
         case "$1" in
             --dry-run) DRY_RUN=true ;;
             --mg-only) MG_ONLY=true ;;
+            --runner-only) RUNNER_ONLY=true ;;
             # Bounded by the `set -u` sentinel, not by a line number. The header
             # is long and grows, and a hardcoded range starts truncating --help
             # mid-thought the first time anybody documents anything — the old
@@ -5076,6 +5378,10 @@ main() {
     # --mg-only: section 8c alone — no window, no pogod, no attempt record.
     if $MG_ONLY; then
         run_mg_only
+    fi
+    # --runner-only: section 8d alone, against $SRC as it stands.
+    if $RUNNER_ONLY; then
+        run_runner_only
     fi
 
     # --- gate 1: the window -------------------------------------------------
@@ -5150,6 +5456,7 @@ main() {
     # The fleet-mg step (section 8c) is owed by every fire that got this far,
     # dry runs included — they get its "skipped reason=dry-run" line.
     MG_STEP_DUE=true
+    RUNNER_STEP_DUE=true
 
     # --- tools + credentials ------------------------------------------------
     # Resolve the alert path BEFORE anything that can fail, so a failure has
@@ -5285,6 +5592,9 @@ $(remedy_for_sync_class "$SYNC_CLASS")"
         exit "$sync_rc"
     fi
     sync_recovery_notice "$SYNC_TRIES" "$SYNC_RETRY_SPENT"
+    # The commit the runner self-refresh (section 8d) compares against — taken
+    # NOW, at the moment the sync is known to have reached the tree.
+    RUNNER_SYNCED_SHA="$(git_q "$GIT" -C "$SRC" rev-parse -q --verify HEAD 2>/dev/null)"
 
     # THE STREAK IS CLEARED HERE, on the observation and not on an exit code
     # (mg-9fc9). This line is the one place in the run where "the transport
