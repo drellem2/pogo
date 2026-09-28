@@ -423,8 +423,16 @@ const (
 	// NudgeDeliveryPTYUnconfirmed: the nudge was typed into a harness that was
 	// mid-turn and emitted no receipt (agent.ErrNudgeQueued). No mail follows.
 	NudgeDeliveryPTYUnconfirmed = "pty_unconfirmed"
-	// NudgeDeliveryMail: a mailbox copy was written for this fire.
+	// NudgeDeliveryMail: a mailbox copy was written for this fire and the PTY
+	// was never tried — the agent was not running (agent_not_running), or the
+	// schedule is delivery: mail. Same meaning as stall-watch's "mail".
 	NudgeDeliveryMail = "mail"
+	// NudgeDeliveryMailFallback: a mailbox copy was written because the agent
+	// WAS running but its PTY refused the fire (nudge_failed or
+	// wake_suppressed). Same value and meaning as stall-watch's
+	// DeliveryMailFallback, so a query across both detectors reads one event
+	// class under one value (drellem2/pogo#204 review).
+	NudgeDeliveryMailFallback = "mail_fallback"
 	// NudgeDeliveryMailCoalesced: the fire fell back to mail but wrote
 	// NOTHING, because an earlier copy from the same run stands unread
 	// (mg-af83). Distinct from mail on purpose.
@@ -1007,7 +1015,12 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 					fire.UnackedStreak = live.UnackedStreak
 				}
 				s.mu.Unlock()
-				s.emitSchedulerEvent("scheduler_fire_failed", fire, now, missed, derr, DeliveryOutcome{})
+				// Keep the outcome: a failed fallback send still has a nudge
+				// refusal and a fallback reason worth reading. It names no
+				// channel — nothing was carried — whatever the deliverer said.
+				outcome.Channel = ""
+				res.Delivery = outcome
+				s.emitSchedulerEvent("scheduler_fire_failed", fire, now, missed, derr, outcome)
 			} else {
 				// Re-read under the lock rather than reporting the values
 				// captured before delivery: a slow delivery is exactly the
@@ -1379,18 +1392,21 @@ func (s *Scheduler) emitSchedulerEvent(eventType string, e Entry, fireTime time.
 		if e.CompletionTracked() {
 			details["unacked_streak"] = e.UnackedStreak
 		}
-		// The channel that carried the fire (drellem2/pogo#204), under
-		// stall_watch_fired's key names. Absent when the deliverer did not
-		// report one. Channel, not completion — see DeliveryOutcome.
-		if outcome.Channel != "" {
-			details["nudge_delivery"] = outcome.Channel
-		}
-		if outcome.FallbackReason != "" {
-			details["nudge_fallback_reason"] = outcome.FallbackReason
-		}
-		if outcome.NudgeError != "" {
-			details["nudge_error"] = outcome.NudgeError
-		}
+	}
+	// The channel that carried the fire (drellem2/pogo#204), under
+	// stall_watch_fired's key names. Absent when the deliverer did not report
+	// one. Channel, not completion — see DeliveryOutcome. scheduler_fire_failed
+	// carries the same keys minus the channel (Tick clears it: nothing was
+	// carried), so a failed fallback send keeps the nudge's refusal and why the
+	// fire fell back at all.
+	if outcome.Channel != "" {
+		details["nudge_delivery"] = outcome.Channel
+	}
+	if outcome.FallbackReason != "" {
+		details["nudge_fallback_reason"] = outcome.FallbackReason
+	}
+	if outcome.NudgeError != "" {
+		details["nudge_error"] = outcome.NudgeError
 	}
 	events.EmitTo(context.Background(), s.logPath, events.Event{
 		EventType: eventType,

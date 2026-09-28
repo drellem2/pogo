@@ -155,7 +155,10 @@ func (p *PogodDeliverer) DeliverOutcome(ctx context.Context, entry Entry, fireTi
 
 	switch entry.Delivery {
 	case DeliveryMail:
-		return DeliveryOutcome{Channel: NudgeDeliveryMail}, p.sendMail(entry.Agent, subject, body)
+		if err := p.sendMail(entry.Agent, subject, body); err != nil {
+			return DeliveryOutcome{}, err
+		}
+		return DeliveryOutcome{Channel: NudgeDeliveryMail}, nil
 	case "", DeliveryNudge:
 		// Try PTY first.
 		if p.Registry != nil {
@@ -260,13 +263,19 @@ func mailAfterNudge(err error) bool {
 // schedule that is silently undeliverable, which is the strictly worse fault.
 //
 // The outcome says which of the two happened: a coalesced fire wrote nothing,
-// so it is mail_coalesced, never mail.
+// so it is mail_coalesced, never mail or mail_fallback.
 func (p *PogodDeliverer) fallbackMail(entry Entry, subject, body, reason string, fireTime time.Time) (DeliveryOutcome, error) {
 	if run, open := p.rideOpenRun(entry, fireTime); open {
 		p.emitFallbackCoalesced(entry, reason, run, fireTime)
 		return DeliveryOutcome{Channel: NudgeDeliveryMailCoalesced, FallbackReason: reason}, nil
 	}
-	out := DeliveryOutcome{Channel: NudgeDeliveryMail, FallbackReason: reason}
+	// mail when the PTY was never tried, mail_fallback when a running agent's
+	// PTY refused — stall-watch's split, so both detectors share one value.
+	channel := NudgeDeliveryMailFallback
+	if reason == fallbackReasonNotRunning {
+		channel = NudgeDeliveryMail
+	}
+	out := DeliveryOutcome{Channel: channel, FallbackReason: reason}
 	if err := p.sendMail(entry.Agent, subject, body+coalesceNotice(entry)); err != nil {
 		// Nothing was carried: keep the reason, drop the channel.
 		return DeliveryOutcome{FallbackReason: reason}, err

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/stallwatch"
 )
 
 // The scheduler used to record every successful Deliver as one indistinct
@@ -51,9 +52,9 @@ func TestDeliverOutcomeNamesEachBranch(t *testing.T) {
 		{name: "pty_unconfirmed", running: true, nudgeErr: queued,
 			want: DeliveryOutcome{Channel: NudgeDeliveryPTYUnconfirmed, NudgeError: queued.Error()}},
 		{name: "nudge_failed", running: true, nudgeErr: refusal, wantMails: 1,
-			want: DeliveryOutcome{Channel: NudgeDeliveryMail, FallbackReason: fallbackReasonNudgeFail, NudgeError: refusal.Error()}},
+			want: DeliveryOutcome{Channel: NudgeDeliveryMailFallback, FallbackReason: fallbackReasonNudgeFail, NudgeError: refusal.Error()}},
 		{name: "wake_suppressed", running: true, nudgeErr: suppressed, wantMails: 1,
-			want: DeliveryOutcome{Channel: NudgeDeliveryMail, FallbackReason: fallbackReasonSuppressed, NudgeError: suppressed.Error()}},
+			want: DeliveryOutcome{Channel: NudgeDeliveryMailFallback, FallbackReason: fallbackReasonSuppressed, NudgeError: suppressed.Error()}},
 		{name: "agent_not_running", wantMails: 1,
 			want: DeliveryOutcome{Channel: NudgeDeliveryMail, FallbackReason: fallbackReasonNotRunning}},
 		{name: "delivery_mail", delivery: DeliveryMail, running: true, wantMails: 1,
@@ -177,8 +178,10 @@ func TestFireDeliveredStampsTheChannelNotCompletion(t *testing.T) {
 			want: map[string]any{"nudge_delivery": "pty"}},
 		{name: "pty_unconfirmed", running: true, nudgeErr: queued,
 			want: map[string]any{"nudge_delivery": "pty_unconfirmed", "nudge_error": queued.Error()}},
-		{name: "mail", running: true, nudgeErr: refusal,
-			want: map[string]any{"nudge_delivery": "mail", "nudge_fallback_reason": "nudge_failed", "nudge_error": refusal.Error()}},
+		{name: "mail_fallback", running: true, nudgeErr: refusal,
+			want: map[string]any{"nudge_delivery": "mail_fallback", "nudge_fallback_reason": "nudge_failed", "nudge_error": refusal.Error()}},
+		{name: "mail", running: false,
+			want: map[string]any{"nudge_delivery": "mail", "nudge_fallback_reason": "agent_not_running"}},
 		{name: "mail_coalesced", prime: true,
 			want: map[string]any{"nudge_delivery": "mail_coalesced", "nudge_fallback_reason": "agent_not_running"}},
 	}
@@ -259,5 +262,128 @@ func TestPlainDelivererStampsNoChannel(t *testing.T) {
 		if v, ok := det[k]; ok {
 			t.Errorf("%s = %v from a deliverer that reports no channel, want absent", k, v)
 		}
+	}
+}
+
+// stall-watch and the scheduler stamp the same nudge_delivery key, so the same
+// situation must carry the same value in both, or a query across the two
+// detectors splits one event class in two (drellem2/pogo#204 review). A running
+// agent whose PTY refused -> mail_fallback; an agent not running -> mail.
+// The not-running arm is the positive control: it pins that the split is by
+// situation, not that every mail became mail_fallback.
+func TestFallbackChannelMatchesStallWatch(t *testing.T) {
+	refusal := errors.New("agent still producing output after 30s")
+	suppressed := fmt.Errorf("%w: usage-limit episode ep-3 open", agent.ErrWakeSuppressed)
+	cases := []struct {
+		name     string
+		running  bool
+		nudgeErr error
+		want     string
+	}{
+		{"running, nudge failed", true, refusal, stallwatch.DeliveryMailFallback},
+		{"running, wake suppressed", true, suppressed, stallwatch.DeliveryMailFallback},
+		{"not running", false, nil, stallwatch.DeliveryMail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var nudges int
+			d := &PogodDeliverer{
+				Mail:    (&recordingMail{}).send,
+				LogPath: filepath.Join(t.TempDir(), "events.log"),
+				nudge:   nudgeReturning(tc.nudgeErr, &nudges),
+			}
+			if tc.running {
+				d.Registry = runningLookup{}
+			}
+			got, err := d.DeliverOutcome(context.Background(), mailCheckEntry("p1", "mail-check-p1"), fixedTime())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Channel != tc.want {
+				t.Errorf("scheduler nudge_delivery = %q, stall-watch uses %q for the same situation", got.Channel, tc.want)
+			}
+		})
+	}
+}
+
+// A failed fallback send used to log scheduler_fire_failed with only the
+// error, dropping why the PTY refused and why the fire fell back. The failure
+// event carries those keys now — and still names no channel, since nothing was
+// carried. The delivered arm on the same deliverer is the positive control that
+// the keys come from the outcome, not from the failure path inventing them.
+func TestFireFailedKeepsTheOutcome(t *testing.T) {
+	refusal := errors.New("agent still producing output after 30s")
+	for _, tc := range []struct {
+		name      string
+		running   bool
+		sendFails bool
+		event     string
+		want      map[string]any
+	}{
+		{name: "running, send fails", running: true, sendFails: true, event: "scheduler_fire_failed",
+			want: map[string]any{"nudge_fallback_reason": "nudge_failed", "nudge_error": refusal.Error()}},
+		{name: "not running, send fails", sendFails: true, event: "scheduler_fire_failed",
+			want: map[string]any{"nudge_fallback_reason": "agent_not_running"}},
+		{name: "running, send succeeds", running: true, event: "scheduler_fire_delivered",
+			want: map[string]any{"nudge_delivery": "mail_fallback", "nudge_fallback_reason": "nudge_failed", "nudge_error": refusal.Error()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fail := 0
+			if tc.sendFails {
+				fail = 1
+			}
+			var nudges int
+			d := &PogodDeliverer{
+				Mail:    (&failingMail{fail: fail}).send,
+				LogPath: filepath.Join(t.TempDir(), "events.log"),
+				nudge:   nudgeReturning(refusal, &nudges),
+			}
+			if tc.running {
+				d.Registry = runningLookup{}
+			}
+			s := newSchedulerForTest(t, nil)
+			s.deliverer = d
+			now := fixedTime()
+			addFiring(t, s, "p1", "mail-check-p1", now)
+			res := s.Tick(context.Background(), now)
+			if len(res) != 1 || res[0].Delivered == tc.sendFails {
+				t.Fatalf("Tick = %+v, want one fire with Delivered=%v", res, !tc.sendFails)
+			}
+			evs := eventsOfType(t, s.logPath, tc.event)
+			if len(evs) != 1 {
+				t.Fatalf("%s events = %d, want 1", tc.event, len(evs))
+			}
+			det := details(t, evs[0])
+			for _, k := range []string{"nudge_delivery", "nudge_fallback_reason", "nudge_error"} {
+				want, wantOK := tc.want[k]
+				got, gotOK := det[k]
+				if wantOK != gotOK || got != want {
+					t.Errorf("%s = %v (present %v), want %v (present %v)", k, got, gotOK, want, wantOK)
+				}
+			}
+			if tc.sendFails {
+				if _, ok := det["error"]; !ok {
+					t.Error("failed event lost its error")
+				}
+				if res[0].Delivery.Channel != "" || res[0].Delivery.FallbackReason != tc.want["nudge_fallback_reason"] {
+					t.Errorf("FireResult.Delivery = %+v, want no channel and reason %v", res[0].Delivery, tc.want["nudge_fallback_reason"])
+				}
+			}
+		})
+	}
+}
+
+// A delivery: mail schedule whose send fails wrote nothing, so neither the
+// outcome nor the failure event may say nudge_delivery=mail.
+func TestFailedMailScheduleNamesNoChannel(t *testing.T) {
+	d, _ := outageDeliverer(t, (&failingMail{fail: 1}).send)
+	entry := mailCheckEntry("p1", "mail-check-p1")
+	entry.Delivery = DeliveryMail
+	got, err := d.DeliverOutcome(context.Background(), entry, fixedTime())
+	if err == nil {
+		t.Fatal("a refused send must surface as a delivery error")
+	}
+	if got.Channel != "" {
+		t.Errorf("channel = %q on a send that wrote nothing, want empty", got.Channel)
 	}
 }
