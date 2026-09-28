@@ -23,6 +23,8 @@ type AgentLookup interface {
 // shelling out to `mg`.
 type MailSender func(to, from, subject, body string) error
 
+var _ OutcomeDeliverer = (*PogodDeliverer)(nil)
+
 // PogodDeliverer is the production Deliverer used by pogod. On fire it tries
 // the configured delivery mode first, then falls back as follows:
 //
@@ -48,6 +50,12 @@ type PogodDeliverer struct {
 
 	runMu sync.Mutex
 	runs  map[fallbackKey]*fallbackRun
+
+	// nudge types a fire into a running agent's PTY. Nil means a.NudgeWake,
+	// which is what production uses; tests substitute it to drive the branches
+	// a live PTY cannot be made to produce on demand (a queued mid-turn nudge,
+	// a refused one).
+	nudge func(a *agent.Agent, body, corr string) error
 }
 
 // # The coalesced mail fallback (mg-af83)
@@ -133,12 +141,21 @@ const (
 
 // Deliver implements Deliverer.
 func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time.Time) error {
+	_, err := p.DeliverOutcome(ctx, entry, fireTime)
+	return err
+}
+
+// DeliverOutcome implements OutcomeDeliverer: Deliver, plus which channel
+// carried the fire and why the PTY was not it (drellem2/pogo#204). The outcome
+// describes the CHANNEL only — never whether the agent woke or did the work;
+// the ack (scheduler_fire_completed) is the completion signal.
+func (p *PogodDeliverer) DeliverOutcome(ctx context.Context, entry Entry, fireTime time.Time) (DeliveryOutcome, error) {
 	body := buildBody(entry, fireTime)
 	subject := buildSubject(entry, fireTime)
 
 	switch entry.Delivery {
 	case DeliveryMail:
-		return p.sendMail(entry.Agent, subject, body)
+		return DeliveryOutcome{Channel: NudgeDeliveryMail}, p.sendMail(entry.Agent, subject, body)
 	case "", DeliveryNudge:
 		// Try PTY first.
 		if p.Registry != nil {
@@ -156,13 +173,18 @@ func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time
 				// died on "still producing output after 30s" and only ran
 				// because the mail fallback caught it — and wait-idle's
 				// precondition is the negation of that state (mg-ebee).
-				err := a.NudgeWake(body, agent.NudgeConfirm, agent.DefaultNudgeTimeout, entry.PendingToken)
+				err := p.nudgeAgent(a, body, entry.PendingToken)
 				if !mailAfterNudge(err) {
 					// The fire reached the agent. Any mailbox copy standing in
 					// for an earlier undelivered run has been superseded by a
 					// live delivery, so the next failure starts a fresh run.
 					p.closeFallbackRun(entry)
-					return nil
+					if err != nil {
+						// ErrNudgeQueued: typed mid-turn, no receipt. Not
+						// labelled pty — nothing confirmed it landed.
+						return DeliveryOutcome{Channel: NudgeDeliveryPTYUnconfirmed, NudgeError: err.Error()}, nil
+					}
+					return DeliveryOutcome{Channel: NudgeDeliveryPTY}, nil
 				}
 				// Log and fall through to mail — better to deliver late via
 				// mail than drop the fire entirely. A policy decline says so in
@@ -175,15 +197,25 @@ func (p *PogodDeliverer) Deliver(ctx context.Context, entry Entry, fireTime time
 					note = "[scheduler] terminal wake suppressed: " + err.Error()
 					reason = fallbackReasonSuppressed
 				}
-				return p.fallbackMail(entry, subject, body+"\n\n"+note, reason, fireTime)
+				out, ferr := p.fallbackMail(entry, subject, body+"\n\n"+note, reason, fireTime)
+				out.NudgeError = err.Error()
+				return out, ferr
 			}
 		}
 		// Agent not running — fall back to mail so the schedule is durable
 		// even when the recipient is offline.
 		return p.fallbackMail(entry, subject, body, fallbackReasonNotRunning, fireTime)
 	default:
-		return fmt.Errorf("scheduler: unsupported delivery %q", entry.Delivery)
+		return DeliveryOutcome{}, fmt.Errorf("scheduler: unsupported delivery %q", entry.Delivery)
 	}
+}
+
+// nudgeAgent is the PTY half of a nudge delivery; see the nudge field.
+func (p *PogodDeliverer) nudgeAgent(a *agent.Agent, body, corr string) error {
+	if p.nudge != nil {
+		return p.nudge(a, body, corr)
+	}
+	return a.NudgeWake(body, agent.NudgeConfirm, agent.DefaultNudgeTimeout, corr)
 }
 
 // mailAfterNudge decides whether a fire whose PTY nudge returned err still
@@ -226,16 +258,21 @@ func mailAfterNudge(err error) bool {
 // box, so treating it as an open run would suppress every later copy against a
 // message that does not exist — trading a mailbox full of duplicates for a
 // schedule that is silently undeliverable, which is the strictly worse fault.
-func (p *PogodDeliverer) fallbackMail(entry Entry, subject, body, reason string, fireTime time.Time) error {
+//
+// The outcome says which of the two happened: a coalesced fire wrote nothing,
+// so it is mail_coalesced, never mail.
+func (p *PogodDeliverer) fallbackMail(entry Entry, subject, body, reason string, fireTime time.Time) (DeliveryOutcome, error) {
 	if run, open := p.rideOpenRun(entry, fireTime); open {
 		p.emitFallbackCoalesced(entry, reason, run, fireTime)
-		return nil
+		return DeliveryOutcome{Channel: NudgeDeliveryMailCoalesced, FallbackReason: reason}, nil
 	}
+	out := DeliveryOutcome{Channel: NudgeDeliveryMail, FallbackReason: reason}
 	if err := p.sendMail(entry.Agent, subject, body+coalesceNotice(entry)); err != nil {
-		return err
+		// Nothing was carried: keep the reason, drop the channel.
+		return DeliveryOutcome{FallbackReason: reason}, err
 	}
 	p.openFallbackRun(entry, reason, fireTime)
-	return nil
+	return out, nil
 }
 
 // rideOpenRun reports whether a mailbox copy for this schedule is already

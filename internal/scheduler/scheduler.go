@@ -383,6 +383,54 @@ type Deliverer interface {
 	Deliver(ctx context.Context, entry Entry, fireTime time.Time) error
 }
 
+// OutcomeDeliverer is a Deliverer that can also say HOW a fire was delivered.
+// Tick prefers it when the deliverer implements it; a plain Deliverer (a
+// DelivererFunc, a test recorder) yields a zero DeliveryOutcome, and the event
+// then carries no channel keys rather than a guessed one.
+//
+// Before this, a PTY nudge, an unconfirmed one, a mail fallback and a
+// coalesced fallback that wrote nothing all logged an identical
+// scheduler_fire_delivered (drellem2/pogo#204).
+type OutcomeDeliverer interface {
+	Deliverer
+	DeliverOutcome(ctx context.Context, entry Entry, fireTime time.Time) (DeliveryOutcome, error)
+}
+
+// DeliveryOutcome records which channel carried a fire. Its fields are stamped
+// on scheduler_fire_delivered under the keys stall_watch_fired already uses
+// (nudge_delivery, nudge_fallback_reason, nudge_error), so one query reads both.
+//
+// It describes the CHANNEL, never completion: nudge_delivery=pty means the
+// bytes reached the terminal, not that the agent woke or did the work. The ack
+// (scheduler_fire_completed) is the completion signal (mg-a754).
+type DeliveryOutcome struct {
+	// Channel is one of the NudgeDelivery* values; empty when the deliverer
+	// does not report one, or when nothing was carried.
+	Channel string
+	// FallbackReason, when set, is why the PTY did not carry the fire:
+	// agent_not_running, nudge_failed or wake_suppressed.
+	FallbackReason string
+	// NudgeError is the error the PTY nudge returned — the refusal string for
+	// a fallback, ErrNudgeQueued's text for pty_unconfirmed.
+	NudgeError string
+}
+
+// Values for DeliveryOutcome.Channel (nudge_delivery on the event).
+const (
+	// NudgeDeliveryPTY: the nudge was typed into the agent's terminal and
+	// confirmed.
+	NudgeDeliveryPTY = "pty"
+	// NudgeDeliveryPTYUnconfirmed: the nudge was typed into a harness that was
+	// mid-turn and emitted no receipt (agent.ErrNudgeQueued). No mail follows.
+	NudgeDeliveryPTYUnconfirmed = "pty_unconfirmed"
+	// NudgeDeliveryMail: a mailbox copy was written for this fire.
+	NudgeDeliveryMail = "mail"
+	// NudgeDeliveryMailCoalesced: the fire fell back to mail but wrote
+	// NOTHING, because an earlier copy from the same run stands unread
+	// (mg-af83). Distinct from mail on purpose.
+	NudgeDeliveryMailCoalesced = "mail_coalesced"
+)
+
 // DelivererFunc adapts an ordinary function to the Deliverer interface so the
 // pogod main loop can pass a closure without a wrapper struct.
 type DelivererFunc func(ctx context.Context, entry Entry, fireTime time.Time) error
@@ -401,7 +449,10 @@ type FireResult struct {
 	Missed      int       // count of additional periods between OriginalDue and FiredAt
 	Delivered   bool      // false if Deliverer returned an error or Skip policy short-circuited
 	DeliverErr  error     // set when delivery failed
-	Skipped     bool      // true when ReplaySkip elided the fire
+	// Delivery is the channel the deliverer reported (zero for a deliverer
+	// that is not an OutcomeDeliverer). Channel, not completion.
+	Delivery DeliveryOutcome
+	Skipped  bool // true when ReplaySkip elided the fire
 
 	// UnackedStreak is the count of consecutive delivered-but-unacked fires
 	// INCLUDING this one, so a promptly-acking agent reads 1 and a dead one
@@ -881,7 +932,7 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			if now.Sub(fire.NextFire) > skipWindow {
 				shouldFire = false
 				res.Skipped = true
-				s.emitSchedulerEvent("scheduler_fire_skipped", fire, now, missed, nil)
+				s.emitSchedulerEvent("scheduler_fire_skipped", fire, now, missed, nil, DeliveryOutcome{})
 			}
 		}
 
@@ -928,10 +979,14 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 			s.mu.Unlock()
 
 			var derr error
-			if s.deliverer != nil {
+			var outcome DeliveryOutcome
+			if od, ok := s.deliverer.(OutcomeDeliverer); ok {
+				outcome, derr = od.DeliverOutcome(ctx, fire, now)
+			} else if s.deliverer != nil {
 				derr = s.deliverer.Deliver(ctx, fire, now)
 			}
 			res.DeliverErr = derr
+			res.Delivery = outcome
 			res.Delivered = derr == nil
 			if derr != nil {
 				log.Printf("scheduler: deliver %s to %s failed: %v", fire.ID, fire.Agent, derr)
@@ -952,7 +1007,7 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 					fire.UnackedStreak = live.UnackedStreak
 				}
 				s.mu.Unlock()
-				s.emitSchedulerEvent("scheduler_fire_failed", fire, now, missed, derr)
+				s.emitSchedulerEvent("scheduler_fire_failed", fire, now, missed, derr, DeliveryOutcome{})
 			} else {
 				// Re-read under the lock rather than reporting the values
 				// captured before delivery: a slow delivery is exactly the
@@ -974,7 +1029,7 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) []FireResult {
 				s.mu.Unlock()
 				res.UnackedStreak = streak
 				res.CompletionTracked = tracked
-				s.emitSchedulerEvent("scheduler_fire_delivered", fire, now, missed, nil)
+				s.emitSchedulerEvent("scheduler_fire_delivered", fire, now, missed, nil, outcome)
 			}
 			changed = true
 		}
@@ -1294,7 +1349,7 @@ func generateID() string {
 // failure. Best-effort; events.EmitTo never blocks the caller. Written to the
 // scheduler's own root (s.logPath), never a globally-resolved path — see the
 // logPath field and mg-e06d.
-func (s *Scheduler) emitSchedulerEvent(eventType string, e Entry, fireTime time.Time, missed int, err error) {
+func (s *Scheduler) emitSchedulerEvent(eventType string, e Entry, fireTime time.Time, missed int, err error, outcome DeliveryOutcome) {
 	details := map[string]any{
 		"schedule_id":   e.ID,
 		"to":            e.Agent,
@@ -1323,6 +1378,18 @@ func (s *Scheduler) emitSchedulerEvent(eventType string, e Entry, fireTime time.
 		details["completion_tracked"] = e.CompletionTracked()
 		if e.CompletionTracked() {
 			details["unacked_streak"] = e.UnackedStreak
+		}
+		// The channel that carried the fire (drellem2/pogo#204), under
+		// stall_watch_fired's key names. Absent when the deliverer did not
+		// report one. Channel, not completion — see DeliveryOutcome.
+		if outcome.Channel != "" {
+			details["nudge_delivery"] = outcome.Channel
+		}
+		if outcome.FallbackReason != "" {
+			details["nudge_fallback_reason"] = outcome.FallbackReason
+		}
+		if outcome.NudgeError != "" {
+			details["nudge_error"] = outcome.NudgeError
 		}
 	}
 	events.EmitTo(context.Background(), s.logPath, events.Event{
