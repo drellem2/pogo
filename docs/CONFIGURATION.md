@@ -72,6 +72,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[deaf_watch]` | `enabled` | on | observes | Mails when a running agent has no mail loop that could wake it. See [deaf-watch](#the-missing-mail-loop-announcer-deaf-watch). |
 | `[wake_watch]` | `enabled` | on | ACTS | Types a pointer of at most 100 characters into an agent's terminal when mail or an assignment arrives for it, re-points work left unconsumed and then mails `mayor`, and mails the sender and `mayor` when mail goes to an agent that is not running. Phase 1 is shadow: the mail-check timers stay on. See [wake-watch](#the-pointer-waker-wake-watch). Code: `internal/wakewatch`. |
 | `[heart_watch]` | `enabled` | on | observes | Mails when a crew heartbeat goes stale. `restart_after` is a threshold in the notice; heart-watch restarts nothing. See [heart-watch](#who-reads-the-crew-heartbeat-when-the-coordinator-is-dark-heart-watch). |
+| `[crew_reset]` | `enabled` | on | ACTS | Mails a crew agent whose session has run 4h, asking it to write a handoff note at its next safe point and run `pogo agent stop` on itself, so restart_on_crash brings it back in a fresh session. It asks at most twice per session and stops nothing itself. See [crew-reset](#crew-context-reset-crew-reset). Code: `internal/crewreset`. |
 | `[blind_watch]` | `enabled` | on | observes | Mails when wedge-watch keeps declining to judge an agent. See [blind-watch](#who-reads-a-detector-that-says-it-cannot-answer-blind-watch). |
 | `[absent_watch]` | `enabled` | on | observes | Mails when a configured agent is missing from the registry. It never starts the agent. See [absent-watch](#the-absent-agent-announcer-absent-watch). |
 | `[progress_watch]` | `enabled` | on | observes | Mails when the fleet is landing no work. See [progress-watch](#is-the-fleet-getting-anything-done-progress-watch). |
@@ -2835,6 +2836,77 @@ agent keeps touching it. Keeping both means an agent that stops writing turnlog
 lines while still refreshing a heartbeat stays visible, and the converse.
 
 Source of truth: `internal/heartwatch/`, `cmd/pogo/checkheartbeats.go`.
+
+## Crew context reset (crew-reset)
+
+A crew session's context only grows, and every turn pays for all of it.
+mg-c2d5's audit estimated that resetting crew context every four hours would
+save about 22% of crew tokens. `[crew_reset]` (mg-5b58d) is the gentle version
+of that: pogod **asks**, and the agent decides when.
+
+When a crew agent's current session passes `after` (4h), pogod mails it one
+notice from `pogod`. The notice tells it to:
+
+1. at its next safe point (not mid-task, and not while it holds unread or
+   unhandled mail), write a handoff note where its prompt already keeps state:
+   a dated entry in its own `sweep.log`, plus anything durable in its memory
+   directory. There is no new store;
+2. run `pogo agent stop <itself>`.
+
+The respawn is the existing supervisor path. `Registry.Stop` leaves a
+restart_on_crash agent in the registry, and pogod's exit hook respawns it about
+2s later into a fresh session (no `--continue`) that runs the prompt's
+"On Startup". A self-issued stop is safe:
+
+- the stop runs inside pogod's HTTP handler, which does not depend on the
+  requesting `pogo` process surviving (it is a child of the session being
+  stopped, and often dies with it);
+- a crew agent holds no work-item claim to release, and the claim release on
+  stop is scoped to polecats and skipped on the respawn path;
+- schedules are kept: the mail-check reaper removes a schedule only when an
+  agent exits unsupervised, and a restart_on_crash stop is not that;
+- the respawned session has a new start time, so crew-reset counts it as a new
+  session and does not ask again until that one passes `after`.
+
+`internal/agent`'s `TestSelfIssuedStopRespawnsRestartOnCrashAgent` covers this.
+The agent itself runs `DELETE /agents/<self>` from inside its own process tree
+and must come back with a new pid and a new start time.
+
+**Who is asked.** Only running crew agents that have restart_on_crash, have
+auto_start = true, and are not parked. Those are the agents for which a
+self-stop is a reset and not an outage. Parked agents and on-demand
+(`auto_start = false`) agents are never asked. Polecats are out of scope.
+
+**Bounded.** A session gets at most two notices: the first at `after`, and one
+reminder if the same session is still up `renotice_after` later. After that
+pogod is quiet for the rest of that session. A notice whose mail failed is not
+counted, so the next sample retries it. The notice carries the session's start
+time, so a fresh session that finds it still unread knows it is not addressed
+to it.
+
+**The pointer.** With `[wake_watch]` on (the default), wake-watch already types
+a short pointer for every mail to a running agent, and crew-reset adds none.
+With wake-watch off, crew-reset types its own pointer of at most 100 bytes.
+
+Each notice emits `crew_reset_notice` (agent, notice number, uptime, session
+start). A failed mail or an unreadable population emits `crew_reset_error`.
+Nothing is persisted: a pogod restart takes the crew down with it, so every
+session the next pogod sees is a new one.
+
+**Default on, and why.** It changes crew behaviour for every operator, which is
+why it is in the changelog. It is on by default because the change is limited:
+it only asks, at most twice per session, and only agents whose respawn the
+supervisor already guarantees. Turn it off with `enabled = false`, or leave out
+single agents with `exclude`.
+
+```toml
+[crew_reset]
+enabled = true             # default true
+after = "4h"               # session uptime that triggers the first notice
+renotice_after = "1h"      # gap before the single reminder (then silence)
+interval = "5m"            # sample cadence
+exclude = []               # agent names never asked, e.g. ["mayor"]
+```
 
 ## Who reads a detector that says it cannot answer? (blind-watch)
 

@@ -65,6 +65,7 @@ var configFieldSection = map[string]string{
 	"DeafWatch":           "deaf_watch",
 	"WakeWatch":           "wake_watch",
 	"HeartWatch":          "heart_watch",
+	"CrewReset":           "crew_reset",
 	"BlindWatch":          "blind_watch",
 	"AbsentWatch":         "absent_watch",
 	"ProgressWatch":       "progress_watch",

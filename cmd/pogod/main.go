@@ -3949,6 +3949,13 @@ Flags:
 	// `pogo check-wakewatch` measures whether they ever find mail it missed.
 	startWakeWatch(hbCtx, cfg.WakeWatch, agentRegistry, coordinator, log.Printf)
 
+	// Crew context reset (mg-5b58d): a crew agent whose session has run
+	// [crew_reset] after (4h) is mailed once, and reminded once an hour later,
+	// asking it to leave itself a handoff note and `pogo agent stop` itself so
+	// restart_on_crash brings it back in a fresh session. ACTS by mail only; it
+	// stops nothing. See docs/CONFIGURATION.md "Crew context reset".
+	startCrewReset(hbCtx, cfg.CrewReset, cfg.WakeWatch.Enabled, agentRegistry, log.Printf)
+
 	// Optional platform-specific wake notifier — reduces wake-event latency
 	// from up-to-Interval (~30s) down to <1s by short-circuiting the
 	// heartbeat tick when the OS reports a wake. Strict performance
