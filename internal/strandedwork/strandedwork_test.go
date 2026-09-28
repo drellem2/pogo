@@ -791,7 +791,7 @@ func TestScanKeepsTheBuilderAndDropsTheReviewer(t *testing.T) {
 // for both cases, which handed the one population whose work is NOT durable a
 // command that cannot run.
 func TestSubmitRemedyPushesFirstOnlyForALocalOnlyBranch(t *testing.T) {
-	pushed := SubmitRemedy("/repo", "polecat-9a19", "mg-9a19", true)
+	pushed := SubmitRemedy("/repo", "polecat-9a19", "mg-9a19", "polecat-9a19")
 	if strings.Contains(pushed, "push origin") {
 		t.Errorf("SubmitRemedy(pushed) = %q — it tells a reader to push a branch already on origin", pushed)
 	}
@@ -799,7 +799,7 @@ func TestSubmitRemedyPushesFirstOnlyForALocalOnlyBranch(t *testing.T) {
 		t.Errorf("SubmitRemedy(pushed) = %q, want %q", pushed, want)
 	}
 
-	local := SubmitRemedy("/repo", "polecat-p0fc6", "", false)
+	local := SubmitRemedy("/repo", "polecat-p0fc6", "", "")
 	if want := "git -C /repo push origin polecat-p0fc6 && pogo refinery submit polecat-p0fc6 --repo=/repo"; local != want {
 		t.Errorf("SubmitRemedy(local-only) = %q, want %q", local, want)
 	}

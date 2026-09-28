@@ -405,6 +405,26 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 		})
 		return
 	}
+	// Is the work a PR awaiting review (drellem2/pogo#147)? A probe failure
+	// leaves f as it was and the alert below goes out — see
+	// strandedwork.Finding.CheckOpenPR for why that direction is not negotiable.
+	f.CheckOpenPR(a.SourceRepo, strandedPRProbe)
+	if f.Disposition == strandedwork.DispositionAwaitingReview {
+		// Logged and emitted, never silent — the mg-1af2 contract above, for the
+		// same reason: a suppression nobody can count is indistinguishable from
+		// a detector that stopped working.
+		log.Printf("agent %s: branch %s has %d commit(s) %s lacks, but they are the head of open PR #%d "+
+			"(%s) — awaiting review, NOT stranded, no alert sent (mg-dbb75). %s",
+			a.Name, f.Branch, len(f.Unmerged), f.Target, f.PR, f.PRBranch, f.Summary())
+		events.Emit(context.Background(), events.Event{
+			EventType:  "work_item_push_awaiting_review",
+			Agent:      a.eventAgent(),
+			WorkItemID: a.WorkItemID,
+			Repo:       a.SourceRepo,
+			Details:    awaitingReviewDetails(f, reason, RouteRelease),
+		})
+		return
+	}
 	if !f.Stranded() {
 		return
 	}
@@ -426,6 +446,7 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 		"summary":     summary,
 		"route":       RouteRelease,
 	}
+	addOriginDetails(details, f)
 	addPresenceDetails(details, presence, note)
 	events.Emit(context.Background(), events.Event{
 		EventType:  "work_item_stranded_push",
@@ -444,6 +465,45 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 		Presence:      presence,
 		SecondOpinion: note,
 	})
+}
+
+// strandedPRProbe is the open-PR probe both agent-driven emitters apply before
+// alerting (mg-dbb75). A variable so tests can answer for GitHub.
+var strandedPRProbe strandedwork.PRProbe = strandedwork.GitHubOpenPR
+
+// awaitingReviewDetails is the payload of work_item_push_awaiting_review, the
+// event that makes the open-PR suppression countable.
+func awaitingReviewDetails(f strandedwork.Finding, reason, route string) map[string]any {
+	return map[string]any{
+		"branch":     f.Branch,
+		"ref":        f.Ref,
+		"origin_ref": f.OriginRef,
+		"target":     f.Target,
+		"pr":         f.PR,
+		"pr_branch":  f.PRBranch,
+		"owner_item": f.WorkItemID,
+		"unmerged":   len(f.Unmerged),
+		"reason":     reason,
+		"route":      route,
+	}
+}
+
+// addOriginDetails puts the two probes that can only ever REMOVE part of an
+// alert on its payload when they ran and are worth knowing: where on origin the
+// work was found, and that the open-PR check could not answer. The second is
+// the one that matters — an alert that went out because GitHub was unreachable
+// has to be tellable from one that went out because there was no PR, or the
+// fail-toward-alert direction (strandedwork.Finding.CheckOpenPR) is invisible.
+func addOriginDetails(details map[string]any, f strandedwork.Finding) {
+	if f.OriginRef != "" && f.OriginRef != f.Ref {
+		details["origin_ref"] = f.OriginRef
+	}
+	if f.OriginProbeError != "" {
+		details["origin_probe_error"] = f.OriginProbeError
+	}
+	if f.PRProbeError != "" {
+		details["pr_probe_error"] = f.PRProbeError
+	}
 }
 
 // addPresenceDetails puts the content second opinion on an event payload.

@@ -339,6 +339,17 @@ func (a StrandedAlert) Message() (subject, body string) {
 	}
 	fmt.Fprintf(&b, "Repo:       %s\n", a.Repo)
 	fmt.Fprintf(&b, "Branch:     %s (ref %s, pushed=%t)\n", a.Finding.Branch, a.Finding.Ref, a.Finding.Pushed)
+	if o := a.Finding.OriginRef; o != "" && o != a.Finding.Ref {
+		// Cross-pushed: durable on origin under another name, and that name is
+		// what the remedy below submits (mg-dbb75).
+		fmt.Fprintf(&b, "On origin:  %s\n", o)
+	}
+	if e := a.Finding.PRProbeError; e != "" {
+		// Sent BECAUSE the open-PR check could not answer, which is the direction
+		// it fails on purpose (strandedwork.Finding.CheckOpenPR). If this branch
+		// is a PR awaiting review, that is the first thing to rule out.
+		fmt.Fprintf(&b, "PR check:   could not ask GitHub whether this is an open PR (%s) — reported anyway\n", e)
+	}
 	fmt.Fprintf(&b, "Target:     %s\n", a.Finding.Target)
 	fmt.Fprintf(&b, "Unmerged:   %d commit(s)", len(a.Finding.Unmerged))
 	if len(a.Finding.Unmerged) > 0 {
@@ -458,7 +469,7 @@ func (a StrandedAlert) cell() strandedwork.Cell {
 // beats a paragraph that qualifies it.
 func (a StrandedAlert) writeRemedy(b *strings.Builder) {
 	target := a.Finding.Target
-	submit := strandedwork.SubmitRemedy(a.Repo, a.Finding.Branch, a.WorkItemID, a.Finding.Pushed)
+	submit := strandedwork.SubmitRemedy(a.Repo, a.Finding.Branch, a.WorkItemID, a.Finding.OriginBranch())
 	handCheck := strandedwork.HandCheckCommand(a.Repo, a.WorkItemID, target)
 	switch a.cell() {
 	case strandedwork.CellRescueUnbuilt:

@@ -139,6 +139,10 @@ type StrandedSweepReport struct {
 	// head, typically. Not stranded, and counted apart from Clean so the
 	// suppression is measurable rather than invisible (mg-1af2).
 	Carried int `json:"carried"`
+	// AwaitingReview is how many had commits the target lacks that are the head
+	// of an OPEN pull request — work on the PR track, stopped to wait for its
+	// review (mg-dbb75). Counted apart from Clean for the reason Carried is.
+	AwaitingReview int `json:"awaiting_review"`
 	// Skipped is how many carried no source repo to check, so no question was
 	// asked. A --no-worktree polecat, or a record written before the repo field
 	// existed.
@@ -231,6 +235,23 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 				c.Name, f.Branch, f.Carrier, f.Summary())
 			continue
 		}
+		// A probe failure leaves f as it was, so the row below still reports it;
+		// see strandedwork.Finding.CheckOpenPR.
+		f.CheckOpenPR(c.SourceRepo, strandedPRProbe)
+		if f.Disposition == strandedwork.DispositionAwaitingReview {
+			rep.AwaitingReview++
+			log.Printf("strandedwork: startup sweep found polecat %s's branch %s is the head of open PR #%d "+
+				"(%s) — awaiting review, NOT stranded (mg-dbb75). %s",
+				c.Name, f.Branch, f.PR, f.PRBranch, f.Summary())
+			events.Emit(context.Background(), events.Event{
+				EventType:  "work_item_push_awaiting_review",
+				Agent:      "cat-" + c.Name,
+				WorkItemID: c.WorkItemID,
+				Repo:       c.SourceRepo,
+				Details:    awaitingReviewDetails(f, "polecat outlived a pogod restart", RouteRestartSweep),
+			})
+			continue
+		}
 		if !f.Stranded() {
 			rep.Clean++
 			continue
@@ -265,6 +286,7 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 			"still_alive":  c.Alive,
 			"witnessed_at": c.StartTime.Format(time.RFC3339),
 		}
+		addOriginDetails(details, f)
 		addPresenceDetails(details, presence, note)
 		events.Emit(context.Background(), events.Event{
 			EventType:  "work_item_stranded_push",
@@ -287,8 +309,8 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 	}
 
 	log.Printf("strandedwork: startup sweep judged %d unadoptable polecat(s): %d stranded, %d clean, "+
-		"%d carried by another branch, %d unjudged, %d with no repo to check",
-		rep.Candidates, rep.Stranded, rep.Clean, rep.Carried, rep.Unjudged, rep.Skipped)
+		"%d carried by another branch, %d awaiting review in an open PR, %d unjudged, %d with no repo to check",
+		rep.Candidates, rep.Stranded, rep.Clean, rep.Carried, rep.AwaitingReview, rep.Unjudged, rep.Skipped)
 	rep.emitRan()
 	return rep
 }
@@ -312,13 +334,14 @@ func (s StrandedSweepReport) emitRan() {
 		EventType: "work_item_stranded_sweep",
 		Agent:     "pogod",
 		Details: map[string]any{
-			"candidates": s.Candidates,
-			"stranded":   s.Stranded,
-			"clean":      s.Clean,
-			"carried":    s.Carried,
-			"unjudged":   s.Unjudged,
-			"skipped":    s.Skipped,
-			"judged":     s.Judged(),
+			"candidates":      s.Candidates,
+			"stranded":        s.Stranded,
+			"clean":           s.Clean,
+			"carried":         s.Carried,
+			"awaiting_review": s.AwaitingReview,
+			"unjudged":        s.Unjudged,
+			"skipped":         s.Skipped,
+			"judged":          s.Judged(),
 		},
 	})
 }

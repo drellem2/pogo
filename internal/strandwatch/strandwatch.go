@@ -635,8 +635,12 @@ type Row struct {
 	// only in a worktree git-gc is about to reap" are different emergencies.
 	Ref    string `json:"ref"`
 	Pushed bool   `json:"pushed"`
-	Target string `json:"target"`
-	Kind   Kind   `json:"kind"`
+	// OriginBranch is the name the work is on origin under — Branch itself, or
+	// another branch the commits were cross-pushed to — and "" when Pushed is
+	// false. It is what the submit names; see strandedwork.Finding.Pushed.
+	OriginBranch string `json:"origin_branch,omitempty"`
+	Target       string `json:"target"`
+	Kind         Kind   `json:"kind"`
 
 	// Unmerged is how many commits `git cherry` says the target lacks.
 	Unmerged int `json:"unmerged"`
@@ -776,6 +780,16 @@ func (r Row) StatusLabel() string {
 	return "-"
 }
 
+// originBranch is OriginBranch, defaulting to Branch for a pushed row built
+// without it: before mg-dbb75 a pushed row was, by definition, on origin under
+// its own name.
+func (r Row) originBranch() string {
+	if r.OriginBranch == "" && r.Pushed {
+		return r.Branch
+	}
+	return r.OriginBranch
+}
+
 // Remedy is the one command to run, or the one question to answer.
 //
 // THE STRANDED ROW'S COMMAND DEPENDS ON r.Pushed (mg-bfe0). The renderer already
@@ -907,7 +921,7 @@ func (r Row) remedy() string {
 			"request",
 			r.Prior.MR, r.priorWhere(), r.priorWhy(), r.Target)
 	case KindStranded:
-		submit := strandedwork.SubmitRemedy(r.Item.Repo, r.Branch, r.Item.ID, r.Pushed)
+		submit := strandedwork.SubmitRemedy(r.Item.Repo, r.Branch, r.Item.ID, r.originBranch())
 		if r.Cell != strandedwork.CellCheckByHand {
 			return fmt.Sprintf("%s   # do NOT dispatch at %s", submit, r.Item.ID)
 		}
@@ -1741,7 +1755,7 @@ func classify(repo, branch string, it Item, target string, hv historyView) (*Row
 			f.Carrier, f.WorkItemID), nil
 	}
 	row := Row{
-		Item: it, Branch: branch, Ref: f.Ref, Pushed: f.Pushed, Target: f.Target,
+		Item: it, Branch: branch, Ref: f.Ref, Pushed: f.Pushed, OriginBranch: f.OriginBranch(), Target: f.Target,
 		Unmerged: len(f.Unmerged), Equivalent: f.Equivalent,
 		PreRegistration: f.PreRegistration,
 		Rescue:          f.Rescue,
