@@ -55,9 +55,12 @@ priority pass (`checkPriorityWake`):
 - Delivery reuses the **same wait-idle nudger** the standard checks use (see
   `newStallNudger` in `cmd/pogod/main.go`) — so a **busy agent is never
   interrupted** and an idle one is woken at once.
-- A dedicated **`high_priority_wake_cooldown`** (default 3m, separate from the
-  standard `nudge_cooldown`) gates repeats — **per item**, and doubling up to
-  `repeat_backoff_cap` (mg-1693; see below).
+- A dedicated **`high_priority_wake_cooldown`** (default 4h since mg-b12da, 3m
+  before; separate from the standard `nudge_cooldown`) gates repeats — **per
+  item** (mg-1693; see below). At 4h it equals `repeat_backoff_cap`, so the
+  cadence is flat. `dispatch_notice_interval` (1h) additionally spaces whole
+  wake notices, batching items that become ready within the same hour; see
+  the mg-b12da correction below.
 - On a fire, pogod's `heartbeat.Nudge` is invoked (via the optional `FastPoll`
   hook) to collapse the next ~30s poll for a prompt follow-up sweep. It cannot
   storm the loop: `FastPoll` runs only on an actual fire, and the cooldown
@@ -126,6 +129,37 @@ The fix is the repo-occupancy check shared with the standard stall notice — se
 the per-repo cap". The priority information is kept rather than dropped: a
 coordinator still wants to know a high-priority item is waiting on a slot, and
 naming the occupying workers lets it ask whether one of them is wedged.
+
+### Correction (mg-b12da): bounded is not quiet
+
+mg-1693 bounded the total per item; it did not make the channel quiet. Over
+2026-09-26..28 (55h of firing on the maintainer's box) the wake fired 72.7 times
+a day. 229 of its 355 item notices were repeats about items the coordinator was
+already holding, and a named item was dispatched within 10 minutes of 18% of
+those repeats against 44% of first notices. drellem2/pogo#211 measured the same
+thing from outside — 22 fires in 66 minutes, median gap 180s — and the operator
+ruled it "somewhat annoying".
+
+Two changes, both defaults an operator can revert:
+
+1. `high_priority_wake_cooldown` 3m → **4h**, equal to `repeat_backoff_cap`: a
+   held item is named once, then at most every 4h. The doubling from 3m spent
+   about eight notices reaching the cap; that is where the repeats came from.
+2. A new `dispatch_notice_interval` (**1h**) between two wake notices. Raising
+   the per-item cooldown leaves first notices untouched, and they were then most
+   of the traffic — 109 distinct items became ready in the 55h, one at a time.
+   The interval holds an item that becomes due inside it and names it in the
+   next notice. It records nothing against the held item, so unlike the
+   per-category cooldown mg-1693 removed, it delays a notice and cannot swallow
+   one.
+
+The price is latency, and it lands on this feature's reason for existing: after
+a quiet hour the first ready item still wakes the coordinator within
+`high_priority_wake_delay`, but a second one inside the same hour waits for the
+rest of it. That was judged acceptable because the operator asked for "much much
+less frequent", and the alternative the operator offered was removing the wake.
+Replayed against the same events, the model gives about 7 wake notices a day,
+down from 54 under the same model of the old defaults.
 
 ## Tests (W-4)
 

@@ -963,6 +963,8 @@ mail_fallback_backlog_cap = 7
 priority_wake_enabled = false
 high_priority_wake_delay = "10s"
 high_priority_wake_cooldown = "90s"
+unclaimed_item_cooldown = "2h"
+dispatch_notice_interval = "20m"
 fast_priorities = ["high", "critical"]
 non_dispatchable_assignees = ["human", "legal-review"]
 `), 0644)
@@ -979,6 +981,12 @@ non_dispatchable_assignees = ["human", "legal-review"]
 	}
 	if cfg.StallWatch.HighPriorityWakeCooldown != 90*time.Second {
 		t.Errorf("wake cooldown = %v, want 90s", cfg.StallWatch.HighPriorityWakeCooldown)
+	}
+	if cfg.StallWatch.UnclaimedItemCooldown != 2*time.Hour {
+		t.Errorf("unclaimed item cooldown = %v, want 2h", cfg.StallWatch.UnclaimedItemCooldown)
+	}
+	if cfg.StallWatch.DispatchNoticeInterval != 20*time.Minute {
+		t.Errorf("dispatch notice interval = %v, want 20m", cfg.StallWatch.DispatchNoticeInterval)
 	}
 	if len(cfg.StallWatch.FastPriorities) != 2 || cfg.StallWatch.FastPriorities[0] != "high" || cfg.StallWatch.FastPriorities[1] != "critical" {
 		t.Errorf("fast priorities = %v, want [high critical]", cfg.StallWatch.FastPriorities)
@@ -1235,10 +1243,68 @@ func TestStallWatchRepeatBackoffCapDefault(t *testing.T) {
 		t.Errorf("repeat backoff cap = %v, want default %v",
 			cfg.StallWatch.RepeatBackoffCap, DefaultStallRepeatBackoffCap)
 	}
-	if DefaultStallRepeatBackoffCap <= DefaultStallNudgeCooldown ||
-		DefaultStallRepeatBackoffCap <= DefaultHighPriorityWakeCooldown {
-		t.Errorf("the default cap (%v) must exceed both base cooldowns or escalation is a no-op",
+	if DefaultStallRepeatBackoffCap <= DefaultStallNudgeCooldown {
+		t.Errorf("the default cap (%v) must exceed nudge_cooldown or escalation is a no-op for the defect alarms",
 			DefaultStallRepeatBackoffCap)
+	}
+	// The two dispatch categories are FLAT by design since mg-b12da: their
+	// per-item base equals the cap, so a held item is named once and then at
+	// most once per cap. A base above the cap would be silently clamped to the
+	// base by repeatCooldown's escape hatch — still flat, but no longer what
+	// the defaults table says — so pin equality rather than "<=".
+	if DefaultHighPriorityWakeCooldown != DefaultStallRepeatBackoffCap ||
+		DefaultUnclaimedItemCooldown != DefaultStallRepeatBackoffCap {
+		t.Errorf("dispatch item cooldowns (wake %v, unclaimed %v) should equal the cap (%v): flat per-item cadence (mg-b12da)",
+			DefaultHighPriorityWakeCooldown, DefaultUnclaimedItemCooldown, DefaultStallRepeatBackoffCap)
+	}
+}
+
+// TestStallWatchDispatchNoticeDefaults pins the mg-b12da defaults an existing
+// deployment gets with its config file untouched: a held dispatch item is
+// named at most every 4h, and each dispatch category sends at most one notice
+// per hour. The before values (3m doubling / 5m doubling / no interval) are in
+// the changelog; these are the numbers #211 was promised.
+func TestStallWatchDispatchNoticeDefaults(t *testing.T) {
+	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+
+	cfg := Load()
+	if cfg.StallWatch.HighPriorityWakeCooldown != 4*time.Hour {
+		t.Errorf("wake cooldown = %v, want 4h", cfg.StallWatch.HighPriorityWakeCooldown)
+	}
+	if cfg.StallWatch.UnclaimedItemCooldown != 4*time.Hour {
+		t.Errorf("unclaimed item cooldown = %v, want 4h", cfg.StallWatch.UnclaimedItemCooldown)
+	}
+	if cfg.StallWatch.DispatchNoticeInterval != time.Hour {
+		t.Errorf("dispatch notice interval = %v, want 1h", cfg.StallWatch.DispatchNoticeInterval)
+	}
+	// The defect alarms keep their fast base: this change must not slow them.
+	if cfg.StallWatch.NudgeCooldown != 5*time.Minute {
+		t.Errorf("nudge cooldown = %v, want 5m (unchanged by mg-b12da)", cfg.StallWatch.NudgeCooldown)
+	}
+}
+
+// TestStallWatchDispatchNoticeIntervalZeroSurvivesLoad: "0s" is the documented
+// off switch for dispatch_notice_interval, so the merge must not treat it as
+// unset and restore the 1h default — the same trap mail_fallback_backlog_cap's
+// negative value guards against.
+func TestStallWatchDispatchNoticeIntervalZeroSurvivesLoad(t *testing.T) {
+	dir := t.TempDir()
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	defer os.Unsetenv("XDG_CONFIG_HOME")
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
+[stall_watch]
+dispatch_notice_interval = "0s"
+`), 0644)
+
+	cfg := Load()
+	if cfg.StallWatch.DispatchNoticeInterval != 0 {
+		t.Errorf("dispatch notice interval = %v, want 0 (explicitly off)", cfg.StallWatch.DispatchNoticeInterval)
+	}
+	if cfg.StallWatch.UnclaimedItemCooldown != DefaultUnclaimedItemCooldown {
+		t.Errorf("unclaimed item cooldown = %v, want default %v", cfg.StallWatch.UnclaimedItemCooldown, DefaultUnclaimedItemCooldown)
 	}
 }
 

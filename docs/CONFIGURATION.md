@@ -426,7 +426,13 @@ unclaimed_item_age_threshold = "10m"    # Threshold A
 unread_mail_age_threshold = "10m"       # Threshold B (age)
 max_unread_mail_count = 5               # Threshold B (count)
 nudge_cooldown = "5m"                   # gap before the SECOND notice about an item
+                                        # (defect alarms and unread mail)
 repeat_backoff_cap = "4h"               # ceiling on the doubling repeat backoff
+unclaimed_item_cooldown = "4h"          # gap before Threshold A names the same
+                                        # item again (was 5m doubling; mg-b12da)
+dispatch_notice_interval = "1h"         # min gap between two notices of the same
+                                        # dispatch category; items due inside it
+                                        # wait for the next one ("0s" = off)
 mail_fallback_backlog_cap = 3           # consecutive mail fallbacks per recipient
                                         # before further ones are withheld
                                         # (negative disables the damping)
@@ -437,7 +443,8 @@ non_dispatchable_assignees = ["human", "parked"]  # everything else is watched
 # Priority wake (gh #61): a high-priority available item skips the 10m gate.
 priority_wake_enabled = true            # default true
 high_priority_wake_delay = "30s"        # min age before a high-priority item wakes
-high_priority_wake_cooldown = "3m"      # gap before the 2nd notice about an item
+high_priority_wake_cooldown = "4h"      # gap before the wake names the same item
+                                        # again (was 3m doubling; mg-b12da)
 fast_priorities = ["high"]              # Priority values that trigger the wake
 
 # Indefinite-hold report (mg-f398): a read-only daily digest of holds that
@@ -551,6 +558,49 @@ holding is gone.
 `stall_watch_fired` events carry `repeat_counts` (item → notice number),
 `backoff_suppressed_ids`, and `next_backoff` so the repetition stays countable
 per item without hand-correlating ids across fires.
+
+### The dispatch notices are quiet by default (mg-b12da)
+
+The two dispatch notices — the priority wake and Threshold A — were still the
+loudest things stall-watch sent after the per-item fix. Measured on the
+maintainer's box over 2026-09-26..28 (55h of firing; the 7-day window held
+nothing earlier): **72.7 priority-wake and 66.1 unclaimed-items fires a day.**
+Most of that was repeats about items the coordinator was already holding —
+often at their repo's worker cap — and repeats rarely led anywhere: a named item
+was dispatched within 10 minutes of 18% of repeat priority-wake notices and
+4.7% of repeat unclaimed-items notices, against 44% and 20% of first notices.
+An outside operator measured the same shape (drellem2/pogo#211: 22 wake fires
+in 66 minutes, median gap 180s) and the operator's verdict was "somewhat
+annoying".
+
+So, since mg-b12da:
+
+- **A held item is named once, then at most every 4h.**
+  `high_priority_wake_cooldown` went from 3m to 4h and Threshold A got its own
+  `unclaimed_item_cooldown` (4h) instead of sharing `nudge_cooldown` (5m). Both
+  equal `repeat_backoff_cap`, so the cadence is flat rather than doubling.
+- **Each dispatch category sends at most one notice per
+  `dispatch_notice_interval` (1h).** An item that becomes due inside the
+  interval is held — nothing is recorded against it — and named in the next
+  notice together with whatever else came due. This is what batches *first*
+  notices, which arrive one item at a time and which the per-item keying
+  cannot reduce. It delays a notice; it never drops one, which is the
+  difference from the per-category cooldown described above. The cost is
+  latency: after a quiet hour the next item still goes out on its first due
+  tick, but a second one inside the hour waits for the rest of it.
+
+Replayed against the same 55h of events, the model of these defaults gives
+about **7 priority-wake and 11 unclaimed-items notices a day, down from 54 and
+61 under the same model of the old defaults** (the model undercounts the old
+behaviour by 5–25% against the recorded 72.7 and 66.1, so read the new figures
+as a floor of that order too). The hard ceiling is now 24 notices a day per
+dispatch category. The capacity split is unchanged: a notice whose items are all
+at their repo's worker cap still reports without recommending a dispatch.
+
+Set `dispatch_notice_interval = "0s"` and the two cooldowns back to `"3m"` /
+`"5m"` to restore the previous behaviour. The worked-but-unclaimed, preserved-
+worktree and stranded-push alarms are not dispatch notices and keep
+`nudge_cooldown`.
 
 ### The mail fallback is damped per recipient
 
@@ -865,10 +915,11 @@ An item that is **ready** (deps met — it is in `available/`, not `pending/`),
 and carries a priority in `fast_priorities` bypasses the 10m gate and is delivered after only
 `high_priority_wake_delay` — via the **same wait-idle nudge**, so a busy agent is
 never interrupted (the write lands at its next turn boundary) and an idle agent
-is woken at once. A dedicated `high_priority_wake_cooldown` keeps an item that
+is woken at once. A dedicated `high_priority_wake_cooldown` (4h) keeps an item that
 stays available (e.g. it can't be dispatched yet) from re-nudging every tick —
-per item and escalating, so it also cannot re-nudge every cooldown forever (see
-"Repeat suppression is per item"); blocked (`pending/`) and already-claimed
+per item, so an item is named once and then at most every 4h, and
+`dispatch_notice_interval` batches items that become ready within the same hour
+(see "The dispatch notices are quiet by default"); blocked (`pending/`) and already-claimed
 (`claimed/`) items are never scanned, so they cannot loop-nudge either. When the wake is disabled, high-priority items
 fall back to the standard 10m gate — disabling it never silences them.
 

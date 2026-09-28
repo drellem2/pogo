@@ -163,12 +163,51 @@ const (
 	// a burst of enqueues settle so a batch produces one nudge rather than one
 	// per item. See the priority-wake half of gh drellem2/pogo #61.
 	DefaultHighPriorityWakeDelay = 30 * time.Second
-	// DefaultHighPriorityWakeCooldown is the minimum gap between two
-	// priority-wake nudges. It is deliberately shorter than the standard stall
-	// cooldown (urgent work should recover fast) but long enough that a
-	// high-priority item which stays available — e.g. the coordinator can't
-	// dispatch it yet — does not re-nudge every heartbeat tick.
-	DefaultHighPriorityWakeCooldown = 3 * time.Minute
+	// DefaultHighPriorityWakeCooldown is the gap before the priority wake names
+	// the SAME item again. The first notice about an item is never delayed by
+	// it (see stallwatch.selectDue); it only spaces the repeats.
+	//
+	// It was 3m until mg-b12da, doubling per repeat out to
+	// DefaultStallRepeatBackoffCap, which re-announced a held item about eight
+	// times in its first four hours. Measured on this host over 2026-09-26..28
+	// (55h of firing): 72.7 priority-wake fires/day, 229 of 355 item notices
+	// repeats, and a named item was dispatched within 10 minutes after 18% of
+	// repeat notices against 44% of first notices. drellem2/pogo#211 measured
+	// the same shape from outside — 22 fires in 66 min, median gap 180s. At 4h,
+	// equal to the backoff cap, the cadence is flat: one notice when an item
+	// becomes ready, then at most one per 4h while it stays ready.
+	DefaultHighPriorityWakeCooldown = 4 * time.Hour
+	// DefaultUnclaimedItemCooldown is the unclaimed_items counterpart of
+	// DefaultHighPriorityWakeCooldown: the gap before the standard 10-min stall
+	// notice names the same item again (mg-b12da).
+	//
+	// Until mg-b12da that category used NudgeCooldown (5m) as the base of the
+	// doubling backoff, shared with unread mail and the defect alarms. Measured
+	// over the same window: 66.1 fires/day, 278 of 358 item notices repeats,
+	// and 13 of those 278 (4.7%) followed by a dispatch of the named item within
+	// 10 minutes. A dedicated knob lets this category go quiet without slowing
+	// the worked-but-unclaimed / preserved / stranded alarms, which still use
+	// NudgeCooldown.
+	DefaultUnclaimedItemCooldown = 4 * time.Hour
+	// DefaultDispatchNoticeInterval is the minimum gap between two notices of
+	// the same DISPATCH category (priority_wake, unclaimed_items), whatever
+	// items they name (mg-b12da).
+	//
+	// The per-item cooldowns above bound repeats; they cannot batch FIRST
+	// notices, and first notices were most of what was left — 109 distinct
+	// high-priority items reached available/ in the 55h measured, arriving at
+	// different times, so a per-item-only fix still modelled ~19 wake fires/day.
+	// This interval holds an item that comes due inside it until the next slot
+	// and sends it then, together with anything else that came due. Nothing is
+	// dropped: an item held here is not marked as notified, so it is named in
+	// the next notice exactly as if it had just arrived. What it costs is
+	// latency — the first item after a quiet hour still goes out on the next
+	// tick; a second one within the hour waits up to the rest of it.
+	//
+	// This is NOT the per-category cooldown mg-1693 removed. That one recorded a
+	// fire against the category and so treated the next new item as already
+	// told; this records nothing about any item it holds back.
+	DefaultDispatchNoticeInterval = time.Hour
 	// DefaultStallRepeatBackoffCap is the ceiling on the per-item repeat backoff
 	// (see stallwatch.repeatCooldown). The FIRST notice about an item is never
 	// delayed — this bounds only how far apart REPEAT notices about an item the
@@ -999,11 +1038,13 @@ type StallWatchConfig struct {
 	// NudgeCooldown is the minimum gap between two nudges for the same
 	// threshold category. Zero falls back to DefaultStallNudgeCooldown.
 	//
-	// For the two work-item categories this is the BASE of a per-item backoff,
-	// not a flat per-category gate: it is the gap before the SECOND notice about
-	// a given item, and each further repeat about that same item doubles up to
+	// For the per-item categories that use it (worked-but-unclaimed, preserved
+	// worktree, stranded push) this is the BASE of a per-item backoff, not a
+	// flat per-category gate: it is the gap before the SECOND notice about a
+	// given item, and each further repeat about that same item doubles up to
 	// RepeatBackoffCap. A different item is never gated by it. See
-	// stallwatch.repeatCooldown.
+	// stallwatch.repeatCooldown. The two dispatch categories have their own
+	// bases since mg-b12da — UnclaimedItemCooldown and HighPriorityWakeCooldown.
 	NudgeCooldown time.Duration
 	// RepeatBackoffCap bounds the per-item repeat backoff for both work-item
 	// categories. Zero falls back to DefaultStallRepeatBackoffCap (4h). Setting
@@ -1035,11 +1076,24 @@ type StallWatchConfig struct {
 	// UnclaimedItemAgeThreshold). Zero falls back to
 	// DefaultHighPriorityWakeDelay.
 	HighPriorityWakeDelay time.Duration
-	// HighPriorityWakeCooldown is the minimum gap between two priority-wake
-	// nudges — a dedicated cooldown so a high-priority item that stays available
-	// does not re-nudge every tick. Zero falls back to
-	// DefaultHighPriorityWakeCooldown.
+	// HighPriorityWakeCooldown is the gap before the priority wake names the
+	// same item again — per item, so it never delays a different item's first
+	// notice. Zero falls back to DefaultHighPriorityWakeCooldown (4h since
+	// mg-b12da; 3m before).
 	HighPriorityWakeCooldown time.Duration
+	// UnclaimedItemCooldown is the gap before the standard unclaimed-items
+	// notice names the same item again (mg-b12da). Load() defaults it to
+	// DefaultUnclaimedItemCooldown. Zero in a hand-built config falls back to
+	// NudgeCooldown, the base that category used before the knob existed.
+	UnclaimedItemCooldown time.Duration
+	// DispatchNoticeInterval is the minimum gap between two notices of the
+	// same dispatch category (priority_wake, unclaimed_items); items that come
+	// due inside it are held — not marked notified — and named in the next
+	// notice (mg-b12da). Load() defaults it to DefaultDispatchNoticeInterval,
+	// and an explicit `dispatch_notice_interval = "0s"` turns it off. Zero or
+	// negative in a hand-built config means off, which is what New() sees for
+	// every config that predates the knob.
+	DispatchNoticeInterval time.Duration
 	// FastPriorities lists the WorkItem.Priority values that trigger the
 	// priority wake. Empty falls back to DefaultFastPriorities (["high"]).
 	FastPriorities []string
@@ -2259,6 +2313,10 @@ type parsedConfig struct {
 	gitgcEnabledSet        bool
 	stallWatchEnabledSet   bool
 	priorityWakeEnabledSet bool
+	// dispatchNoticeIntervalSet records that dispatch_notice_interval appeared,
+	// because "0s" is its documented off switch: a `> 0` merge guard would
+	// discard exactly that value and restore the 1h default.
+	dispatchNoticeIntervalSet bool
 	// blockedReminderEnabledSet mirrors priorityWakeEnabledSet: without it an
 	// explicit `blocked_reminder_enabled = false` is indistinguishable from the
 	// key being absent, and the layer merge would restore the default `true`.
@@ -2369,6 +2427,8 @@ func Load() *Config {
 			PriorityWakeEnabled:      true,
 			HighPriorityWakeDelay:    DefaultHighPriorityWakeDelay,
 			HighPriorityWakeCooldown: DefaultHighPriorityWakeCooldown,
+			UnclaimedItemCooldown:    DefaultUnclaimedItemCooldown,
+			DispatchNoticeInterval:   DefaultDispatchNoticeInterval,
 
 			BlockedReminderEnabled:    true,
 			BlockedReminderCooldown:   DefaultBlockedReminderCooldown,
@@ -3005,6 +3065,12 @@ func Load() *Config {
 		if fileCfg.StallWatch.HighPriorityWakeCooldown > 0 {
 			cfg.StallWatch.HighPriorityWakeCooldown = fileCfg.StallWatch.HighPriorityWakeCooldown
 		}
+		if fileCfg.StallWatch.UnclaimedItemCooldown > 0 {
+			cfg.StallWatch.UnclaimedItemCooldown = fileCfg.StallWatch.UnclaimedItemCooldown
+		}
+		if fileCfg.dispatchNoticeIntervalSet {
+			cfg.StallWatch.DispatchNoticeInterval = fileCfg.StallWatch.DispatchNoticeInterval
+		}
 		if len(fileCfg.StallWatch.FastPriorities) > 0 {
 			cfg.StallWatch.FastPriorities = fileCfg.StallWatch.FastPriorities
 		}
@@ -3631,6 +3697,15 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "high_priority_wake_cooldown":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.StallWatch.HighPriorityWakeCooldown = d
+				}
+			case "unclaimed_item_cooldown":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.UnclaimedItemCooldown = d
+				}
+			case "dispatch_notice_interval":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.DispatchNoticeInterval = d
+					cfg.dispatchNoticeIntervalSet = true
 				}
 			case "fast_priorities":
 				cfg.StallWatch.FastPriorities = parseStringArray(val)
