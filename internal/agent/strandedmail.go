@@ -340,8 +340,9 @@ func (a StrandedAlert) Message() (subject, body string) {
 	fmt.Fprintf(&b, "Repo:       %s\n", a.Repo)
 	fmt.Fprintf(&b, "Branch:     %s (ref %s, pushed=%t)\n", a.Finding.Branch, a.Finding.Ref, a.Finding.Pushed)
 	if o := a.Finding.OriginRef; o != "" && o != a.Finding.Ref {
-		// Cross-pushed: durable on origin under another name, and that name is
-		// what the remedy below submits (mg-dbb75).
+		// Cross-pushed: durable on origin under another name. The remedy below
+		// submits that name only when it holds exactly these commits
+		// (strandedwork.Finding.SubmitBranch, mg-dbb75).
 		fmt.Fprintf(&b, "On origin:  %s\n", o)
 	}
 	if e := a.Finding.PRProbeError; e != "" {
@@ -469,7 +470,7 @@ func (a StrandedAlert) cell() strandedwork.Cell {
 // beats a paragraph that qualifies it.
 func (a StrandedAlert) writeRemedy(b *strings.Builder) {
 	target := a.Finding.Target
-	submit := strandedwork.SubmitRemedy(a.Repo, a.Finding.Branch, a.WorkItemID, a.Finding.OriginBranch())
+	submit := strandedwork.SubmitRemedy(a.Repo, a.Finding.Branch, a.WorkItemID, a.Finding.SubmitBranch())
 	handCheck := strandedwork.HandCheckCommand(a.Repo, a.WorkItemID, target)
 	switch a.cell() {
 	case strandedwork.CellRescueUnbuilt:

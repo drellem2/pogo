@@ -334,9 +334,11 @@ type Finding struct {
 	// OriginRef is the origin ref Ref's tip is on, when Pushed: Ref itself when
 	// the branch is pushed under its own name, otherwise another origin ref —
 	// one whose tip IS Ref's tip when there is one, else one that contains it.
-	// It is the branch a submit has to name, because the refinery merges from
-	// origin (see SubmitRemedy and OriginBranch).
 	OriginRef string `json:"origin_ref,omitempty"`
+	// OriginIsTip is true when OriginRef's tip IS Ref's tip, so the two names
+	// hold exactly the same commits. Only then may a submit name OriginRef's
+	// branch instead of Branch — see SubmitBranch.
+	OriginIsTip bool `json:"origin_is_tip,omitempty"`
 	// OriginProbeError records that the any-ref-on-origin probe failed. Pushed
 	// then stays false, which keeps the LOCAL-ONLY warning: a probe that can
 	// only ever REMOVE an urgent warning must not remove one it did not run.
@@ -493,11 +495,28 @@ func localOnlyNote(pushed bool) string {
 }
 
 // OriginBranch is the branch name OriginRef has on origin, or "" when the tip
-// is on no origin ref. It is what a submit must name: the refinery merges
-// origin/<branch>, so a submit of a branch that is only on origin under
-// another name is refused, exactly like an unpushed one.
+// is on no origin ref. It is the name CheckOpenPR asks GitHub about. It is NOT
+// always a name a submit may use — see SubmitBranch.
 func (f Finding) OriginBranch() string {
 	return strings.TrimPrefix(f.OriginRef, "refs/remotes/origin/")
+}
+
+// SubmitBranch is the origin branch a submit can name to land EXACTLY this
+// branch's commits, or "" when there is none and the branch has to be pushed
+// under its own name first (SubmitRemedy then chains the push).
+//
+// A CONTAINING ref is deliberately not one (mg-dbb75 review round 1). The
+// refinery merges the whole branch it is given, so submitting a branch that
+// carries these commits AND someone else's later ones lands that other item's
+// work under this item's --author, and around whatever review it is waiting
+// on — the harm DispositionCarried's summary forbids, reached by a route
+// ownerAmong does not see. The work is still durable (Pushed stays true and
+// the LOCAL-ONLY warning goes); only the submit keeps to the branch's own name.
+func (f Finding) SubmitBranch() string {
+	if !f.Pushed || !f.OriginIsTip {
+		return ""
+	}
+	return f.OriginBranch()
 }
 
 // SubmitRemedy renders the command that gets a stranded branch merged.
@@ -516,19 +535,19 @@ func (f Finding) OriginBranch() string {
 // of a stranded-work remedy is deciding what to paste, and a prose caveat next to
 // a runnable command loses to the command.
 //
-// originBranch is Finding.OriginBranch(): "" when the work is on no origin ref,
-// which is the only case that gets the push. When the work is on origin under
-// ANOTHER name the submit names THAT branch, and nothing is pushed
-// (drellem2/pogo#147, mg-dbb75): the commits are already on the server, and a
-// push would only mint a second origin ref for them. Before that, a pushed
-// branch was one whose own name was on origin, so the two names never
-// differed.
+// submitAs is Finding.SubmitBranch(): the origin branch holding exactly this
+// branch's commits, or "" when there is none, which is the only case that gets
+// the push. When the same head is on origin under ANOTHER name the submit
+// names THAT branch, and nothing is pushed (drellem2/pogo#147, mg-dbb75): the
+// commits are already on the server, and a push would only mint a second
+// origin ref for them. A branch that is on origin only INSIDE a longer branch
+// still gets the push — see SubmitBranch for why the container is not named.
 //
 // It lives here rather than in each caller for the reason given on
 // BranchMatchesItem: several callers depend on exactly this rule, and a second
 // copy is a second rule the day one of them changes.
-func SubmitRemedy(repo, branch, author, originBranch string) string {
-	name := originBranch
+func SubmitRemedy(repo, branch, author, submitAs string) string {
+	name := submitAs
 	if name == "" {
 		name = branch
 	}
@@ -536,7 +555,7 @@ func SubmitRemedy(repo, branch, author, originBranch string) string {
 	if author != "" {
 		submit += " --author=" + author
 	}
-	if originBranch != "" {
+	if submitAs != "" {
 		return submit
 	}
 	return fmt.Sprintf("git -C %s push origin %s && %s", repo, branch, submit)
@@ -668,7 +687,7 @@ func inspectResolved(repo, branch, targetRef string) (Finding, error) {
 	}
 	f.Ref, f.Pushed, f.Found = ref, pushed, true
 	if pushed {
-		f.OriginRef = ref
+		f.OriginRef, f.OriginIsTip = ref, true
 	}
 	f.TipTime, f.TipTimeError = tipTime(repo, ref)
 
@@ -693,10 +712,10 @@ func inspectResolved(repo, branch, targetRef string) (Finding, error) {
 	// Pushed. A probe failure keeps the LOCAL-ONLY verdict — see
 	// OriginProbeError.
 	if !f.Pushed {
-		if oref, oerr := onOrigin(repo, ref); oerr != nil {
+		if oref, exact, oerr := onOrigin(repo, ref); oerr != nil {
 			f.OriginProbeError = oerr.Error()
 		} else if oref != "" {
-			f.OriginRef, f.Pushed = oref, true
+			f.OriginRef, f.OriginIsTip, f.Pushed = oref, exact, true
 		}
 	}
 
@@ -829,27 +848,29 @@ func carriedBy(repo, head, branch string) ([]string, error) {
 }
 
 // onOrigin names an origin ref that head is on, or "" when no origin ref
-// reaches it.
+// reaches it, and whether that ref's tip IS head.
 //
 // A ref whose tip IS head is preferred over one that merely contains it,
 // because it is the one a submit can name without also merging somebody else's
 // later commits, and the one whose PR (if any) has exactly this work as its
-// head. Ties go to the first in refname order, so the answer is stable.
+// head. A containing ref is still returned — it settles that the work is on
+// origin — but exact=false keeps it out of the submit (see SubmitBranch). Ties
+// go to the first in refname order, so the answer is stable.
 //
 // All of refs/remotes/origin/ and not only the polecat namespace carriedBy
 // searches: the question here is not who OWNS the commits but whether git-gc of
 // this worktree can destroy them, and a commit on any origin ref survives it —
 // the same reasoning as LocalOnlyCommits' `--not --remotes`.
-func onOrigin(repo, head string) (string, error) {
+func onOrigin(repo, head string) (ref string, exact bool, err error) {
 	sha, err := git(repo, "rev-parse", "--verify", "--quiet", head+"^{commit}")
 	if err != nil {
-		return "", fmt.Errorf("resolve %s in %s: %w", head, repo, err)
+		return "", false, fmt.Errorf("resolve %s in %s: %w", head, repo, err)
 	}
 	sha = strings.TrimSpace(sha)
 	out, err := git(repo, "for-each-ref", "--contains", sha,
 		"--format=%(objectname) %(refname)", "refs/remotes/origin/")
 	if err != nil {
-		return "", fmt.Errorf("list origin refs containing %s in %s: %w", head, repo, err)
+		return "", false, fmt.Errorf("list origin refs containing %s in %s: %w", head, repo, err)
 	}
 	containing := ""
 	for _, line := range strings.Split(out, "\n") {
@@ -858,13 +879,13 @@ func onOrigin(repo, head string) (string, error) {
 			continue
 		}
 		if tip == sha {
-			return name, nil
+			return name, true, nil
 		}
 		if containing == "" {
 			containing = name
 		}
 	}
-	return containing, nil
+	return containing, false, nil
 }
 
 // PRProbeTimeout bounds CheckOpenPR's call to GitHub. It sits on the

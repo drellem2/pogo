@@ -111,13 +111,13 @@ func newStallStranded(queue func() *refinery.Refinery) stallwatch.Stranded {
 						continue
 					}
 					b := stallwatch.StrandedBranch{
-						Branch:       f.Branch,
-						Ref:          f.Ref,
-						Pushed:       f.Pushed,
-						OriginBranch: f.OriginBranch(),
-						Unmerged:     len(f.Unmerged),
-						Target:       f.Target,
-						Repo:         repo,
+						Branch:   f.Branch,
+						Ref:      f.Ref,
+						Pushed:   f.Pushed,
+						SubmitAs: f.SubmitBranch(),
+						Unmerged: len(f.Unmerged),
+						Target:   f.Target,
+						Repo:     repo,
 					}
 					if f.PreRegistration != nil {
 						b.PreRegistration = f.PreRegistration.SHA
