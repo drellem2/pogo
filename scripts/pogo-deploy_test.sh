@@ -243,6 +243,87 @@ load_gh_token "$WORK/notoken" >/dev/null 2>&1 \
 unset GH_TOKEN
 
 # ---------------------------------------------------------------------------
+# load_gh_token with no argument — the candidate search (drellem2/pogo#124)
+# ---------------------------------------------------------------------------
+# The installed plist never sets POGO_DEPLOY_ZSHENV, so a nightly reads whatever
+# gh_token_candidates lists. A host that keeps the export in ~/.zshrc used to
+# abort at 03:00 every night. Each arm gets its own HOME so the files are the
+# only variable; HOME and the override are restored after.
+TOK_SAVED_HOME="$HOME"
+TOK_SAVED_OVERRIDE="$ZSHENV_OVERRIDE"
+ZSHENV_OVERRIDE=""
+tokhome() { local h="$WORK/tokhome-$1"; mkdir -p "$h"; printf '%s' "$h"; }
+
+# only .zshrc has it -> found, and the log names .zshrc
+HOME="$(tokhome rc-only)"; unset GH_TOKEN
+printf 'alias ll=ls\n' > "$HOME/.zshenv"
+printf 'export GH_TOKEN=ghp_fromzshrc456\n' > "$HOME/.zshrc"
+load_gh_token > "$TOKLOG" 2>&1; TOKRC=$?; TOKOUT="$(cat "$TOKLOG")"
+[ "$TOKRC" -eq 0 ] && [ "${GH_TOKEN:-}" = "ghp_fromzshrc456" ] \
+    && pass "load_gh_token finds an export that lives only in ~/.zshrc" || fail "load_gh_token missed the ~/.zshrc export (rc=$TOKRC): $TOKOUT"
+case "$TOKOUT" in *"sourced from $HOME/.zshrc (present,"*) pass "and the log names ~/.zshrc as the file that supplied it" ;;
+    *) fail "the log does not name ~/.zshrc: $TOKOUT" ;; esac
+printf '%s' "$TOKOUT" | grep -q "ghp_fromzshrc456" \
+    && fail "the candidate search LOGGED the token value" || pass "the candidate search never logs the value"
+
+# only .zprofile has it -> found (the last candidate is really tried)
+HOME="$(tokhome profile-only)"; unset GH_TOKEN
+printf 'export GH_TOKEN=ghp_fromzprofile\n' > "$HOME/.zprofile"
+load_gh_token > "$TOKLOG" 2>&1; TOKRC=$?; TOKOUT="$(cat "$TOKLOG")"
+[ "$TOKRC" -eq 0 ] && [ "${GH_TOKEN:-}" = "ghp_fromzprofile" ] \
+    && case "$TOKOUT" in *"sourced from $HOME/.zprofile"*) true ;; *) false ;; esac \
+    && pass "load_gh_token reaches ~/.zprofile when .zshenv and .zshrc are absent" || fail "load_gh_token missed ~/.zprofile (rc=$TOKRC): $TOKOUT"
+
+# both .zshenv and .zshrc have it -> .zshenv wins
+HOME="$(tokhome both)"; unset GH_TOKEN
+printf 'export GH_TOKEN=ghp_fromzshenv789\n' > "$HOME/.zshenv"
+printf 'export GH_TOKEN=ghp_fromzshrc456\n' > "$HOME/.zshrc"
+load_gh_token > "$TOKLOG" 2>&1; TOKRC=$?; TOKOUT="$(cat "$TOKLOG")"
+[ "$TOKRC" -eq 0 ] && [ "${GH_TOKEN:-}" = "ghp_fromzshenv789" ] \
+    && case "$TOKOUT" in *"sourced from $HOME/.zshenv"*) true ;; *) false ;; esac \
+    && pass "~/.zshenv wins when it and ~/.zshrc both export GH_TOKEN" || fail "candidate order is wrong (rc=$TOKRC): $TOKOUT"
+
+# an empty export in .zshenv is a miss, not a stop: .zshrc still supplies it
+HOME="$(tokhome empty-first)"; unset GH_TOKEN
+printf 'export GH_TOKEN=\n' > "$HOME/.zshenv"
+printf 'export GH_TOKEN=ghp_fromzshrc456\n' > "$HOME/.zshrc"
+load_gh_token > "$TOKLOG" 2>&1; TOKRC=$?
+[ "$TOKRC" -eq 0 ] && [ "${GH_TOKEN:-}" = "ghp_fromzshrc456" ] \
+    && pass "an empty export in ~/.zshenv falls through to ~/.zshrc" || fail "an empty ~/.zshenv export stopped the search (rc=$TOKRC)"
+
+# the override is exact: it names a file without the export while .zshrc has one -> fail
+HOME="$(tokhome override)"; unset GH_TOKEN
+printf 'export GH_TOKEN=ghp_fromzshrc456\n' > "$HOME/.zshrc"
+printf 'export OTHER=1\n' > "$HOME/override-file"
+ZSHENV_OVERRIDE="$HOME/override-file"
+load_gh_token > "$TOKLOG" 2>&1; TOKRC=$?; TOKOUT="$(cat "$TOKLOG")"
+[ "$TOKRC" -ne 0 ] && [ -z "${GH_TOKEN:-}" ] \
+    && pass "POGO_DEPLOY_ZSHENV is exact: no fallback to ~/.zshrc when the named file lacks the export" || fail "the override fell through to another file (rc=$TOKRC): $TOKOUT"
+case "$(gh_token_candidates_text)" in "$HOME/override-file") pass "with the override set, it is the only candidate the alert names" ;;
+    *) fail "override candidates: $(gh_token_candidates_text)" ;; esac
+# positive control for the arm above: the same override pointed at a file that HAS it succeeds
+unset GH_TOKEN
+ZSHENV_OVERRIDE="$HOME/.zshrc"
+load_gh_token >/dev/null 2>&1 && [ "${GH_TOKEN:-}" = "ghp_fromzshrc456" ] \
+    && pass "the override pointed at a file with the export succeeds (control)" || fail "the override cannot read a file that has the export"
+ZSHENV_OVERRIDE=""
+
+# no candidate has it -> fail, and the error names all three
+HOME="$(tokhome none)"; unset GH_TOKEN
+printf 'export OTHER=1\n' > "$HOME/.zshenv"
+printf 'alias ll=ls\n' > "$HOME/.zshrc"
+load_gh_token > "$TOKLOG" 2>&1; TOKRC=$?; TOKOUT="$(cat "$TOKLOG")"
+[ "$TOKRC" -ne 0 ] && pass "load_gh_token fails when no candidate has the export" || fail "load_gh_token succeeded with no export anywhere"
+case "$TOKOUT" in *"any of: $HOME/.zshenv, $HOME/.zshrc, $HOME/.zprofile"*) pass "and the error names all three files it tried" ;;
+    *) fail "the error does not name every candidate: $TOKOUT" ;; esac
+case "$(gh_token_candidates_text)" in "$HOME/.zshenv, $HOME/.zshrc, $HOME/.zprofile") pass "the abort alert's 'we looked in' list is the same three files" ;;
+    *) fail "alert candidates: $(gh_token_candidates_text)" ;; esac
+
+HOME="$TOK_SAVED_HOME"
+ZSHENV_OVERRIDE="$TOK_SAVED_OVERRIDE"
+unset GH_TOKEN
+
+# ---------------------------------------------------------------------------
 # resolve_git — a WORKING git, not merely a present one (mg-b72a)
 # ---------------------------------------------------------------------------
 # `mg` has always been proved by running it; `git` was pinned to /usr/bin/git on

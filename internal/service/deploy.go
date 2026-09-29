@@ -58,7 +58,9 @@ const deployLogName = "pogo-deploy.log"
 //
 // There is deliberately NO GH_TOKEN key. ~/Library/LaunchAgents is
 // world-readable, so a token here is a token every process on the box can read;
-// pogo-deploy.sh sources it from ~/.zshenv at run time instead.
+// pogo-deploy.sh reads it at run time instead, from the first of ~/.zshenv,
+// ~/.zshrc, ~/.zprofile with an `export GH_TOKEN=` line (POGO_DEPLOY_ZSHENV,
+// which this plist never sets, names one exact file instead; drellem2/pogo#124).
 const deployPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

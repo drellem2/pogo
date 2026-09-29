@@ -391,9 +391,14 @@
 # GH_TOKEN IS SOURCED AT RUNTIME, NEVER FROM THE PLIST
 # ----------------------------------------------------
 # ~/Library/LaunchAgents is world-readable; a token in the plist is a token on
-# disk for every process on the box. It is read out of ~/.zshenv at run time
-# instead (one grep, one eval of one export line — not a wholesale source of a
-# zsh file by bash). The value is never logged, echoed, or mailed.
+# disk for every process on the box. It is read out of the operator's zsh init
+# at run time instead (one grep, one eval of one export line — not a wholesale
+# source of a zsh file by bash). The value is never logged, echoed, or mailed.
+# With POGO_DEPLOY_ZSHENV unset the candidates are ~/.zshenv, ~/.zshrc and
+# ~/.zprofile, in that order: the first with an `export GH_TOKEN=` line wins and
+# the log names it. The installed plist never sets POGO_DEPLOY_ZSHENV, so a host
+# that keeps the export in .zshrc or .zprofile used to abort every night
+# (drellem2/pogo#124). The run aborts only after every candidate has missed.
 #
 # USAGE
 #   pogo-deploy.sh              # the nightly run (what launchd invokes)
@@ -411,7 +416,8 @@
 #   POGO_DEPLOY_REMOTE       clone URL used to create it if absent
 #   POGO_DEPLOY_BOOTSTRAP_REPO  repo to read the origin URL from ($HOME/dev/pogo)
 #   POGO_DEPLOY_WINDOW       "START-END" local hours, half-open (default "2-6")
-#   POGO_DEPLOY_ZSHENV       file to read GH_TOKEN from ($HOME/.zshenv)
+#   POGO_DEPLOY_ZSHENV       the ONLY file to read GH_TOKEN from (exact; unset =
+#                            try $HOME/.zshenv, .zshrc, .zprofile in order)
 #   POGO_DEPLOY_GRACE        seconds to wait before the post-bounce check (120)
 #   POGO_DEPLOY_LOCK_DIR     mutual-exclusion dir
 #   POGO_DEPLOY_ALERT_TO     first alert recipient (default: [agents] coordinator,
@@ -519,7 +525,8 @@ SRC="${POGO_DEPLOY_SRC:-$HOME/.pogo/deploy-src}"
 BOOTSTRAP_REPO="${POGO_DEPLOY_BOOTSTRAP_REPO:-$HOME/dev/pogo}"
 DEPLOY_REMOTE="${POGO_DEPLOY_REMOTE:-}"
 WINDOW="${POGO_DEPLOY_WINDOW:-2-6}"
-ZSHENV="${POGO_DEPLOY_ZSHENV:-$HOME/.zshenv}"
+# Empty means "search the candidates" — see gh_token_candidates (section 3).
+ZSHENV_OVERRIDE="${POGO_DEPLOY_ZSHENV:-}"
 GRACE="${POGO_DEPLOY_GRACE:-120}"
 LOCK_DIR="${POGO_DEPLOY_LOCK_DIR:-$HOME/.pogo/deploy.lock.d}"
 # The coordinator, not a named PM. This defaulted to `pm-pogo` — an agent that
@@ -1268,29 +1275,80 @@ resolve_pogo() {
 # The value is never logged. Callers get "present"/"absent", which is the only
 # fact any diagnostic needs; a prefix echo is just as leakable as the whole
 # token and the transcript outlives the run.
-load_gh_token() {
-    local f="${1:-$ZSHENV}" line
-    if [ -n "${GH_TOKEN:-}" ]; then
-        log "GH_TOKEN: already present in the environment"
-        return 0
+#
+# Where to look (drellem2/pogo#124): POGO_DEPLOY_ZSHENV, when set, is the one
+# file and nothing else is read — an operator who names a file means it.
+# Otherwise ~/.zshenv, ~/.zshrc, ~/.zprofile in that order, first export wins.
+# The plist never sets the override, so this list IS what a nightly reads.
+#
+# gh_token_candidates — one path per line. HOME is read at call time, not
+# source time, so a sandboxed caller gets its own HOME's files.
+gh_token_candidates() {
+    if [ -n "${ZSHENV_OVERRIDE:-}" ]; then
+        printf '%s\n' "$ZSHENV_OVERRIDE"
+    else
+        printf '%s\n' "$HOME/.zshenv" "$HOME/.zshrc" "$HOME/.zprofile"
     fi
+}
+
+# gh_token_candidates_text — the candidate list as one comma-separated line,
+# for the abort alert.
+gh_token_candidates_text() {
+    local f out=""
+    while IFS= read -r f; do
+        [ -n "$f" ] && out="${out:+$out, }$f"
+    done <<EOF_CANDIDATES
+$(gh_token_candidates)
+EOF_CANDIDATES
+    printf '%s' "$out"
+}
+
+# _gh_token_from_file FILE REPORT — the single-file read. REPORT is `err` (an
+# exact file: its miss is the failure) or `log` (one candidate among several:
+# its miss is a line in the log, and the failure is reported once, after all).
+_gh_token_from_file() {
+    local f="$1" report="$2" line
     if [ ! -r "$f" ]; then
-        err "GH_TOKEN: cannot read $f"
+        "$report" "GH_TOKEN: cannot read $f"
         return 1
     fi
     line="$(grep -E '^[[:space:]]*export[[:space:]]+GH_TOKEN=' "$f" 2>/dev/null | tail -1)"
     if [ -z "$line" ]; then
-        err "GH_TOKEN: no 'export GH_TOKEN=' line in $f"
+        "$report" "GH_TOKEN: no 'export GH_TOKEN=' line in $f"
         return 1
     fi
-    eval "$line" || { err "GH_TOKEN: could not evaluate the export line in $f"; return 1; }
+    eval "$line" || { "$report" "GH_TOKEN: could not evaluate the export line in $f"; unset GH_TOKEN; return 1; }
     if [ -z "${GH_TOKEN:-}" ]; then
-        err "GH_TOKEN: the export line in $f yielded an empty value"
+        "$report" "GH_TOKEN: the export line in $f yielded an empty value"
+        unset GH_TOKEN
         return 1
     fi
     export GH_TOKEN
     log "GH_TOKEN: sourced from $f (present, ${#GH_TOKEN} chars)"
     return 0
+}
+
+# load_gh_token [FILE] — FILE reads exactly that file (the unit tests' seam);
+# no argument walks gh_token_candidates.
+load_gh_token() {
+    local f tried=""
+    if [ -n "${GH_TOKEN:-}" ]; then
+        log "GH_TOKEN: already present in the environment"
+        return 0
+    fi
+    if [ $# -gt 0 ]; then
+        _gh_token_from_file "$1" err
+        return
+    fi
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        tried="${tried:+$tried, }$f"
+        _gh_token_from_file "$f" log && return 0
+    done <<EOF_CANDIDATES
+$(gh_token_candidates)
+EOF_CANDIDATES
+    err "GH_TOKEN: no usable 'export GH_TOKEN=' line in any of: $tried"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -5571,12 +5629,14 @@ exit 71. Existence checks pass; the binary just cannot work.
     harden_git_transport
     load_gh_token || {
         alert "[pogo-deploy] ABORTED: no GH_TOKEN" \
-"The nightly redeploy could not obtain GH_TOKEN from $ZSHENV, so any gh call in
-the deploy would fail unauthenticated (the mg-03ea/mg-25fb class). Nothing was
-deployed and the running pogod is untouched.
+"The nightly redeploy could not obtain GH_TOKEN, so any gh call in the deploy
+would fail unauthenticated (the mg-03ea/mg-25fb class). Nothing was deployed
+and the running pogod is untouched.
 
+  we looked in: $(gh_token_candidates_text)
   log: $HOME/Library/Logs/pogo/pogo-deploy.log
-  fix: confirm 'export GH_TOKEN=' is present and readable in $ZSHENV"
+  fix: put an 'export GH_TOKEN=' line in one of those files and make it
+       readable (or set POGO_DEPLOY_ZSHENV to the exact file that has it)"
         exit 1
     }
 

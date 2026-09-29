@@ -34,7 +34,7 @@ func TestRenderDeployPlistNeverRunsAtLoad(t *testing.T) {
 // recovered after the fact. ~/Library/LaunchAgents is world-readable (0644, in
 // a directory every local process can traverse), so a token written here is a
 // token disclosed to everything on the box — and it stays disclosed until
-// somebody notices and rotates it. The runner sources GH_TOKEN from ~/.zshenv
+// somebody notices and rotates it. The runner reads GH_TOKEN from zsh init files
 // at run time precisely so this file never has to hold one.
 func TestRenderDeployPlistHasNoSecrets(t *testing.T) {
 	rendered, _, err := renderDeployPlist()
