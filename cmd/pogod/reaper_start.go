@@ -18,13 +18,21 @@ import (
 //
 // The reaper library (internal/reaper) is launchd-free and fully unit-tested;
 // pogod supplies the two real-world seams: service.KickstartJob (the only
-// launchctl call) and client.SendMGMail (the escalation channel).
-func startReaper(ctx context.Context, cfg config.ReaperConfig) {
+// launchctl call) and client.SendMGMail (the escalation channel). Its give-up
+// mail goes to the mayor and to escalationBox ([agents] escalation_box), the box
+// every other watcher escalation goes to (drellem2/pogo#148).
+func startReaper(ctx context.Context, cfg config.ReaperConfig, escalationBox string) {
 	if !cfg.Enabled {
 		log.Printf("pogod: reaper disabled")
 		return
 	}
+	r := reaper.New(reaperOptions(cfg, escalationBox))
+	go r.Run(ctx, cfg.Interval)
+}
 
+// reaperOptions builds the production reaper.Options from config: the real
+// kickstart and mail seams, and the give-up mail routed to escalationBox.
+func reaperOptions(cfg config.ReaperConfig, escalationBox string) reaper.Options {
 	jobs := make([]reaper.Job, 0, len(cfg.Jobs))
 	for _, j := range cfg.Jobs {
 		jobs = append(jobs, reaper.Job{
@@ -34,11 +42,11 @@ func startReaper(ctx context.Context, cfg config.ReaperConfig) {
 		})
 	}
 
-	r := reaper.New(reaper.Options{
+	return reaper.Options{
 		Jobs:          jobs,
 		MaxKickstarts: cfg.MaxKickstarts,
 		Kickstart:     service.KickstartJob,
 		Mail:          client.SendMGMail,
-	})
-	go r.Run(ctx, cfg.Interval)
+		EscalateTo:    escalationBox,
+	}
 }

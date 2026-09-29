@@ -85,7 +85,8 @@ is be0c's job, not this one's.
 
 3. **Bounded, backed off, gives up loudly.** `max_kickstarts` (default 3) caps
    consecutive kickstarts. On exhaustion the reaper STOPS and mails both `mayor`
-   and `human` — **once** — then stays quiet. This is the **mg-1679 defense**: a
+   and the escalation box (`[agents] escalation_box`, `human` by default) —
+   **once** — then stays quiet. This is the **mg-1679 defense**: a
    job that FATALs on every start never freshens its heartbeat, so launchctl
    reports a fresh pid each time while the job does no work; without the cap the
    reaper would kickstart it forever, a *new* self-concealing failure.

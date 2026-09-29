@@ -188,6 +188,46 @@ func TestReaperBoundedGivesUpOnFatalingJob(t *testing.T) {
 	}
 }
 
+// TestReaperGiveUpFollowsEscalateTo: the give-up mail's person-facing copy goes
+// where [agents] escalation_box points, not to a hard-coded `human`
+// (drellem2/pogo#148). The empty arm is the positive control that the default
+// is still mayor+human; the "mayor" arm pins that pointing the box at the mayor
+// yields one mail, not the same one twice.
+func TestReaperGiveUpFollowsEscalateTo(t *testing.T) {
+	for _, tc := range []struct {
+		escalateTo string
+		want       []string
+	}{
+		{"", []string{"mayor", DefaultEscalateTo}},
+		{"daniel-phone", []string{"mayor", "daniel-phone"}},
+		{"mayor", []string{"mayor"}},
+	} {
+		start := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+		e := newEnv(start)
+		hb := "/hb/bridget"
+		e.touch(hb)
+		r := e.reaper(Options{
+			Jobs:       []Job{{Label: "com.pogo.bridget", Heartbeat: hb, Period: 5 * time.Minute}},
+			EscalateTo: tc.escalateTo,
+		})
+		for i := 0; i < 10; i++ {
+			e.advance(6 * time.Minute)
+			r.Check(e.now)
+		}
+
+		var got []string
+		for _, m := range e.mails {
+			got = append(got, m.to)
+		}
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("EscalateTo=%q: give-up mailed %v, want %v", tc.escalateTo, got, tc.want)
+		}
+		if want := "Escalating to " + strings.Join(tc.want, "+") + "."; !e.logContains(want) {
+			t.Errorf("EscalateTo=%q: give-up line does not name its recipients (%q); logs: %v", tc.escalateTo, want, e.logs)
+		}
+	}
+}
+
 // The settle/backoff window: right after a kickstart, a still-stale heartbeat
 // must NOT trigger another immediate kickstart — the job needs its Period to
 // produce a fresh beat.

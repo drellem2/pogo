@@ -67,6 +67,12 @@ const DefaultMaxKickstarts = 3
 // does not specify one.
 const DefaultInterval = 60 * time.Second
 
+// DefaultEscalateTo is the box that receives the give-up mail alongside the
+// mayor when Options.EscalateTo is empty. pogod passes [agents] escalation_box,
+// so a deployment that re-points escalations moves this mail with the rest
+// (drellem2/pogo#148).
+const DefaultEscalateTo = "human"
+
 // Job is one launchd job the reaper supervises by heartbeat freshness.
 type Job struct {
 	// Label is the launchd label, e.g. "com.pogo.watchdog". kickstart targets
@@ -105,6 +111,8 @@ type Reaper struct {
 	kickstart func(label string) (pid int, err error)
 	mail      func(to, from, subject, body string) error
 	logf      func(format string, args ...any)
+
+	escalateTo string
 }
 
 // Options configures a Reaper. Only Jobs and Kickstart are required in
@@ -118,6 +126,9 @@ type Options struct {
 	Kickstart func(label string) (pid int, err error)
 	// Mail escalates on give-up. Defaults to a no-op that logs.
 	Mail func(to, from, subject, body string) error
+	// EscalateTo is the box a PERSON reads, mailed on give-up alongside the
+	// mayor. pogod wires [agents] escalation_box. Empty means DefaultEscalateTo.
+	EscalateTo string
 	// Now defaults to time.Now.
 	Now func() time.Time
 	// Stat returns a file's mtime. Defaults to os.Stat-based mtime.
@@ -137,6 +148,10 @@ func New(o Options) *Reaper {
 		kickstart:     o.Kickstart,
 		mail:          o.Mail,
 		logf:          o.Logf,
+		escalateTo:    o.EscalateTo,
+	}
+	if r.escalateTo == "" {
+		r.escalateTo = DefaultEscalateTo
 	}
 	if r.maxKickstarts <= 0 {
 		r.maxKickstarts = DefaultMaxKickstarts
@@ -240,8 +255,8 @@ func (r *Reaper) checkJob(now time.Time, j Job) {
 	// while launchctl happily reports a fresh pid each time.
 	if st.consecutive >= r.maxKickstarts {
 		if !st.escalated {
-			r.logf("reaper: GIVING UP on %s — kickstarted %d times, heartbeat still stale (%s, period %s). Escalating to mayor+human.",
-				j.Label, st.consecutive, staleness, j.Period)
+			r.logf("reaper: GIVING UP on %s — kickstarted %d times, heartbeat still stale (%s, period %s). Escalating to %s.",
+				j.Label, st.consecutive, staleness, j.Period, strings.Join(r.escalationRecipients(), "+"))
 			r.escalate(j, st, staleness)
 			st.escalated = true
 		}
@@ -262,8 +277,18 @@ func (r *Reaper) checkJob(now time.Time, j Job) {
 		j.Label, staleness, st.consecutive, r.maxKickstarts, pid)
 }
 
-// escalate mails the mayor and the human. A give-up that only logs is still a
-// silent failure to everyone who is not tailing pogod.log.
+// escalationRecipients is who the give-up mail goes to: the mayor and the
+// escalation box, once each — a deployment that points escalation_box at the
+// mayor gets one mail, not the same one twice.
+func (r *Reaper) escalationRecipients() []string {
+	if r.escalateTo == "mayor" {
+		return []string{"mayor"}
+	}
+	return []string{"mayor", r.escalateTo}
+}
+
+// escalate mails the mayor and the escalation box. A give-up that only logs is
+// still a silent failure to everyone who is not tailing pogod.log.
 func (r *Reaper) escalate(j Job, st *jobState, staleness string) {
 	subject := fmt.Sprintf("reaper gave up on %s — heartbeat still stale after %d kickstarts", j.Label, st.consecutive)
 	body := fmt.Sprintf(
@@ -272,7 +297,7 @@ func (r *Reaper) escalate(j Job, st *jobState, staleness string) {
 			"This is the mg-1679 shape: the job restarts but never does work — most likely FATALing on start.\n"+
 			"The reaper has STOPPED kickstarting it to avoid a tight self-concealing loop. Manual investigation needed.",
 		j.Label, st.consecutive, j.Heartbeat, staleness, j.Period, st.lastPID)
-	for _, to := range []string{"mayor", "human"} {
+	for _, to := range r.escalationRecipients() {
 		if err := r.mail(to, "pogod-reaper", subject, body); err != nil {
 			r.logf("reaper: failed to mail %s about %s give-up: %v", to, j.Label, err)
 		}

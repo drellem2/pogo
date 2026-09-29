@@ -121,6 +121,38 @@ func TestNoFirePositiveControlOnTheRealIncident(t *testing.T) {
 	}
 }
 
+// TestNoFireNoticeFollowsMailTo: the did-not-run notice goes where [agents]
+// escalation_box points (Options.MailTo), not to a hard-coded `human`
+// (drellem2/pogo#148). It is sampled ALONE — no mirrors, no revision — so the
+// only mail that can arrive is the no-fire one; TestNoticesFollowMailTo covers
+// the other two notices and cannot see this send. The empty arm is the
+// positive control that the default is still `human`, so the test also fails if
+// the no-fire notice stops mailing at all.
+func TestNoFireNoticeFollowsMailTo(t *testing.T) {
+	for _, tc := range []struct{ mailTo, want string }{
+		{"", DefaultMailTo},
+		{"daniel-phone", "daniel-phone"},
+	} {
+		rec := &recorder{}
+		opts := noFireOpts(rec, incidentLog)
+		opts.MailTo = tc.mailTo
+		w := New(noFireCfg(), opts)
+
+		w.Check(nofireAt(t, "2026-08-07T12:00"))
+
+		if rec.mailCount() != 1 {
+			t.Fatalf("MailTo=%q: sent %d mails, want exactly the did-not-run notice", tc.mailTo, rec.mailCount())
+		}
+		m := rec.mails[0]
+		if !strings.Contains(m.subject, "DID NOT RUN") {
+			t.Fatalf("MailTo=%q: the one mail is not the did-not-run notice: %q", tc.mailTo, m.subject)
+		}
+		if m.to != tc.want {
+			t.Errorf("MailTo=%q: did-not-run notice went to %q, want %q", tc.mailTo, m.to, tc.want)
+		}
+	}
+}
+
 // TestNoFireQuietOnAHealthyLog is the other half of the control, at the same
 // instant and with the same schedule: an alarm only shown to be loud has not
 // been shown to discriminate.

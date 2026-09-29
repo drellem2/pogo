@@ -3945,8 +3945,9 @@ Flags:
 	// Start the tier-1 heartbeat reaper: a goroutine (NOT a LaunchAgent — the
 	// wedge in mg-50e0 means we cannot rely on being spawned) that kickstarts
 	// declared launchd jobs whose heartbeat state file has gone stale. Liveness
-	// is heartbeat freshness, never process existence. mg-d18b.
-	startReaper(hbCtx, cfg.Reaper)
+	// is heartbeat freshness, never process existence. mg-d18b. Its give-up
+	// mail follows escalation_box like every other escalation (pogo#148).
+	startReaper(hbCtx, cfg.Reaper, escalationBox)
 
 	// The pointer waker (mg-5496 phase 1, mg-e00c): an agent is woken when mail
 	// or an assignment arrives for it, with a pointer of at most 100 bytes;

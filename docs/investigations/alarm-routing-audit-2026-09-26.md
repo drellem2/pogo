@@ -94,7 +94,7 @@ mailed every 30s.
 | stallwatch (coordinator unread mail) | mayor mail stale | mayor (nudge) | mayor only | partial | **not changed.** A deaf mayor is deafwatch's case, and deafwatch escalates at once. |
 | wedgewatch | PTY frozen | **nobody** (log only) | n/a | n/a | **not changed.** Unrouted by design; blindwatch covers the detector. Noted. |
 | progresswatch | fleet landing no work | mayor | box after 2h | mostly no | unchanged |
-| synthwatch, refusalwatch, credexpiry, driftwatch | dead credential etc. | hard-coded `human` | never mayor | no | unchanged here. They ignored `escalation_box`, a separate gap — since closed: these four and the usage-limit coordinator now route through `escalation_box` (default `human`), drellem2/pogo#148. |
+| synthwatch, refusalwatch, credexpiry, driftwatch | dead credential etc. | hard-coded `human` | never mayor | no | unchanged here. They ignored `escalation_box`, a separate gap — since closed: these four and the usage-limit coordinator now route through `escalation_box` (default `human`), drellem2/pogo#148; so does the tier-1 reaper's give-up mail (mayor + `human`, not in this table), mg-a586e. |
 | ghintake, ghteardown, carrierdrift, reviewdecl, refinery | workflow | mayor / notify_to | n/a | no | unchanged |
 
 ### Scripts and launchd jobs
