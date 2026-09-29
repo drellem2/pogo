@@ -431,9 +431,42 @@ for repo in <repos>; do
   if [ -z "$def" ] || [ "$def" = null ]; then
     echo "gh unavailable — $slug default branch (CI state UNKNOWN, not green)"
   else
-    gh run list --repo "$slug" --branch "$def" --limit 5 \
-        --json status,conclusion,workflowName,createdAt,headSha \
-      || echo "gh unavailable — $slug CI (state UNKNOWN, not green)"
+    # POSITIVE CONTROL: the listing must reach the branch TIP (mg-62522).
+    # `--branch` is filtered server-side by GitHub, and on 2026-09-29 it returned
+    # well-formed, all-success rows for drellem2/pogo that stopped THREE WEEKS
+    # before main's head — while the unfiltered listing had main's head run.
+    # Nothing in those rows says they are stale, so ask for the tip separately
+    # and require a listed run on it before calling the tip anything.
+    tip=$(gh api "repos/$slug/commits/$def" -q .sha 2>/dev/null)
+    fields=status,conclusion,workflowName,createdAt,headSha,headBranch,event
+    runs=$(gh run list --repo "$slug" --branch "$def" --limit 5 --json "$fields") \
+      || { echo "gh unavailable — $slug CI (state UNKNOWN, not green)"; runs=; }
+    ontip() { [ -n "$1" ] && jq -e --arg h "$tip" 'any(.[]; .headSha == $h)' <<<"$1" >/dev/null; }
+    if [ -n "$tip" ] && [ "$tip" != null ] && ! ontip "$runs"; then
+      # The filtered listing misses the tip. The UNFILTERED listing, filtered
+      # client-side on headBranch, does not go through GitHub's branch filter.
+      alt=$(gh run list --repo "$slug" --limit 40 --json "$fields" \
+              | jq --arg b "$def" '[.[] | select(.headBranch == $b)][:5]')
+      if ontip "$alt"; then
+        echo "CI STALE FILTER — $slug: --branch $def did not list the tip ${tip:0:7}; the rows below are the unfiltered listing's"
+        runs=$alt
+      fi
+    fi
+    [ -n "$runs" ] && printf '%s\n' "$runs"
+    if [ -z "$tip" ] || [ "$tip" = null ]; then
+      echo "CI TIP UNKNOWN — $slug: could not read $def's head sha, so no row above is known to be current (UNKNOWN, not green)"
+    elif ontip "$runs"; then
+      echo "CI reaches tip — $slug $def@${tip:0:7} has a listed run; judge the rows above"
+    else
+      newest=$(jq -r '.[0].headSha // empty' <<<"${runs:-[]}")
+      if [ -n "$newest" ]; then
+        behind=$(gh api "repos/$slug/compare/$newest...$tip" -q .ahead_by 2>/dev/null)
+        seen="newest listed run is on ${newest:0:7}, ${behind:-?} commit(s) behind"
+      else
+        seen="the listing is empty"
+      fi
+      echo "CI TIP NOT COVERED — $slug: no listed run is on $def's tip ${tip:0:7}; $seen. The tip's CI state is UNKNOWN, not green"
+    fi
   fi
 
   # SECONDARY, and a DIFFERENT QUESTION: has this repo failed recently at all?
@@ -468,7 +501,7 @@ an optional "where applicable" extra:
   GitHub Actions cross-compile matrix, so CI can be red while the refinery is
   green; this scan is the only baseline source that catches that class of break.
 
-  Three things decide correctly here, and each has been observed going wrong:
+  Four things decide correctly here, and each has been observed going wrong:
 
   - **The newest run is often not finished.** Its `status` is `queued` or
     `in_progress` and its `conclusion` is **empty** — neither green nor broken.
@@ -487,6 +520,25 @@ an optional "where applicable" extra:
     sitting at the top. `--limit 5` with timestamps lets you see that the head
     of the list is six days older than the rows beneath it; `--limit 1` gives
     you a stale `failure` with nothing to compare it against.
+  - **The listing must reach the branch tip, and only the tip's sha can say
+    so.** `--branch` is filtered on GitHub's side, and on 2026-09-29 it returned
+    rows for `drellem2/pogo` `main` that ended on 2026-09-08 (`abf1749`) while
+    main's head was `2c13a25`, whose run the *unfiltered* listing carried. Every
+    row was well-formed and `success`, so nothing in the output was wrong except
+    its date — and had main gone red that morning, the step would have kept
+    reporting 09-08's green. Why the filter stalls is not established, and it
+    is not constant (the same command at ~08:20Z, minutes later, listed the head
+    correctly), which is exactly why the step asks for the tip's sha and
+    requires a listed run on it: `CI reaches tip` is the only line that lets
+    you judge the rows as current. `CI STALE FILTER` means the filter missed
+    the tip and the rows printed are the unfiltered listing's, filtered on
+    `headBranch`; judge those.
+    `CI TIP NOT COVERED` and `CI TIP UNKNOWN` are **UNKNOWN, not green** — a
+    push whose run has not been created yet, a commit the workflow skips, or a
+    tip beyond the 40-run unfiltered window all read this way, and the line
+    says how many commits the newest listed run is behind so you can tell one
+    commit from three weeks. Record it as a gap; do not quote the rows as the
+    state of main.
 - **Has CI failed recently — a different question.** The `--status failure`
   listing answers "has this repo been red lately", which is a **history**
   question, and it is useful for spotting a flapping branch or a recurring

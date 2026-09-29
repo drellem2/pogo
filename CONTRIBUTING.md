@@ -88,7 +88,17 @@ completed run reports GREEN**; widen the window before concluding anything:
 
 ```bash
 gh run list --repo drellem2/pogo --branch main --limit 15
+gh api repos/drellem2/pogo/commits/main -q .sha   # the tip the rows must reach
 ```
+
+Check that the top rows' `headSha` includes the tip. `--branch` is filtered on
+GitHub's side and has returned a list three weeks and 97 commits stale
+(2026-09-29: rows ended at `abf1749` on 09-08 while main was `2c13a25`), every
+row well-formed and green. When the tip is missing, read the unfiltered listing
+and filter it yourself — `gh run list --repo drellem2/pogo --limit 40 --json
+headSha,headBranch,conclusion,createdAt -q '.[]|select(.headBranch=="main")'` —
+and if the tip is missing there too, the tip's CI state is unknown, not green
+(`mg-62522`).
 
 If you touch a path whose behaviour differs by OS, say which OS you verified on
 in your report. "The gate passed" answers a question about darwin.
