@@ -2850,6 +2850,91 @@ awk '/^    resolve_mg/{mg=NR} /^    register_alert_recipients/{reg=NR} /^    res
     || fail "registration is not ordered between resolve_mg and resolve_git"
 
 # ---------------------------------------------------------------------------
+# resolve_alert_recipients / alert() — alerts go where pogod's escalations go
+# ---------------------------------------------------------------------------
+# drellem2/pogo#148. alert() mailed the literal `human`, and ALERT_TO defaulted
+# to the literal `mayor`, on a deployment whose [agents] escalation_box /
+# coordinator said otherwise. The runner is out of process and bounces pogod, so
+# it reads both through `pogo config get` (in-process, no daemon), and EVERY
+# failure of that read keeps the old literal — an undeliverable nightly alert is
+# worse than a mis-routed one.
+RR_CLI="$WORK/fake-pogo-config"
+cat > "$RR_CLI" <<'FAKEPOGO'
+#!/usr/bin/env bash
+[ "$1 $2" = "config get" ] || exit 2
+case "$3" in
+    agents.coordinator)    printf '%s\n' "${RR_COORD-ringmaster}" ;;
+    agents.escalation_box) printf '%s\n' "${RR_BOX-daniel-phone}" ;;
+    *) exit 1 ;;
+esac
+FAKEPOGO
+chmod +x "$RR_CLI"
+RR_OLD="$WORK/old-pogo"
+printf '#!/usr/bin/env bash\necho "Error: unknown command \\"config\\" for \\"pogo\\"" >&2\nexit 1\n' > "$RR_OLD"
+chmod +x "$RR_OLD"
+
+# rr_resolve CLI [ENV...] — run resolve_alert_recipients in a child from the
+# script's own defaults and print "ALERT_TO ESCALATION_BOX".
+rr_resolve() {
+    local cli="$1"; shift
+    ( ALERT_TO="${POGO_DEPLOY_ALERT_TO:-mayor}"; ESCALATION_BOX="${POGO_DEPLOY_ESCALATION_BOX:-human}"
+      POGO_CLI="$cli"; [ $# -eq 0 ] || export "$@"
+      [ -n "${POGO_DEPLOY_ALERT_TO:-}" ] && ALERT_TO="$POGO_DEPLOY_ALERT_TO"
+      [ -n "${POGO_DEPLOY_ESCALATION_BOX:-}" ] && ESCALATION_BOX="$POGO_DEPLOY_ESCALATION_BOX"
+      resolve_alert_recipients >/dev/null 2>&1; printf '%s %s' "$ALERT_TO" "$ESCALATION_BOX" )
+}
+GOT="$(rr_resolve "$RR_CLI")"
+[ "$GOT" = "ringmaster daniel-phone" ] \
+    && pass "resolve_alert_recipients reads [agents] coordinator and escalation_box through 'pogo config get'" \
+    || fail "configured recipients not read: got '$GOT', want 'ringmaster daniel-phone'"
+# Positive control for the arms below: a config that names the defaults reads
+# back as the defaults, so the fallback arms are not passing by coincidence of
+# the fake's output.
+GOT="$(rr_resolve "$RR_CLI" RR_COORD=mayor RR_BOX=human)"
+[ "$GOT" = "mayor human" ] \
+    && pass "an unconfigured install still alerts mayor and human" || fail "default config read back as '$GOT'"
+GOT="$(rr_resolve "")"
+[ "$GOT" = "mayor human" ] \
+    && pass "no pogo CLI: alerts fall back to mayor and human" || fail "no-CLI fallback gave '$GOT'"
+GOT="$(rr_resolve "$RR_OLD")"
+[ "$GOT" = "mayor human" ] \
+    && pass "a pogo CLI without 'config get' (the first night): alerts fall back to mayor and human" || fail "old-CLI fallback gave '$GOT'"
+GOT="$(rr_resolve "$RR_CLI" "RR_COORD=Usage: pogo" "RR_BOX=")"
+[ "$GOT" = "mayor human" ] \
+    && pass "a value that is not a mailbox name (or is empty) is refused, keeping mayor and human" || fail "garbage value accepted: '$GOT'"
+GOT="$(rr_resolve "$RR_CLI" POGO_DEPLOY_ALERT_TO=pm-elsewhere POGO_DEPLOY_ESCALATION_BOX=ops)"
+[ "$GOT" = "pm-elsewhere ops" ] \
+    && pass "explicit POGO_DEPLOY_ALERT_TO / POGO_DEPLOY_ESCALATION_BOX are never overridden by the config read" || fail "env override lost: '$GOT'"
+( POGO_CLI="$RR_OLD"; resolve_alert_recipients 2>&1 ) | grep -q "could not read \[agents\] escalation_box" \
+    && pass "a failed read is LOGGED, so a mis-routed night says why" || fail "a failed recipient read was silent"
+
+# alert() sends to the resolved names — and to `human` only when that IS the box.
+RR_MG="$WORK/fake-mg-send"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$3" >> "$RR_SENDS"\nexit 0\n' > "$RR_MG"
+chmod +x "$RR_MG"
+rr_alert() {
+    RR_SENDS="$WORK/rr-sends.$1.$2"; : > "$RR_SENDS"; export RR_SENDS
+    ( MG="$RR_MG"; POGO_CLI=""; ALERT_TO="$1"; ESCALATION_BOX="$2"; alert "subj" "body" >/dev/null 2>&1 )
+    tr '\n' ' ' < "$RR_SENDS" | sed 's/ $//'
+}
+GOT="$(rr_alert mayor human)"
+[ "$GOT" = "mayor human" ] \
+    && pass "alert() default arm (positive control): mails mayor and human" || fail "default alert mailed '$GOT'"
+GOT="$(rr_alert ringmaster daniel-phone)"
+[ "$GOT" = "ringmaster daniel-phone" ] \
+    && pass "alert() mails the configured coordinator and escalation box, not a literal human/mayor" || fail "routed alert mailed '$GOT'"
+GOT="$(rr_alert ringmaster ringmaster)"
+[ "$GOT" = "ringmaster" ] \
+    && pass "alert() mails a box once when the coordinator IS the escalation box" || fail "same-box alert mailed '$GOT'"
+
+# Ordering: the read needs the CLI (resolve_pogo) and must name the boxes before
+# they are registered.
+awk '/^    resolve_pogo/{p=NR} /^    resolve_alert_recipients/{r=NR} /^    register_alert_recipients/{reg=NR} END{exit !(p && r && reg && p < r && r < reg)}' "$RUNNER" \
+    && pass "resolve_alert_recipients runs after resolve_pogo and before register_alert_recipients" \
+    || fail "resolve_alert_recipients is not ordered between resolve_pogo and register_alert_recipients"
+unset -f rr_resolve rr_alert
+
+# ---------------------------------------------------------------------------
 # alert()'s return value — the question mg-7dc1 recorded as UNEXAMINED
 # ---------------------------------------------------------------------------
 # mg-7dc1 left open "whether a nonzero return from the alert path cascades into

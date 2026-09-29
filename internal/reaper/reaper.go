@@ -73,6 +73,12 @@ const DefaultInterval = 60 * time.Second
 // (drellem2/pogo#148).
 const DefaultEscalateTo = "human"
 
+// DefaultCoordinator is the coordinator box that receives the give-up mail when
+// Options.Coordinator is empty. pogod passes [agents] coordinator, so a
+// deployment whose coordinator is not called "mayor" does not have the mail
+// filed into a box nobody reads (drellem2/pogo#148).
+const DefaultCoordinator = "mayor"
+
 // Job is one launchd job the reaper supervises by heartbeat freshness.
 type Job struct {
 	// Label is the launchd label, e.g. "com.pogo.watchdog". kickstart targets
@@ -112,7 +118,8 @@ type Reaper struct {
 	mail      func(to, from, subject, body string) error
 	logf      func(format string, args ...any)
 
-	escalateTo string
+	escalateTo  string
+	coordinator string
 }
 
 // Options configures a Reaper. Only Jobs and Kickstart are required in
@@ -129,6 +136,9 @@ type Options struct {
 	// EscalateTo is the box a PERSON reads, mailed on give-up alongside the
 	// mayor. pogod wires [agents] escalation_box. Empty means DefaultEscalateTo.
 	EscalateTo string
+	// Coordinator is the coordinator agent's box, mailed on give-up. pogod
+	// wires [agents] coordinator. Empty means DefaultCoordinator.
+	Coordinator string
 	// Now defaults to time.Now.
 	Now func() time.Time
 	// Stat returns a file's mtime. Defaults to os.Stat-based mtime.
@@ -149,9 +159,13 @@ func New(o Options) *Reaper {
 		mail:          o.Mail,
 		logf:          o.Logf,
 		escalateTo:    o.EscalateTo,
+		coordinator:   o.Coordinator,
 	}
 	if r.escalateTo == "" {
 		r.escalateTo = DefaultEscalateTo
+	}
+	if r.coordinator == "" {
+		r.coordinator = DefaultCoordinator
 	}
 	if r.maxKickstarts <= 0 {
 		r.maxKickstarts = DefaultMaxKickstarts
@@ -277,17 +291,17 @@ func (r *Reaper) checkJob(now time.Time, j Job) {
 		j.Label, staleness, st.consecutive, r.maxKickstarts, pid)
 }
 
-// escalationRecipients is who the give-up mail goes to: the mayor and the
+// escalationRecipients is who the give-up mail goes to: the coordinator and the
 // escalation box, once each — a deployment that points escalation_box at the
-// mayor gets one mail, not the same one twice.
+// coordinator gets one mail, not the same one twice.
 func (r *Reaper) escalationRecipients() []string {
-	if r.escalateTo == "mayor" {
-		return []string{"mayor"}
+	if r.escalateTo == r.coordinator {
+		return []string{r.coordinator}
 	}
-	return []string{"mayor", r.escalateTo}
+	return []string{r.coordinator, r.escalateTo}
 }
 
-// escalate mails the mayor and the escalation box. A give-up that only logs is
+// escalate mails the coordinator and the escalation box. A give-up that only logs is
 // still a silent failure to everyone who is not tailing pogod.log.
 func (r *Reaper) escalate(j Job, st *jobState, staleness string) {
 	subject := fmt.Sprintf("reaper gave up on %s — heartbeat still stale after %d kickstarts", j.Label, st.consecutive)

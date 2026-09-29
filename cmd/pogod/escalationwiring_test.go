@@ -60,7 +60,7 @@ func TestMainRoutesEveryEscalationThroughEscalationBox(t *testing.T) {
 	}{
 		"claude.SetUsageLimitMailTo": {arg: 0},
 		"refusalSinks":               {arg: 0},
-		"startReaper":                {arg: 2},
+		"startReaper":                {arg: 3},
 	}
 	fields := 0
 
@@ -145,7 +145,7 @@ func TestReaperOptionsFollowEscalationBox(t *testing.T) {
 		{"daniel-phone", "daniel-phone"},
 	} {
 		agents := config.AgentsConfig{EscalationBox: tc.box}
-		opts := reaperOptions(config.ReaperConfig{}, agents.EscalationBoxName())
+		opts := reaperOptions(config.ReaperConfig{}, agents.CoordinatorName(), agents.EscalationBoxName())
 		if opts.EscalateTo != tc.want {
 			t.Errorf("escalation_box=%q: reaper EscalateTo = %q, want %q", tc.box, opts.EscalateTo, tc.want)
 		}
@@ -156,5 +156,52 @@ func TestReaperOptionsFollowEscalationBox(t *testing.T) {
 	if reaper.DefaultEscalateTo != config.DefaultEscalationBox {
 		t.Errorf("reaper.DefaultEscalateTo = %q, want config.DefaultEscalationBox (%q)",
 			reaper.DefaultEscalateTo, config.DefaultEscalationBox)
+	}
+}
+
+// TestReaperOptionsFollowCoordinator: the give-up mail's coordinator copy goes
+// to [agents] coordinator, not a hard-coded "mayor" (drellem2/pogo#148). The
+// unset arm is the positive control that an unconfigured install still mails
+// `mayor`; the main.go check pins that startReaper is handed the resolved name.
+func TestReaperOptionsFollowCoordinator(t *testing.T) {
+	for _, tc := range []struct{ coordinator, want string }{
+		{"", "mayor"},
+		{"ringmaster", "ringmaster"},
+	} {
+		agents := config.AgentsConfig{Coordinator: tc.coordinator}
+		opts := reaperOptions(config.ReaperConfig{}, agents.CoordinatorName(), agents.EscalationBoxName())
+		if opts.Coordinator != tc.want {
+			t.Errorf("coordinator=%q: reaper Coordinator = %q, want %q", tc.coordinator, opts.Coordinator, tc.want)
+		}
+	}
+	if reaper.DefaultCoordinator != config.DefaultCoordinator {
+		t.Errorf("reaper.DefaultCoordinator = %q, want config.DefaultCoordinator (%q)",
+			reaper.DefaultCoordinator, config.DefaultCoordinator)
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || exprString(call.Fun) != "startReaper" {
+			return true
+		}
+		found = true
+		if len(call.Args) < 3 {
+			t.Errorf("%s: startReaper has %d args", fset.Position(call.Pos()), len(call.Args))
+			return true
+		}
+		if id, ok := call.Args[2].(*ast.Ident); !ok || id.Name != "coordinator" {
+			t.Errorf("%s: startReaper argument 2 = %s, want coordinator — the give-up mail ignores [agents] coordinator",
+				fset.Position(call.Pos()), exprString(call.Args[2]))
+		}
+		return true
+	})
+	if !found {
+		t.Errorf("main.go never calls startReaper")
 	}
 }

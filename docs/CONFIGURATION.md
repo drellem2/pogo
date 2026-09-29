@@ -58,7 +58,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[dispatch]` | `max_polecats_per_repo` | on | ACTS | Refuses to spawn a worker into a repo that already has 3 live workers. While the refinery holds a merge request for that repo, it holds back 1 of the 3 slots. Default `max_polecats_per_repo = 3`; `0` turns it off. See [Dispatch cap](#dispatch-cap--how-many-workers-may-enter-one-repository). |
 | `[dispatch_pairing]` | `repos` | inert | ACTS | Once you list `repos`, it refuses to dispatch an item in those repos until its paired item is filed. See [Dispatch pairing](#dispatch-pairing--items-that-owe-a-paired-work-item). |
 | `[audit_successor]` | `repos` | inert | observes | Once you list `repos`, `pogo doctor` warns about merged audits that no successor answered. It runs only inside `pogo doctor`, never in pogod, and it never refuses. See [Audit successors](#audit-successors--merged-audits-that-nothing-answered). |
-| `[reaper]` | `enabled` | on | ACTS | Inert until you list `jobs`. It runs `launchctl kickstart` on a declared launchd job whose heartbeat file has gone stale, and after `max_kickstarts` tries it mails `mayor` and the [escalation box](#the-escalation-mailbox) (`human` by default). See [Heartbeat reaper](#heartbeat-reaper-tier-1). |
+| `[reaper]` | `enabled` | on | ACTS | Inert until you list `jobs`. It runs `launchctl kickstart` on a declared launchd job whose heartbeat file has gone stale, and after `max_kickstarts` tries it mails the coordinator (`[agents] coordinator`, `mayor` by default) and the [escalation box](#the-escalation-mailbox) (`human` by default). See [Heartbeat reaper](#heartbeat-reaper-tier-1). |
 | `[reconcile]` | `mirrors` | inert | observes | Declares host mirrors. pogod never reconciles them. `[drift_watch]` reads the list, and `pogo service reconcile` copies files only when you run it. See [Host reconcile + drift check](#host-reconcile--drift-check). |
 | `[drift_watch]` | `enabled` | on | observes | Mails when a mirrored host artifact drifts from its source, when the running pogod is behind, or when the nightly deploy did not fire. It never reconciles. |
 | `[cred_expiry]` | `enabled` | on | observes | Mails before the fleet's harness credential expires. It never re-mints. See [The credential-expiry warner](#the-credential-expiry-warner). |
@@ -324,8 +324,9 @@ episode-start and episode-cleared mails), `driftwatch` (mirror drift, a stale
 running revision, a nightly that did not fire), `credexpiry` (a credential
 approaching expiry, or unreadable), the consecutive-refusal alarm
 (`refusalwatch`) and the tier-1 heartbeat reaper's give-up mail (sent alongside
-`mayor`, once only if this box is `mayor`). They used to hard-code `human`; they now follow this setting
-like everything else. The refusal alarm still does not pass `--create`, so a
+the `[agents] coordinator`, once only if this box is the coordinator). They used
+to hard-code `human` (and the reaper `mayor`); they now follow this setting like
+everything else. The refusal alarm still does not pass `--create`, so a
 mistyped box is a loud undelivered alarm (recorded in its ledger), not a new
 mailbox nobody reads.
 
@@ -369,6 +370,20 @@ six direct senders above; the log line for each escalating watcher prints its
 Note that a watcher drops the second recipient when it equals the first, so
 setting this to a watcher's `notify_to` disables that watcher's escalation
 rather than double-sending it.
+
+**The nightly deploy follows it too, out of process.**
+`scripts/launchd/pogo-deploy.sh` is not part of pogod and bounces it, so it
+cannot ask the daemon. It reads `[agents] coordinator` and this setting through
+`pogo config get agents.coordinator` / `pogo config get agents.escalation_box`,
+which resolve the config files in-process — with pogod's defaults — and answer
+while pogod is down. Its alerts go to the coordinator (or
+`POGO_DEPLOY_ALERT_TO`) and always copy this box (or
+`POGO_DEPLOY_ESCALATION_BOX`), once if they are the same. **Every failure of
+that read falls back to `mayor` / `human`** — a missing or older `pogo` CLI
+(including the first night after upgrading, before the deploy has installed one
+with `config get`), a timeout, or output that is not a mailbox name — and the
+run log says which, because a nightly alert that cannot be delivered is worse
+than a mis-routed one.
 
 ## Crew auto-start
 
@@ -1568,7 +1583,7 @@ Three properties are load-bearing and every one is tested:
   supervisor eventually becomes the thing concealing the failure.
 - **Bounded, backed off, gives up loudly.** After `max_kickstarts` consecutive
   kickstarts that do not restore freshness, the reaper **STOPS** and mails both
-  `mayor` and the escalation box (`[agents] escalation_box`, `human` by
+  the coordinator (`[agents] coordinator`, `mayor` by default) and the escalation box (`[agents] escalation_box`, `human` by
   default), then stays quiet. This is the mg-1679 defense: a job that
   FATALs on every start (launchctl reports a fresh pid each time) would
   otherwise be kickstarted forever — a new self-concealing failure.

@@ -414,7 +414,11 @@
 #   POGO_DEPLOY_ZSHENV       file to read GH_TOKEN from ($HOME/.zshenv)
 #   POGO_DEPLOY_GRACE        seconds to wait before the post-bounce check (120)
 #   POGO_DEPLOY_LOCK_DIR     mutual-exclusion dir
-#   POGO_DEPLOY_ALERT_TO     first alert recipient (mayor; `human` is always copied)
+#   POGO_DEPLOY_ALERT_TO     first alert recipient (default: [agents] coordinator,
+#                            read via `pogo config get`; `mayor` if that fails)
+#   POGO_DEPLOY_ESCALATION_BOX  the always-copied box a PERSON reads (default:
+#                            [agents] escalation_box, read the same way; `human`
+#                            if that fails)
 #   POGO_DEPLOY_SKIP_WINDOW  set to 1 to bypass the window guard (controls only)
 #   POGO_DEPLOY_NOW          "HH" override for the window guard (tests only)
 #   POGO_DEPLOY_RESERVE      seconds of the window kept back for build+bounce (1200)
@@ -526,9 +530,15 @@ LOCK_DIR="${POGO_DEPLOY_LOCK_DIR:-$HOME/.pogo/deploy.lock.d}"
 # mg-d639 removed that. An unknown recipient is now refused (no_such_mailbox,
 # exit 3), which turns a silently-undelivered alert into a loud one — an
 # improvement, and the reason register_alert_recipients exists below. A
-# deployment whose PM owns deploys sets POGO_DEPLOY_ALERT_TO. `human` is copied
-# either way.
+# deployment whose PM owns deploys sets POGO_DEPLOY_ALERT_TO. The escalation
+# box (below) is copied either way.
+#
+# Unset, both names are READ from config by resolve_alert_recipients — the same
+# [agents] coordinator / escalation_box pogod mails (drellem2/pogo#148). These
+# assignments are the fallbacks that read keeps when it fails, and what every
+# alert uses before it has run.
 ALERT_TO="${POGO_DEPLOY_ALERT_TO:-mayor}"
+ESCALATION_BOX="${POGO_DEPLOY_ESCALATION_BOX:-human}"
 DEPLOY_REF="${POGO_DEPLOY_REF:-main}"
 STALE_LOCK_MIN="${POGO_DEPLOY_STALE_LOCK_MIN:-180}"
 DRY_RUN=false
@@ -1122,7 +1132,7 @@ resolve_mg() {
 # install, where nothing else creates them.
 register_alert_recipients() {
     local who
-    for who in "$ALERT_TO" human; do
+    for who in "$ALERT_TO" "$ESCALATION_BOX"; do
         if "$MG" mail register "$who" >/dev/null 2>&1; then
             continue
         fi
@@ -1130,9 +1140,59 @@ register_alert_recipients() {
         # non-zero on the unknown verb. That build also still files mail for an
         # unknown name, so the alert path works there without this — say so
         # rather than implying the alert is broken.
-        err "alert: could not register mailbox '$who' — alerts to it may be refused (mg mail register unavailable or failed); 'human' and '$ALERT_TO' are mailed independently, so the other copy is unaffected"
+        err "alert: could not register mailbox '$who' — alerts to it may be refused (mg mail register unavailable or failed); '$ESCALATION_BOX' and '$ALERT_TO' are mailed independently, so the other copy is unaffected"
     done
     return 0
+}
+
+# resolve_alert_recipients — send alerts where pogod sends its escalations
+# (drellem2/pogo#148).
+#
+# pogod routes every escalation a person must see to [agents] escalation_box and
+# its coordinator mail to [agents] coordinator. This job runs OUT of process and
+# bounces pogod, so it cannot ask the daemon: it asks `pogo config get`, which
+# reads the config files in-process and answers while pogod is down.
+#
+# EVERY failure falls back to the literal default (`mayor` / `human`) and says
+# so in the log. A nightly alert that cannot be delivered is worse than a
+# mis-routed one: a missing CLI, an old CLI without `config get` (the first
+# night after this ships, until the deploy installs one that has it), a timeout,
+# or a value that is not a plausible mailbox name all keep the fallback. An
+# explicit POGO_DEPLOY_ALERT_TO / POGO_DEPLOY_ESCALATION_BOX is never
+# overridden. Non-fatal by construction.
+resolve_alert_recipients() {
+    local v
+    if [ -z "${POGO_DEPLOY_ALERT_TO:-}" ]; then
+        if v="$(read_config_name agents.coordinator)"; then
+            ALERT_TO="$v"
+        else
+            log "alert: could not read [agents] coordinator ($v) — alerting '$ALERT_TO'"
+        fi
+    fi
+    if [ -z "${POGO_DEPLOY_ESCALATION_BOX:-}" ]; then
+        if v="$(read_config_name agents.escalation_box)"; then
+            ESCALATION_BOX="$v"
+        else
+            log "alert: could not read [agents] escalation_box ($v) — alerting '$ESCALATION_BOX'"
+        fi
+    fi
+    log "alert: recipients '$ALERT_TO' and '$ESCALATION_BOX'"
+    return 0
+}
+
+# read_config_name KEY — print the resolved value of KEY via `pogo config get`
+# and exit 0, or print the reason it could not and exit 1. Only a single token
+# of mailbox-name characters is accepted: whatever else came back (an old CLI's
+# usage text, an error on stdout) is not a recipient.
+read_config_name() {
+    local key="$1" out
+    [ -n "$POGO_CLI" ] || { printf 'no pogo CLI'; return 1; }
+    out="$(run_bounded "$TOOL_PROBE_TIMEOUT" "$POGO_CLI" config get "$key" 2>/dev/null)" \
+        || { printf '`pogo config get` failed or is unavailable'; return 1; }
+    case "$out" in
+        ''|*[!A-Za-z0-9._@-]*) printf 'unusable value'; return 1 ;;
+    esac
+    printf '%s' "$out"
 }
 
 # `git`, resolved by EXECUTION rather than by existence, for the reason in the
@@ -1237,9 +1297,11 @@ load_gh_token() {
 # 4. Alerting
 # ---------------------------------------------------------------------------
 # Two channels, on purpose. The event is for the digest and is best-effort; the
-# mail is the loud half. `human` is always copied on a RED because a deploy that
+# mail is the loud half. The escalation box (`human` unless [agents]
+# escalation_box says otherwise) is always copied on a RED because a deploy that
 # refused to deploy is a thing the operator has to know about by morning, and a
-# fleet agent reading it is not the same as the operator seeing it.
+# fleet agent reading it is not the same as the operator seeing it. When both
+# names are the same box it is mailed once.
 #
 # $3 is optional extra JSON fields for the EVENT (no braces, leading comma
 # omitted). The mail is read by a person and carries its facts in prose; the
@@ -1272,10 +1334,12 @@ alert() {
     # text (mg-8380). These bodies carry log paths and remedies verbatim.
     "$MG" mail send "$ALERT_TO" --from=pogo-deploy --subject="$subject" --body-file "$bf" >/dev/null 2>&1 \
         || { err "alert: mail to '$ALERT_TO' failed"; rc=1; }
-    "$MG" mail send human --from=pogo-deploy --subject="$subject" --body-file "$bf" >/dev/null 2>&1 \
-        || { err "alert: mail to 'human' failed"; rc=1; }
+    if [ "$ESCALATION_BOX" != "$ALERT_TO" ]; then
+        "$MG" mail send "$ESCALATION_BOX" --from=pogo-deploy --subject="$subject" --body-file "$bf" >/dev/null 2>&1 \
+            || { err "alert: mail to '$ESCALATION_BOX' failed"; rc=1; }
+    fi
     rm -f "$bf"
-    [ "$rc" -eq 0 ] && log "alert: mailed '$ALERT_TO' and 'human'"
+    [ "$rc" -eq 0 ] && log "alert: mailed '$ALERT_TO' and '$ESCALATION_BOX'"
     return $rc
 }
 
@@ -4682,6 +4746,7 @@ AND the restore did not take: $target reports '${MG_LIVE:-no stamp}', the fleet 
 run_mg_only() {
     resolve_mg || { err "mg-only: no macguffin mg resolved — nothing to install over"; exit 1; }
     resolve_pogo || true
+    resolve_alert_recipients
     resolve_git || { err "mg-only: no working git"; exit 1; }
     harden_git_transport
     if ! acquire_lock; then
@@ -4942,6 +5007,7 @@ AND the restore did not take. Restore by hand: cp -p $RUNNER_TARGET.prev $RUNNER
 run_runner_only() {
     resolve_mg || true
     resolve_pogo || true
+    resolve_alert_recipients
     resolve_git || { err "runner-only: no working git"; exit 1; }
     if ! acquire_lock; then
         log "lock: another pogo-deploy run holds $LOCK_DIR — exiting 0"
@@ -5463,11 +5529,15 @@ main() {
     # somewhere to be reported to. A wrapper whose first failure is "I cannot
     # tell you about failures" is the silent nightly all over again.
     resolve_mg   || { err "no alert path — refusing to run unattended"; exit 1; }
+    resolve_pogo || log "pogo CLI unresolved — the post-bounce schedule check will be skipped"
+    # Who the alerts go to: [agents] coordinator / escalation_box, read through
+    # the CLI just resolved, falling back to mayor / human (drellem2/pogo#148).
+    # Non-fatal.
+    resolve_alert_recipients
     # Resolving mg proves the alert path can RUN; registering proves it can be
     # DELIVERED. Since mg-d639 those are different questions, and this job mails
-    # two fixed names that nothing else provisions (mg-7dc1). Non-fatal.
+    # two names that nothing else provisions (mg-7dc1). Non-fatal.
     register_alert_recipients
-    resolve_pogo || log "pogo CLI unresolved — the post-bounce schedule check will be skipped"
     # Never fatal. Without it the sync-failure classifier loses only its ability
     # to assert that a host is DOWN; it can still confirm one is up, and it
     # reports `unclassified` rather than guessing (mg-0d70).
