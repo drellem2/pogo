@@ -220,6 +220,15 @@ so user prompts containing other `{{` sequences are untouched. Two things stay
 fixed regardless of the name: the prompt file path `~/.pogo/agents/mayor.md`,
 and the `"mayor"` category label in `pogo agent prompt list --json`.
 
+**Watcher `notify_to` defaults follow the name.** Every watcher whose findings
+default to the coordinator — `[gh_teardown]`, `[gh_intake]`, `[carrier_drift]`,
+`[review_decl]`, `[ack_watch]`, `[deaf_watch]`, `[absent_watch]`,
+`[progress_watch]`, `[first_turn]` and `[midsession_wedge]` — resolves an
+unset `notify_to` to the configured coordinator, so a renamed coordinator is
+mailed rather than a `mayor` box nobody reads. An explicitly set `notify_to`
+always wins. The `notify_to = "mayor"` lines in the examples below show the
+value on an unrenamed install (mg-152d1).
+
 **Naming the coordinator after a crew agent shadows that crew prompt.** A name
 is one address, so `coordinator = "doctor"` makes `doctor` the coordinator, and
 `~/.pogo/agents/crew/doctor.md` is then unreachable — nothing can start it. The
@@ -1989,7 +1998,7 @@ outward-facing and stays human-gated.
 enabled = true             # default true; skipped when `gh` is unavailable
 interval = "1h"            # coarse sample cadence (default 1h)
 renotify_after = "24h"     # unchanged findings re-mail after this (default 24h)
-notify_to = "mayor"        # mailbox findings go to (default mayor, a FLEET box —
+notify_to = "mayor"        # mailbox findings go to (default [agents] coordinator, a FLEET box —
                            # name a PM here if one owns the gh-issue workflow)
 escalate_after = "72h"     # one unresolved finding also copies `human` after this
                            # (default 72h; negative disables, zero means default)
@@ -2157,7 +2166,7 @@ interval = "15m"           # coarse sample cadence (default 15m)
 grace = "30m"              # how long an issue may go uncarried before it counts
                            # (default 30m; negative reports immediately)
 renotify_after = "24h"     # unchanged findings re-mail after this (default 24h)
-notify_to = "mayor"        # mailbox findings go to (default mayor, the ACTOR)
+notify_to = "mayor"        # mailbox findings go to (default the coordinator, the ACTOR)
 escalate_after = "4h"      # one uncarried issue also copies `human` after this
                            # (default 4h; negative disables, zero means default)
 repos = ["owner/repo"]     # explicit watch list; unset falls back to poller
@@ -2406,7 +2415,7 @@ interval = "30m"           # coarse sample cadence (default 30m)
 renotify_after = "6h"      # unchanged findings re-mail after this (default 6h)
 blackout_renotify = "30m"  # renotify window while a FLEET BLACKOUT stands
                            # (default 30m — must be shorter than renotify_after)
-notify_to = "mayor"        # mailbox findings go to (default mayor)
+notify_to = "mayor"        # mailbox findings go to (default [agents] coordinator)
 escalate_after = "24h"     # one standing finding also copies the escalation box
                            # after this (default 24h; negative disables the AGE
                            # escalation, zero means default). A FLEET BLACKOUT
@@ -2583,7 +2592,7 @@ interval = "5m"            # sample cadence (default 5m; the condition is a
 hold_down = "15m"          # a missing loop must persist this long before it is
                            # announced (default 15m; negative disables — tests only)
 renotify_after = "6h"      # an unchanged roster re-mails after this (default 6h)
-notify_to = "mayor"        # mailbox announcements go to (default mayor)
+notify_to = "mayor"        # mailbox announcements go to (default [agents] coordinator)
 escalate_after = "24h"     # a standing finding also copies `human` after this
                            # (default 24h; negative disables AGE-based escalation
                            # only — a deaf `notify_to` still escalates at once)
@@ -2738,7 +2747,7 @@ dormant_after = "24h"      # when an ON-DEMAND absence gets its ONE notice
 renotify_after = "12h"     # an unchanged FAULT roster re-mails after this
                            # (default 12h). Declared absences are never
                            # renotified, at any setting.
-notify_to = "mayor"        # mailbox announcements go to (default mayor)
+notify_to = "mayor"        # mailbox announcements go to (default [agents] coordinator)
 escalate_after = "48h"     # a standing FAULT also copies `human` after this
                            # (default 48h; negative disables AGE-based escalation
                            # only — an absent `notify_to` still escalates at once).
@@ -3085,7 +3094,7 @@ hold_down = "10m"          # the conjunction must hold CONTINUOUSLY this long
                            # because the CPU member is instantaneous; negative
                            # disables — tests only)
 renotify_after = "2h"      # an open, unchanged episode re-mails after this
-notify_to = "mayor"        # mailbox findings go to (default mayor)
+notify_to = "mayor"        # mailbox findings go to (default [agents] coordinator)
 escalate_after = "2h"      # a standing finding also copies `human` after this
                            # (default 2h; negative disables age-based escalation)
 ```
@@ -3269,7 +3278,7 @@ enabled = true             # default true
 interval = "10m"           # sample cadence (default 10m; well under the grace)
 grace = "45m"              # a spawned agent may complete nothing for this long
                            # (default 45m — see the sweep above before changing)
-notify_to = "mayor"        # SINGLE-agent findings go here (default mayor); the
+notify_to = "mayor"        # SINGLE-agent findings go here (default [agents] coordinator); the
                            # fleet-wide case always also goes to
                            # [agents] escalation_box
 ```

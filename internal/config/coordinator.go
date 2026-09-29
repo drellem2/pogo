@@ -199,6 +199,13 @@ func GuardRunningCoordinator(cfg *Config) (*Config, *RenameRefusal) {
 	if cfg.StallWatch.Agent == cfg.Agents.Coordinator {
 		cfg.StallWatch.Agent = rec.Name
 	}
+	// The watcher notify_to defaults follow the coordinator the same way
+	// (mg-152d1); an explicit value naming some other box is left alone.
+	for _, to := range cfg.coordinatorNotifyTos() {
+		if *to == cfg.Agents.Coordinator {
+			*to = rec.Name
+		}
+	}
 	cfg.Agents.Coordinator = rec.Name
 	return cfg, refusal
 }

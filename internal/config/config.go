@@ -1340,8 +1340,8 @@ type GHTeardownConfig struct {
 	// trains a human to filter the sender, but going permanently quiet after one
 	// notice is how #89 stayed open for four days.
 	RenotifyAfter time.Duration
-	// NotifyTo is the mailbox findings are reported to. Empty falls back to
-	// DefaultGHTeardownNotifyTo (`pm-pogo`).
+	// NotifyTo is the mailbox findings are reported to. Empty (unset) is
+	// resolved by Load to [agents] coordinator (mg-152d1).
 	//
 	// The recipient obeys the same logic as the cadence above. A teardown miss
 	// says "our gh-issue workflow's last step did not run" — a fleet workflow
@@ -1388,8 +1388,8 @@ type ReviewDeclConfig struct {
 	// RenotifyAfter is how long an unchanged set of findings stays quiet before
 	// being mailed again. Zero falls back to DefaultReviewDeclRenotify.
 	RenotifyAfter time.Duration
-	// NotifyTo is the mailbox findings are reported to. Empty falls back to
-	// DefaultReviewDeclNotifyTo (the coordinator) — the only agent that files
+	// NotifyTo is the mailbox findings are reported to. Empty (unset) is
+	// resolved by Load to [agents] coordinator (mg-152d1) — the only agent that files
 	// review tickets and therefore the only one that can write the missing line.
 	NotifyTo string
 }
@@ -1521,8 +1521,8 @@ type GHIntakeConfig struct {
 	// RenotifyAfter is how long an unchanged set of findings stays quiet before
 	// being mailed again. Zero falls back to DefaultGHIntakeRenotify.
 	RenotifyAfter time.Duration
-	// NotifyTo is the mailbox findings are reported to. Empty falls back to
-	// DefaultGHIntakeNotifyTo (`mayor`) — the agent that can actually file the
+	// NotifyTo is the mailbox findings are reported to. Empty (unset) is
+	// resolved by Load to [agents] coordinator (mg-152d1) — the agent that can actually file the
 	// carrier. Routing this to `human` would land it in a maildir carrying ~990
 	// unread messages, where it could only be forwarded back.
 	NotifyTo string
@@ -1589,8 +1589,8 @@ type CarrierDriftConfig struct {
 	// RenotifyAfter is how long an unchanged set of findings stays quiet before
 	// being mailed again. Zero falls back to DefaultCarrierDriftRenotify.
 	RenotifyAfter time.Duration
-	// NotifyTo is the mailbox findings are reported to. Empty falls back to
-	// DefaultCarrierDriftNotifyTo (the coordinator).
+	// NotifyTo is the mailbox findings are reported to. Empty (unset) is
+	// resolved by Load to [agents] coordinator (mg-152d1).
 	NotifyTo string
 	// EscalateAfter is how long ONE finding may persist unbroken before the
 	// notice also goes to `human`. Zero falls back to
@@ -1636,8 +1636,8 @@ type AckWatchConfig struct {
 	// firing. Zero falls back to DefaultAckWatchBlackoutRenotify. Separate
 	// because the two conditions have different half-lives — see there.
 	BlackoutRenotify time.Duration
-	// NotifyTo is the mailbox findings are reported to. Empty falls back to
-	// DefaultAckWatchNotifyTo (`mayor`).
+	// NotifyTo is the mailbox findings are reported to. Empty (unset) is
+	// resolved by Load to [agents] coordinator (mg-152d1).
 	NotifyTo string
 	// EscalateAfter is how long ONE finding may persist unbroken before the
 	// notice also goes to the escalation box. Zero falls back to
@@ -1712,8 +1712,8 @@ type DeafWatchConfig struct {
 	// RenotifyAfter is how long an unchanged roster stays quiet before being
 	// mailed again. Zero falls back to DefaultDeafWatchRenotify.
 	RenotifyAfter time.Duration
-	// NotifyTo is the mailbox announcements are sent to. Empty falls back to
-	// DefaultDeafWatchNotifyTo (`mayor`).
+	// NotifyTo is the mailbox announcements are sent to. Empty (unset) is
+	// resolved by Load to [agents] coordinator (mg-152d1).
 	NotifyTo string
 	// EscalateAfter is how long a finding may persist unbroken before the
 	// notice also goes to `human`. Zero falls back to
@@ -1755,8 +1755,8 @@ type ProgressWatchConfig struct {
 	// RenotifyAfter is how long an open episode stays quiet. Zero falls back to
 	// DefaultProgressWatchRenotify.
 	RenotifyAfter time.Duration
-	// NotifyTo is the mailbox findings go to. Empty falls back to
-	// DefaultProgressWatchNotifyTo (`mayor`).
+	// NotifyTo is the mailbox findings go to. Empty (unset) is
+	// resolved by Load to [agents] coordinator (mg-152d1).
 	NotifyTo string
 	// EscalateAfter is how long the condition may hold before the notice also
 	// goes to `human`. Zero falls back to DefaultProgressWatchEscalateAfter; a
@@ -1907,8 +1907,8 @@ type AbsentWatchConfig struct {
 	// RenotifyAfter is how long an unchanged roster stays quiet before being
 	// mailed again. Zero falls back to DefaultAbsentWatchRenotify.
 	RenotifyAfter time.Duration
-	// NotifyTo is the mailbox announcements are sent to. Empty falls back to
-	// DefaultAbsentWatchNotifyTo (`mayor`).
+	// NotifyTo is the mailbox announcements are sent to. Empty (unset) is
+	// resolved by Load to [agents] coordinator (mg-152d1).
 	NotifyTo string
 	// EscalateAfter is how long a finding may persist unbroken before the notice
 	// also goes to `human`. Zero falls back to DefaultAbsentWatchEscalateAfter;
@@ -1954,9 +1954,9 @@ type FirstTurnConfig struct {
 	// measurement question, not a taste question — see internal/firstturn for
 	// the sweep, and rerun it before choosing a different number.
 	Grace time.Duration
-	// NotifyTo is the mailbox the SINGLE-agent case is sent to. Empty falls back
-	// to DefaultFirstTurnNotifyTo (`mayor`). It does not affect the fleet-wide
-	// case, which always also goes to `[agents] escalation_box`.
+	// NotifyTo is the mailbox the SINGLE-agent case is sent to. Empty (unset) is
+	// resolved by Load to [agents] coordinator (mg-152d1). It does not affect
+	// the fleet-wide case, which always also goes to `[agents] escalation_box`.
 	NotifyTo string
 }
 
@@ -2101,7 +2101,8 @@ type MidSessionWedgeConfig struct {
 	// action is what mg-daf4 declined to ship.
 	ReportOnly bool
 	// NotifyTo receives the notice when the bounded attempts are spent. Empty
-	// falls back to DefaultMidSessionWedgeNotifyTo; "-" disables the mail.
+	// (unset) is resolved by Load to [agents] coordinator (mg-152d1); "-"
+	// disables the mail.
 	NotifyTo string
 	// RenotifyAfter floors how often ONE agent's exhausted-recovery notice is
 	// mailed. Zero falls back to midsessionwedge.DefaultRenotifyAfter; NEGATIVE
@@ -2503,7 +2504,6 @@ func Load() *Config {
 			Enabled:       true,
 			Interval:      DefaultGHTeardownInterval,
 			RenotifyAfter: DefaultGHTeardownRenotify,
-			NotifyTo:      DefaultGHTeardownNotifyTo,
 			EscalateAfter: DefaultGHTeardownEscalateAfter,
 		},
 		GHIntake: GHIntakeConfig{
@@ -2511,21 +2511,18 @@ func Load() *Config {
 			Interval:      DefaultGHIntakeInterval,
 			Grace:         DefaultGHIntakeGrace,
 			RenotifyAfter: DefaultGHIntakeRenotify,
-			NotifyTo:      DefaultGHIntakeNotifyTo,
 			EscalateAfter: DefaultGHIntakeEscalateAfter,
 		},
 		CarrierDrift: CarrierDriftConfig{
 			Enabled:       true,
 			Interval:      DefaultCarrierDriftInterval,
 			RenotifyAfter: DefaultCarrierDriftRenotify,
-			NotifyTo:      DefaultCarrierDriftNotifyTo,
 			EscalateAfter: DefaultCarrierDriftEscalateAfter,
 		},
 		ReviewDecl: ReviewDeclConfig{
 			Enabled:       true,
 			Interval:      DefaultReviewDeclInterval,
 			RenotifyAfter: DefaultReviewDeclRenotify,
-			NotifyTo:      DefaultReviewDeclNotifyTo,
 		},
 		PromptEdit: PromptEditConfig{
 			Enabled:       true,
@@ -2543,7 +2540,6 @@ func Load() *Config {
 			Interval:         DefaultAckWatchInterval,
 			RenotifyAfter:    DefaultAckWatchRenotify,
 			BlackoutRenotify: DefaultAckWatchBlackoutRenotify,
-			NotifyTo:         DefaultAckWatchNotifyTo,
 			EscalateAfter:    DefaultAckWatchEscalateAfter,
 		},
 		WakeWatch: WakeWatchConfig{
@@ -2560,7 +2556,6 @@ func Load() *Config {
 			Interval:      DefaultDeafWatchInterval,
 			HoldDown:      DefaultDeafWatchHoldDown,
 			RenotifyAfter: DefaultDeafWatchRenotify,
-			NotifyTo:      DefaultDeafWatchNotifyTo,
 			EscalateAfter: DefaultDeafWatchEscalateAfter,
 		},
 		HeartWatch: HeartWatchConfig{
@@ -2591,7 +2586,6 @@ func Load() *Config {
 			HoldDown:      DefaultAbsentWatchHoldDown,
 			DormantAfter:  DefaultAbsentWatchDormantAfter,
 			RenotifyAfter: DefaultAbsentWatchRenotify,
-			NotifyTo:      DefaultAbsentWatchNotifyTo,
 			EscalateAfter: DefaultAbsentWatchEscalateAfter,
 		},
 		ProgressWatch: ProgressWatchConfig{
@@ -2599,14 +2593,12 @@ func Load() *Config {
 			Interval:      DefaultProgressWatchInterval,
 			HoldDown:      DefaultProgressWatchHoldDown,
 			RenotifyAfter: DefaultProgressWatchRenotify,
-			NotifyTo:      DefaultProgressWatchNotifyTo,
 			EscalateAfter: DefaultProgressWatchEscalateAfter,
 		},
 		FirstTurn: FirstTurnConfig{
 			Enabled:  true,
 			Interval: DefaultFirstTurnInterval,
 			Grace:    DefaultFirstTurnGrace,
-			NotifyTo: DefaultFirstTurnNotifyTo,
 		},
 		SynthWatch:   SynthWatchConfig{Enabled: true},
 		RefusalWatch: RefusalWatchConfig{Enabled: true},
@@ -2624,7 +2616,6 @@ func Load() *Config {
 		MidSessionWedge: MidSessionWedgeConfig{
 			Enabled:  true,
 			Interval: DefaultMidSessionWedgeInterval,
-			NotifyTo: DefaultMidSessionWedgeNotifyTo,
 		},
 		DoneReap: DoneReapConfig{
 			Enabled:   true,
@@ -3276,8 +3267,38 @@ func Load() *Config {
 	if cfg.StallWatch.Agent == "" {
 		cfg.StallWatch.Agent = cfg.Agents.Coordinator
 	}
+	// Every watcher whose notify_to defaults to the coordinator follows the
+	// CONFIGURED coordinator, not the literal Default*NotifyTo ("mayor"), so a
+	// host that renames [agents] coordinator does not mail a box nobody reads
+	// (mg-152d1). Resolved here, after the file overlay, so an explicit
+	// notify_to always wins. An unrenamed install still resolves to "mayor",
+	// the value of every Default*NotifyTo.
+	for _, to := range cfg.coordinatorNotifyTos() {
+		if *to == "" {
+			*to = cfg.Agents.Coordinator
+		}
+	}
 
 	return cfg
+}
+
+// coordinatorNotifyTos returns every watcher notify_to whose default is the
+// coordinator (mg-152d1). Load fills the empty ones from [agents] coordinator,
+// and GuardRunningCoordinator re-points the ones that followed it, so the two
+// cannot disagree about which fields track the coordinator name.
+func (c *Config) coordinatorNotifyTos() []*string {
+	return []*string{
+		&c.GHTeardown.NotifyTo,
+		&c.GHIntake.NotifyTo,
+		&c.CarrierDrift.NotifyTo,
+		&c.ReviewDecl.NotifyTo,
+		&c.AckWatch.NotifyTo,
+		&c.DeafWatch.NotifyTo,
+		&c.AbsentWatch.NotifyTo,
+		&c.ProgressWatch.NotifyTo,
+		&c.FirstTurn.NotifyTo,
+		&c.MidSessionWedge.NotifyTo,
+	}
 }
 
 // ServerURL returns the base URL for connecting to the pogo daemon.
