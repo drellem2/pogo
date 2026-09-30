@@ -1492,16 +1492,18 @@ Flags:
 	// the run boundary. launchd appends across restarts (so prior-run crash
 	// evidence survives), and this startup rotation keeps the file bounded
 	// while guaranteeing the previous run's tail is in pogod.log or
-	// pogod.log.1 when a post-mortem needs it (mg-6d02). No-op unless
-	// stderr actually is pogod.log — dev runs are untouched. A piped spawn
-	// was already re-pointed at the log just above, so it rotates too.
-	rotated, logPath, rotErr := service.RotatePogodLogIfNeeded()
+	// pogod.log.1 when a post-mortem needs it (mg-6d02). The file rotated is
+	// the one fd 2 actually writes to, not a path this build computes, so an
+	// older or hand-edited plist is rotated too (drellem2/pogo#104). Dev runs
+	// (tty/pipe stderr) are untouched. A piped spawn was already re-pointed
+	// at the log just above, so it rotates too. One line on EVERY boot says
+	// what happened and why: a skipped rotation used to print nothing, which
+	// is how a host that never rotated went unnoticed.
+	rotation, rotErr := service.RotatePogodLogIfNeeded()
 	if rotErr != nil {
 		log.Printf("pogod: log rotation failed (continuing): %v", rotErr)
 	}
-	if rotated {
-		log.Printf("pogod: rotated %s (previous run's log is %s.1)", logPath, logPath)
-	}
+	log.Printf("pogod: log rotation: %s", rotation.Summary())
 	log.Printf("pogod: starting (pid=%d)", os.Getpid())
 	if pipedStdio.Any() {
 		logPipedStdio(pipedStdio, pipedStdioPath, pipedStdioErr)

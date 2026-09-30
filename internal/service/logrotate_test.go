@@ -2,8 +2,10 @@ package service
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -95,9 +97,17 @@ func setTestHome(t *testing.T) string {
 	return filepath.Join(d, "pogod.log")
 }
 
-// A big log must NOT be rotated when stderr is not pogod.log (dev run /
-// pipe-captured spawn) — the same-inode gate is what keeps startup
-// rotation safe to call unconditionally.
+// stubResolver replaces resolveStderrPath for the duration of the test.
+func stubResolver(t *testing.T, fn func() (string, bool, error)) {
+	t.Helper()
+	saved := resolveStderrPath
+	resolveStderrPath = fn
+	t.Cleanup(func() { resolveStderrPath = saved })
+}
+
+// A big default log must NOT be rotated when stderr is not that file (dev
+// run / pipe-captured spawn / a different redirect) — the same-inode guard is
+// what keeps startup rotation safe to call unconditionally.
 func TestRotatePogodLogSkipsWhenStderrIsNotTheLog(t *testing.T) {
 	logPath := setTestHome(t)
 	big := bytes.Repeat([]byte("x"), maxPogodLogSize+1)
@@ -105,15 +115,12 @@ func TestRotatePogodLogSkipsWhenStderrIsNotTheLog(t *testing.T) {
 		t.Fatalf("write big log: %v", err)
 	}
 
-	rotated, gotPath, err := RotatePogodLogIfNeeded()
+	r, err := RotatePogodLogIfNeeded()
 	if err != nil {
 		t.Fatalf("RotatePogodLogIfNeeded: %v", err)
 	}
-	if rotated {
-		t.Fatal("rotated=true, but stderr is not pogod.log — gate failed")
-	}
-	if gotPath != logPath {
-		t.Errorf("logPath = %q, want %q", gotPath, logPath)
+	if r.Rotated() {
+		t.Fatalf("rotated (%s), but stderr is not pogod.log — guard failed", r.Summary())
 	}
 	if fi, err := os.Stat(logPath); err != nil || fi.Size() != int64(len(big)) {
 		t.Errorf("pogod.log must be untouched: size=%v err=%v", fi.Size(), err)
@@ -123,11 +130,51 @@ func TestRotatePogodLogSkipsWhenStderrIsNotTheLog(t *testing.T) {
 	}
 }
 
-func TestRotatePogodLogMissingFileIsNoop(t *testing.T) {
+// fd 2 named a path that no longer exists: path-missing, an anomaly with its
+// own reason — not the silent no-op it used to share with "stderr is a tty".
+func TestRotatePogodLogResolvedPathMissing(t *testing.T) {
 	setTestHome(t)
-	rotated, _, err := RotatePogodLogIfNeeded()
-	if err != nil || rotated {
-		t.Fatalf("missing log: rotated=%v err=%v, want false/nil", rotated, err)
+	missing := filepath.Join(t.TempDir(), "gone.log")
+	stubResolver(t, func() (string, bool, error) { return missing, true, nil })
+
+	r, err := RotatePogodLogIfNeeded()
+	if err != nil {
+		t.Fatalf("RotatePogodLogIfNeeded: %v", err)
+	}
+	if r.Reason != RotationPathMissing || r.Path != missing || r.Source != logPathFromFd {
+		t.Fatalf("got %+v, want path-missing for %s from fd 2", r, missing)
+	}
+	if !strings.Contains(r.Summary(), "path-missing (stderr="+missing+")") {
+		t.Errorf("Summary() = %q", r.Summary())
+	}
+}
+
+// fd 2's name unreadable: fall back to the installed plist (none here) and
+// then the default, and say so — including why fd 2 could not be read.
+func TestRotatePogodLogUnresolvableFallsBackToDefault(t *testing.T) {
+	logPath := setTestHome(t)
+	stubResolver(t, func() (string, bool, error) { return "", true, errors.New("no F_GETPATH") })
+
+	r, err := RotatePogodLogIfNeeded()
+	if err != nil {
+		t.Fatalf("RotatePogodLogIfNeeded: %v", err)
+	}
+	if r.Reason != RotationPathMissing || r.Path != logPath || r.Source != logPathFromDefault {
+		t.Fatalf("got %+v, want path-missing for %s from default", r, logPath)
+	}
+	if s := r.Summary(); !strings.Contains(s, "from default") || !strings.Contains(s, "no F_GETPATH") {
+		t.Errorf("Summary() = %q, want the fallback source and the resolve error", s)
+	}
+}
+
+func TestRotatePogodLogNotRedirectedSummary(t *testing.T) {
+	stubResolver(t, func() (string, bool, error) { return "", false, nil })
+	r, err := RotatePogodLogIfNeeded()
+	if err != nil || r.Reason != RotationNotRedirected {
+		t.Fatalf("got %+v err=%v, want not-redirected", r, err)
+	}
+	if got, want := r.Summary(), "not-redirected (stderr=not a regular file)"; got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
 	}
 }
 
