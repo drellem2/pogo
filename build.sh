@@ -120,6 +120,77 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# VERIFY WHAT --install JUST WROTE (drellem2/pogo#103, mg-8075b)
+#
+# The ldflags above fix what `pogo version` says, but they do NOT fix the stamp
+# scripts/pogo-self-deploy reads: its installed_rev() asks `go version -m` for
+# Go's automatic vcs.revision. In a polecat worktree (under ~/.pogo/polecats, a
+# gitignored subtree of the ~/.pogo repo) Go records ~/.pogo's HEAD there — a
+# commit the pogo repo does not contain — and the nightly redeploy refuses that
+# foreign stamp and aborts every night until a human reinstalls. `--install` used
+# to be a bare `go install` that said nothing about it.
+#
+# So after installing, read each installed binary back and require BOTH stamps
+# to name `git rev-parse HEAD` of the tree we built:
+#   - the ldflags Commit (the -X ...version.Commit= recorded in the build info)
+#   - Go's vcs.revision (what the nightly redeploy reads)
+# Local and cheap: one `go list` and one `go version -m` per binary. Nothing is
+# uninstalled on failure — the binaries are already in GOBIN — the point is that
+# the operator is told NOW instead of by the nightly's abort alert.
+#
+# POGO_INSTALL_VERIFY_EXPECT overrides the expected sha. It exists for
+# build_test.sh's positive control, so the check can be seen going red on a
+# build whose stamps are otherwise correct.
+# ---------------------------------------------------------------------------
+verify_installed_stamps() {
+  local expect="${POGO_INSTALL_VERIFY_EXPECT:-}"
+  if [ -z "$expect" ]; then
+    expect="$(git rev-parse HEAD 2>/dev/null || true)"
+  fi
+  if [ -z "$expect" ]; then
+    echo "build.sh: no git revision available — installed binaries NOT verified (they are unstamped; the nightly redeploy cannot compare them to main)" >&2
+    return 0
+  fi
+
+  local targets
+  targets="$(go list -f '{{if eq .Name "main"}}{{.Target}}{{end}}' ./cmd/...)" || return $?
+  if [ -z "$targets" ]; then
+    echo "build.sh: --install verification found no installed binaries to check" >&2
+    return 1
+  fi
+
+  local bad=0 bin name info ldcommit vcsrev
+  while IFS= read -r bin; do
+    [ -n "$bin" ] || continue
+    name="$(basename "$bin")"
+    if ! info="$(go version -m "$bin" 2>&1)"; then
+      echo "build.sh: --install verification: cannot read build info of $name at $bin: $info" >&2
+      bad=1
+      continue
+    fi
+    ldcommit="$(printf '%s\n' "$info" | sed -n 's/.*internal\/version\.Commit=\([0-9a-f]*\).*/\1/p' | head -1)"
+    vcsrev="$(printf '%s\n' "$info" | sed -n 's/.*vcs\.revision=\([0-9a-f]*\).*/\1/p' | head -1)"
+    if [ "$ldcommit" != "$expect" ]; then
+      echo "build.sh: --install verification FAILED for $name ($bin): ldflags Commit is '${ldcommit:-<none>}', expected $expect (git rev-parse HEAD)" >&2
+      bad=1
+    fi
+    if [ "$vcsrev" != "$expect" ]; then
+      echo "build.sh: --install verification FAILED for $name ($bin): Go vcs.revision is '${vcsrev:-<none>}', expected $expect (git rev-parse HEAD)" >&2
+      echo "  A foreign or missing vcs.revision BLOCKS THE NIGHTLY REDEPLOY: scripts/pogo-self-deploy reads it with \`go version -m\` and aborts until $name is reinstalled." >&2
+      echo "  Usual cause: building in a worktree nested inside another git repo (e.g. under ~/.pogo/polecats), so Go stamped the OUTER repo's HEAD. Reinstall from a checkout that is not nested in another repo." >&2
+      bad=1
+    fi
+  done <<EOF
+$targets
+EOF
+
+  if [ "$bad" -ne 0 ]; then
+    return 1
+  fi
+  echo "build.sh: --install verified: every installed binary's ldflags Commit and vcs.revision are $expect"
+}
+
 # Per-step timing (mg-eed9). build.sh is the refinery's gate, so the three
 # phases it owns — fmt, test, compile — are gate cost and were unattributed:
 # every discussion of "the build is slow" reasoned about test.sh alone because
@@ -174,4 +245,5 @@ gate_step "go build ./cmd/..." go build -ldflags "$ldflags" -o "${build_dir%/}/"
 if [ "$do_install" = true ]; then
   echo "Step 4: Installing binaries into GOBIN..."
   gate_step "go install ./cmd/..." go install -ldflags "$ldflags" ./cmd/... || exit $?
+  gate_step "verify installed stamps" verify_installed_stamps || exit $?
 fi
