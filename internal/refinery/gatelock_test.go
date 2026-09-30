@@ -228,10 +228,20 @@ func TestGuardClearsALockWhoseGroupIsGone(t *testing.T) {
 // runGate writes the lock while the gate runs. The gate itself reads the lock,
 // so the test observes it from inside the occupancy it describes. runGate
 // removes the lock when the group is empty.
+//
+// runGate can only write the lock after cmd.Start, because the lock names the
+// gate's pid, so the gate's first instructions race the write. A bare `cat`
+// lost that race on CI (mg-0e1db: "No such file or directory" at 0.00s; 2/500
+// locally under GOMAXPROCS=1). The gate therefore waits, bounded, until the
+// lock is complete — os.WriteFile truncates before it writes, so existence
+// alone is not enough; the JSON's closing brace is. A lock that never appears
+// still fails the test when the wait runs out and `cat` finds nothing.
 func TestRunGateHoldsTheLockForExactlyTheGatesLifetime(t *testing.T) {
 	wt := newLockedTree(t)
 	w := &gateWatch{mr: &MergeRequest{ID: "mr-lock", Branch: "polecat-lock"}, excerpt: newExcerptBuffer()}
-	out, err := runGate(context.Background(), wt, "cat .git/"+gateLockFile, 0, w)
+	lock := ".git/" + gateLockFile
+	gate := "i=0; until grep -q '}$' " + lock + " 2>/dev/null || [ $i -ge 1000 ]; do sleep 0.01; i=$((i+1)); done; cat " + lock
+	out, err := runGate(context.Background(), wt, gate, 0, w)
 	if err != nil {
 		t.Fatalf("gate failed: %v\n%s", err, out)
 	}
