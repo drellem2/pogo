@@ -662,7 +662,17 @@ already refuses one that does not name its template.
 Two channels:
 
 1. **macguffin mail** — async, persistent. For task descriptions, status reports, questions. Agent checks `mg mail list <self>` periodically.
-2. **pogo nudge** — sync, ephemeral. For wakeup signals. pogod writes the message to the target agent's PTY master fd — the agent sees it as typed input — and then **confirms** delivery from the harness's own submission receipts rather than assuming it (see "Confirmed nudge delivery" below). Falls back to mail if the agent isn't running.
+2. **pogo nudge** — sync, ephemeral. For wakeup signals. pogod writes the message to the target agent's PTY master fd — the agent sees it as typed input — and then **confirms** delivery from the harness's own submission receipts rather than assuming it (see "Confirmed nudge delivery" below). `pogo nudge` itself never falls back to mail: a nudge to an agent that is not running sends nothing and fails, naming the box to `mg mail send` to instead (the CLI fallback was removed in mg-e00c). The only mail after a failed nudge is sent by pogod's own callers: the scheduler's deliverer (`mailAfterNudge` in `internal/scheduler/deliverer.go`, which mails on every failure except a queued nudge) and stall-watch (`nudge_delivery = mail_fallback`).
+
+   **Nudge outcomes.** `POST /agents/:name/nudge` answers with a `NudgeAPIResponse` (`internal/agent/api.go`) whose `status` is the contract callers branch on, never the error text (drellem2/pogo#100). `pogo nudge` maps each to its own exit code, and `pogo nudge --json` / `pogo doctor --json`'s `nudge` object carry the same `status`:
+
+   | `status` | HTTP | `pogo nudge` exit | Meaning — what the caller should do |
+   |---|---|---|---|
+   | `delivered` | 200 | 0 | Reached the agent (confirmed by its submission receipt, or assumed after `--wait-idle`). |
+   | `not_delivered` | 500 | 4 | Nobody received it — the confirm escalation ran out, or it was never written (wait-idle timed out, agent exited). Resend, e.g. by mail. |
+   | `queued` | 202 | 5 | Written to a harness that was mid-turn, which emits no receipt for such a prompt. Probably fine; do **not** resend, or the agent gets it twice. |
+   | `not_running` | 404 | 1 | No running agent by that name; nothing was sent. Mail its box instead. |
+   | `failed` | 500 | 1 | Any other error (PTY write error, unreadable receipt, mangled submission, pogod unreachable); `error` says which. |
 
 No direct RPC. No shared memory. No pub/sub. No tmux. Agents are processes that read files and run commands. pogod mediates interactive access because it owns their terminals.
 

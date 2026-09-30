@@ -3661,11 +3661,7 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						message := strings.Join(args, " ")
 						opts := &client.NudgeOpts{Mode: "wait-idle", Timeout: 30}
 						nudgeErr := client.NudgeRunning("doctor", message, opts)
-						if nudgeErr != nil {
-							result["nudge"] = map[string]string{"status": "error", "error": nudgeErr.Error()}
-						} else {
-							result["nudge"] = map[string]string{"status": "delivered", "message": message}
-						}
+						result["nudge"] = doctorNudgeReport("doctor", message, nudgeErr)
 					}
 					cli.PrintJSON(result)
 				} else {
@@ -3674,11 +3670,7 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						message := strings.Join(args, " ")
 						opts := &client.NudgeOpts{Mode: "wait-idle", Timeout: 30}
 						nudgeErr := client.NudgeRunning("doctor", message, opts)
-						if nudgeErr != nil {
-							fmt.Printf("Warning: could not nudge doctor: %s\n", nudgeErr)
-						} else {
-							fmt.Printf("Nudged doctor: %s\n", message)
-						}
+						fmt.Println(doctorNudgeLine("doctor", message, nudgeErr))
 					}
 					fmt.Println("Use 'pogo nudge doctor <message>' to ask questions.")
 					fmt.Println("Use 'pogo agent stop doctor' when done.")

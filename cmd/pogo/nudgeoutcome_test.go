@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/drellem2/pogo/internal/agent"
@@ -46,6 +47,41 @@ func TestNudgeFailureResult(t *testing.T) {
 	for _, other := range []int{cli.ExitSuccess, cli.ExitError, cli.ExitNotFound, cli.ExitUnknown} {
 		if other == cli.ExitNudgeNotDelivered || other == cli.ExitNudgeQueued {
 			t.Fatalf("a nudge exit code collides with an existing code %d", other)
+		}
+	}
+}
+
+// mg-3e961: `pogo doctor "<question>"` reports its nudge with the same
+// distinct statuses as `pogo nudge`, not a blanket "error".
+func TestDoctorNudgeReport(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		wantStatus string
+		wantLine   string
+	}{
+		{"delivered", nil, agent.NudgeStatusDelivered, "Nudged doctor: why?"},
+		{"not delivered", &client.NudgeError{Agent: "doctor", Status: agent.NudgeStatusNotDelivered, Detail: "x"}, agent.NudgeStatusNotDelivered, "not delivered"},
+		{"queued", &client.NudgeError{Agent: "doctor", Status: agent.NudgeStatusQueued, Detail: "x"}, agent.NudgeStatusQueued, "do not resend"},
+		{"daemon failed", &client.NudgeError{Agent: "doctor", Status: agent.NudgeStatusFailed, Detail: "x"}, agent.NudgeStatusFailed, "could not nudge"},
+		{"not running", &client.NotRunningError{Agent: "doctor", Box: "doctor"}, agent.NudgeStatusNotRunning, "could not nudge"},
+	}
+	for _, c := range cases {
+		body := doctorNudgeReport("doctor", "why?", c.err)
+		if body["status"] != c.wantStatus {
+			t.Errorf("%s: status %q, want %q", c.name, body["status"], c.wantStatus)
+		}
+		if body["status"] == "error" {
+			t.Errorf("%s: the retired blanket status \"error\" came back", c.name)
+		}
+		if body["message"] != "why?" {
+			t.Errorf("%s: body %v does not carry the message", c.name, body)
+		}
+		if c.err != nil && body["error"] != c.err.Error() {
+			t.Errorf("%s: body %v does not carry the error", c.name, body)
+		}
+		if line := doctorNudgeLine("doctor", "why?", c.err); !strings.Contains(line, c.wantLine) {
+			t.Errorf("%s: line %q does not contain %q", c.name, line, c.wantLine)
 		}
 	}
 }
