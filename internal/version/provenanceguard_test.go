@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -101,7 +102,20 @@ const (
 // exactly the settings ReadBuildInfo returns, so a script that scrapes
 // vcs.revision out of it is wrong in the same way for the same reason, and the
 // Go scan above cannot see it.
-var shellStampTokens = []string{"go version -m", "vcs.revision"}
+//
+// Patterns, not literal tokens (mg-41494): a scrape is usually a sed or grep
+// REGEX, and a careful author escapes the dot — build.sh's own reads
+// `vcs\.revision=`, which the literal "vcs.revision" never matched, so the
+// guard under-counted build.sh and a new unlisted scrape written that way
+// passed silently. The field name matches with the dot bare, backslash-escaped
+// (any number of backslashes, for strings quoted twice) or in a bracket class.
+var shellStampTokens = []struct {
+	label string
+	re    *regexp.Regexp
+}{
+	{"go version -m", regexp.MustCompile(`go version -m`)},
+	{"vcs.revision", regexp.MustCompile(`vcs(\\*\.|\[\.\])revision`)},
+}
 
 // goStampReaders is the closed list of Go sites permitted to read the stamp,
 // keyed by repo-relative path and enclosing function. Function granularity, not
@@ -137,20 +151,29 @@ var goStampReaders = map[string]string{
 // rather than a bare filename so a NEW scrape inside an already-listed script
 // is caught; reformatting that changes the count is meant to force a look.
 var shellStampScrapers = map[string]int{
-	// 727 is the real scrape (installed_rev, reading a binary on disk); 868
-	// is an ACTION string telling a human which command to run.
+	// Counts are pattern HITS, not lines: a line matching both patterns
+	// counts twice.
+	//
+	// installed_rev's real scrape (reading a binary on disk) is one line with
+	// both patterns = 2; the third is an ACTION string telling a human which
+	// command to run.
 	filepath.Join("scripts", "pogo-self-deploy"): 3,
 
-	// verify_installed_stamps (drellem2/pogo#103, mg-8075b): the one real
-	// scrape reads each binary --install just wrote and COMPARES its
-	// vcs.revision against `git rev-parse HEAD`. It is the detector for this
-	// guard's misattribution, not a consumer of it. The other four hits are the
-	// failure/success messages that name the field.
-	"build.sh": 5,
-	// Test 11 of build_test.sh, which asserts on verify_installed_stamps's
-	// messages and builds the nested-worktree fixture that yields a foreign
-	// vcs.revision. It reads no stamp of its own.
-	"build_test.sh": 5,
+	// verify_installed_stamps (drellem2/pogo#103, mg-8075b) reads each binary
+	// --install just wrote and COMPARES its vcs.revision against
+	// `git rev-parse HEAD`. It is the detector for this guard's
+	// misattribution, not a consumer of it. The real read is TWO hits: the
+	// `go version -m` invocation, and the sed that extracts the field as the
+	// regex-escaped `vcs\.revision` (invisible to this guard until
+	// mg-41494). The other four are the failure/success messages naming the
+	// field — the redeploy warning names both patterns, so counts twice.
+	"build.sh": 6,
+	// Test 11 of build_test.sh: six hits in assertions on
+	// verify_installed_stamps's messages, plus 11b's direct `go version -m`
+	// read of the nested install's ldflags Commit (not vcs.revision), which is
+	// what makes "flagged only vcs.revision" a check that can fail rather than
+	// an absence that main also satisfies.
+	"build_test.sh": 7,
 }
 
 func TestToolchainStampReadersAreEnumerated(t *testing.T) {
@@ -279,6 +302,12 @@ func TestTheProvenanceGuardCanFail(t *testing.T) {
 	// against this tree reported PASS while that scrape sat at line 727.
 	write("scripts/deployish", "#!/bin/bash\nrev=$(go version -m \"$1\" | grep vcs.revision)\n")
 	write("scripts/warned.sh", "#!/bin/sh\n# never scrape `go version -m` for vcs.revision\necho ok\n")
+	// A REGEX-ESCAPED scrape with no `go version -m` on the line: the binary's
+	// build info arrives in a variable, as it does in build.sh's
+	// verify_installed_stamps. The literal token "vcs.revision" never matched
+	// this (mg-41494), so the only thing that can see it is the field pattern.
+	write("scripts/escaped.sh", "#!/bin/sh\nrev=$(printf '%s\\n' \"$info\" | sed -n 's/.*vcs\\.revision=\\([0-9a-f]*\\).*/\\1/p')\n")
+	write("scripts/bracketed.sh", "#!/bin/sh\nrev=$(printf '%s\\n' \"$info\" | grep -o 'vcs[.]revision=[0-9a-f]*')\n")
 
 	shell, err := scanShellStampScrapers(root)
 	if err != nil {
@@ -287,6 +316,12 @@ func TestTheProvenanceGuardCanFail(t *testing.T) {
 	if lines := shell[filepath.Join("scripts", "deployish")]; len(lines) == 0 {
 		t.Error("the shell scan missed an extensionless scraper — the exact blind spot that made " +
 			"the ported guard report PASS on this repo")
+	}
+	for _, rel := range []string{filepath.Join("scripts", "escaped.sh"), filepath.Join("scripts", "bracketed.sh")} {
+		if lines := shell[rel]; len(lines) != 1 {
+			t.Errorf("the shell scan reported %v for %s, want exactly one vcs.revision hit — a scrape "+
+				"written as a regex (escaped or bracketed dot) is the form real scripts use", lines, rel)
+		}
 	}
 	if lines, ok := shell[filepath.Join("scripts", "warned.sh")]; ok {
 		t.Errorf("a shell COMMENT warning about the trap was counted as a scrape: %v\n"+
@@ -431,8 +466,8 @@ func scanShellStampScrapers(root string) (map[string][]string, error) {
 				continue
 			}
 			for _, bad := range shellStampTokens {
-				if strings.Contains(code, bad) {
-					found[rel] = append(found[rel], rel+":"+strconv.Itoa(i+1)+": "+bad)
+				if bad.re.MatchString(code) {
+					found[rel] = append(found[rel], rel+":"+strconv.Itoa(i+1)+": "+bad.label)
 				}
 			}
 		}
