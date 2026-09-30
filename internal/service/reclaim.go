@@ -22,8 +22,13 @@ import (
 // action that frees disk to the one job that needs a working checkout, a working
 // network and a successful build — on a full volume, none of which are available.
 //
-// WHY THE SCHEDULE IS AN INTERVAL AND THE TRIGGER IS A SIZE. launchd has no size
-// trigger; StartInterval is the sampler and pogo-reclaim.sh is the trigger. The
+// WHY THE SCHEDULE IS A SAMPLER AND THE TRIGGER IS A SIZE. launchd has no size
+// trigger; a half-hourly wake is the sampler and pogo-reclaim.sh is the trigger.
+// The wake is a StartCalendarInterval at :00 and :30, not a StartInterval of
+// 1800s: on the reference box StartInterval jobs sat at `pended nondemand
+// spawn = interval` with `runs = 0` while the calendar jobs beside them fired
+// (the mg-50e0 wedge; mg-d8160), so a sampler on StartInterval sampled nothing.
+// The
 // script's header carries the reasoning for the two floors and why they are
 // ANDed. What matters here is that this file installs BOTH artifacts — the plist
 // and the runner — and that com.pogo.reclaim is registered in
@@ -40,7 +45,8 @@ const reclaimLabel = "com.pogo.reclaim"
 // never fired.
 const reclaimLogName = "pogo-reclaim.log"
 
-// reclaimIntervalSeconds — 30 minutes.
+// reclaimIntervalSeconds — 30 minutes, rendered as StartCalendarInterval fires
+// at the minutes calendarEveryMinutes gives for it (:00 and :30).
 //
 // Chosen against the observed fill rate, not against a sense of tidiness: this
 // volume went from healthy to 571 MiB free inside a working day, and every
@@ -74,8 +80,15 @@ const reclaimPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <array>
         <string>{{.ScriptPath}}</string>
     </array>
-    <key>StartInterval</key>
-    <integer>{{.IntervalSeconds}}</integer>
+    <key>StartCalendarInterval</key>
+    <array>
+{{- range .Minutes}}
+        <dict>
+            <key>Minute</key>
+            <integer>{{.}}</integer>
+        </dict>
+{{- end}}
+    </array>
     <key>RunAtLoad</key>
     <false/>
     <key>KeepAlive</key>
@@ -112,6 +125,7 @@ type reclaimData struct {
 	Home            string
 	PogoHome        string
 	IntervalSeconds int
+	Minutes         []int // StartCalendarInterval Minute values, one fire each per hour
 }
 
 // ReclaimLogPath is the file the installed job writes every line to, including
@@ -187,6 +201,7 @@ func renderReclaimPlist() (string, reclaimData, error) {
 		Home:            home,
 		PogoHome:        pogoHome(),
 		IntervalSeconds: reclaimIntervalSeconds,
+		Minutes:         calendarEveryMinutes(reclaimIntervalSeconds / 60),
 	}
 	tmpl, err := template.New("reclaim-plist").Parse(reclaimPlistTemplate)
 	if err != nil {
@@ -255,7 +270,7 @@ func InstallReclaim() error {
 
 	fmt.Printf("Reclaim agent installed: %s\n", plistPath)
 	fmt.Printf("Script:   %s\n", dst)
-	fmt.Printf("Sampling: every %d min; the reclaim itself fires only when free space AND cache size both cross their floors\n", data.IntervalSeconds/60)
+	fmt.Printf("Sampling: every %d min (at %s past each hour); the reclaim itself fires only when free space AND cache size both cross their floors\n", data.IntervalSeconds/60, joinMinutes(data.Minutes))
 	fmt.Printf("Logs:     %s\n", ReclaimLogPath())
 	fmt.Printf("\n")
 	fmt.Printf("This job reclaims the Go module cache and nothing else. On the box that\n")

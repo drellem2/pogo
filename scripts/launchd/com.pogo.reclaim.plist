@@ -9,27 +9,39 @@
         <!-- Update YOUR_USERNAME, or use `pogo service install-reclaim`. -->
         <string>/Users/YOUR_USERNAME/.pogo/bin/pogo-reclaim.sh</string>
     </array>
-    <!-- StartInterval, not StartCalendarInterval, and this is the ticket's
-         central decision rendered into launchd's vocabulary.
+    <!-- A half-hourly SAMPLER, and this is the ticket's central decision
+         rendered into launchd's vocabulary.
 
          The trigger is SIZE — the cache grows with build activity, not with
-         time — and launchd has no size trigger. StartInterval is therefore the
+         time — and launchd has no size trigger. The schedule is therefore the
          SAMPLER and the script is the trigger: every 30 minutes it wakes, runs
          one `df`, and in the overwhelmingly common case logs one line and
          exits. The expensive `du` of the cache is only paid on a fire that has
          already established free space is below the floor.
 
-         A nightly StartCalendarInterval was the alternative and is worse for
-         this condition: the volume went from healthy to 571 MiB free inside a
-         working day, and a job that samples once a night can miss the entire
-         window in which every merge on the box is failing. Firing during a
-         build is handled by the script's in-flight check, not by picking an
-         hour. -->
-    <key>StartInterval</key>
-    <integer>1800</integer>
+         The fires are StartCalendarInterval at :00 and :30, not StartInterval
+         1800 (mg-d8160). On the reference box StartInterval jobs never fired
+         (`runs = 0`, `pended nondemand spawn = interval`) while the calendar
+         jobs beside them kept running — the mg-50e0 launchd wedge. A single
+         nightly calendar fire was the other alternative and is worse for this
+         condition: the volume went from healthy to 571 MiB free inside a
+         working day. Firing during a build is handled by the script's
+         in-flight check, not by picking an hour. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
     <!-- RunAtLoad=false. Installing or reloading this job must not perform a
          reclaim as a side effect — an operator rerunning the installer should
-         not thereby delete a 7G cache. The first sample arrives 30 min later. -->
+         not thereby delete a 7G cache. The first sample arrives at the next
+         :00 or :30. -->
     <key>RunAtLoad</key>
     <false/>
     <!-- One-shot per fire. KeepAlive=true would respawn it in a tight loop. -->

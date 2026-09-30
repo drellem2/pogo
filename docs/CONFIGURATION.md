@@ -1853,10 +1853,14 @@ pogo service install-gh-watch      # com.pogo.ghwatch: /bin/zsh -c -l 'exec <pog
 pogo gh-watch --force              # one run by hand, every detector sampled now
 ```
 
-- **Schedule.** launchd fires it every 15 minutes and at load; each detector
+- **Schedule.** launchd fires it at :00, :15, :30 and :45 of every hour
+  (`StartCalendarInterval`) and at load; each detector
   keeps its own `interval` and skips a fire on which it is not due. `--force`
   clears only that interval check — an unchanged finding set is still not
-  re-mailed before `renotify_after`, and escalation clocks are kept.
+  re-mailed before `renotify_after`, and escalation clocks are kept. It was a
+  `StartInterval` of 900s until mg-d8160; on the reference box that class never
+  fired after the load (`runs = 1`, `pended nondemand spawn = interval`) while
+  the calendar jobs beside it ran, so the detectors were dark between hand runs.
 - **State between runs.** A per-fire process would otherwise make every fire
   each detector's first. `$POGO_HOME/gh-watch/state.json` carries each
   detector's last-sample time, last-mailed fingerprint and per-finding

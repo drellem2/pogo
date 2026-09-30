@@ -24,8 +24,9 @@ import (
 // lesson (a correct, audited detector that NOTHING RAN) is why this exists
 // rather than trusting the plist to be loaded.
 //
-// WHY "AWAKE TIME". The job fires on launchd's StartInterval, which does not
-// fire while the host sleeps, and pogod's heartbeat keeps ticking across a
+// WHY "AWAKE TIME". The job fires on launchd's StartCalendarInterval (every
+// quarter-hour; StartInterval until mg-d8160), which does not fire while the
+// host sleeps, and pogod's heartbeat keeps ticking across a
 // wake before launchd has had its chance. Judging staleness against wall-clock
 // time alone would raise this alarm on nearly every wake. So a record is stale
 // only when it is older than the window AND pogod has itself been ticking,

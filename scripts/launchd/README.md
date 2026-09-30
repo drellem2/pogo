@@ -865,6 +865,10 @@ cannot reach it, and the 7.3G that produced the ticket would have.
 launchd has no size trigger — `StartInterval`, `StartCalendarInterval` and
 `WatchPaths` are the whole vocabulary, and a directory growing is not a
 WatchPaths event. So the job wakes every 30 minutes and **the size decides**.
+The wake is a `StartCalendarInterval` at :00 and :30, not a `StartInterval` of
+1800s: on the reference box `StartInterval` jobs sat at `pended nondemand spawn =
+interval` with `runs = 0` while the calendar jobs beside them fired (mg-50e0's
+wedge; mg-d8160).
 
 That is affordable only because the measurements are ordered cheap-first: one
 `df` per fire, and the `du` of a multi-gigabyte tree only once `df` has already

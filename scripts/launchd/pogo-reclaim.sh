@@ -102,7 +102,8 @@
 # launchd has no size trigger. It has StartInterval, StartCalendarInterval and
 # WatchPaths, and a directory's SIZE changing is not a WatchPaths event. So the
 # schedule here is a SAMPLER and the size is the TRIGGER: launchd wakes this
-# script every 30 minutes, and the script decides.
+# script every 30 minutes (StartCalendarInterval at :00 and :30 — StartInterval
+# never fired on the reference box, mg-d8160), and the script decides.
 #
 # That ordering is why the sampler is cheap. `df` on the volume runs first and
 # costs nothing; the `du` of a multi-gigabyte tree is only paid on a fire that

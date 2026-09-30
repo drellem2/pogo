@@ -12,12 +12,22 @@ package service
 // therefore a shell, not the pogo binary, and that is the job's defining
 // property rather than an implementation detail.
 //
-// WHY StartInterval AND RunAtLoad. The watchers throttle themselves (intake
-// every 15m, teardown and re-read hourly by default) from their persisted
-// state, so the job only has to wake at least as often as the fastest of them.
-// RunAtLoad makes an install produce a record at once, which is what pogod's
-// witness and the operator installing it both want to see; a fire at load is a
-// read-only pass whose mail is still governed by the persisted renotify state.
+// WHY StartCalendarInterval AND RunAtLoad. The watchers throttle themselves
+// (intake every 15m, teardown and re-read hourly by default) from their
+// persisted state, so the job only has to wake at least as often as the fastest
+// of them, and a wall-clock fire at :00/:15/:30/:45 serves as well as one
+// relative to load. RunAtLoad makes an install produce a record at once, which
+// is what pogod's witness and the operator installing it both want to see; a
+// fire at load is a read-only pass whose mail is still governed by the
+// persisted renotify state.
+//
+// It was StartInterval (900s) until mg-d8160, and on the reference box that
+// never fired: launchctl print showed `runs = 1` (the RunAtLoad) and
+// `pended nondemand spawn = interval|speculative` for hours, while the
+// StartCalendarInterval jobs beside it (com.pogo.mgbackup, com.pogo.deploy) kept
+// running — the launchd wedge of mg-50e0. Every fire this job misses leaves
+// gh-issue intake, teardown and carrier re-read dark, so it uses the trigger
+// class that fires there. calendarEveryMinutes renders the fires.
 //
 // It is in the managed registry (launchagentaudit.go), so the nightly audit
 // compares the installed plist against what this build renders.
@@ -37,9 +47,11 @@ const ghWatchLabel = "com.pogo.ghwatch"
 
 const ghWatchLogName = "pogo-gh-watch.log"
 
-// ghWatchIntervalSeconds is the job's wake interval: the fastest watcher's
-// default interval (ghintake.DefaultInterval, 15m).
-const ghWatchIntervalSeconds = 900
+// ghWatchIntervalMinutes is the job's wake cadence: the fastest watcher's
+// default interval (ghintake.DefaultInterval, 15m). It is rendered as one
+// StartCalendarInterval fire per multiple of it within the hour, not as a
+// StartInterval (see the file header).
+const ghWatchIntervalMinutes = 15
 
 const ghWatchPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -54,8 +66,15 @@ const ghWatchPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
         <string>-l</string>
         <string>{{.Command}}</string>
     </array>
-    <key>StartInterval</key>
-    <integer>{{.IntervalSeconds}}</integer>
+    <key>StartCalendarInterval</key>
+    <array>
+{{- range .Minutes}}
+        <dict>
+            <key>Minute</key>
+            <integer>{{.}}</integer>
+        </dict>
+{{- end}}
+    </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -80,14 +99,14 @@ const ghWatchPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 `
 
 type ghWatchData struct {
-	Label           string
-	Command         string
-	LogDir          string
-	LogName         string
-	Path            string
-	Home            string
-	PogoHome        string
-	IntervalSeconds int
+	Label    string
+	Command  string
+	LogDir   string
+	LogName  string
+	Path     string
+	Home     string
+	PogoHome string
+	Minutes  []int // StartCalendarInterval Minute values, one fire each per hour
 }
 
 // GHWatchLogPath is the job's log.
@@ -109,6 +128,31 @@ func findPogo() (string, error) {
 	return filepath.Abs(path)
 }
 
+// calendarEveryMinutes returns the Minute values of a StartCalendarInterval
+// that fires every n minutes on the wall clock: 0, n, 2n, ... below 60. n must
+// divide 60, or the gap across the hour would differ from the others; a caller
+// passing anything else is a programming error, so it panics rather than
+// render a schedule nobody chose.
+func calendarEveryMinutes(n int) []int {
+	if n <= 0 || n > 60 || 60%n != 0 {
+		panic(fmt.Sprintf("calendarEveryMinutes(%d): n must divide 60", n))
+	}
+	out := make([]int, 0, 60/n)
+	for m := 0; m < 60; m += n {
+		out = append(out, m)
+	}
+	return out
+}
+
+// joinMinutes renders fire minutes as ":00/:15/:30/:45" for install summaries.
+func joinMinutes(ms []int) string {
+	parts := make([]string, len(ms))
+	for i, m := range ms {
+		parts[i] = fmt.Sprintf(":%02d", m)
+	}
+	return strings.Join(parts, "/")
+}
+
 // shellQuote single-quotes s for zsh.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
@@ -121,14 +165,14 @@ func renderGHWatchPlist() (string, ghWatchData, error) {
 	}
 	home, _ := os.UserHomeDir()
 	data := ghWatchData{
-		Label:           ghWatchLabel,
-		Command:         "exec " + shellQuote(pogoPath) + " gh-watch --oneline",
-		LogDir:          logDir(),
-		LogName:         ghWatchLogName,
-		Path:            launchdPath(),
-		Home:            home,
-		PogoHome:        pogoHome(),
-		IntervalSeconds: ghWatchIntervalSeconds,
+		Label:    ghWatchLabel,
+		Command:  "exec " + shellQuote(pogoPath) + " gh-watch --oneline",
+		LogDir:   logDir(),
+		LogName:  ghWatchLogName,
+		Path:     launchdPath(),
+		Home:     home,
+		PogoHome: pogoHome(),
+		Minutes:  calendarEveryMinutes(ghWatchIntervalMinutes),
 	}
 	tmpl, err := template.New("ghwatch-plist").Parse(ghWatchPlistTemplate)
 	if err != nil {
@@ -172,7 +216,7 @@ func InstallGHWatch() error {
 	}
 
 	fmt.Printf("gh-watch agent installed: %s\n", plistPath)
-	fmt.Printf("Runs:     /bin/zsh -c -l %q every %d min, and once now (RunAtLoad)\n", data.Command, data.IntervalSeconds/60)
+	fmt.Printf("Runs:     /bin/zsh -c -l %q at minutes %s of every hour, and once now (RunAtLoad)\n", data.Command, joinMinutes(data.Minutes))
 	fmt.Printf("Logs:     %s (one line per fire)\n", GHWatchLogPath())
 	fmt.Printf("Record:   %s/gh-watch/state.json (read by pogod)\n", data.PogoHome)
 	fmt.Printf("\n")

@@ -43,19 +43,20 @@ func TestRenderReclaimPlistHasNoSecrets(t *testing.T) {
 	}
 }
 
-// TestRenderReclaimPlistSamplesOnAnInterval pins the ticket's central decision
+// TestRenderReclaimPlistSamplesEveryHalfHour pins the ticket's central decision
 // in launchd's vocabulary.
 //
 // The trigger is SIZE, and launchd has no size trigger — so the schedule is a
-// SAMPLER and the script is the trigger. That makes StartInterval right here for
-// exactly the reason it is wrong for com.pogo.deploy (which pins
-// StartCalendarInterval, because a nightly that fires N seconds after load is
-// not a nightly).
+// SAMPLER and the script is the trigger. The sampler is half-hourly wall-clock
+// fires (StartCalendarInterval at :00 and :30), NOT StartInterval: on the
+// reference box StartInterval jobs never fired (`runs = 0`, `pended nondemand
+// spawn = interval`) while the calendar jobs beside them did (mg-d8160), and a
+// sampler that never samples is the one outcome worse than a slow one.
 //
-// The interval is pinned as a number because the number is an argument: the
+// The cadence is pinned as a number because the number is an argument: the
 // volume went from healthy to 571 MiB free inside a working day, and a sampler
 // slower than that misses the window in which every merge on the box is failing.
-func TestRenderReclaimPlistSamplesOnAnInterval(t *testing.T) {
+func TestRenderReclaimPlistSamplesEveryHalfHour(t *testing.T) {
 	rendered, data, err := renderReclaimPlist()
 	if err != nil {
 		t.Fatalf("renderReclaimPlist: %v", err)
@@ -66,26 +67,46 @@ func TestRenderReclaimPlistSamplesOnAnInterval(t *testing.T) {
 	if ReclaimInterval() != data.IntervalSeconds {
 		t.Errorf("ReclaimInterval() = %d but the plist renders %d — a caller stating the cadence would state a different one than launchd runs", ReclaimInterval(), data.IntervalSeconds)
 	}
-	if !strings.Contains(rendered, "<key>StartInterval</key>") {
-		t.Error("no StartInterval: the sampler has no schedule")
+	if strings.Contains(rendered, "<key>StartInterval</key>") {
+		t.Error("StartInterval is present: on this box that class never fires (mg-d8160), so the sampler would sample nothing")
 	}
-	if strings.Contains(rendered, "StartCalendarInterval") {
-		t.Error("StartCalendarInterval is present: a wall-clock nightly can miss the entire window in which the disk fills and every merge fails")
+	// POGO_RECLAIM_INTERVAL_SEC is what the script quotes as "the next fire";
+	// it must agree with the fires actually scheduled.
+	if !strings.Contains(rendered, "<key>POGO_RECLAIM_INTERVAL_SEC</key>\n        <string>1800</string>") {
+		t.Error("POGO_RECLAIM_INTERVAL_SEC does not carry 1800")
 	}
 
-	// The audit decodes the same plist. If it cannot see the interval, drift in
+	// The audit decodes the same plist. If it cannot see the fires, drift in
 	// the sampling rate is invisible to `pogo doctor` — the mg-fc99 shape, where
 	// a job is installed, loaded, listed by launchctl, and doing a fraction of
 	// what the code believes.
 	sched := parseLaunchSchedule([]byte(rendered))
-	if !sched.Decoded {
-		t.Fatal("the audit could not decode the plist this build renders")
+	want := LaunchSchedule{Decoded: true, Calendar: []CalendarFire{
+		{Minute: 0, Hour: -1, Day: -1, Weekday: -1, Month: -1},
+		{Minute: 30, Hour: -1, Day: -1, Weekday: -1, Month: -1},
+	}}
+	if !sched.Equal(want) {
+		t.Errorf("audit decoded %s (RunAtLoad=%t); want %s with RunAtLoad=false", sched, sched.RunAtLoad, want)
 	}
-	if sched.Interval != data.IntervalSeconds {
-		t.Errorf("audit decoded interval %d; plist renders %d", sched.Interval, data.IntervalSeconds)
+}
+
+// TestTrackedReclaimPlistMatchesTheRenderedSchedule — scripts/launchd holds a
+// hand-written copy of the plist for readers and manual installs. If its
+// schedule said StartInterval while the installer wrote calendar fires, the copy
+// would document (and a manual install would reinstate) the trigger that never
+// fired.
+func TestTrackedReclaimPlistMatchesTheRenderedSchedule(t *testing.T) {
+	tracked, err := os.ReadFile(filepath.Join("..", "..", "scripts", "launchd", "com.pogo.reclaim.plist"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if sched.RunAtLoad {
-		t.Error("audit decoded RunAtLoad=true")
+	rendered, _, err := renderReclaimPlist()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, want := parseLaunchSchedule(tracked), parseLaunchSchedule([]byte(rendered))
+	if !got.Equal(want) {
+		t.Errorf("tracked plist schedules %s (RunAtLoad=%t); the installer renders %s (RunAtLoad=%t)", got, got.RunAtLoad, want, want.RunAtLoad)
 	}
 }
 
@@ -189,36 +210,43 @@ func TestReclaimIsRegisteredForAudit(t *testing.T) {
 }
 
 // TestAuditReclaimDetectsIntervalDrift proves the registration is worth having
-// rather than merely present. A plist whose StartInterval was hand-edited to
-// once a day is installed, loaded, listed by launchctl, and samples 1/48th as
-// often as the code believes — the state that has to be visible.
+// rather than merely present. A plist whose schedule was hand-edited to once a
+// day is installed, loaded, listed by launchctl, and samples 1/48th as often as
+// the code believes — the state that has to be visible. The pre-mg-d8160
+// StartInterval 1800 plist, still installed on a box that has not re-run
+// install-reclaim, has to read as schedule drift too.
 func TestAuditReclaimDetectsIntervalDrift(t *testing.T) {
 	rendered, _, err := renderReclaimPlist()
 	if err != nil {
 		t.Fatalf("renderReclaimPlist: %v", err)
 	}
-	drifted := strings.Replace(rendered,
-		"<key>StartInterval</key>\n    <integer>1800</integer>",
-		"<key>StartInterval</key>\n    <integer>86400</integer>", 1)
-	if drifted == rendered {
-		t.Fatal("could not construct a drifted plist — the StartInterval spelling changed")
+	i := strings.Index(rendered, "    <key>StartCalendarInterval</key>")
+	j := strings.Index(rendered, "    <key>RunAtLoad</key>")
+	if i < 0 || j < i {
+		t.Fatal("could not locate the calendar block in the rendered plist")
 	}
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, reclaimLabel+".plist")
-	if err := os.WriteFile(path, []byte(drifted), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	res := auditLaunchAgent(reclaimLabel, path, "pogo service install-reclaim", rendered, nil)
-	if res.Status != LaunchAgentStale {
-		t.Errorf("status = %q; want %q for a plist sampling once a day where the code says every 30 min", res.Status, LaunchAgentStale)
-	}
-	if !res.ScheduleDrift {
-		t.Error("ScheduleDrift is false: an interval that samples 1/48th as often was reported as a mere byte difference")
-	}
-	if !strings.Contains(res.Detail, "install-reclaim") {
-		t.Errorf("detail does not name the remedy: %s", res.Detail)
+	for name, sched := range map[string]string{
+		"daily":        "    <key>StartCalendarInterval</key>\n    <dict>\n        <key>Hour</key>\n        <integer>3</integer>\n        <key>Minute</key>\n        <integer>0</integer>\n    </dict>\n",
+		"old interval": "    <key>StartInterval</key>\n    <integer>1800</integer>\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			drifted := rendered[:i] + sched + rendered[j:]
+			dir := t.TempDir()
+			path := filepath.Join(dir, reclaimLabel+".plist")
+			if err := os.WriteFile(path, []byte(drifted), 0644); err != nil {
+				t.Fatal(err)
+			}
+			res := auditLaunchAgent(reclaimLabel, path, "pogo service install-reclaim", rendered, nil)
+			if res.Status != LaunchAgentStale {
+				t.Errorf("status = %q; want %q", res.Status, LaunchAgentStale)
+			}
+			if !res.ScheduleDrift {
+				t.Error("ScheduleDrift is false: a different sampling schedule was reported as a mere byte difference")
+			}
+			if !strings.Contains(res.Detail, "install-reclaim") {
+				t.Errorf("detail does not name the remedy: %s", res.Detail)
+			}
+		})
 	}
 }
 
