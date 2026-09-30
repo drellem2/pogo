@@ -1070,10 +1070,56 @@ func mailLoopExclusionFor(a *Agent) MailLoopExclusionReason {
 	return ""
 }
 
-// NudgeAPIResponse is returned for wait-idle nudges to report delivery status.
+// Nudge outcome statuses carried by NudgeAPIResponse.Status. They are the
+// contract a caller branches on — never the error text (drellem2/pogo#100).
+const (
+	// NudgeStatusDelivered: the message reached the agent (confirmed by its
+	// receipt where the harness has one, assumed after wait-idle otherwise).
+	NudgeStatusDelivered = "delivered"
+	// NudgeStatusNotRunning: no running agent by that name; nothing was sent.
+	NudgeStatusNotRunning = "not_running"
+	// NudgeStatusQueued: written to a harness that was mid-turn, which emits
+	// no receipt for such a prompt (ErrNudgeQueued). Probably fine; do NOT
+	// resend, or the agent gets the instruction twice.
+	NudgeStatusQueued = "queued"
+	// NudgeStatusNotDelivered: nobody received it — the confirm escalation ran
+	// out (ErrNudgeUnconfirmed), or the message was never written because
+	// wait-idle timed out or the agent exited (ErrNudgeNotWritten). Resend,
+	// e.g. by mail.
+	NudgeStatusNotDelivered = "not_delivered"
+	// NudgeStatusFailed: any other error (a PTY write error, an unreadable
+	// receipt file, a mangled submission). The Error field says which.
+	NudgeStatusFailed = "failed"
+)
+
+// NudgeAPIResponse is the body of every POST /agents/:name/nudge answer that
+// reached the agent registry, success or failure.
 type NudgeAPIResponse struct {
-	Status string `json:"status"` // "delivered" or "not_running"
+	Status string `json:"status"` // one of the NudgeStatus* constants
 	Agent  string `json:"agent"`
+	Error  string `json:"error,omitempty"` // set on every status but delivered
+}
+
+// NudgeErrorStatus maps a NudgeWithMode error to the status reported for it.
+// err must be non-nil.
+func NudgeErrorStatus(err error) string {
+	switch {
+	case errors.Is(err, ErrNudgeQueued):
+		return NudgeStatusQueued
+	case errors.Is(err, ErrNudgeUnconfirmed), errors.Is(err, ErrNudgeNotWritten):
+		return NudgeStatusNotDelivered
+	}
+	return NudgeStatusFailed
+}
+
+// nudgeErrorHTTPStatus is the HTTP code sent with each failure status. The
+// body's status is the contract; the code only keeps "queued" out of the 5xx
+// range, since pogod did write the message and has nothing to apologise for.
+func nudgeErrorHTTPStatus(status string) int {
+	if status == NudgeStatusQueued {
+		return http.StatusAccepted
+	}
+	return http.StatusInternalServerError
 }
 
 func (r *Registry) handleNudge(w http.ResponseWriter, req *http.Request) {
@@ -1091,7 +1137,7 @@ func (r *Registry) handleNudge(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(NudgeAPIResponse{
-			Status: "not_running",
+			Status: NudgeStatusNotRunning,
 			Agent:  name,
 		})
 		return
@@ -1122,15 +1168,26 @@ func (r *Registry) handleNudge(w http.ResponseWriter, req *http.Request) {
 		timeout = time.Duration(nudgeReq.Timeout) * time.Second
 	}
 
+	// Every outcome gets a structured body. This used to be a bare 500 with the
+	// error's prose for all of them, so a caller could tell "nobody got it,
+	// resend" from "queued mid-turn, probably fine" only by matching that
+	// prose (drellem2/pogo#100).
 	if err := agent.NudgeWithMode(nudgeReq.Message, mode, timeout); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		status := NudgeErrorStatus(err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(nudgeErrorHTTPStatus(status))
+		json.NewEncoder(w).Encode(NudgeAPIResponse{
+			Status: status,
+			Agent:  name,
+			Error:  err.Error(),
+		})
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(NudgeAPIResponse{
-		Status: "delivered",
+		Status: NudgeStatusDelivered,
 		Agent:  name,
 	})
 }

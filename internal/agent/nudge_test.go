@@ -383,6 +383,9 @@ func TestNudgeExitedAgent(t *testing.T) {
 	if err == nil {
 		t.Error("expected error nudging exited agent in wait-idle mode")
 	}
+	if !errors.Is(err, ErrNudgeNotWritten) {
+		t.Errorf("an exited agent was never written to; want ErrNudgeNotWritten, got %v", err)
+	}
 }
 
 func TestRingBufferLastWriteTime(t *testing.T) {

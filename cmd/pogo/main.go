@@ -3014,6 +3014,17 @@ Agents whose harness reports no submissions (a provider with no receipt hook, or
 an agent spawned before the hook existed) fall back to --wait-idle behaviour
 automatically.
 
+Exit status tells the outcomes apart, so a caller never has to match the error
+text (with --json the same outcome is printed as "status" on failure too):
+
+  0  delivered
+  4  not delivered — nobody received it (the escalation ran out, or it was never
+     written: --wait-idle timed out or the agent exited). Resend, e.g. by mail.
+  5  queued, unconfirmed — written to an agent mid-turn, whose harness emits no
+     receipt for that. Probably fine; resending would deliver it twice.
+  1  anything else, including an agent that is not running (status
+     "not_running") and a pogod that cannot be reached (status "failed")
+
 If the agent is not running, the command FAILS and names the agent's mailbox:
 nothing is sent. (It used to fall back to "gt mail send", which nothing in this
 fleet reads, and report success — mg-e00c.) To leave a message for a stopped
@@ -3035,7 +3046,12 @@ agent, mail it: mg mail send <box> --from=<you> --subject=... --body=...`,
 			}
 
 			if err := client.NudgeRunning(name, message, opts); err != nil {
-				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				body, code := nudgeFailureResult(name, err)
+				if jsonOutput {
+					cli.PrintJSON(body)
+					os.Exit(code)
+				}
+				cli.ExitWithError(false, err.Error(), code)
 			}
 
 			if jsonOutput {

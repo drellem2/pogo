@@ -228,9 +228,61 @@ func NudgeAgent(name, message string, opts *NudgeOpts) error {
 	}
 	if r.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(r.Body)
-		return fmt.Errorf("nudge failed: %s", string(msg))
+		return nudgeFailure(name, msg)
 	}
 	return nil
+}
+
+var (
+	// ErrNudgeQueued: pogod wrote the nudge to a harness that was mid-turn and
+	// can neither confirm nor deny that it landed. Probably fine — do not
+	// resend, or the agent acts on it twice (agent.ErrNudgeQueued).
+	ErrNudgeQueued = errors.New("nudge queued, unconfirmed")
+	// ErrNudgeNotDelivered: nobody received the nudge — pogod's confirm
+	// escalation ran out, or the message was never written. Resend it by
+	// another channel.
+	ErrNudgeNotDelivered = errors.New("nudge not delivered")
+)
+
+// NudgeError is a failed nudge as pogod reported it. Status is one of
+// agent.NudgeStatus*; errors.Is(err, ErrNudgeQueued) and
+// errors.Is(err, ErrNudgeNotDelivered) answer the two statuses a caller acts
+// on, so nobody has to match Detail's prose (drellem2/pogo#100).
+type NudgeError struct {
+	Agent  string
+	Status string
+	Detail string
+}
+
+func (e *NudgeError) Error() string {
+	switch e.Status {
+	case agent.NudgeStatusQueued:
+		return "nudge queued, unconfirmed: " + e.Detail
+	case agent.NudgeStatusNotDelivered:
+		return "nudge not delivered: " + e.Detail
+	}
+	return "nudge failed: " + e.Detail
+}
+
+func (e *NudgeError) Unwrap() error {
+	switch e.Status {
+	case agent.NudgeStatusQueued:
+		return ErrNudgeQueued
+	case agent.NudgeStatusNotDelivered:
+		return ErrNudgeNotDelivered
+	}
+	return nil
+}
+
+// nudgeFailure turns a non-OK nudge response body into an error. A daemon
+// that predates the structured body answers with bare prose, which becomes
+// an untyped error exactly as before; the caller then sees status "failed".
+func nudgeFailure(name string, body []byte) error {
+	var resp agent.NudgeAPIResponse
+	if err := json.Unmarshal(body, &resp); err == nil && resp.Status != "" {
+		return &NudgeError{Agent: name, Status: resp.Status, Detail: resp.Error}
+	}
+	return fmt.Errorf("nudge failed: %s", strings.TrimSpace(string(body)))
 }
 
 // GetHostLoad asks pogod what share of this host the fleet is holding.

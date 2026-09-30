@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -176,6 +177,11 @@ func TestWaitIdleNudgeRefusesToReachABusyAgent(t *testing.T) {
 	}
 	if !containsAll(err.Error(), "wait for idle", "still producing output") {
 		t.Fatalf("unexpected error shape: %v", err)
+	}
+	// Nothing was written, so the caller is told "not delivered" (pogo#100) —
+	// and the deadline is still in the chain for callers that asked for it.
+	if !errors.Is(err, ErrNudgeNotWritten) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want ErrNudgeNotWritten wrapping context.DeadlineExceeded, got %v", err)
 	}
 
 	time.Sleep(500 * time.Millisecond)

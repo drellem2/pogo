@@ -18,6 +18,14 @@ const (
 	// success or failure is the exact defect mg-ed4a was filed for. Used by
 	// `pogo service verify-revision`.
 	ExitUnknown = 3
+	// ExitNudgeNotDelivered: `pogo nudge` — nobody received the message (the
+	// confirm escalation ran out, or it was never written). Resend it by
+	// another channel. drellem2/pogo#100.
+	ExitNudgeNotDelivered = 4
+	// ExitNudgeQueued: `pogo nudge` — the message was written to an agent
+	// mid-turn and cannot be confirmed either way. Probably fine; resending
+	// would deliver it twice. drellem2/pogo#100.
+	ExitNudgeQueued = 5
 )
 
 // PrintJSON marshals v as indented JSON and writes it to stdout.

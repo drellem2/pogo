@@ -82,6 +82,14 @@ var (
 	// head-truncation Claude Code 2.1.283 inflicted on long nudges (mg-8a70).
 	// Before receipts carried content, this was logged as a confirmed success.
 	ErrNudgeMangled = errors.New("nudge submitted but mangled in transit")
+
+	// ErrNudgeNotWritten means the message was never written to the PTY at
+	// all: wait-idle's precondition was not met before its deadline (the agent
+	// kept producing output), or the agent exited while pogod waited. Like
+	// ErrNudgeUnconfirmed, nobody received it — so both are reported to a
+	// caller as the same "not delivered" outcome (drellem2/pogo#100), and a
+	// resend by another channel cannot deliver it twice.
+	ErrNudgeNotWritten = errors.New("nudge not written")
 )
 
 // IsIdle returns true if no output has been written to the agent's PTY
@@ -377,10 +385,10 @@ func (a *Agent) NudgeWithModeCorrelated(msg string, mode NudgeMode, timeout time
 		if errors.Is(err, context.DeadlineExceeded) {
 			sinceWrite := time.Since(a.outputBuf.LastWriteTime()).Round(time.Millisecond)
 			return fmt.Errorf("wait for idle: agent %q still producing output after %s "+
-				"(last PTY write %s ago) — agent is busy or stuck redrawing: %w",
-				a.Name, timeout, sinceWrite, err)
+				"(last PTY write %s ago) — agent is busy or stuck redrawing, %w: %w",
+				a.Name, timeout, sinceWrite, ErrNudgeNotWritten, err)
 		}
-		return fmt.Errorf("wait for idle: %w", err)
+		return fmt.Errorf("wait for idle, %w: %w", ErrNudgeNotWritten, err)
 	}
 
 	if err := a.Nudge(msg); err != nil {
