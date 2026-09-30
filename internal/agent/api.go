@@ -2024,6 +2024,18 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			spawnReq.Id, adoption.Finding.Branch, adoption.Finding.Branch))
 		return
 	}
+	// $POGO_HOME gate (mg-752a3, decision on mg-feecc): a worktree cut from the
+	// live tree has exactly one exit — a refinery submit — and the refinery
+	// refuses that repo, because a merge lands on origin and the live checkout
+	// never pulls. So refuse here, where the worker has not yet been spent,
+	// instead of at the end of its life. Only when a worktree would be created:
+	// --no-worktree (or a template with worktree = false) edits in place, which
+	// IS the live-commit path. After the worktree decision, before every side
+	// effect (mg-ef80).
+	if refusal := pogoHomeSpawnRefusal(spawnReq.Repo, createWorktree); refusal != "" {
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+		return
+	}
 	if adoption != nil {
 		// Past every refusal that is specific to adopting, so the record is being
 		// written about a dispatch that is going out. Later failures — a worktree

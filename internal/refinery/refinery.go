@@ -666,6 +666,14 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	if req.TargetRef == "" {
 		req.TargetRef = "main"
 	}
+	// Refuse $POGO_HOME outright, first of the repo checks and before anything
+	// shells out against it (mg-752a3, decision on mg-feecc). A merge lands on
+	// the repo's origin and the live checkout never pulls, so here a merge is
+	// never live — it forks a second history beside the live tree. Refused now,
+	// at the prompt, rather than accepted and failed at merge.
+	if err := RefusePogoHomeRepo(req.RepoPath); err != nil {
+		return "", err
+	}
 	// Reject a malformed post-merge tag now, while the submitter is still
 	// running and a retry costs nothing. The same mistake caught after the
 	// merge lands costs a half-finished release, because the merge is not

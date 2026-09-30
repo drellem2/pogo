@@ -4904,6 +4904,12 @@ Submit will not push it for you. If the refusal says the head is already held
 by another origin ref, that means the work is safe but the name is not on
 origin — push it under the name you are submitting.
 
+--repo may not be $POGO_HOME (or a worktree of it), and is refused at submit
+(mg-752a3). A merge lands on the repo's origin, and the live checkout pogod runs
+from never pulls, so for that one repo a merge is never live — it forks a second
+history beside the live tree. Commit directly in the live checkout instead.
+spawn-polecat refuses a worktree polecat on $POGO_HOME for the same reason.
+
 When the merge lands on the repo's default branch, the moment it succeeds pogod
 records the work item done and stops the polecat.
 
@@ -4999,6 +5005,12 @@ Example:
 			branch := args[0]
 			if submitRepo == "" {
 				cli.ExitWithError(jsonOutput, "--repo is required", cli.ExitError)
+			}
+			// $POGO_HOME is never a refinery target (mg-752a3). Checked here as
+			// well as in pogod because a relative --repo resolves against THIS
+			// process's cwd, which pogod cannot see.
+			if err := refinery.RefusePogoHomeRepo(submitRepo); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
 			verdict, err := readSubmitVerdict(submitVerdict, submitVerdictFile)
 			if err != nil {
