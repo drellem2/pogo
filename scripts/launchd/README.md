@@ -311,8 +311,10 @@ belongs there instead. In order:
    only git is a healthy `/usr/bin/git` its whole effect is that a future broken
    shim would abort once with an alert instead of failing separately inside every
    `git` call in `sync_src`.
-6. **`GH_TOKEN` at run time**, matched out of `~/.zshenv` one line at a time and
-   `eval`'d alone — never sourced wholesale (that file's `export PATH=` would
+6. **`GH_TOKEN` at run time**, matched out of the first of `~/.zshenv`,
+   `~/.zshrc`, `~/.zprofile` that has an `export GH_TOKEN=` line (the log names
+   which; the run aborts only when all three miss, and the alert lists them) and
+   `eval`'d alone — never sourced wholesale (a zsh init file's `export PATH=` would
    strip `go` and reproduce the 07-23 `go: command not found` failure), and
    **never** in the plist: `~/Library/LaunchAgents` is world-readable. The value
    is never logged.
@@ -505,7 +507,7 @@ All optional; the defaults are the production values.
 | `POGO_NET_CONTROL_MIN_TARGETS` | `2` | Targets that must be probed before `down` is available at all. |
 | `POGO_DEPLOY_STALE_LOCK_MIN` | `180` | Minutes after which a lock is reclaimed. The vigil refreshes the lock's mtime, so this means "no run has made progress in 180min". |
 | `POGO_DEPLOY_GRACE` | `120` | Seconds before the post-bounce mail-check re-read. |
-| `POGO_DEPLOY_ZSHENV` | `~/.zshenv` | Where `GH_TOKEN` is read from. |
+| `POGO_DEPLOY_ZSHENV` | unset: `~/.zshenv`, `~/.zshrc`, `~/.zprofile` in order | The ONE file `GH_TOKEN` is read from when set (exact, no fallback). Unset, the first candidate with the export wins. |
 | `GIT` | first candidate that prints `git version` | Pins a specific git. Still checked by execution — a pin that cannot run is the same outage as no pin. |
 | `POGO_DEPLOY_ALERT_TO` | `mayor` | First alert recipient; `human` is always copied. |
 | `POGO_DEPLOY_MG` | `1` | `0` disables the fleet-mg install (below). |
