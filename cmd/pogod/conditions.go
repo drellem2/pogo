@@ -60,7 +60,9 @@ const (
 	rowA13TeardownNotArmed = "ghteardown_not_armed"
 	rowA13IntakeNotArmed   = "ghintake_not_armed"
 	rowA13IntakeNoCred     = "ghintake_no_credential"
-	rowA14LogRotation      = "log_rotation_failed"
+
+	rowA13GHWatchNotReporting = "ghwatch_not_reporting"
+	rowA14LogRotation         = "log_rotation_failed"
 
 	rowA9TicketIndex       = "gitgc_no_ticket_index"
 	rowA9PolecatWitness    = "gitgc_no_polecat_witness"
@@ -464,6 +466,22 @@ func conditionHeartbeatWriteFailed(to, path, detail string) pogodCondition {
 	}
 }
 
+// A13 — the gh-issue detectors. Since mg-257a8 they do not run in pogod: they
+// run in `pogo gh-watch`, which launchd starts through a login shell
+// (com.pogo.ghwatch) so that pogod need not hold a GitHub credential for them.
+// pogod raises these four conditions by READING that job's record,
+// $POGO_HOME/gh-watch/state.json (see ghwatchwitness.go): the first three
+// annunciate a detector the job could not arm, the fourth a job that has
+// stopped producing records at all — the one failure the job cannot report
+// about itself.
+
+// ghWatchJobRemedy is the shared "where does this job's environment come from"
+// paragraph. The job runs `zsh -c -l`, so its PATH and credential are what a
+// NON-interactive login zsh has: ~/.zshenv and ~/.zprofile, never ~/.zshrc.
+const ghWatchJobRemedy = "com.pogo.ghwatch runs `pogo gh-watch` through `zsh -c -l`, so its PATH and\n" +
+	"     credential are what a NON-interactive login zsh has (~/.zshenv, ~/.zprofile —\n" +
+	"     not ~/.zshrc). Reproduce its view with the same shell: `zsh -c -l '<command>'`."
+
 // conditionTeardownNotArmed — A13. The one row that does NOT go to the
 // coordinator: the gh-issue teardown detector already has a configured mailbox
 // ([gh_teardown] notify_to, `pm-pogo` by default) chosen deliberately in mg-b586
@@ -475,29 +493,27 @@ func conditionTeardownNotArmed(to, detail string) pogodCondition {
 		Row:    "A13",
 		To:     to,
 		Detail: detail,
-		Subject: "[pogod] gh-issue teardown detector NOT ARMED — `gh` is not on the daemon's PATH; " +
+		Subject: "[pogod] gh-issue teardown detector NOT ARMED — `gh` is not on the gh-watch job's PATH; " +
 			"done carriers are unchecked",
 		Body: conditionBody("A13",
 			"The gh-issue teardown detector is enabled but did not arm, because `gh` is not\n"+
-				"reachable on pogod's PATH.",
+				"reachable on the PATH of `pogo gh-watch`, the scheduled job that runs it\n"+
+				"(com.pogo.ghwatch; pogod read this from that job's last record).",
 			"Nothing is checking done work items against the GitHub issues they carry, so an\n"+
 				"  issue that should have been closed by a merged carrier just stays open with no\n"+
-				"  finding raised. This is a PATH fault, not a config choice, and PATH under launchd\n"+
-				"  is not the PATH in your shell — `gh` working when you type it proves nothing\n"+
-				"  about the daemon. This exact class has bitten before (a nightly deploy died on\n"+
-				"  `go: command not found` for the same reason).",
-			"1. `launchctl print gui/$(id -u)/com.pogo.daemon | grep -A2 PATH` — compare against\n"+
-				"     where `gh` actually is (`command -v gh`).\n"+
-				"  2. Fix EnvironmentVariables.PATH in\n"+
-				"     ~/Library/LaunchAgents/com.pogo.daemon.plist (or re-run `pogo service\n"+
-				"     install`, which writes a PATH that includes the usual locations) and reload.\n"+
-				"  3. Confirm with `pogo events --type gh_teardown_report` after the next boot.",
+				"  finding raised. This is a PATH fault, not a config choice, and the job's PATH\n"+
+				"  is not necessarily the PATH in your interactive shell — `gh` working when you\n"+
+				"  type it proves nothing about the job.",
+			"1. "+ghWatchJobRemedy+"\n"+
+				"  2. `zsh -c -l 'command -v gh'` — if empty, put gh's directory on PATH in\n"+
+				"     ~/.zprofile or ~/.zshenv.\n"+
+				"  3. Confirm with `pogo gh-watch --force` (it prints each detector's arming).",
 			detail),
 	}
 }
 
 // conditionIntakeNotArmed — A13's second consequence (mg-039b). Same root cause as
-// conditionTeardownNotArmed, a `gh` that pogod cannot reach, and the same
+// conditionTeardownNotArmed, a `gh` the gh-watch job cannot reach, and the same
 // deviation from the routing rule for the same reason: the gh-issue INTAKE
 // detector has a deliberately-chosen mailbox for its findings ([gh_intake]
 // notify_to, the coordinator by default), and its not-armed condition belongs to
@@ -506,9 +522,7 @@ func conditionTeardownNotArmed(to, detail string) pogodCondition {
 // It is a SEPARATE condition rather than a sentence added to A13's body, because
 // the two detectors have different readers by design — the teardown detector
 // reports to the PM, the intake detector to the coordinator — and one root cause
-// with two affected readers needs two notices or one of them learns nothing. The
-// row number is shared because the fault is one fault; the pattern of several
-// conditions on a single row is already established by A9's four.
+// with two affected readers needs two notices or one of them learns nothing.
 //
 // What it costs is worse than A13's, which is why it is worth its own notice: a
 // disarmed teardown detector leaves a done work item behind for someone to find,
@@ -520,28 +534,25 @@ func conditionIntakeNotArmed(to, detail string) pogodCondition {
 		Row:    "A13",
 		To:     to,
 		Detail: detail,
-		Subject: "[pogod] gh-issue INTAKE detector NOT ARMED — `gh` is not on the daemon's PATH; " +
+		Subject: "[pogod] gh-issue INTAKE detector NOT ARMED — `gh` is not on the gh-watch job's PATH; " +
 			"open issues are not being reconciled against carriers",
 		Body: conditionBody("A13",
 			"The gh-issue intake detector is enabled but did not arm, because `gh` is not\n"+
-				"reachable on pogod's PATH.",
+				"reachable on the PATH of `pogo gh-watch`, the scheduled job that runs it\n"+
+				"(com.pogo.ghwatch; pogod read this from that job's last record).",
 			"Nothing is reconciling the OPEN issues on the watched repos against the `gh:`\n"+
 				"  carrier markers in the work-item store. A `[gh]` mail that is delivered and then\n"+
 				"  dropped leaves no trace: the issue appears in no `mg list`, no `--tag=gh-issue`\n"+
 				"  board, and no stall watch, so a reporter waits with no acknowledgement and\n"+
 				"  nothing notices. That is measured, not hypothetical — drellem2/pogo#99 went ~10\n"+
 				"  hours uncarried on 2026-07-29 and was found only because a PM ran a sweep by hand\n"+
-				"  on a hunch. This is a PATH fault, not a config choice, and PATH under launchd is\n"+
-				"  not the PATH in your shell — `gh` working when you type it proves nothing about\n"+
-				"  the daemon.",
-			"1. `launchctl print gui/$(id -u)/com.pogo.daemon | grep -A2 PATH` — compare against\n"+
-				"     where `gh` actually is (`command -v gh`).\n"+
-				"  2. Fix EnvironmentVariables.PATH in\n"+
-				"     ~/Library/LaunchAgents/com.pogo.daemon.plist (or re-run `pogo service\n"+
-				"     install`, which writes a PATH that includes the usual locations) and reload.\n"+
+				"  on a hunch.",
+			"1. "+ghWatchJobRemedy+"\n"+
+				"  2. `zsh -c -l 'command -v gh'` — if empty, put gh's directory on PATH in\n"+
+				"     ~/.zprofile or ~/.zshenv.\n"+
 				"  3. In the meantime run the check by hand: `pogo check-intake`. It is the same\n"+
 				"     detector, and it will tell you immediately whether anything is uncarried.\n"+
-				"  4. Confirm with `pogo events --type gh_intake_watch_fired` after the next boot.",
+				"  4. Confirm with `pogo gh-watch --force` (it prints each detector's arming).",
 			detail),
 	}
 }
@@ -550,38 +561,23 @@ func conditionIntakeNotArmed(to, detail string) pogodCondition {
 // the same category of argument as the two above: an arming PRECONDITION, not a
 // finding.
 //
-// The comment beside the `gh` LookPath gate reads "A missing gh is a
-// precondition, not a finding", and this extends that accepted argument from the
-// BINARY to the CREDENTIAL. Both are one global cause, both are invisible to a
-// per-repo view, and both would otherwise be reported as N unreadable repos —
-// the detector faithfully amplifying an environment gap into a wall of findings,
-// which is the noise that gets a detector muted before the run that matters.
-//
 // It is SEPARATE from conditionIntakeNotArmed, which shares its row and its
-// reader, because the remedies do not overlap at all: one is a PATH edit in a
-// launchd plist, the other is `gh auth login`. A single id would let whichever
-// fired first suppress the other, and a host with neither gh nor a credential
-// would be told about one of its two problems.
-//
-// # Why this could not have been built before mg-fb29's first item
-//
-// The predicate is ghtoken's Result.OK(), and until `gh auth token` joined the
-// chain that predicate was not decidable. gh also authenticates from the
-// hosts.yml that `gh auth login` writes, which ghtoken could not see, so
-// !OK() included every host that had ever run `gh auth login` — and arming on it
-// would have disabled the detector on exactly the hosts where it works fine.
-// That is the false-alarm this row would have become.
+// reader, because the remedies do not overlap at all: one is a PATH fix, the
+// other is `gh auth login`. A single id would let whichever fired first suppress
+// the other, and a host with neither gh nor a credential would be told about one
+// of its two problems.
 func conditionIntakeNoCredential(to, detail string) pogodCondition {
 	return pogodCondition{
 		ID:     rowA13IntakeNoCred,
 		Row:    "A13",
 		To:     to,
 		Detail: detail,
-		Subject: "[pogod] gh-issue INTAKE detector NOT ARMED — no GitHub credential on this host; " +
+		Subject: "[pogod] gh-issue INTAKE detector NOT ARMED — the gh-watch job has no GitHub credential; " +
 			"run `gh auth login`",
 		Body: conditionBody("A13",
-			"The gh-issue intake detector is enabled and `gh` IS on pogod's PATH, but no GitHub\n"+
-				"credential could be established, so it did not arm.",
+			"The gh-issue intake detector is enabled and `gh` IS on the gh-watch job's PATH, but\n"+
+				"no GitHub credential could be established there, so it did not arm (pogod read\n"+
+				"this from the job's last record).",
 			"Identical to the not-armed-for-PATH case: nothing is reconciling the OPEN issues on\n"+
 				"  the watched repos against the `gh:` carrier markers in the work-item store, so a\n"+
 				"  dropped `[gh]` mail leaves a reporter waiting with no record anywhere (measured:\n"+
@@ -591,16 +587,47 @@ func conditionIntakeNoCredential(to, detail string) pogodCondition {
 				"  and you would be mailed N unreadable-repo findings whose real cause appeared as\n"+
 				"  one of four guesses in a footnote. That message cost nine days of a person's\n"+
 				"  queue once already (mg-fb29).",
-			"1. `gh auth status` — confirm. Then `gh auth login`, or export GH_TOKEN somewhere a\n"+
-				"     non-interactive shell reads (on this box that is ~/.zshenv, NOT ~/.zshrc).\n"+
-				"  2. Restart pogod. The credential is read ONCE at startup by design, so a login\n"+
-				"     performed now is not picked up until the daemon restarts.\n"+
-				"  3. This is NOT a false alarm about a `gh auth login` host. All three sources are\n"+
-				"     checked — the environment, a user shell, and `gh auth token`, which reads the\n"+
-				"     credential `gh auth login` itself writes. The DETAIL below names each source\n"+
-				"     that was asked and what it said.\n"+
-				"  4. Confirm the repair with `pogo events --type gh_intake_watch_fired`, or run the\n"+
-				"     check by hand at any time with `pogo check-intake`.",
+			"1. "+ghWatchJobRemedy+"\n"+
+				"  2. `zsh -c -l 'gh auth status'` — confirm. Then `gh auth login`, or export\n"+
+				"     GH_TOKEN in ~/.zshenv (NOT ~/.zshrc, which the job never reads).\n"+
+				"  3. No restart is needed: the job reads the credential afresh on every fire.\n"+
+				"     Confirm with `pogo gh-watch --force`, which prints the credential line\n"+
+				"     (existence-only) and each detector's arming.",
+			detail),
+	}
+}
+
+// conditionGHWatchNotReporting — A13's fourth condition (mg-257a8). The three
+// above are the job reporting that it could not arm a detector; this one is the
+// job not reporting at all. A launchd job that is unloaded, wedged in the
+// nondemand-spawn state (mg-50e0), or failing before it writes its record emits
+// nothing, and every gh-issue detector is then dark with no notice from any of
+// them — which is why the witness lives here, in the process that is running.
+//
+// Routed to the COORDINATOR: all three detectors are affected and they report to
+// two different mailboxes, so the job itself is a fleet-infrastructure fault.
+func conditionGHWatchNotReporting(to, detail string) pogodCondition {
+	return pogodCondition{
+		ID:      rowA13GHWatchNotReporting,
+		Row:     "A13",
+		To:      to,
+		Detail:  detail,
+		Subject: "[pogod] gh-watch job NOT REPORTING — the gh-issue intake, teardown and re-read detectors are all dark",
+		Body: conditionBody("A13",
+			"The scheduled job that runs the gh-issue detectors (`pogo gh-watch`, launchd label\n"+
+				"com.pogo.ghwatch) has not written a fresh record to $POGO_HOME/gh-watch/state.json\n"+
+				"within the window pogod allows for it, while at least one of those detectors is\n"+
+				"enabled.",
+			"Nothing is reconciling open issues against carriers (intake), checking done\n"+
+				"  carriers' issues were closed (teardown), or re-reading live carriers' issues.\n"+
+				"  None of the three can say so, because none of them is running — this notice is\n"+
+				"  the only one you will get.",
+			"1. `launchctl print gui/$(id -u)/com.pogo.ghwatch | grep -E 'state|runs|last exit'`.\n"+
+				"     Not found: `pogo service install-gh-watch`. Stuck at `pended nondemand\n"+
+				"     spawn`: `launchctl kickstart gui/$(id -u)/com.pogo.ghwatch`.\n"+
+				"  2. Read the job's log: ~/Library/Logs/pogo/pogo-gh-watch.log.\n"+
+				"  3. Run it by hand: `pogo gh-watch --force`. A clean run clears this notice on\n"+
+				"     pogod's next check.",
 			detail),
 	}
 }

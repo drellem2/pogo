@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -32,7 +31,6 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/apimount"
 	"github.com/drellem2/pogo/internal/blindwatch"
-	"github.com/drellem2/pogo/internal/carrierdrift"
 	"github.com/drellem2/pogo/internal/claude"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
@@ -42,9 +40,8 @@ import (
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/firstturn"
-	"github.com/drellem2/pogo/internal/ghintake"
-	"github.com/drellem2/pogo/internal/ghteardown"
 	"github.com/drellem2/pogo/internal/ghtoken"
+	"github.com/drellem2/pogo/internal/ghwatch"
 	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/health"
 	"github.com/drellem2/pogo/internal/heartbeat"
@@ -1521,21 +1518,21 @@ Flags:
 
 	// Repair GH_TOKEN for the same reason and in the same breath (mg-03ea).
 	// pathenv fixes children that cannot be FOUND under launchd's minimal env;
-	// this fixes children that are found, run, and cannot AUTHENTICATE. Without
-	// it every `gh` call pogod makes exits with "populate the GH_TOKEN
-	// environment variable", which is why the gh-issue teardown detector below
-	// reported every carrier as indeterminate on every run. Logged
-	// existence-only: the value never reaches the log, and the line NAMES THE
-	// WINNING SOURCE — with three sources in the chain, a line that does not say
-	// which one won can no longer answer the question this line has already
-	// answered once (it is what refuted gh#113's premise, 163 occurrences deep).
+	// this fixes children that are found, run, and cannot AUTHENTICATE.
+	// Existence-only in the log, and the line NAMES THE WINNING SOURCE (it is
+	// what refuted gh#113's premise, 163 occurrences deep).
 	//
-	// The Result is KEPT, not just logged (mg-fb29). Its OK() is the positive
-	// credential predicate the gh-issue intake detector arms on further down: one
-	// global evaluation, at startup, rather than each watched repo inferring the
-	// same fact from its own failed `gh issue list`.
-	ghCredential := ghtoken.Ensure()
-	log.Printf("pogod: %s", ghCredential)
+	// WHAT STILL NEEDS IT (mg-257a8). The gh-issue watchers that used to be its
+	// main consumers moved out to `pogo gh-watch`, which gets the user's
+	// credential from a login shell on every fire. What is left in pogod are
+	// merge-path calls that cannot move to a schedule: the refinery's PR-body
+	// closing-keyword guard (internal/refinery/closingref_gate.go, `gh pr
+	// view`), its external-PR push-back and close (merge.go via internal/ghpr,
+	// `gh pr close`), and strandedwork's awaiting-review probe (internal/ghpr).
+	// All three fail SOFT without a token — the guard is silently off — so the
+	// token stays until those calls get a per-call credential of their own;
+	// mg-37183 tracks that, and removes this line when it lands.
+	log.Printf("pogod: %s", ghtoken.Ensure())
 
 	// Bound every git repository lookup at POGO_HOME, before anything shells out
 	// to git or spawns an agent. Every repo pogod manages (polecats/*,
@@ -2541,271 +2538,42 @@ Flags:
 			cfg.CredExpiry.Interval)
 	}
 
-	// Build the gh-issue teardown detector (mg-6e57): the standing check that
-	// every gh-issue carrier at status=done has actually had its GitHub issue
-	// closed. mg-07ba reached `done, stage: merge` with the work genuinely
-	// finished and drellem2/pogo#89 sat OPEN for four days, because a carrier
-	// that completed its teardown and one that skipped it are indistinguishable
-	// from the outside. REPORT-ONLY: it mails and never closes or comments —
-	// that stays human-gated.
+	// The gh-issue detectors — intake (mg-039b), teardown (mg-6e57) and the
+	// carrier re-read (mg-5d9d) — no longer run here (mg-257a8). They run in
+	// `pogo gh-watch`, which launchd starts through a login shell
+	// (com.pogo.ghwatch, `pogo service install-gh-watch`), so the credential
+	// they need is the user's shell's, read afresh on every fire, rather than
+	// one pogod fetched once and held. Their config ([gh_intake],
+	// [gh_teardown], [carrier_drift]) is unchanged and read by that job.
 	//
-	// It reports to a FLEET mailbox (`pm-pogo` by default, mg-b586), because a
-	// teardown miss is a workflow failure the fleet chases, not a decision for a
-	// human; `human` is copied only once a finding has gone unresolved past
-	// escalate_after, when "the fleet is not handling this" is itself the news.
-	//
-	// Armed only when `gh` is actually available. Without it EVERY lookup is
-	// indeterminate, and the runner would faithfully report an environment gap
-	// as a wall of findings — noise that would get the detector muted before the
-	// run that matters. A missing gh is a precondition, not a finding.
-	var teardownWatcher *ghteardown.Watcher
-	if cfg.GHTeardown.Enabled {
-		if _, err := exec.LookPath("gh"); err != nil {
-			log.Printf("pogod: gh-issue teardown detector NOT armed — `gh` not on PATH (%v); "+
-				"done carriers will not be checked against their issues", err)
-			// A13 (mg-342d). The ONE row that does not go to the coordinator:
-			// this subsystem already has a deliberately-chosen mailbox for its
-			// findings ([gh_teardown] notify_to, mg-b586), and its not-armed
-			// condition belongs to the same reader as those findings.
-			//
-			// A missing `gh` is a precondition rather than a finding — which is
-			// exactly why the watcher refuses to arm — but it is a precondition
-			// that can BREAK, and under launchd it has: PATH in the daemon's
-			// environment is not PATH in a shell, so `gh` working when you type
-			// it proves nothing. The transition is what is worth mailing.
-			// Falls back to the coordinator if notify_to was explicitly blanked:
-			// an unroutable notice is louder than a lost one, but a routable one
-			// is better than both.
-			teardownTo := cfg.GHTeardown.NotifyTo
-			if teardownTo == "" {
-				teardownTo = coordinator
-			}
-			conditions.Raise(conditionTeardownNotArmed(teardownTo, err.Error()), time.Now())
-		} else {
-			conditions.Clear(rowA13TeardownNotArmed, time.Now())
-			src := ghteardown.MGSource{}
-			teardownWatcher = ghteardown.New(ghteardown.Options{
-				Enabled:       true,
-				Source:        src.Carriers,
-				Mail:          client.SendMGMail,
-				Interval:      cfg.GHTeardown.Interval,
-				RenotifyAfter: cfg.GHTeardown.RenotifyAfter,
-				NotifyTo:      cfg.GHTeardown.NotifyTo,
-				EscalateAfter: cfg.GHTeardown.EscalateAfter,
-				EscalateTo:    escalationBox,
-			})
-			log.Printf("pogod: gh-issue teardown detector enabled (interval=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s, report-only)",
-				cfg.GHTeardown.Interval, cfg.GHTeardown.RenotifyAfter,
-				cfg.GHTeardown.NotifyTo, cfg.GHTeardown.EscalateAfter, escalationBox)
+	// What stays here is the witness: pogod reads the job's record on the
+	// heartbeat and raises A13 when a detector did not arm or the job has
+	// stopped reporting. See ghwatchwitness.go.
+	var ghWatch *ghWatchWitness
+	if cfg.GHTeardown.Enabled || cfg.GHIntake.Enabled || cfg.CarrierDrift.Enabled {
+		// Each not-armed condition goes to its detector's own mailbox (A13's
+		// routing), falling back to the coordinator if notify_to was blanked.
+		teardownTo := cfg.GHTeardown.NotifyTo
+		if teardownTo == "" {
+			teardownTo = coordinator
 		}
-	}
-
-	// Build the gh-issue INTAKE detector (mg-039b): the reconciliation nobody
-	// computed. The sibling above audits the workflow's LAST step; this one audits
-	// its FIRST — for every OPEN issue on a watched repo, does a work item exist
-	// carrying that issue's `gh:` marker?
-	//
-	// It exists because a delivered `[gh]` mail can be dropped with nothing
-	// noticing. drellem2/pogo#99 generated two delivered mails on 2026-07-29 and
-	// went ~10 hours with no carrier; its paired issue #100 was carried normally,
-	// so a pair filed to be considered together was split and the untracked half
-	// was invisible to every listing the fleet runs. It surfaced only because a PM
-	// ran an open-issue sweep by hand, early, on a hunch. The coordinator prompt
-	// already prescribes the discipline that would have prevented it — prescribing
-	// it was not sufficient, because there was no detector, only an instruction.
-	//
-	// Reports to the COORDINATOR rather than the PM (unlike the teardown detector):
-	// the remedy is to file a carrier and dispatch triage, and that is the only
-	// agent that does either. `human` is copied only once one issue has gone
-	// uncarried past escalate_after, when "the coordinator is not handling this" has
-	// itself become the news — which is also the answer to what happens if the
-	// coordinator is down. REPORT-ONLY: it mails and never files or comments.
-	//
-	// Armed only when `gh` is actually available AND a GitHub credential exists.
-	// Without either, EVERY repo lookup fails, and the runner would faithfully
-	// report one environment gap as a wall of unreadable repos — noise that would
-	// get the detector muted before the run that matters. A missing gh is a
-	// precondition, not a finding; mg-fb29 extends that same accepted argument
-	// from the BINARY to the CREDENTIAL, which is the identical shape (one global
-	// cause, invisible from any per-repo view) and was measured to cost more: the
-	// N-unreadable-repos message names a credential among four guesses, and nine
-	// days of a person's queue went to chasing the guess.
-	//
-	// The two are separate conditions with separate ids because their remedies do
-	// not overlap — a plist PATH edit versus `gh auth login` — and a shared id
-	// would let the first to fire suppress the second.
-	var intakeWatcher *ghintake.Watcher
-	if cfg.GHIntake.Enabled {
-		// A13's second and third consequences route to this subsystem's own
-		// mailbox for the same reason A13 does, falling back to the coordinator if
-		// notify_to was explicitly blanked.
 		intakeTo := cfg.GHIntake.NotifyTo
 		if intakeTo == "" {
 			intakeTo = coordinator
 		}
-		_, ghPathErr := exec.LookPath("gh")
-		switch decideIntakeArming(ghPathErr == nil, ghCredential.OK()) {
-		case intakeBlockedNoGH:
-			log.Printf("pogod: gh-issue intake detector NOT armed — `gh` not on PATH (%v); "+
-				"open issues will not be reconciled against carriers", ghPathErr)
-			// See conditionIntakeNotArmed. The credential condition is CLEARED
-			// rather than left standing: without `gh` the credential predicate is
-			// not measurable, so asserting it either way would be a claim nothing
-			// checked — and a stale raise would make the real credential fault
-			// read as "already known" when gh comes back, suppressing its mail for
-			// a renotify window. Exactly one A13-intake condition is live at once.
-			conditions.Clear(rowA13IntakeNoCred, time.Now())
-			conditions.Raise(conditionIntakeNotArmed(intakeTo, ghPathErr.Error()), time.Now())
-		case intakeBlockedNoCredential:
-			// gh is here and cannot authenticate. Reported ONCE, as the credential
-			// fault it is, instead of once per watched repo as an unreadable repo.
-			// Decidable only because ghtoken now asks `gh auth token`: before that,
-			// !OK() also covered every host authenticated by `gh auth login`, and
-			// this branch would have disarmed the detector on hosts where it works.
-			log.Printf("pogod: gh-issue intake detector NOT armed — no GitHub credential (%s); "+
-				"open issues will not be reconciled against carriers", ghCredential)
-			conditions.Clear(rowA13IntakeNotArmed, time.Now())
-			conditions.Raise(conditionIntakeNoCredential(intakeTo, ghCredential.String()), time.Now())
-		default:
-			conditions.Clear(rowA13IntakeNotArmed, time.Now())
-			conditions.Clear(rowA13IntakeNoCred, time.Now())
-			// The watch list is resolved ONCE at build time rather than per sample:
-			// it comes from the poller's state directory, and a repo added there
-			// mid-run is picked up on the next pogod restart. Resolving it per sample
-			// would mean a directory read on every tick for a list that changes
-			// perhaps twice a year.
-			stateDir := filepath.Join(config.PogoHome(), ghintake.PollerStateDirName)
-			repos, repoSrc := ghintake.ResolveRepos(cfg.GHIntake.Repos, stateDir)
-			// The cache lives as long as this watcher, so a pass forks `mg show`
-			// only for items whose file changed since the last one (#179). It is a
-			// pointer, which is what lets it survive src.Carriers being bound off
-			// this struct value below. See newIntakeCarrierSource.
-			src := newIntakeCarrierSource()
-			// The credential predicate is fixed at arm time, deliberately: it is
-			// one global fact, and re-deciding it per sample would mean a `gh auth
-			// token` subprocess every fifteen minutes on every healthy scan. What
-			// the report carries is WHICH SOURCE won, so a reader can check the
-			// claim rather than take it.
-			//
-			// Derived from the same Result the gate above consulted rather than
-			// restated as a literal `true`: everything reaching this line has
-			// already passed OK(), but if the gate ever gains a branch that arms
-			// without a credential, the report follows it instead of asserting one
-			// that is not there.
-			cred, credSrc := ghintake.CredentialFor(ghCredential.OK(), string(ghCredential.Source))
-			// ...and re-asked per sample ON THE FAILURE PATH ONLY (mg-4d59). The
-			// paragraph above is still right about the happy path and wrong about
-			// one word: "the answer only changes when pogod restarts anyway" was
-			// measured false. This daemon inherited GH_TOKEN at exec from a shell,
-			// the token was rotated in ~/.zshenv 174 hours later, and the snapshot
-			// could not see it while `gh issue list` returned HTTP 401 on BOTH
-			// watched repos for 173 hours — under a report heading that ruled a
-			// credential fault out.
-			//
-			// Reverify runs nothing when no repo failed, so the cost objection the
-			// paragraph above raises is answered rather than overridden: a healthy
-			// scan still spends nothing on this. (And what it spends on a failed
-			// one is a single HTTPS request, not a `gh` subprocess — the probe
-			// talks to the API directly, because an HTTP status is a contract and
-			// gh's stderr is prose.)
-			intakeVerify := ghintake.VerifierFor(ghtoken.RejectionProbe)
-			intakeWatcher = ghintake.New(ghintake.Options{
-				Enabled: true,
-				Source: func() (ghintake.Inventory, error) {
-					inv, err := ghintake.Collect(repos, ghintake.GHOpenIssues, src.Carriers, src.Statuses(), cred, credSrc)
-					if err != nil {
-						return inv, err
-					}
-					return ghintake.Reverify(inv, intakeVerify), nil
-				},
-				Mail:          client.SendMGMail,
-				Interval:      cfg.GHIntake.Interval,
-				Grace:         cfg.GHIntake.Grace,
-				RenotifyAfter: cfg.GHIntake.RenotifyAfter,
-				NotifyTo:      cfg.GHIntake.NotifyTo,
-				EscalateAfter: cfg.GHIntake.EscalateAfter,
-				EscalateTo:    escalationBox,
-			})
-			log.Printf("pogod: gh-issue intake detector enabled (interval=%s grace=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s repos=%v from %s credential=%s, report-only)",
-				cfg.GHIntake.Interval, cfg.GHIntake.Grace, cfg.GHIntake.RenotifyAfter,
-				cfg.GHIntake.NotifyTo, cfg.GHIntake.EscalateAfter, escalationBox, repos, repoSrc,
-				ghCredential.Source)
+		ghWatch = &ghWatchWitness{
+			home:            config.PogoHome(),
+			teardownEnabled: cfg.GHTeardown.Enabled,
+			intakeEnabled:   cfg.GHIntake.Enabled,
+			driftEnabled:    cfg.CarrierDrift.Enabled,
+			teardownTo:      teardownTo,
+			intakeTo:        intakeTo,
+			coordinator:     coordinator,
 		}
-	}
-
-	// Build the gh-issue carrier RE-READ (mg-5d9d): the third member of the
-	// triple, covering every step between the two above. Intake catches an open
-	// issue with NO carrier; teardown catches a DONE carrier whose issue stayed
-	// open; this one catches a LIVE carrier whose issue has moved on without it.
-	//
-	// It exists because a carrier records that an issue was noticed ONCE, and
-	// nothing re-reads the issue afterwards — so the carrier's existence is
-	// evidence about the PAST that reads as evidence about the PRESENT. Three
-	// instances surfaced on 2026-09-07 by three unrelated accidents and no
-	// instrument: two issues carried for days with nothing on the thread (from
-	// the reporter's side, identical to having no carrier), one carried and
-	// untriaged for 17 days, and one carried against an issue closed the same day
-	// that then sat dispatchable for a month.
-	//
-	// It runs HERE and not only as a CLI, and that is the ticket's own
-	// requirement rather than a convention: a carrier's staleness has to be
-	// visible without anyone having an accident. Everything the fleet ran on a
-	// schedule reported clean throughout all three, accurately — `check-intake`
-	// read "44 carried, 0 uncarried" — because none of them measured this axis.
-	// internal/verdictwatch is the standing reminder of the other failure mode: a
-	// correct, audited detector that NOTHING RAN.
-	//
-	// Armed on the same precondition as its two siblings — `gh` on PATH and a
-	// credential — because without either EVERY re-read fails and the runner
-	// would report one environment gap as a wall of un-re-read carriers.
-	//
-	// Deliberately NO third A13 condition row. The two that exist annunciate this
-	// exact environment fault, from the same cause, to the same reader; a third
-	// saying it again would be three notices for one missing binary, and the
-	// remedy is already named twice. The log line below is the record that this
-	// detector in particular is dark.
-	var carrierDriftWatcher *carrierdrift.Watcher
-	if cfg.CarrierDrift.Enabled {
-		_, ghPathErr := exec.LookPath("gh")
-		switch {
-		case ghPathErr != nil:
-			log.Printf("pogod: gh-issue carrier re-read NOT armed — `gh` not on PATH (%v); "+
-				"live carriers will not be checked against their issues", ghPathErr)
-		case !ghCredential.OK():
-			log.Printf("pogod: gh-issue carrier re-read NOT armed — no GitHub credential (%s); "+
-				"live carriers will not be checked against their issues", ghCredential)
-		default:
-			// Cached across passes (mg-e353): see newCarrierDriftSource.
-			src := newCarrierDriftSource(cfg.CarrierDrift.IncludeShelved)
-			carrierDriftWatcher = carrierdrift.New(carrierdrift.Options{
-				Enabled: true,
-				Source:  src.Carriers,
-				// RetryingSnapshot, not the bare GHSnapshot: this box's network is
-				// ~50% intermittent (mg-0ffc), and an un-retried re-read turns one
-				// blip into a whole pass of non-answers (mg-dd22). `pogo
-				// check-carriers` binds the same wrapper, so a hand re-run cannot
-				// disagree with this one for want of a retry.
-				Snapshot: carrierdrift.RetryingSnapshot(carrierdrift.GHSnapshot),
-				Statuses: src.Statuses(),
-				Mail:     client.SendMGMail,
-				Interval: cfg.CarrierDrift.Interval,
-				Windows: carrierdrift.Windows{
-					Ack:    cfg.CarrierDrift.AckWindow,
-					Stage:  cfg.CarrierDrift.StageWindow,
-					Closed: cfg.CarrierDrift.ClosedGrace,
-					Stages: cfg.CarrierDrift.Stages,
-				},
-				RenotifyAfter: cfg.CarrierDrift.RenotifyAfter,
-				NotifyTo:      cfg.CarrierDrift.NotifyTo,
-				EscalateAfter: cfg.CarrierDrift.EscalateAfter,
-				EscalateTo:    escalationBox,
-			})
-			w := carrierDriftWatcher.Windows()
-			log.Printf("pogod: gh-issue carrier re-read enabled (interval=%s ack_window=%s stage_window=%s closed_grace=%s stages=%v renotify=%s notify_to=%s escalate_after=%s escalate_to=%s shelved=%t, report-only)",
-				cfg.CarrierDrift.Interval, w.Ack, w.Stage, w.Closed, w.Stages,
-				cfg.CarrierDrift.RenotifyAfter, cfg.CarrierDrift.NotifyTo,
-				cfg.CarrierDrift.EscalateAfter, escalationBox, cfg.CarrierDrift.IncludeShelved)
-		}
+		log.Printf("pogod: gh-issue detectors run in `pogo gh-watch` (com.pogo.ghwatch), not here; "+
+			"witnessing its record at %s (intake=%t teardown=%t carrier_drift=%t, stale after %s)",
+			ghwatch.StatePath(config.PogoHome()), cfg.GHIntake.Enabled, cfg.GHTeardown.Enabled,
+			cfg.CarrierDrift.Enabled, ghWatchStaleAfter)
 	}
 
 	// Build the REVIEW-DECLARATION detector (mg-253e): the sweep that reports a
@@ -3720,30 +3488,10 @@ Flags:
 		if driftWatcher != nil {
 			go driftWatcher.Check(now)
 		}
-		// The gh-issue teardown detector rides the same tick and throttles
-		// itself to a COARSE interval. In a goroutine because it shells out to
-		// `mg` once per carrier and to `gh` over the network — neither must
-		// delay the next tick. Report-only.
-		if teardownWatcher != nil {
-			go teardownWatcher.Check(now)
-		}
-		// The gh-issue INTAKE detector rides the same tick on its own coarse
-		// interval. In a goroutine because it scans every work item in the store
-		// via `mg show` and lists issues over the network — neither must delay the
-		// next tick. Report-only: it mails, and it has no seam through which it
-		// could file a work item or comment on an issue.
-		if intakeWatcher != nil {
-			go intakeWatcher.Check(now)
-		}
-		// The gh-issue carrier RE-READ rides the same tick on its own coarse
-		// interval. In a goroutine because it shells out to `mg show` once per
-		// live work item and then to `gh` once per carrier over the network —
-		// neither must delay the next tick. Report-only: it mails, and it has no
-		// seam through which it could comment on an issue, close one, or edit the
-		// carrier whose staleness it reports.
-		if carrierDriftWatcher != nil {
-			go carrierDriftWatcher.Check(now)
-		}
+		// The gh-issue detectors run in `pogo gh-watch` now (mg-257a8); pogod
+		// only reads that job's record. Synchronous: one small file read,
+		// throttled to every few minutes by the witness itself.
+		ghWatch.Check(conditions, now)
 		// The review-declaration detector rides the same tick on its own coarse
 		// interval. In a goroutine because it walks four status directories and
 		// shells out to `mg mail send` on a finding — neither must delay the next

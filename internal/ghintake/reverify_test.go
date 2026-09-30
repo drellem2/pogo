@@ -196,7 +196,7 @@ func TestRejectedCredentialLeadsTheMailSubjectWithTheCause(t *testing.T) {
 	}
 
 	subj := rep.MailSubject()
-	for _, want := range []string{"REJECTED", "401", "restart pogod"} { // subject
+	for _, want := range []string{"REJECTED", "401", "pogo gh-watch"} { // subject
 		if !strings.Contains(subj, want) {
 			t.Errorf("the subject must carry %q — a body hedge does not survive a forward: %s", want, subj)
 		}
@@ -210,7 +210,7 @@ func TestRejectedCredentialLeadsTheMailSubjectWithTheCause(t *testing.T) {
 	for _, want := range []string{
 		"GITHUB REJECTED THIS SCAN'S CREDENTIAL",
 		"HTTP 401",
-		"launchctl kickstart -k gui/$(id -u)/com.pogo.daemon",
+		"pogo gh-watch --force",
 		"source=ambient",
 	} {
 		if !strings.Contains(body, want) {

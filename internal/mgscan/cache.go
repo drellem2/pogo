@@ -141,3 +141,53 @@ func (c *Cache[V]) Len() int {
 	defer c.mu.Unlock()
 	return len(c.m)
 }
+
+// Entry is one cached value with the mtime it is valid at — the on-disk form of
+// a Cache (mg-257a8).
+type Entry[V any] struct {
+	Mtime string `json:"mtime"`
+	Value V      `json:"value"`
+}
+
+// Snapshot returns a copy of every entry, for a caller that must carry the cache
+// across processes. `pogo gh-watch` is such a caller: the scans that hold these
+// caches now run in a process launchd starts every few minutes, and a cache
+// that died with each run would return every pass to one `mg show` fork per
+// item — the drellem2/pogo#179 cost the cache exists to remove.
+//
+// Persisting it changes nothing about correctness: an entry is still used only
+// at the exact mtime it was stored under, so an item edited between runs misses.
+func (c *Cache[V]) Snapshot() map[string]Entry[V] {
+	out := map[string]Entry[V]{}
+	if c == nil {
+		return out
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, e := range c.m {
+		out[id] = Entry[V]{Mtime: e.mtime, Value: e.v}
+	}
+	return out
+}
+
+// LoadEntries adds entries (typically a previous run's Snapshot) to the cache.
+// Entries with no mtime are dropped, as Store drops them.
+func (c *Cache[V]) LoadEntries(entries map[string]Entry[V]) {
+	for id, e := range entries {
+		c.Store(id, e.Mtime, e.Value)
+	}
+}
+
+// MarshalJSON encodes the cache as its Snapshot, so a caller can persist a cache
+// whose value type it cannot name (carrierdrift's is unexported).
+func (c *Cache[V]) MarshalJSON() ([]byte, error) { return json.Marshal(c.Snapshot()) }
+
+// UnmarshalJSON adds the encoded entries to the cache; see LoadEntries.
+func (c *Cache[V]) UnmarshalJSON(b []byte) error {
+	var entries map[string]Entry[V]
+	if err := json.Unmarshal(b, &entries); err != nil {
+		return err
+	}
+	c.LoadEntries(entries)
+	return nil
+}

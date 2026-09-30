@@ -670,7 +670,7 @@ func (r Report) renderRepoErrors(b *strings.Builder) {
 	case CredentialMissing:
 		b.WriteString("The per-repo errors above are consequences, not causes, and fixing them one at a\n" +
 			"time is not a thing anyone can do. There is one remedy:\n\n" +
-			"  gh auth login          # then restart pogod, which reads the credential at startup\n\n" +
+			"  gh auth login          # then `pogo gh-watch --force`; every run re-reads it\n\n" +
 			"This was checked rather than guessed. `gh auth token` is asked for the credential\n" +
 			"gh already holds, so a host authenticated by `gh auth login` — with nothing in the\n" +
 			"environment and nothing in any shell profile — reads as CONFIGURED here. Only a\n" +
@@ -683,21 +683,19 @@ func (r Report) renderRepoErrors(b *strings.Builder) {
 			"out — the API answered. Rate limiting is ruled out — a throttle is HTTP 403, not\n"+
 			"401. A renamed or deleted repo cannot produce a 401 either, though a credential\n"+
 			"this bad would hide one if it existed; that is a thing to re-check AFTER the\n"+
-			"restart, not a competing explanation for what you are reading now.\n\n"+
-			"The remedy is NOT `gh auth login` alone, and this is the part that cost 173 hours\n"+
-			"the first time (mg-4d59). The credential that failed is the one in the SCANNING\n"+
-			"PROCESS's environment (source=%s), which was copied at exec and is never re-read.\n"+
-			"A shell, a crew agent and this daemon can hold three different tokens, and the\n"+
-			"first two working proves nothing about the third — that contrast is exactly what\n"+
-			"the escalation reported. So:\n\n"+
-			"  gh auth status                  # confirm the shell's credential is good\n"+
-			"  <rotate, or re-login>           # only if it is not\n"+
-			"  launchctl kickstart -k gui/$(id -u)/com.pogo.daemon\n"+
-			"                                  # REQUIRED, and the step that is easy to skip:\n"+
-			"                                  # pogod reads the credential ONCE, at startup,\n"+
-			"                                  # and cannot pick up a rotation without this\n\n"+
-			"Until that restart this message will repeat with a valid token sitting in every\n"+
-			"shell on the box, and NO new GitHub issue is visible to this fleet: it reaches no\n"+
+			"fix, not a competing explanation for what you are reading now.\n\n"+
+			"The credential that failed is the one in the SCANNING PROCESS's environment\n"+
+			"(source=%s). That process is `pogo gh-watch`, started afresh by launchd through a\n"+
+			"login shell on every fire (mg-257a8), so it reads the credential from the shell's\n"+
+			"profile each run — no daemon holds a stale copy. (Before mg-257a8 the scan ran\n"+
+			"inside pogod, which copied the credential at exec and never re-read it; that is\n"+
+			"the 173 hours of mg-4d59.) So:\n\n"+
+			"  gh auth status                  # in a fresh login shell: is ITS credential good?\n"+
+			"  <rotate, or re-login>           # only if it is not; the export belongs where a\n"+
+			"                                  # non-interactive login zsh reads it (~/.zshenv)\n"+
+			"  pogo gh-watch --force           # confirm now rather than at the next fire\n\n"+
+			"Until the credential a login shell reads is fixed this message will repeat, and\n"+
+			"NO new GitHub issue is visible to this fleet: it reaches no\n"+
 			"carrier, no triage and no gate for as long as this lasts.\n\n",
 			r.CredentialDetail, credSrc)
 	case CredentialPresent:
@@ -787,7 +785,7 @@ func (r Report) MailSubject() string {
 			parts = append(parts, fmt.Sprintf(
 				"GitHub REJECTED this scan's credential (HTTP 401, source=%s) — one fault, %d repo(s) "+
 					"unreadable as a result, NO new issue is visible to the fleet: %s. "+
-					"Fix the credential AND restart pogod, which reads it only at startup",
+					"fix the credential a login shell reads; each `pogo gh-watch` run re-reads it",
 				credSrc, n, strings.Join(repos, ", ")))
 		case CredentialPresent:
 			// States the MEASUREMENT, not the conclusion. "not an auth fault" would

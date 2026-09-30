@@ -915,6 +915,41 @@ into it would make every emergency restart a deploy.`,
 		},
 	}
 
+	var cmdServiceInstallGHWatch = &cobra.Command{
+		Use:   "install-gh-watch",
+		Short: "Install the gh-issue watcher LaunchAgent (com.pogo.ghwatch), which runs `pogo gh-watch` every 15 minutes",
+		Long: `Install com.pogo.ghwatch — the launchd job that runs ` + "`pogo gh-watch`" + ` (the gh-issue
+intake, teardown and carrier re-read watchers) every 15 minutes, and once at load.
+
+The job runs through ` + "`/bin/zsh -c -l`" + `, so it uses the GitHub credential and PATH
+a login shell has (~/.zshenv, ~/.zprofile), read afresh on every fire. That is
+why the watchers left pogod (mg-257a8): launchd starts pogod without a shell, so
+pogod could only fetch a credential once and hold it.
+
+Idempotent: the plist is rewritten only when this build renders it differently,
+and the nightly activation audit compares the installed copy against that
+rendering. pogod reads the job's record ($POGO_HOME/gh-watch/state.json) and
+reports when a detector did not arm or the job stops reporting.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.InstallGHWatch(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
+	var cmdServiceUninstallGHWatch = &cobra.Command{
+		Use:   "uninstall-gh-watch",
+		Short: "Remove the gh-issue watcher LaunchAgent (com.pogo.ghwatch)",
+		Long:  `Stop and remove com.pogo.ghwatch. The record under $POGO_HOME/gh-watch is left in place.`,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.UninstallGHWatch(); err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+		},
+	}
+
 	var cmdServiceInstallReclaim = &cobra.Command{
 		Use:   "install-reclaim",
 		Short: "Install the size-triggered Go module cache reclaim LaunchAgent (com.pogo.reclaim)",
@@ -4662,6 +4697,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	// emits nothing.
 	rootCmd.AddCommand(newCheckReviewDeclCmd(&jsonOutput))
 	rootCmd.AddCommand(newCheckCarriersCmd(&jsonOutput))
+	rootCmd.AddCommand(newGHWatchCmd(&jsonOutput))
 	rootCmd.AddCommand(newInEffectCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdCheckCommitBody)
 	rootCmd.AddCommand(newCheckPromptsCmd(&jsonOutput))
@@ -4725,6 +4761,8 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	cmdService.AddCommand(cmdServiceInstallDeploy)
 	cmdService.AddCommand(cmdServiceUninstallDeploy)
 	cmdService.AddCommand(cmdServiceInstallReclaim)
+	cmdService.AddCommand(cmdServiceInstallGHWatch)
+	cmdService.AddCommand(cmdServiceUninstallGHWatch)
 	cmdService.AddCommand(cmdServiceUninstallReclaim)
 	cmdService.AddCommand(cmdServiceReconcile)
 	cmdService.AddCommand(cmdServiceCheckDrift)

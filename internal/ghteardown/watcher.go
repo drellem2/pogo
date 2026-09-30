@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/watchstate"
 )
 
 // Default cadences for the standing runner.
@@ -96,6 +97,10 @@ type Options struct {
 	EscalateAfter time.Duration
 	// EscalateTo receives escalated notices. Empty means DefaultEscalateTo.
 	EscalateTo string
+	// Agent is the `agent` field on every event this runner emits. Empty means
+	// "pogod", its home until mg-257a8; `pogo gh-watch` passes its own name so
+	// the event log says which process actually ran the sample.
+	Agent string
 	// Enabled arms the runner.
 	Enabled bool
 }
@@ -172,6 +177,7 @@ type Watcher struct {
 	lookup        LookupFunc
 	mail          MailFunc
 	emit          Emitter
+	agent         string
 
 	mu         sync.Mutex
 	lastRun    time.Time
@@ -219,7 +225,12 @@ func New(opts Options) *Watcher {
 	if escalateTo == "" {
 		escalateTo = DefaultEscalateTo
 	}
+	agent := opts.Agent
+	if agent == "" {
+		agent = "pogod"
+	}
 	return &Watcher{
+		agent:   agent,
 		enabled: opts.Enabled, interval: interval, renotifyAfter: renotify,
 		escalateAfter: escalate, notifyTo: notifyTo, escalateTo: escalateTo,
 		source: opts.Source, lookup: lookup, mail: opts.Mail, emit: emit,
@@ -261,7 +272,7 @@ func (w *Watcher) sample(now time.Time) {
 		// indistinguishable from a quiet one.
 		w.emit(events.Event{
 			EventType: "gh_teardown_watch_error",
-			Agent:     "pogod",
+			Agent:     w.agent,
 			Details:   map[string]any{"error": err.Error()},
 		})
 		return
@@ -288,7 +299,7 @@ func (w *Watcher) sample(now time.Time) {
 	}
 
 	body := rep.Render() +
-		"\nThis is REPORT-ONLY — pogod did NOT close or comment on anything. Closing an\n" +
+		"\nThis is REPORT-ONLY — this detector did NOT close or comment on anything. Closing an\n" +
 		"external issue is outward-facing and stays human-gated.\n\n" +
 		"Re-check on demand with:\n  pogo check-teardown\n"
 
@@ -331,7 +342,7 @@ func (w *Watcher) sample(now time.Time) {
 			details["mail_error_"+to] = err.Error()
 		}
 	}
-	w.emit(events.Event{EventType: "gh_teardown_watch_fired", Agent: "pogod", Details: details})
+	w.emit(events.Event{EventType: "gh_teardown_watch_fired", Agent: w.agent, Details: details})
 }
 
 // trackAges records when each currently-actionable finding was FIRST seen and
@@ -402,4 +413,28 @@ func (r Report) fingerprint() string {
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:8])
+}
+
+// State returns the memory this runner carries between samples, so a caller
+// that runs it in a short-lived process (`pogo gh-watch`, mg-257a8) can persist
+// it across runs. The returned value shares nothing with the runner.
+func (w *Watcher) State() watchstate.State {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return watchstate.State{
+		LastRun: w.lastRun, Ran: w.ran,
+		LastPrint: w.lastPrint, LastMailed: w.lastMailed,
+		FirstSeen: w.firstSeen,
+	}.Clone()
+}
+
+// Restore replaces the runner's memory with s — the inverse of State. Call it
+// before the first Check; a zero State is a runner that has never sampled.
+func (w *Watcher) Restore(s watchstate.State) {
+	s = s.Clone()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastRun, w.ran = s.LastRun, s.Ran
+	w.lastPrint, w.lastMailed = s.LastPrint, s.LastMailed
+	w.firstSeen = s.FirstSeen
 }

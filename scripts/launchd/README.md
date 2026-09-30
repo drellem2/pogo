@@ -1165,3 +1165,22 @@ machine sleeps through the :17 fire (launchd coalesces missed fires into one on
 wake). Writes landing between `git add -A` and the commit wait for the next
 run. The backup keeps history, so a corruption that the store commits is
 recoverable only by checking out an older commit, which is a manual step.
+
+## gh-issue watchers (`com.pogo.ghwatch`)
+
+Runs `pogo gh-watch` — the gh-issue intake, teardown and carrier re-read
+detectors — every 15 minutes and at load. Installed and audited from the Go
+template in `internal/service/ghwatch.go` (there is no tracked plist copy):
+
+```bash
+pogo service install-gh-watch
+pogo service uninstall-gh-watch
+```
+
+Its ProgramArguments are `/bin/zsh -c -l 'exec <pogo> gh-watch --oneline'`: a
+LOGIN shell, so each fire uses the GitHub credential and PATH from `~/.zshenv` /
+`~/.zprofile`. That is the reason the detectors left pogod (mg-257a8) — launchd
+gives pogod no shell. Log: `~/Library/Logs/pogo/pogo-gh-watch.log` (one line
+per fire). Record: `~/.pogo/gh-watch/state.json`, which pogod reads to report a
+detector that did not arm or a job that stopped reporting. See
+docs/CONFIGURATION.md §"Where the gh-issue detectors run".

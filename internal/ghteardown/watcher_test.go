@@ -86,7 +86,7 @@ func TestWatcherMailsOnATeardownMiss(t *testing.T) {
 	}
 	// The notice must say it did not act, so nobody assumes the issue is handled.
 	if !strings.Contains(mail.bodies[0], "REPORT-ONLY") {
-		t.Error("notice must state that pogod did not close or comment")
+		t.Error("notice must state that the detector did not close or comment")
 	}
 }
 
