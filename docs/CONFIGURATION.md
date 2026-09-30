@@ -1902,6 +1902,18 @@ restart (mg-4d59). Now each child that needs GitHub asks
 returned in the child's env slice and written nowhere else. A probe costs a few
 milliseconds; nothing is cached, so a rotation reaches the next call.
 
+A call site whose child runs under a deadline (`exec.CommandContext(ctx, …)`)
+uses `ghtoken.ChildEnvContext(ctx, base)` instead: the same chain, with each
+source also cut off at `ctx`'s deadline. Without it the fetch runs before the
+timed child starts and is bounded only by each source's own 15s probe timeout,
+so a hung `gh auth token` on a host with no ambient `GH_TOKEN` turned a 300ms
+PR lookup into 15s (mg-c258b). When the deadline ends the fetch, the child
+gets no credential and fails as the timeout it already is, and this is not
+logged as the credential going unavailable. The bounded sites are ghpr
+`Lookup`, `lookupPRBody`, `ghClosePR`, `fetchPolecatBaseRefs`, strandedwork
+`Fetch` and freshen's network git. The rest have no deadline and keep
+`ChildEnv`.
+
 Converted call sites (non-test code):
 
 | Where | Child | Why it needs a credential |

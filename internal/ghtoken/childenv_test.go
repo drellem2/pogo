@@ -1,11 +1,14 @@
 package ghtoken
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func okHarvest(tok string) func() (string, error) {
@@ -123,7 +126,7 @@ func TestChildEnv_LogsOnlyTransitions(t *testing.T) {
 		t.Fatalf("loss should log exactly once, got %q", lines)
 	}
 	childMu.Lock()
-	childShellHarvest = okHarvest(fakeToken)
+	childShellHarvest = func(context.Context) (string, error) { return fakeToken, nil }
 	childMu.Unlock()
 	ChildEnv(os.Environ())
 	if len(lines) != 2 || !strings.Contains(lines[1], "available again (source=shell)") {
@@ -155,5 +158,70 @@ func TestGitNeedsCredential(t *testing.T) {
 		if got := GitNeedsCredential(strings.Fields(in)); got != want {
 			t.Errorf("GitNeedsCredential(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// hangingStub writes an executable that never returns on its own and puts its
+// directory first on PATH.
+func hangingStub(t *testing.T, name string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return path
+}
+
+// TestChildEnvContextBoundsTheFetch (mg-c258b): with no ambient credential and
+// BOTH real sources hung — the user shell's probe and `gh auth token` — the
+// fetch ends at the caller's deadline, not at 2 x probeTimeout. This is the
+// state of a CI runner with a hung gh stub first on PATH: before the fix the
+// ghpr lookup bounded at 300ms took 15s there.
+func TestChildEnvContextBoundsTheFetch(t *testing.T) {
+	var lines []string
+	prevLog := childLogf
+	childLogf = func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) }
+	defer func() { childLogf = prevLog }()
+	childMu.Lock()
+	prevOK := childLastOK
+	ok := true
+	childLastOK = &ok
+	childMu.Unlock()
+	defer func() { childMu.Lock(); childLastOK = prevOK; childMu.Unlock() }()
+
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("SHELL", hangingStub(t, "sh-hung"))
+	hangingStub(t, "gh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	env := ChildEnvContext(ctx, os.Environ())
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("credential fetch took %s against a 300ms deadline", d)
+	}
+	if v := lookupEnv(env, "GH_TOKEN"); v != "" {
+		t.Error("a hung chain produced a credential")
+	}
+	// A deadline says nothing about whether a credential exists.
+	if len(lines) != 0 {
+		t.Errorf("a fetch cut short by the caller's deadline logged: %q", lines)
+	}
+}
+
+// TestChildEnvContextStillFetches is the positive control: an unexpired ctx
+// lets the chain yield exactly as ChildEnv does.
+func TestChildEnvContextStillFetches(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	restore := SetChildHarvestForTest(okHarvest(fakeToken), failHarvest("no gh"))
+	defer restore()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if v := lookupEnv(ChildEnvContext(ctx, os.Environ()), "GH_TOKEN"); v != fakeToken {
+		t.Error("ChildEnvContext with time left did not deliver the credential")
 	}
 }

@@ -234,6 +234,7 @@ func isExecCommandCall(e ast.Expr) bool {
 //	                             does this to add the git identity)
 //	nil                          os/exec's own "inherit the parent" signal
 //	ghtoken.ChildEnv(<rooted>)   adds a per-call credential, drops nothing
+//	ghtoken.ChildEnvContext(ctx, <rooted>)   the same, deadline-bounded
 //
 // An identifier it cannot follow is NOT accepted. This test would rather be
 // loud about an environment it cannot vouch for than vouch for one it did not
@@ -255,6 +256,11 @@ func rootsInEnviron(e ast.Expr) bool {
 			// entry — never fewer vars — so it is rooted exactly when its
 			// argument is (mg-37183).
 			return rootsInEnviron(v.Args[0])
+		}
+		if ok && pkg.Name == "ghtoken" && sel.Sel.Name == "ChildEnvContext" && len(v.Args) == 2 {
+			// The ctx only bounds the fetch (mg-c258b); the env rule is
+			// ChildEnv's, applied to the base argument.
+			return rootsInEnviron(v.Args[1])
 		}
 		return ok && pkg.Name == "os" && sel.Sel.Name == "Environ"
 	case *ast.SelectorExpr:
@@ -335,6 +341,7 @@ func TestInheritCheckAcceptsTheRealPatterns(t *testing.T) {
 		"append onto a set":   `append(cmd.Env, gitIdentityEnv()...)`,
 		"explicit nil":        `nil`,
 		"per-call credential": `ghtoken.ChildEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))`,
+		"bounded credential":  `ghtoken.ChildEnvContext(ctx, append(os.Environ(), "GH_PROMPT_DISABLED=1"))`,
 	}
 	for name, src := range accepted {
 		t.Run(name, func(t *testing.T) {

@@ -171,7 +171,7 @@ func lookupPRBody(wtDir, branch string) (int, string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch, "--json", "number,body")
 	cmd.Dir = wtDir
-	cmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
+	cmd.Env = ghtoken.ChildEnvContext(ctx, append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError

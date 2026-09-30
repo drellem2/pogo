@@ -971,7 +971,7 @@ func Fetch(repo string) (fresh bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), FetchTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", repo, "fetch", "--quiet", "origin")
-	cmd.Env = ghtoken.ChildEnv(os.Environ())
+	cmd.Env = ghtoken.ChildEnvContext(ctx, os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("fetch origin in %s: %s: %w", repo, strings.TrimSpace(string(out)), err)

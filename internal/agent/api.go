@@ -2909,7 +2909,7 @@ func fetchPolecatBaseRefs(sourceRepo, branch string, fetchTimeout time.Duration)
 	if specs := polecatFetchRefspecs(ctx, sourceRepo, branch); len(specs) > 0 {
 		args := append([]string{"-C", sourceRepo, "fetch", "--no-tags", "origin"}, specs...)
 		narrow := exec.CommandContext(ctx, "git", args...)
-		narrow.Env = ghtoken.ChildEnv(os.Environ())
+		narrow.Env = ghtoken.ChildEnvContext(ctx, os.Environ())
 		if out, err := narrow.CombinedOutput(); err == nil {
 			return true
 		} else if ctx.Err() == nil {
@@ -2919,7 +2919,7 @@ func fetchPolecatBaseRefs(sourceRepo, branch string, fetchTimeout time.Duration)
 	}
 
 	wide := exec.CommandContext(ctx, "git", "-C", sourceRepo, "fetch", "--no-tags", "origin")
-	wide.Env = ghtoken.ChildEnv(os.Environ())
+	wide.Env = ghtoken.ChildEnvContext(ctx, os.Environ())
 	out, err := wide.CombinedOutput()
 	if err == nil {
 		return true
