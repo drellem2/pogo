@@ -369,10 +369,23 @@ if printf '%s\n' "$NEST_OUT" | grep -q 'BLOCKS THE NIGHTLY REDEPLOY'; then
 else
   fail "the failure does not mention the nightly redeploy"
 fi
-if printf '%s\n' "$NEST_OUT" | grep -q 'ldflags Commit is'; then
-  fail "the nested arm also flagged the ldflags Commit, which build.sh stamps correctly there"
+# "Only vcs.revision" used to be a bare absence check — no 'ldflags Commit is'
+# in the output — which a build.sh with no verification at all (main before
+# #103) also satisfies (mg-41494). It now needs three things, each able to fail:
+# the verification RAN on hello and reported the vcs.revision failure, the
+# installed binary really carries the right ldflags Commit (read back here,
+# independently of build.sh's own reading), and build.sh did not flag it.
+# What it catches: build.sh stamping the nested worktree's ldflags wrongly, or
+# its verification misreporting a correct ldflags Commit as a failure.
+nest_ld="$(go version -m "${gb_nest}/hello" 2>/dev/null | sed -n 's/.*internal\/version\.Commit=\([0-9a-f]*\).*/\1/p' | head -1)"
+if ! printf '%s\n' "$NEST_OUT" | grep -q "FAILED for hello.*vcs.revision is"; then
+  fail "the nested arm did not report the foreign Go stamp, so 'only' has nothing to be only of"
+elif [ "$nest_ld" != "$src_sha" ]; then
+  fail "the nested install's ldflags Commit is '${nest_ld:-<none>}', expected ${src_sha}"
+elif printf '%s\n' "$NEST_OUT" | grep -q 'ldflags Commit is'; then
+  fail "the nested arm also flagged the ldflags Commit, which is correct there (${nest_ld})"
 else
-  pass "the nested arm flagged only vcs.revision (the ldflags Commit is correct)"
+  pass "the nested arm flagged only vcs.revision (the installed ldflags Commit is ${src_sha})"
 fi
 
 # 11c: the ldflags half fires on its own — an unstamped build from the
