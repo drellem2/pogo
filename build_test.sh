@@ -297,6 +297,117 @@ else
   fail "control: a passing build no longer exits 0"
 fi
 
+# --- Test 11: --install reads back the stamps it just installed (drellem2/pogo#103)
+#
+# The nightly redeploy (scripts/pogo-self-deploy installed_rev) reads Go's
+# automatic vcs.revision out of the installed binary, NOT the ldflags Commit.
+# In a worktree nested inside another git repo — a polecat worktree under
+# ~/.pogo/polecats, where ~/.pogo is itself a repo — Go stamps the OUTER repo's
+# HEAD there, and the nightly aborts on the foreign stamp every night until a
+# human reinstalls. --install must say so at install time.
+#
+# 11b reproduces the real mechanism (a `git worktree add` into a gitignored
+# subtree of another repo) rather than faking a stamp, so the test fails if Go
+# ever stops behaving this way instead of passing against a fiction. Each arm
+# installs into its own temp GOBIN; the host's ~/go/bin is never written.
+echo ""
+echo "Test 11: --install verifies the installed binaries' stamps"
+
+git_q() { git -c user.email=t@example.com -c user.name=t -c init.defaultBranch=main "$@"; }
+
+# make_src DIR: a git repo shaped like the pogo tree, one commit.
+make_src() {
+  local d="$1"
+  mkdir -p "$d/cmd/hello" "$d/scripts/lib"
+  cp "$BUILD_SCRIPT" "$d/build.sh"
+  printf '#!/bin/bash\ntrue\n' > "$d/fmt.sh"
+  printf '#!/bin/bash\ntrue\n' > "$d/test.sh"
+  chmod +x "$d/build.sh" "$d/fmt.sh" "$d/test.sh"
+  cp "${SCRIPT_DIR}/scripts/lib/gate-profile.sh" "$d/scripts/lib/gate-profile.sh"
+  printf 'module example.com/hello\n\ngo 1.25.0\n' > "$d/go.mod"
+  printf '%s' "$good_main" > "$d/cmd/hello/main.go"
+  printf 'bin/\n' > "$d/.gitignore"
+  git_q -C "$d" init -q && git_q -C "$d" add . && git_q -C "$d" commit -qm src
+}
+
+# 11a: a standalone checkout — both stamps name HEAD, --install passes.
+src="${tmpdir}/src"
+make_src "$src"
+src_sha="$(git -C "$src" rev-parse HEAD)"
+gb_ok="${tmpdir}/gobin-ok"; mkdir -p "$gb_ok"
+OK_OUT="$(cd "$src" && GOBIN="$gb_ok" ./build.sh --skip-tests --install 2>&1)" && OK_RC=0 || OK_RC=$?
+if [ "$OK_RC" -eq 0 ] && [ -x "${gb_ok}/hello" ] \
+   && printf '%s\n' "$OK_OUT" | grep -q "install verified.*${src_sha}"; then
+  pass "--install from a standalone checkout verified both stamps against HEAD and exited 0"
+else
+  fail "--install from a standalone checkout did not verify cleanly (rc=${OK_RC}): $(printf '%s\n' "$OK_OUT" | grep 'build.sh:' | tail -3)"
+fi
+
+# 11b: the defect — a worktree of $src nested in a gitignored subtree of an
+# outer repo. The ldflags Commit is right; Go's vcs.revision names the outer repo.
+outer="${tmpdir}/outer"
+mkdir -p "$outer"
+printf 'polecats/\n' > "${outer}/.gitignore"
+git_q -C "$outer" init -q && git_q -C "$outer" add . && git_q -C "$outer" commit -qm outer
+outer_sha="$(git -C "$outer" rev-parse HEAD)"
+wt="${outer}/polecats/w1"
+git_q -C "$src" worktree add -q "$wt" -b w1 2>/dev/null
+gb_nest="${tmpdir}/gobin-nest"; mkdir -p "$gb_nest"
+NEST_OUT="$(cd "$wt" && GOBIN="$gb_nest" ./build.sh --skip-tests --install 2>&1)" && NEST_RC=0 || NEST_RC=$?
+if [ "$NEST_RC" -ne 0 ]; then
+  pass "--install from a nested worktree exited non-zero (${NEST_RC})"
+else
+  fail "--install from a nested worktree exited 0 — the foreign vcs.revision went unreported"
+fi
+if printf '%s\n' "$NEST_OUT" | grep -q "FAILED for hello.*vcs.revision is '${outer_sha}', expected ${src_sha}"; then
+  pass "the failure names the binary, the foreign sha found, and the expected sha"
+else
+  fail "the failure does not name binary/found/expected: $(printf '%s\n' "$NEST_OUT" | grep 'build.sh:' | tail -3)"
+fi
+if printf '%s\n' "$NEST_OUT" | grep -q 'BLOCKS THE NIGHTLY REDEPLOY'; then
+  pass "the failure says a foreign vcs.revision blocks the nightly redeploy"
+else
+  fail "the failure does not mention the nightly redeploy"
+fi
+if printf '%s\n' "$NEST_OUT" | grep -q 'ldflags Commit is'; then
+  fail "the nested arm also flagged the ldflags Commit, which build.sh stamps correctly there"
+else
+  pass "the nested arm flagged only vcs.revision (the ldflags Commit is correct)"
+fi
+
+# 11c: the ldflags half fires on its own — an unstamped build from the
+# standalone checkout has a correct vcs.revision and no ldflags Commit.
+gb_ns="${tmpdir}/gobin-nostamp"; mkdir -p "$gb_ns"
+NS_OUT="$(cd "$src" && GOBIN="$gb_ns" POGO_BUILD_NO_STAMP=1 ./build.sh --skip-tests --install 2>&1)" && NS_RC=0 || NS_RC=$?
+if [ "$NS_RC" -ne 0 ] && printf '%s\n' "$NS_OUT" | grep -q "FAILED for hello.*ldflags Commit is '<none>', expected ${src_sha}"; then
+  pass "an unstamped install fails on the missing ldflags Commit"
+else
+  fail "an unstamped install was not caught (rc=${NS_RC}): $(printf '%s\n' "$NS_OUT" | grep 'build.sh:' | tail -3)"
+fi
+
+# 11d: positive control on the COMPARISON — the build that passed in 11a,
+# judged against a sha it does not carry, must go red on both stamps. Without
+# this, 11a would also pass against a check that compares nothing.
+gb_pc="${tmpdir}/gobin-control"; mkdir -p "$gb_pc"
+wrong="0000000000000000000000000000000000000000"
+PC_OUT="$(cd "$src" && GOBIN="$gb_pc" POGO_INSTALL_VERIFY_EXPECT="$wrong" ./build.sh --skip-tests --install 2>&1)" && PC_RC=0 || PC_RC=$?
+if [ "$PC_RC" -ne 0 ] \
+   && printf '%s\n' "$PC_OUT" | grep -q "ldflags Commit is '${src_sha}', expected ${wrong}" \
+   && printf '%s\n' "$PC_OUT" | grep -q "vcs.revision is '${src_sha}', expected ${wrong}"; then
+  pass "control: a correct build judged against the wrong sha fails on both stamps"
+else
+  fail "control: the check did not fire against a wrong expected sha (rc=${PC_RC})"
+fi
+
+# 11e: a plain `./build.sh` (no --install) never runs the check and never
+# writes GOBIN, even from the nested worktree.
+gb_plain="${tmpdir}/gobin-plain"; mkdir -p "$gb_plain"
+if (cd "$wt" && GOBIN="$gb_plain" ./build.sh --skip-tests >/dev/null 2>&1) && [ -z "$(ls -A "$gb_plain")" ]; then
+  pass "without --install the nested worktree still builds and GOBIN stays empty"
+else
+  fail "without --install the nested worktree build failed or wrote GOBIN"
+fi
+
 echo ""
 echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
 [ "$FAIL" -eq 0 ]
