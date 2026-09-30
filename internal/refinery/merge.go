@@ -936,7 +936,7 @@ func ghClosePR(wtDir string, number int, comment string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", "pr", "close", strconv.Itoa(number), "--comment", comment)
 	cmd.Dir = wtDir
-	cmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
+	cmd.Env = ghtoken.ChildEnvContext(ctx, append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }

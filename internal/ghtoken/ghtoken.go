@@ -366,13 +366,25 @@ func ProbeCommand(shell string) []string {
 // stderr is captured to a throwaway buffer rather than to the returned error:
 // shell init can print, and the error string ends up in logs and mail.
 func shellHarvest(shell string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	return shellHarvestCtx(context.Background(), shell)
+}
+
+// shellHarvestCtx is shellHarvest bounded ALSO by parent: the probe stops at
+// probeTimeout or at parent's deadline, whichever comes first (mg-c258b).
+func shellHarvestCtx(parent context.Context, shell string) (string, error) {
+	if err := parent.Err(); err != nil {
+		return "", fmt.Errorf("%s environment probe not run: the caller's deadline has passed", filepath.Base(shell))
+	}
+	ctx, cancel := context.WithTimeout(parent, probeTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, shell, ProbeCommand(shell)...)
 	cmd.Stderr = nil // discarded on purpose; see the doc comment above.
 	out, err := cmd.Output()
 	if ctx.Err() != nil {
+		if parent.Err() != nil {
+			return "", fmt.Errorf("%s environment probe cut short by the caller's deadline", filepath.Base(shell))
+		}
 		return "", fmt.Errorf("%s environment probe timed out after %s", filepath.Base(shell), probeTimeout)
 	}
 	if err != nil {
@@ -402,18 +414,29 @@ var GHTokenCommand = []string{"auth", "token"}
 // stop recognising after a gh release, and it is a string that ends up in logs
 // and mail.
 func ghAuthToken() (string, error) {
+	return ghAuthTokenCtx(context.Background())
+}
+
+// ghAuthTokenCtx is ghAuthToken bounded ALSO by parent (mg-c258b).
+func ghAuthTokenCtx(parent context.Context) (string, error) {
 	bin, err := exec.LookPath("gh")
 	if err != nil {
 		return "", fmt.Errorf("gh is not on PATH")
 	}
+	if err := parent.Err(); err != nil {
+		return "", fmt.Errorf("`gh auth token` not run: the caller's deadline has passed")
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	ctx, cancel := context.WithTimeout(parent, probeTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, bin, GHTokenCommand...)
 	cmd.Stderr = nil // discarded on purpose; see the doc comment above.
 	out, err := cmd.Output()
 	if ctx.Err() != nil {
+		if parent.Err() != nil {
+			return "", fmt.Errorf("`gh auth token` cut short by the caller's deadline")
+		}
 		return "", fmt.Errorf("`gh auth token` timed out after %s", probeTimeout)
 	}
 	if err != nil {

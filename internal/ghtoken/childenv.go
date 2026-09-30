@@ -1,6 +1,7 @@
 package ghtoken
 
 import (
+	"context"
 	"log"
 	"strings"
 	"sync"
@@ -35,10 +36,33 @@ import (
 // is the one an operator needs, and it names each source's reason, never a
 // value.
 func ChildEnv(base []string) []string {
+	return ChildEnvContext(context.Background(), base)
+}
+
+// ChildEnvContext is ChildEnv with the credential fetch bounded by ctx as well
+// as by each source's own 15s probe timeout (mg-c258b). A caller whose child
+// runs under exec.CommandContext(ctx, …) must pass that same ctx: the fetch
+// runs BEFORE the child starts, so under plain ChildEnv a hung source (a
+// wedged `gh auth token`, a slow shell init) spends up to 15s per source
+// outside the caller's deadline — a 300ms-bounded gh lookup then took 15s on
+// a host with no ambient GH_TOKEN (pogo CI, drellem2/pogo main since 50076f4).
+//
+// What does NOT change: the chain, its order, and that the value goes only to
+// the returned slice. When ctx ends before a source yields, base is returned
+// unchanged; the child, started under the same expired ctx, fails as a
+// timeout, which is how the caller already classifies it. A fetch cut short
+// by the caller's deadline says nothing about whether a credential exists, so
+// it is not logged as the chain going UNAVAILABLE.
+func ChildEnvContext(ctx context.Context, base []string) []string {
 	childMu.Lock()
 	shellH, ghH := childShellHarvest, childGHHarvest
 	childMu.Unlock()
-	env, res := childEnv(base, shellH, ghH)
+	env, res := childEnv(base,
+		func() (string, error) { return shellH(ctx) },
+		func() (string, error) { return ghH(ctx) })
+	if !res.OK() && ctx.Err() != nil {
+		return env
+	}
 	noteChildResult(res)
 	return env
 }
@@ -78,8 +102,8 @@ func lookupEnv(env []string, key string) string {
 
 var (
 	childMu           sync.Mutex
-	childShellHarvest = func() (string, error) { return shellHarvest(UserShell()) }
-	childGHHarvest    = ghAuthToken
+	childShellHarvest = func(ctx context.Context) (string, error) { return shellHarvestCtx(ctx, UserShell()) }
+	childGHHarvest    = ghAuthTokenCtx
 	childLastOK       *bool
 	childLogf         = log.Printf
 )
@@ -107,11 +131,14 @@ func noteChildResult(res Result) {
 // SetChildHarvestForTest replaces ChildEnv's two sources for the duration of a
 // test in ANY package, so a call site's test can prove its child received the
 // credential without a real shell or a real secret. It returns the restore
-// function; pass it to t.Cleanup.
+// function; pass it to t.Cleanup. The replacements ignore ChildEnvContext's
+// ctx; a test of the deadline itself lives in this package.
 func SetChildHarvestForTest(shell, gh func() (string, error)) (restore func()) {
 	childMu.Lock()
 	prevShell, prevGH, prevOK := childShellHarvest, childGHHarvest, childLastOK
-	childShellHarvest, childGHHarvest, childLastOK = shell, gh, nil
+	childShellHarvest = func(context.Context) (string, error) { return shell() }
+	childGHHarvest = func(context.Context) (string, error) { return gh() }
+	childLastOK = nil
 	childMu.Unlock()
 	return func() {
 		childMu.Lock()

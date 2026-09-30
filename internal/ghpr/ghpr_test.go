@@ -54,13 +54,35 @@ func TestLookup(t *testing.T) {
 
 // TestLookupIsBounded: a gh that hangs is an error at the timeout, not a hang —
 // the stranded-work caller sits on the polecat-stop path.
+//
+// Two arms, because the per-call credential (mg-37183) is fetched BEFORE the
+// bounded gh child starts, and its fallback is `gh auth token` — the same hung
+// stub. "ambient" is a host with GH_TOKEN exported (this box: the chain never
+// runs). "no credential" is a CI runner: the chain runs, the user shell is
+// hung too, and the whole call must still end at the timeout (mg-c258b —
+// before ChildEnvContext this arm took 15s, locally as on the runner).
 func TestLookupIsBounded(t *testing.T) {
-	fakeGH(t, `exec sleep 30`)
-	start := time.Now()
-	if _, err := OpenNumber(t.TempDir(), "b", 300*time.Millisecond); err == nil {
-		t.Error("hung gh: want an error, got nil")
-	}
-	if d := time.Since(start); d > 10*time.Second {
-		t.Errorf("hung gh took %s, want about the 300ms timeout", d)
+	for _, arm := range []string{"ambient", "no credential"} {
+		t.Run(arm, func(t *testing.T) {
+			fakeGH(t, `exec sleep 30`)
+			if arm == "ambient" {
+				t.Setenv("GH_TOKEN", "ghp_bounded_fake_0000000000000000000000")
+			} else {
+				t.Setenv("GH_TOKEN", "")
+				t.Setenv("GITHUB_TOKEN", "")
+				shell := filepath.Join(t.TempDir(), "sh-hung")
+				if err := os.WriteFile(shell, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("SHELL", shell)
+			}
+			start := time.Now()
+			if _, err := OpenNumber(t.TempDir(), "b", 300*time.Millisecond); err == nil {
+				t.Error("hung gh: want an error, got nil")
+			}
+			if d := time.Since(start); d > 10*time.Second {
+				t.Errorf("hung gh took %s, want about the 300ms timeout", d)
+			}
+		})
 	}
 }

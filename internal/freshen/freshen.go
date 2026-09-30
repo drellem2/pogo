@@ -445,7 +445,7 @@ func git(dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if ghtoken.GitNeedsCredential(args) {
-		cmd.Env = ghtoken.ChildEnv(cmd.Env)
+		cmd.Env = ghtoken.ChildEnvContext(ctx, cmd.Env)
 	}
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
