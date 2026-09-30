@@ -184,9 +184,12 @@ type MGSource struct {
 type ItemCache = mgscan.Cache[cachedItem]
 
 // cachedItem is carrier()'s answer for one successfully read item.
+//
+// Its fields are exported only so `pogo gh-watch` can persist the cache between
+// runs as JSON (mg-257a8); nothing outside this package reads them.
 type cachedItem struct {
-	c  Carrier
-	ok bool
+	C  Carrier `json:"c"`
+	OK bool    `json:"ok"`
 }
 
 // NewItemCache returns an empty ItemCache for a long-lived MGSource.
@@ -307,18 +310,18 @@ func (s MGSource) Carriers() ([]Carrier, int, error) {
 	// drellem2/pogo#179 profiled in ghintake's identical scan (mg-e353).
 	mgscan.Pool(len(rows), s.workers(), func(i int) {
 		c, ok := s.cachedCarrier(rows[i])
-		results[i] = cachedItem{c: c, ok: ok}
+		results[i] = cachedItem{C: c, OK: ok}
 	})
 
 	var out []Carrier
 	scanned := 0
 	for _, r := range results {
-		if r.c.ID == "" && !r.ok {
+		if r.C.ID == "" && !r.OK {
 			continue // unreadable item: not examined
 		}
 		scanned++
-		if r.ok {
-			out = append(out, r.c)
+		if r.OK {
+			out = append(out, r.C)
 		}
 	}
 	return out, scanned, nil
@@ -336,17 +339,17 @@ func (s MGSource) cachedCarrier(r listRow) (Carrier, bool) {
 		return s.carrier(r.ID)
 	}
 	if hit, ok := s.Cache.Lookup(r.ID, r.Mtime); ok {
-		c := hit.c
-		if hit.ok {
+		c := hit.C
+		if hit.OK {
 			c.Status = r.Status
 		}
-		return c, hit.ok
+		return c, hit.OK
 	}
 	c, ok := s.carrier(r.ID)
 	if c.ID != "" && s.Cache != nil {
 		stored := c
 		stored.Status = ""
-		s.Cache.Store(r.ID, r.Mtime, cachedItem{c: stored, ok: ok})
+		s.Cache.Store(r.ID, r.Mtime, cachedItem{C: stored, OK: ok})
 	}
 	return c, ok
 }

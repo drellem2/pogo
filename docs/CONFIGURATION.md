@@ -1834,6 +1834,53 @@ Source of truth: `internal/credexpiry/`. Mechanism:
 This complements, and does not replace, reactive detection — an early
 **revocation** produces no warning here.
 
+## Where the gh-issue detectors run
+
+The three gh-issue detectors — [intake](#the-gh-issue-intake-detector),
+[teardown](#the-gh-issue-teardown-detector) and the carrier re-read
+(`[carrier_drift]`) — run in **`pogo gh-watch`**, not in pogod (mg-257a8).
+Their config sections are unchanged; the job reads them.
+
+Every one of them calls `gh`, which needs a GitHub credential, and launchd
+starts pogod without a shell. pogod used to fetch a token at startup through a
+zsh subshell and hold it for its whole life — a secret in a long-lived daemon,
+frozen at exec (a rotation in `~/.zshenv` stayed invisible to the intake scan
+for 173 hours, mg-4d59), and when the fetch failed every check read "unknown".
+The job instead runs through a **login shell**:
+
+```
+pogo service install-gh-watch      # com.pogo.ghwatch: /bin/zsh -c -l 'exec <pogo> gh-watch --oneline'
+pogo gh-watch --force              # one run by hand, every detector sampled now
+```
+
+- **Schedule.** launchd fires it every 15 minutes and at load; each detector
+  keeps its own `interval` and skips a fire on which it is not due. `--force`
+  clears only that interval check — an unchanged finding set is still not
+  re-mailed before `renotify_after`, and escalation clocks are kept.
+- **State between runs.** A per-fire process would otherwise make every fire
+  each detector's first. `$POGO_HOME/gh-watch/state.json` carries each
+  detector's last-sample time, last-mailed fingerprint and per-finding
+  escalation clocks; `cache.json` carries the mg-scan caches, so an unchanged
+  store costs no `mg show` forks (drellem2/pogo#179).
+- **The record.** `state.json` is also the run's result: per detector, whether
+  it armed (`armed` / `disabled` / `no_gh_binary` / `no_credential`), whether it
+  sampled this run, the last sample's event details, and every issue state the
+  last sample read (`lookups`), so "closed" is distinguishable from "checked
+  nothing". `pogo gh-watch --json` prints it.
+- **pogod's part** is a witness: it reads the record and raises A13 when a
+  detector did not arm (`ghteardown_not_armed`, `ghintake_not_armed`,
+  `ghintake_no_credential`, routed as before) or when the job has not written a
+  fresh record for an hour of pogod's own awake time (`ghwatch_not_reporting`,
+  to the coordinator) — the one failure the job cannot report about itself.
+  The awake-time rule is what keeps a host wake from raising it before launchd
+  has fired the job.
+- **Events** carry `"agent": "gh-watch"`; the event types are unchanged.
+- **What pogod still uses a token for.** `ghtoken.Ensure()` stays in pogod for
+  its merge-path `gh` calls — the refinery's PR-body closing-keyword guard, its
+  external-PR close, and strandedwork's awaiting-review probe. All three fail
+  soft without a credential, so removing it waits on their own per-call
+  credential (mg-37183).
+
 ## The gh-issue teardown detector
 
 The gh-issue workflow ends by closing the GitHub issue behind a carrier work
@@ -1843,8 +1890,10 @@ drellem2/pogo#89, and it sat OPEN for four days. Nothing noticed: from the
 outside, a carrier that completed its teardown and one that skipped it are the
 same three characters. The miss is an **absence**, and an absence emits nothing.
 
-`pogo check-teardown` audits it on demand; pogod runs the same detector on a
-coarse heartbeat interval and mails `human`. Both are **report-only** — neither
+`pogo check-teardown` audits it on demand; `pogo gh-watch` (the
+`com.pogo.ghwatch` launchd job — see [Where the gh-issue detectors
+run](#where-the-gh-issue-detectors-run)) runs the same detector on a coarse
+interval and mails `notify_to`. Both are **report-only** — neither
 closes an issue nor comments, because posting on an external thread is
 outward-facing and stays human-gated.
 
@@ -1949,9 +1998,11 @@ outward-facing and stays human-gated.
   Sibling of
   `internal/pathenv`: that one fixes children that cannot be **found** under
   launchd, this one fixes children that run and cannot **authenticate**. The
-  value is read once at startup, so a rotated token needs a pogod restart; the
-  failure mode is a return to indeterminate, which is reported, never mistaken
-  for closed.
+  value is read once per process: pogod (which since mg-257a8 needs it only for
+  its merge-path `gh` calls) needs a restart to see a rotated token, while
+  `pogo gh-watch` is a fresh process on every fire and sees it at the next one.
+  The failure mode is a return to indeterminate, which is reported, never
+  mistaken for closed.
 
   **`gh auth token` is what makes "no credential" a decidable fact.** It is the
   one link of the proposed configurable chain that writes no new copy of the
@@ -1960,7 +2011,7 @@ outward-facing and stays human-gated.
   mg-7d62 as a secret-handling decision. Its value is less the extra host it
   rescues than what it lets a caller conclude: before it, "no token harvested"
   did **not** mean "gh cannot authenticate", because `gh auth login` writes a
-  `hosts.yml` this package could not see. After it, it does, and `cmd/pogod`
+  `hosts.yml` this package could not see. After it, it does, and `pogo gh-watch`
   arms the gh-issue intake detector on exactly that predicate. A non-zero exit
   from `gh auth token` is **ordinary**, not a fault — a host that never ran `gh
   auth login` is a normal host — and nothing anywhere parses gh's stderr to
@@ -2105,8 +2156,8 @@ scope, a question) is a judgement that stays with the coordinator.
   configured neither source reconciled a stranger's issue tracker against its
   local work items (mg-f04b). An empty watch list is reported as such, since
   "examined nothing" and "found nothing" otherwise render identically. Reading the poller's state rather than duplicating its list is
-  the point: a repo added to the poller is covered on the next pogod restart with
-  no second edit to forget. It reads *state*, not the sent ledger — so a poller
+  the point: a repo added to the poller is covered on the next `pogo gh-watch`
+  fire with no second edit to forget. It reads *state*, not the sent ledger — so a poller
   that is stopped, wedged, or has never delivered a mail still yields a correct
   watch list. The report says which source it used.
 - **Why not in the poller?** The poller holds the *sent* side of the ledger, which
@@ -2118,9 +2169,10 @@ scope, a question) is a judgement that stays with the coordinator.
   the poller responsible for the coordinator's follow-through while giving it no
   way to notice its own, where pogod already has the durable mail, condition
   annunciation, and escalation path this needs.
-- **Arming.** Skipped entirely when `gh` is not on PATH, since every repo lookup
-  would fail and the runner would report an environment gap as a wall of
-  unreadable repos. That state raises the A13 condition
+- **Arming.** Skipped entirely when `gh` is not on the `pogo gh-watch` job's
+  PATH, since every repo lookup would fail and the runner would report an
+  environment gap as a wall of unreadable repos. That state (read by pogod from
+  the job's record) raises the A13 condition
   (`ghintake_not_armed`) to the intake mailbox — a separate notice from the
   teardown detector's on the same row, because one root cause with two readers
   needs two notices or one reader learns nothing.
@@ -2128,10 +2180,11 @@ scope, a question) is a judgement that stays with the coordinator.
   argument, one step further: a `gh` that runs and cannot authenticate fails
   every repo lookup for one global reason, and the runner would report that one
   reason as N unreadable repos. The predicate is `internal/ghtoken`'s result,
-  evaluated **once at startup** — not per poll, and never by inspecting the
-  per-repo failures. Without a credential the detector does not arm and raises
-  the A13 condition `ghintake_no_credential`, whose remedy (`gh auth login` plus
-  a pogod restart) has nothing in common with the PATH case's, which is why it
+  evaluated **once per `pogo gh-watch` run** — never by inspecting the per-repo
+  failures. Without a credential the detector does not arm, the run records
+  that, and pogod raises the A13 condition `ghintake_no_credential` from the
+  record; its remedy (`gh auth login`, or an export in `~/.zshenv`; no restart —
+  the next fire re-reads it) has nothing in common with the PATH case's, which is why it
   is a separate id rather than a sentence added to the other notice. The two are
   ordered: a host with no `gh` is told about `gh`, never about a credential it
   could not have obtained anyway.

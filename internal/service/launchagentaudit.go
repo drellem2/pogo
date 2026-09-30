@@ -298,6 +298,12 @@ func managedLaunchAgents() []managedLaunchAgent {
 			Render: func() (string, error) { s, _, err := renderReclaimPlist(); return s, err },
 			Remedy: "pogo service install-reclaim",
 		},
+		{
+			Label:  ghWatchLabel,
+			Path:   ghWatchPlistPath,
+			Render: func() (string, error) { s, _, err := renderGHWatchPlist(); return s, err },
+			Remedy: "pogo service install-gh-watch",
+		},
 	}
 }
 
