@@ -126,6 +126,7 @@ const (
 	ownedByReminders = "installed by pogo-reminders, not by any installer in this repo (`internal/service` renders no plist for it), so this build has no expected copy to compare the installed one against"
 	ownedByPogoPA    = "installed by pogo-pa, not by any installer in this repo, so this build has no expected copy to compare the installed one against"
 	ownedBySleepwake = "installed by pogo-sleepwake, not by any installer in this repo, so this build has no expected copy to compare the installed one against"
+	ownedByPA        = "installed by hand by the pa agent (mg-0f79: Daniel's 07:00 weekday VIX regime report, pa-owned), from an untracked plist it keeps in ~/.pogo/bin — not by any installer in this repo — so this build has no expected copy to compare the installed one against"
 	ownedByBridget   = "installed by the bridget repo (cloverross/bridget, see docs/design/bridget-integration-design.md), not by any installer in this repo, so this build has no expected copy to compare the installed one against"
 )
 
@@ -155,6 +156,17 @@ func launchAgentExclusionReasons() map[string]string {
 		"com.pogo.sleepwake": ownedBySleepwake,
 
 		"com.pogo.bridget": ownedByBridget,
+
+		// Pogo-owned but still outside: the plist is tracked in this repo
+		// (scripts/launchd/com.pogo.mgbackup.plist) and installed by hand per
+		// scripts/launchd/README.md, so no `pogo service install-*` renders it
+		// and there is no Go-side copy to compare against. Ruled pogo-owned by
+		// Daniel 2026-09-29 (mg-79c6a); bringing it into the registry is the
+		// "Go-side render per job" work the file header describes.
+		"com.pogo.mgbackup": "installed by hand from scripts/launchd/com.pogo.mgbackup.plist (mg-b01d: hourly backup of the mg store, pogo-owned) via the sed + bootstrap in scripts/launchd/README.md — `internal/service` renders no plist for it, so this build has no expected copy to compare the installed one against",
+
+		// Ruled pa-owned by Daniel 2026-09-29 (mg-79c6a).
+		"com.pogo.vixreport": ownedByPA,
 	}
 }
 
