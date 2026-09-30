@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/hookarm"
 	"github.com/drellem2/pogo/internal/synthfail"
@@ -2850,7 +2851,9 @@ func fetchPolecatBaseRefs(sourceRepo, branch string, fetchTimeout time.Duration)
 
 	if specs := polecatFetchRefspecs(ctx, sourceRepo, branch); len(specs) > 0 {
 		args := append([]string{"-C", sourceRepo, "fetch", "--no-tags", "origin"}, specs...)
-		if out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput(); err == nil {
+		narrow := exec.CommandContext(ctx, "git", args...)
+		narrow.Env = ghtoken.ChildEnv(os.Environ())
+		if out, err := narrow.CombinedOutput(); err == nil {
 			return true
 		} else if ctx.Err() == nil {
 			log.Printf("polecat: narrow fetch of %v failed in %s, retrying wide: %v\n%s",
@@ -2858,7 +2861,9 @@ func fetchPolecatBaseRefs(sourceRepo, branch string, fetchTimeout time.Duration)
 		}
 	}
 
-	out, err := exec.CommandContext(ctx, "git", "-C", sourceRepo, "fetch", "--no-tags", "origin").CombinedOutput()
+	wide := exec.CommandContext(ctx, "git", "-C", sourceRepo, "fetch", "--no-tags", "origin")
+	wide.Env = ghtoken.ChildEnv(os.Environ())
+	out, err := wide.CombinedOutput()
 	if err == nil {
 		return true
 	}

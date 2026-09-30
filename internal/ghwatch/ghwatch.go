@@ -20,8 +20,9 @@
 //
 // pogod's own remaining `gh` calls (the refinery's PR-body closing-keyword guard
 // and external-PR close, and strandedwork's awaiting-review probe) are
-// merge-path, not scheduled, and are NOT moved by this package; pogod keeps
-// ghtoken.Ensure for them until their own follow-up lands.
+// merge-path, not scheduled, and are NOT moved by this package. They get a
+// credential per call through ghtoken.ChildEnv, and pogod holds none of its own
+// (mg-37183).
 //
 // # State between runs
 //

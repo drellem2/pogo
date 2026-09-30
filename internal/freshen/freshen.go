@@ -44,6 +44,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/drellem2/pogo/internal/ghtoken"
 )
 
 // Status is the verdict for one checkout. Exactly one is returned per call.
@@ -442,6 +444,9 @@ func git(dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if ghtoken.GitNeedsCredential(args) {
+		cmd.Env = ghtoken.ChildEnv(cmd.Env)
+	}
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return fmt.Sprintf("git %s timed out after %s", args[0], CommandTimeout), ctx.Err()

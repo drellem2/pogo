@@ -61,6 +61,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
+	"github.com/drellem2/pogo/internal/ghtoken"
 )
 
 // PromptsSubtree is where the shipped corpus lives in the repo. Its layout
@@ -161,7 +162,7 @@ func gitNetOut(ctx context.Context, repo string, args ...string) ([]byte, error)
 	// this env in a local and assigning the local reads as a sealed
 	// environment, and it flagged exactly that here — correctly, by its own
 	// stated rule that unknown is never clean.
-	cmd.Env = append(os.Environ(), gitNetEnv()...)
+	cmd.Env = ghtoken.ChildEnv(append(os.Environ(), gitNetEnv()...))
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

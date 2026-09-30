@@ -40,7 +40,6 @@ import (
 	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/firstturn"
-	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/ghwatch"
 	"github.com/drellem2/pogo/internal/gitceiling"
 	"github.com/drellem2/pogo/internal/health"
@@ -1516,23 +1515,16 @@ Flags:
 		fmt.Printf("Warning: could not augment PATH: %v\n", err)
 	}
 
-	// Repair GH_TOKEN for the same reason and in the same breath (mg-03ea).
-	// pathenv fixes children that cannot be FOUND under launchd's minimal env;
-	// this fixes children that are found, run, and cannot AUTHENTICATE.
-	// Existence-only in the log, and the line NAMES THE WINNING SOURCE (it is
-	// what refuted gh#113's premise, 163 occurrences deep).
-	//
-	// WHAT STILL NEEDS IT (mg-257a8). The gh-issue watchers that used to be its
-	// main consumers moved out to `pogo gh-watch`, which gets the user's
-	// credential from a login shell on every fire. What is left in pogod are
-	// merge-path calls that cannot move to a schedule: the refinery's PR-body
-	// closing-keyword guard (internal/refinery/closingref_gate.go, `gh pr
-	// view`), its external-PR push-back and close (merge.go via internal/ghpr,
-	// `gh pr close`), and strandedwork's awaiting-review probe (internal/ghpr).
-	// All three fail SOFT without a token — the guard is silently off — so the
-	// token stays until those calls get a per-call credential of their own;
-	// mg-37183 tracks that, and removes this line when it lands.
-	log.Printf("pogod: %s", ghtoken.Ensure())
+	// There is deliberately NO GH_TOKEN repair here any more (mg-37183). pogod
+	// used to call ghtoken.Ensure(), which wrote the harvested token into its
+	// OWN environment — so every child it spawned afterwards (agents, gates,
+	// hooks) inherited it, and a rotated token stayed stale until restart
+	// (mg-4d59). The gh-issue watchers left for `pogo gh-watch` (mg-257a8); the
+	// calls that remained — the refinery's PR-body closing-keyword guard and
+	// external-PR close, strandedwork's awaiting-review probe, and every git
+	// network op against an https github.com remote (whose credential helper
+	// is `gh auth git-credential`) — now fetch a credential per call into that
+	// one child's env via ghtoken.ChildEnv. Do not reintroduce Ensure here.
 
 	// Bound every git repository lookup at POGO_HOME, before anything shells out
 	// to git or spawns an agent. Every repo pogod manages (polecats/*,

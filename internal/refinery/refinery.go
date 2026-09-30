@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/hostload"
 )
 
@@ -821,7 +822,7 @@ func validateTargetRef(repoPath, targetRef string) error {
 	// GIT_TERMINAL_PROMPT=0 makes auth-required HTTPS remotes fail fast
 	// rather than hang waiting for a username on stdin under launchd.
 	cmd := exec.Command("git", "-C", repoPath, "ls-remote", "--heads", "origin", targetRef)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// Distinguish auth failure from "no remote" — auth failures are
@@ -885,7 +886,7 @@ func detectDefaultBranch(repoPath string) (string, error) {
 // remote fails fast rather than hanging on stdin under launchd.
 func remoteDefaultBranch(repoPath string) (string, bool) {
 	cmd := exec.Command("git", "-C", repoPath, "ls-remote", "--symref", "origin", "HEAD")
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", false
@@ -931,13 +932,13 @@ func createTargetRef(repoPath, targetRef, sourceRef string) error {
 	// push it to a new branch on origin. GIT_TERMINAL_PROMPT=0 so an
 	// auth-required HTTPS remote fails fast instead of hanging.
 	fetchCmd := exec.Command("git", "-C", repoPath, "fetch", "origin", sourceRef)
-	fetchCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	fetchCmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
 	if fOut, err := fetchCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("fetch source_ref %q from origin: %v: %s", sourceRef, err, strings.TrimSpace(string(fOut)))
 	}
 	pushCmd := exec.Command("git", "-C", repoPath, "push", "origin",
 		"refs/remotes/origin/"+sourceRef+":refs/heads/"+targetRef)
-	pushCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	pushCmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
 	if pOut, err := pushCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("push %s:%s to origin: %v: %s", sourceRef, targetRef, err, strings.TrimSpace(string(pOut)))
 	}

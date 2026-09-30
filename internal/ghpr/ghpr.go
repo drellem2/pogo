@@ -25,6 +25,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/drellem2/pogo/internal/ghtoken"
 )
 
 // Lookup returns the number and state ("OPEN", "MERGED", "CLOSED") of the
@@ -37,7 +39,7 @@ func Lookup(dir, branch string, timeout time.Duration) (int, string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch, "--json", "state,number")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1")
+	cmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError

@@ -1875,11 +1875,65 @@ pogo gh-watch --force              # one run by hand, every detector sampled now
   The awake-time rule is what keeps a host wake from raising it before launchd
   has fired the job.
 - **Events** carry `"agent": "gh-watch"`; the event types are unchanged.
-- **What pogod still uses a token for.** `ghtoken.Ensure()` stays in pogod for
-  its merge-path `gh` calls — the refinery's PR-body closing-keyword guard, its
-  external-PR close, and strandedwork's awaiting-review probe. All three fail
-  soft without a credential, so removing it waits on their own per-call
-  credential (mg-37183).
+- **What pogod still uses a token for — per call, never held (mg-37183).**
+  pogod no longer fetches a token at startup. Its remaining GitHub children —
+  the refinery's PR-body closing-keyword guard, its external-PR close,
+  strandedwork's awaiting-review probe, and every git **network** operation
+  (fetch, push, ls-remote) — get one from `ghtoken.ChildEnv` at the moment they
+  are spawned, in that child's environment only. git is on the list because an
+  https github.com remote's credential helper here is `gh auth git-credential`,
+  which reads `GH_TOKEN` from the git child: without it, the refinery's push to
+  an https remote (onethird_program, `~/.pogo`) exits 128. See [Per-call
+  credentials in pogod](#per-call-credentials-in-pogod).
+
+## Per-call credentials in pogod
+
+pogod never holds a GitHub token in its own environment (mg-37183). Before, it
+called `ghtoken.Ensure()` at startup, which harvested the token and
+`os.Setenv`'d it into pogod — so every agent, gate and hook it spawned
+afterwards inherited the secret, and a rotated token stayed stale until a
+restart (mg-4d59). Now each child that needs GitHub asks
+`ghtoken.ChildEnv(base)` as it is built: the same chain (ambient `GH_TOKEN` /
+`GITHUB_TOKEN` in the child's base env → the user shell → `gh auth token`),
+returned in the child's env slice and written nowhere else. A probe costs a few
+milliseconds; nothing is cached, so a rotation reaches the next call.
+
+Converted call sites (non-test code):
+
+| Where | Child | Why it needs a credential |
+|---|---|---|
+| `internal/refinery/closingref_gate.go` `lookupPRBody` | `gh pr view` | PR-body closing-keyword guard — INDETERMINATE (merge proceeds) without one |
+| `internal/refinery/merge.go` `ghClosePR` | `gh pr close` | external-PR close after merge |
+| `internal/ghpr` `Lookup` (refinery `lookupPR`/`openPRNumber`, strandedwork `GitHubOpenPR`) | `gh pr view` | PR push-back/close; awaiting-review probe |
+| `internal/refinery/merge.go` `gitCmdOutput` — fetch / push / ls-remote / pull / clone only | `git` | the merge pipeline's fetch, push, branch delete, post-merge push and ls-remote; `fastforward.go`, `recovery.go`, `postmerge.go`, `prune.go` go through it |
+| `internal/refinery/refinery.go` `validateTargetRef`, `remoteDefaultBranch`, `createTargetRef` | `git ls-remote` / `fetch` / `push` | submit-time checks and target-branch creation |
+| `internal/refinery/submitbranch.go` `validateSubmitBranch` | `git ls-remote` | submit-time branch check |
+| `internal/agent/api.go` `fetchPolecatBaseRefs` | `git fetch` | polecat spawn freshness fetch |
+| `internal/strandedwork` `Fetch` | `git fetch` | stranded-work scan |
+| `internal/freshen` `git` — network ops only | `git fetch` / `ls-remote` | worktree freshen |
+| `internal/staleness` `gitNetOut` | `git fetch` / `ls-remote` | driftwatch's reference check |
+
+Deliberately **not** given one: local git operations (rebase, rev-parse,
+update-ref …; `ghtoken.GitNeedsCredential` decides, so a token never travels
+further than a remote op); the refinery's quality-gate and deploy commands
+(`sh -c`, repo-supplied code — handing them a secret is a decision this change
+does not make; before mg-37183 they inherited pogod's copy); and agents
+themselves, whose shells read `~/.zshenv`. pogo and macguffin use ssh remotes and
+never needed it.
+
+Logging is existence-only and transition-only: nothing while credentials are
+available, one `ghtoken: per-call gh/git credential UNAVAILABLE` line (with each
+source's reason, never a value) when the chain stops yielding, and one line when
+it recovers.
+
+What else read the retired startup line: `internal/staleness/nofire.go` parses a
+`GH_TOKEN:` line, but it is the **nightly deploy's** (`pogo-deploy.sh`, in
+`~/Library/Logs/pogo/pogo-deploy.log`), not pogod's, and is unaffected.
+
+`cmd/pogod`'s `TestPogodNeverWritesGHTokenIntoItsOwnEnvironment` fails if a
+`ghtoken.Ensure` call reappears in pogod; each converted package has a
+`childcred_test.go` proving its child receives the credential and pogod's own
+environment never does, with a no-credential control arm.
 
 ## The gh-issue teardown detector
 
@@ -1985,9 +2039,10 @@ outward-facing and stays human-gated.
   but cannot authenticate also returns indeterminate for every carrier. launchd
   execs pogod directly, without a shell, so the daemon inherits an environment
   with no `GH_TOKEN` and every lookup failed with "populate the GH_TOKEN
-  environment variable". `internal/ghtoken` repairs this at pogod startup, and
-  `pogo check-teardown` calls it too so the CLI works from cron as well as from
-  a terminal: when the environment has no token, a **user shell** is asked for
+  environment variable". `internal/ghtoken` repairs this — for the `pogo` CLI
+  (`pogo check-teardown`, `pogo gh-watch`) with `ghtoken.Ensure()`, and for
+  pogod's children with the per-call `ghtoken.ChildEnv` (mg-37183; see [Per-call
+  credentials in pogod](#per-call-credentials-in-pogod)): when the environment has no token, a **user shell** is asked for
   one (`zsh -c` sources `~/.zshenv` on every invocation, so the secret stays
   where it already lives), and failing that **`gh auth token`** is asked for the
   credential gh already holds (mg-fb29). The token is never written to a plist, a
@@ -1998,9 +2053,9 @@ outward-facing and stays human-gated.
   Sibling of
   `internal/pathenv`: that one fixes children that cannot be **found** under
   launchd, this one fixes children that run and cannot **authenticate**. The
-  value is read once per process: pogod (which since mg-257a8 needs it only for
-  its merge-path `gh` calls) needs a restart to see a rotated token, while
-  `pogo gh-watch` is a fresh process on every fire and sees it at the next one.
+  value is read per call in pogod (a rotated token reaches the very next child)
+  and once per process in the CLI, which for `pogo gh-watch` is a fresh process
+  on every fire.
   The failure mode is a return to indeterminate, which is reported, never
   mistaken for closed.
 
@@ -2020,13 +2075,16 @@ outward-facing and stays human-gated.
   host**, so a fleet authenticated only against a GitHub Enterprise host would
   read as unauthenticated here.
 
-  **Verifying the harvest — not with `ps`.** `ps eww -p <pogod-pid> | grep
-  GH_TOKEN` returns nothing **even when the harvest succeeded**, because
-  `ghtoken.Ensure()` calls `os.Setenv` *after* exec and macOS `ps` reports the
-  exec-time environment. That false negative is the founding diagnostic of two
-  separate reports that the daemon was tokenless, and both were wrong. Check a
-  **child's** environment instead, or read the startup log line, which now names
-  the source it won from.
+  **Verifying — not with `ps` on pogod.** `ps eww -p <pid> | grep GH_TOKEN`
+  shows only a process's **exec-time** environment, so it could never see
+  `ghtoken.Ensure()`'s post-exec `os.Setenv` — the false negative behind two
+  wrong "the daemon is tokenless" reports. Since mg-37183 pogod has no token
+  at all and no longer logs a `GH_TOKEN:` startup line, so neither `ps` on pogod
+  nor pogod.log can show a credential. The observable that changed is pogod's
+  **children**: an agent pogod spawned after the change has no `GH_TOKEN` in its
+  exec-time environment (`ps eww <agent pid>`, pid from `pogo agent list`; its
+  shells still read `~/.zshenv`), while a gh/git child spawned by the refinery
+  carries one for its lifetime only.
 
   Because every unit test in the package injects its lookup, they all pass just
   as happily when the real `gh` is unauthenticated. The guard against a silent

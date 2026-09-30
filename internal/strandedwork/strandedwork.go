@@ -64,12 +64,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/drellem2/pogo/internal/ghpr"
+	"github.com/drellem2/pogo/internal/ghtoken"
 )
 
 // PreRegistrationPrefix is the commit-subject prefix that marks a
@@ -969,6 +971,7 @@ func Fetch(repo string) (fresh bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), FetchTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", repo, "fetch", "--quiet", "origin")
+	cmd.Env = ghtoken.ChildEnv(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("fetch origin in %s: %s: %w", repo, strings.TrimSpace(string(out)), err)

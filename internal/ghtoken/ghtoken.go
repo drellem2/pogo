@@ -50,7 +50,7 @@
 // treated SourceNone as "unauthenticated" would false-alarm on every host that
 // had ever run `gh auth login`. `gh auth token` reads exactly that file, so
 // after it, SourceNone means gh has no credential for the default host, and a
-// caller may act on it. cmd/pogod does: the gh-issue intake detector refuses to
+// caller may act on it. `pogo gh-watch` does: the gh-issue intake detector refuses to
 // arm without one, rather than letting one global cause be amplified into a
 // per-repo fault for every watched repo (mg-fb29).
 //
@@ -72,16 +72,20 @@
 //
 // # Secret discipline
 //
-// The value is held in memory, handed to os.Setenv, and never returned to a
-// caller, logged, or included in an error string. Result reports only WHERE the
+// The value is held in memory and handed to exactly one sink: os.Setenv for
+// Ensure (the short-lived CLI), or ONE child's environment slice for ChildEnv
+// (pogod, which must never hold it itself — mg-37183). It is never logged or
+// included in an error string. Result reports only WHERE the
 // token came from, never what it is. The shell probe's stderr is deliberately
 // discarded rather than folded into the error text: shell init files can print
 // things, and an error message is a thing that gets logged and mailed.
 //
 // # Staleness — and why "benign" was wrong (mg-4d59)
 //
-// Like pathenv, this runs once at startup, so a token rotated afterwards is not
-// picked up until pogod restarts. That much was always stated here. What was
+// Like pathenv, Ensure runs once per process, so a token rotated afterwards is
+// not picked up until that process restarts — which is why pogod no longer
+// calls it and uses the per-call ChildEnv instead (mg-37183); the rest of this
+// section is the history of Ensure in pogod. What was
 // stated with it — that the failure mode is "the benign one", lookups going back
 // to indeterminate — was measured false on 2026-09-08 and is retracted.
 //
@@ -141,7 +145,7 @@ const (
 	// sources. Since `gh auth token` covers the `gh auth login` case this package
 	// used to be blind to, this is now a decidable statement about gh's default
 	// host rather than a heuristic: gh will not authenticate. Callers may act on
-	// it, and cmd/pogod does.
+	// it, and `pogo gh-watch` does.
 	SourceNone Source = "none"
 )
 
@@ -243,6 +247,20 @@ func ensure(getenv func(string) string, setenv func(string, string) error,
 		}
 	}
 
+	return harvest(shellHarvest, ghHarvest, func(tok string) error {
+		if err := setenv("GH_TOKEN", tok); err != nil {
+			return fmt.Errorf("setenv: %w", err)
+		}
+		return nil
+	})
+}
+
+// harvest walks the non-ambient sources in order and hands the FIRST plausible
+// token to sink. It is the chain Ensure and ChildEnv share; the only thing that
+// differs between them is where the value goes — Ensure's sink is os.Setenv,
+// ChildEnv's is one child's environment slice. A sink error counts as that
+// source not yielding, and the chain falls through.
+func harvest(shellHarvest, ghHarvest func() (string, error), sink func(string) error) Result {
 	res := Result{Source: SourceNone}
 	for _, src := range []struct {
 		name    Source
@@ -256,9 +274,7 @@ func ensure(getenv func(string) string, setenv func(string, string) error,
 			err = validate(tok)
 		}
 		if err == nil {
-			if serr := setenv("GH_TOKEN", tok); serr != nil {
-				err = fmt.Errorf("setenv: %w", serr)
-			} else {
+			if err = sink(tok); err == nil {
 				res.Source = src.name
 				return res
 			}

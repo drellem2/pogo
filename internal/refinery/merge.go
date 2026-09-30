@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/ghpr"
+	"github.com/drellem2/pogo/internal/ghtoken"
 )
 
 // defaultMaxAttempts is the fallback retry budget when no per-repo
@@ -935,7 +936,7 @@ func ghClosePR(wtDir string, number int, comment string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", "pr", "close", strconv.Itoa(number), "--comment", comment)
 	cmd.Dir = wtDir
-	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1")
+	cmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
@@ -1501,6 +1502,12 @@ func gitCmdOutput(dir string, args ...string) (string, error) {
 	// available (ia-1428, gh #7).
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	cmd.Env = append(cmd.Env, gitIdentityEnv()...)
+	// A network op against an https github.com remote authenticates through
+	// `gh auth git-credential`, which reads GH_TOKEN from THIS child's env;
+	// pogod no longer carries one of its own (mg-37183).
+	if ghtoken.GitNeedsCredential(args) {
+		cmd.Env = ghtoken.ChildEnv(cmd.Env)
+	}
 	output, err := cmd.CombinedOutput()
 	out := strings.TrimSpace(string(output))
 	if err != nil {

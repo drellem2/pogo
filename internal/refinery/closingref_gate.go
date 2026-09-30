@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/drellem2/pogo/internal/closingref"
+	"github.com/drellem2/pogo/internal/ghtoken"
 )
 
 // bodySeparator is a NUL byte. Commit bodies are multi-line, unbounded prose
@@ -170,7 +171,7 @@ func lookupPRBody(wtDir, branch string) (int, string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch, "--json", "number,body")
 	cmd.Dir = wtDir
-	cmd.Env = append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1")
+	cmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError

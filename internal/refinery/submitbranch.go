@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/drellem2/pogo/internal/ghtoken"
 )
 
 // validateSubmitBranch checks, at submit time, that the branch a merge request
@@ -62,7 +64,7 @@ func validateSubmitBranch(repoPath, branch string) error {
 	// GIT_TERMINAL_PROMPT=0 makes auth-required HTTPS remotes fail fast rather
 	// than hang waiting for a username on stdin under launchd.
 	cmd := exec.Command("git", "-C", repoPath, "ls-remote", "--heads", "origin", branch)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// An auth failure is doomed rather than transient, and it is the

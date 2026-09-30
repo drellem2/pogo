@@ -233,6 +233,7 @@ func isExecCommandCall(e ast.Expr) bool {
 //	cmd.Env / x.Env              appending onto an env already set (merge.go
 //	                             does this to add the git identity)
 //	nil                          os/exec's own "inherit the parent" signal
+//	ghtoken.ChildEnv(<rooted>)   adds a per-call credential, drops nothing
 //
 // An identifier it cannot follow is NOT accepted. This test would rather be
 // loud about an environment it cannot vouch for than vouch for one it did not
@@ -249,6 +250,12 @@ func rootsInEnviron(e ast.Expr) bool {
 			return false
 		}
 		pkg, ok := sel.X.(*ast.Ident)
+		if ok && pkg.Name == "ghtoken" && sel.Sel.Name == "ChildEnv" && len(v.Args) == 1 {
+			// ghtoken.ChildEnv(base) returns base, or base plus one GH_TOKEN
+			// entry — never fewer vars — so it is rooted exactly when its
+			// argument is (mg-37183).
+			return rootsInEnviron(v.Args[0])
+		}
 		return ok && pkg.Name == "os" && sel.Sel.Name == "Environ"
 	case *ast.SelectorExpr:
 		// `cmd.Env` on the right-hand side: appending onto an environment that
@@ -322,11 +329,12 @@ func parseEnvs(t *testing.T, src string) []ast.Expr {
 // deleted the first time it blocked a legitimate diff.
 func TestInheritCheckAcceptsTheRealPatterns(t *testing.T) {
 	accepted := map[string]string{
-		"plain inherit":     `os.Environ()`,
-		"one append":        `append(os.Environ(), "POGO_REFINERY=1")`,
-		"variadic append":   `append(os.Environ(), append(injected, req.Env...)...)`,
-		"append onto a set": `append(cmd.Env, gitIdentityEnv()...)`,
-		"explicit nil":      `nil`,
+		"plain inherit":       `os.Environ()`,
+		"one append":          `append(os.Environ(), "POGO_REFINERY=1")`,
+		"variadic append":     `append(os.Environ(), append(injected, req.Env...)...)`,
+		"append onto a set":   `append(cmd.Env, gitIdentityEnv()...)`,
+		"explicit nil":        `nil`,
+		"per-call credential": `ghtoken.ChildEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))`,
 	}
 	for name, src := range accepted {
 		t.Run(name, func(t *testing.T) {
