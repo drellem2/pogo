@@ -127,3 +127,22 @@ func TestRegistryJobsHaveNoExclusionReason(t *testing.T) {
 		}
 	}
 }
+
+// TestOwnerRulingsForMgbackupAndVixreport pins Daniel's 2026-09-29 ruling
+// (mg-79c6a): both jobs were loaded on the reference box and rendered as
+// "2 with NONE". mgbackup is pogo-owned and vixreport is pa-owned; each reason
+// must name that owner, or the ruling is lost in the attribution. The unknown
+// label is the positive control that the loud default still fires.
+func TestOwnerRulingsForMgbackupAndVixreport(t *testing.T) {
+	s := scopeLaunchAgents(nil, []string{"com.pogo.mgbackup", "com.pogo.vixreport", "com.pogo.some-new-thing"})
+	un := s.Unexplained()
+	if len(un) != 1 || un[0].Label != "com.pogo.some-new-thing" {
+		t.Errorf("Unexplained = %+v, want only the unruled control job", un)
+	}
+	reasons := launchAgentExclusionReasons()
+	for label, owner := range map[string]string{"com.pogo.mgbackup": "pogo-owned", "com.pogo.vixreport": "pa-owned"} {
+		if !strings.Contains(reasons[label], owner) {
+			t.Errorf("%s: reason %q does not record the owner ruling %q", label, reasons[label], owner)
+		}
+	}
+}
