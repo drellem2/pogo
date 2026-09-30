@@ -140,6 +140,17 @@ var shellStampScrapers = map[string]int{
 	// 727 is the real scrape (installed_rev, reading a binary on disk); 868
 	// is an ACTION string telling a human which command to run.
 	filepath.Join("scripts", "pogo-self-deploy"): 3,
+
+	// verify_installed_stamps (drellem2/pogo#103, mg-8075b): the one real
+	// scrape reads each binary --install just wrote and COMPARES its
+	// vcs.revision against `git rev-parse HEAD`. It is the detector for this
+	// guard's misattribution, not a consumer of it. The other four hits are the
+	// failure/success messages that name the field.
+	"build.sh": 5,
+	// Test 11 of build_test.sh, which asserts on verify_installed_stamps's
+	// messages and builds the nested-worktree fixture that yields a foreign
+	// vcs.revision. It reads no stamp of its own.
+	"build_test.sh": 5,
 }
 
 func TestToolchainStampReadersAreEnumerated(t *testing.T) {
