@@ -105,15 +105,19 @@ func stubResolver(t *testing.T, fn func() (string, bool, error)) {
 	t.Cleanup(func() { resolveStderrPath = saved })
 }
 
-// A big default log must NOT be rotated when stderr is not that file (dev
-// run / pipe-captured spawn / a different redirect) — the same-inode guard is
-// what keeps startup rotation safe to call unconditionally.
+// A big default log must NOT be rotated when the resolver names it but fd 2
+// is not that file (a stale or wrong name) — the same-inode guard is what
+// keeps startup rotation safe to call unconditionally. The resolver is
+// stubbed to name the big log so the test reaches the guard whatever the
+// runner's stderr is, and never judges (or renames) the runner's own stderr:
+// the only candidate is a file under a temp HOME that fd 2 cannot be.
 func TestRotatePogodLogSkipsWhenStderrIsNotTheLog(t *testing.T) {
 	logPath := setTestHome(t)
 	big := bytes.Repeat([]byte("x"), maxPogodLogSize+1)
 	if err := os.WriteFile(logPath, big, 0644); err != nil {
 		t.Fatalf("write big log: %v", err)
 	}
+	stubResolver(t, func() (string, bool, error) { return logPath, true, nil })
 
 	r, err := RotatePogodLogIfNeeded()
 	if err != nil {
@@ -121,6 +125,9 @@ func TestRotatePogodLogSkipsWhenStderrIsNotTheLog(t *testing.T) {
 	}
 	if r.Rotated() {
 		t.Fatalf("rotated (%s), but stderr is not pogod.log — guard failed", r.Summary())
+	}
+	if r.Reason != RotationPathMissing || r.Path != logPath {
+		t.Errorf("got %+v, want path-missing for %s (the guard's verdict)", r, logPath)
 	}
 	if fi, err := os.Stat(logPath); err != nil || fi.Size() != int64(len(big)) {
 		t.Errorf("pogod.log must be untouched: size=%v err=%v", fi.Size(), err)

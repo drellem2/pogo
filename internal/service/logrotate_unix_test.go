@@ -4,9 +4,11 @@ package service
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -277,5 +279,44 @@ func TestStderrLogPathResolvesFd2(t *testing.T) {
 
 	if resErr != nil || !redirected || !sameName(t, got, p) {
 		t.Fatalf("stderrLogPath() = %q, %v, %v; want %q, true, nil", got, redirected, resErr, p)
+	}
+}
+
+// fd 2's name unreadable, and the installed plist's StandardErrorPath is the
+// file fd 2 writes to: the installed-plist fallback is chosen and rotated.
+func TestRotatePogodLogFallsBackToInstalledPlist(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("InstalledLogPath reads a launchd plist; darwin only")
+	}
+	fx := newNonDefaultFixture(t)
+	plist := launchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plist), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFileT(t, plist, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.pogo.daemon</string>
+	<key>StandardErrorPath</key>
+	<string>`+fx.custom+`</string>
+</dict>
+</plist>
+`)
+	if p, ok := InstalledLogPath(); !ok || p != fx.custom {
+		t.Fatalf("fixture: InstalledLogPath() = %q, %v; want %q", p, ok, fx.custom)
+	}
+	stubResolver(t, func() (string, bool, error) { return "", true, errors.New("no F_GETPATH") })
+
+	r, rotErr := redirectOntoFile(t, fx.custom)
+	if rotErr != nil || !r.Rotated() || r.Path != fx.custom || r.Source != logPathFromInstalled {
+		t.Fatalf("got %+v err=%v, want rotated %s from installed plist", r, rotErr, fx.custom)
+	}
+	if !strings.Contains(r.Summary(), "from installed plist") {
+		t.Errorf("Summary() = %q", r.Summary())
+	}
+	if fi, err := os.Stat(fx.def); err != nil || fi.Size() != int64(fx.defSize) {
+		t.Errorf("default %s was touched (err=%v)", fx.def, err)
 	}
 }
