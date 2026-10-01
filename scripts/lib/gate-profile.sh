@@ -162,9 +162,38 @@ gate_profile_load() {
     esac
 }
 
-# Cumulative child CPU seconds (user+sys) for THIS shell. Must be called from
-# the shell that waited for the children — see the header. Writes through a
-# file precisely so the parse can subshell without destroying the reading.
+# Cumulative child CPU seconds (user+sys) for THIS shell, stored into the
+# variable named by $1. Must be called from the shell that waited for the
+# children — see the header — which is why it assigns through `printf -v`
+# rather than printing for a `$(...)` capture.
+#
+# THE SCRATCH FILE LIVES ONLY FOR THE LENGTH OF ONE READING (mg-c1a5e). It used
+# to be created once in gate_profile_begin and removed only by
+# gate_profile_report, so its removal depended on the caller arming an EXIT
+# trap, on that trap getting past the report's "no steps recorded" early
+# return, and on begin being called once. The first of those failed in
+# production: a gate killed or failing inside its FIRST step reaches the report
+# with GATE_PROFILE_COUNT=0, returned before the rm, and left one file per run
+# — 410 of them in $TMPDIR by 2026-10-01, every one holding the near-zero CPU
+# reading taken before step one. Now each reading creates, uses and removes its
+# own file, so a run that ends anywhere outside the few milliseconds of a
+# reading leaves nothing whatever its trap does; GATE_PROFILE_TIMES_FILE names
+# the file only while it exists, so the report can remove a reading's file if
+# the run is ended in the middle of it.
+gate_profile_read_cpu() {
+    local reading="0.000"
+    GATE_PROFILE_TIMES_FILE="$(mktemp "${TMPDIR:-/tmp}/pogo-gate-profile.XXXXXX" 2>/dev/null)" || GATE_PROFILE_TIMES_FILE=""
+    if [ -n "$GATE_PROFILE_TIMES_FILE" ]; then
+        times > "$GATE_PROFILE_TIMES_FILE"
+        reading="$(gate_profile_child_cpu "$GATE_PROFILE_TIMES_FILE")"
+        rm -f "$GATE_PROFILE_TIMES_FILE"
+        GATE_PROFILE_TIMES_FILE=""
+    fi
+    printf -v "$1" '%s' "$reading"
+}
+
+# Parse a `times` output file. Writes through a file precisely so the parse can
+# subshell without destroying the reading.
 gate_profile_child_cpu() {
     awk 'NR == 2 {
         total = 0
@@ -176,7 +205,7 @@ gate_profile_child_cpu() {
         printf "%.3f", total
         found = 1
     }
-    END { if (!found) printf "0.000" }' "$GATE_PROFILE_TIMES_FILE"
+    END { if (!found) printf "0.000" }' "$1"
 }
 
 gate_profile_begin() {
@@ -184,10 +213,8 @@ gate_profile_begin() {
     gate_profile_enabled || return 0
 
     gate_profile_detect_clock
-    GATE_PROFILE_TIMES_FILE="$(mktemp "${TMPDIR:-/tmp}/pogo-gate-profile.XXXXXX")"
     GATE_PROFILE_T0="$(gate_profile_now_ns)"
-    times > "$GATE_PROFILE_TIMES_FILE"
-    GATE_PROFILE_CPU0="$(gate_profile_child_cpu)"
+    gate_profile_read_cpu GATE_PROFILE_CPU0
 }
 
 # gate_step <label> <command> [args...]
@@ -203,8 +230,7 @@ gate_step() {
 
     local load start end cpu_before cpu_after status restore_errexit=""
     load="$(gate_profile_load)"
-    times > "$GATE_PROFILE_TIMES_FILE"
-    cpu_before="$(gate_profile_child_cpu)"
+    gate_profile_read_cpu cpu_before
     start="$(gate_profile_now_ns)"
 
     echo "$name"
@@ -223,8 +249,7 @@ gate_step() {
     fi
 
     end="$(gate_profile_now_ns)"
-    times > "$GATE_PROFILE_TIMES_FILE"
-    cpu_after="$(gate_profile_child_cpu)"
+    gate_profile_read_cpu cpu_after
 
     GATE_PROFILE_NAMES[$GATE_PROFILE_COUNT]="$name"
     GATE_PROFILE_WALL[$GATE_PROFILE_COUNT]="$(awk -v a="$start" -v b="$end" 'BEGIN { d = (b - a) / 1000000000; if (d < 0) d = 0; printf "%.2f", d }')"
@@ -237,6 +262,13 @@ gate_step() {
 }
 
 gate_profile_report() {
+    # FIRST, before either early return: a run ended in the middle of a reading
+    # leaves that reading's file named here. Placing this after the returns is
+    # how the original leak happened (mg-c1a5e).
+    if [ -n "$GATE_PROFILE_TIMES_FILE" ]; then
+        rm -f "$GATE_PROFILE_TIMES_FILE"
+        GATE_PROFILE_TIMES_FILE=""
+    fi
     gate_profile_enabled || return 0
     [ "$GATE_PROFILE_COUNT" -gt 0 ] || return 0
 
@@ -293,12 +325,6 @@ gate_profile_report() {
     echo "============================================================================="
 
     gate_profile_write_json "$total_wall" "$total_cpu"
-
-    # The scratch file the `times` readings go through. Removed here rather than
-    # under a trap of this file's own: callers install their own EXIT trap to
-    # call this function, and a second trap installed from a sourced library
-    # would silently replace theirs.
-    [ -n "$GATE_PROFILE_TIMES_FILE" ] && rm -f "$GATE_PROFILE_TIMES_FILE"
     return 0
 }
 

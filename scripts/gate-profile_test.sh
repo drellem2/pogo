@@ -477,6 +477,129 @@ else
     fail "a gate script appends its report instead of arming it on EXIT (test.sh trap: '${TEST_SH_TRAP}', build.sh trap: '${BUILD_SH_TRAP}')"
 fi
 
+# --- Test 10: no exit path leaves a pogo-gate-profile.* file (mg-c1a5e) -----
+# The `times` scratch file used to be created by gate_profile_begin and removed
+# only at the bottom of gate_profile_report, after its "no steps recorded"
+# early return. So any gate that ended inside its FIRST step — killed by the
+# refinery, or failing — left one file in $TMPDIR, and 410 had built up by
+# 2026-10-01. Every path below is run against a private scratch TMPDIR and the
+# count must be unchanged afterwards. The step that gets killed records its own
+# pid and is reaped here, so this test does not orphan a sleep.
+echo ""
+echo "Test 10: No exit path leaves a pogo-gate-profile.* file in \$TMPDIR"
+LEAK_TMP="$tmpdir/leak-tmp"
+mkdir -p "$LEAK_TMP"
+leak_count() { find "$LEAK_TMP" -maxdepth 1 -name 'pogo-gate-profile.*' | grep -c . || true; }
+
+# $1 = steps to run after begin+trap; $2 = "trap" or "notrap"; $3 = "double"
+# to call gate_profile_begin twice.
+write_leak_driver() {
+    {
+        echo '#!/bin/bash'
+        echo 'set -e'
+        echo ". \"$LIB\""
+        echo 'gate_profile_begin "leak"'
+        [ "${3:-}" = "double" ] && echo 'gate_profile_begin "leak-again"'
+        [ "$2" = "trap" ] && echo "trap 'gate_profile_report' EXIT"
+        printf '%s\n' "$1"
+    } > "$tmpdir/leak.sh"
+}
+
+# The step a signal is sent during: records its pid, then sleeps in place.
+HOLD_STEP="gate_step \"HELD STEP\" bash -c 'echo \$\$ > \"$tmpdir/held.pid\"; exec sleep 30'"
+
+# run_signalled <signal> <steps...>: start the driver in its own process
+# group with SIGINT at default (a `&` job inherits it ignored — see
+# docs/development.md), wait for the held step, signal the whole group the way
+# a Ctrl-C or a refinery stop would, then reap everything.
+run_signalled() {
+    local sig="$1" pid held i
+    rm -f "$tmpdir/held.pid"
+    TMPDIR="$LEAK_TMP" perl -e 'setpgrp(0, 0); $SIG{INT} = "DEFAULT"; exec @ARGV' \
+        bash "$tmpdir/leak.sh" > "$tmpdir/leak.out" 2>&1 &
+    pid=$!
+    for ((i = 0; i < 100; i++)); do
+        [ -s "$tmpdir/held.pid" ] && break
+        sleep 0.1
+    done
+    kill -"$sig" -- "-$pid" 2>/dev/null || kill -"$sig" "$pid" 2>/dev/null || true
+    for ((i = 0; i < 100; i++)); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    held="$(cat "$tmpdir/held.pid" 2>/dev/null || true)"
+    [ -n "$held" ] && kill -KILL "$held" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
+check_no_leak() {
+    local label="$1" before="$2" after
+    after="$(leak_count)"
+    if [ "$after" -eq "$before" ]; then
+        pass "$label left no pogo-gate-profile.* file ($before before, $after after)"
+    else
+        fail "$label left $((after - before)) pogo-gate-profile.* file(s) in \$TMPDIR"
+        find "$LEAK_TMP" -maxdepth 1 -name 'pogo-gate-profile.*' -exec rm -f {} +
+    fi
+}
+
+# Positive control: the counter must see a file of that name when one is
+# left, or every "unchanged" below is the instrument being blind.
+mktemp "$LEAK_TMP/pogo-gate-profile.XXXXXX" > /dev/null
+if [ "$(leak_count)" -eq 1 ]; then
+    pass "control: an abandoned pogo-gate-profile.* file is counted"
+else
+    fail "control: the leak counter did not see a planted file — the checks below say nothing"
+fi
+find "$LEAK_TMP" -maxdepth 1 -name 'pogo-gate-profile.*' -exec rm -f {} +
+
+set +e
+write_leak_driver 'gate_step "OK" true' trap
+B="$(leak_count)"; TMPDIR="$LEAK_TMP" bash "$tmpdir/leak.sh" > /dev/null 2>&1
+check_no_leak "a passing run" "$B"
+
+write_leak_driver 'gate_step "OK" true
+gate_step "BAD" bash -c "exit 3"' trap
+B="$(leak_count)"; TMPDIR="$LEAK_TMP" bash "$tmpdir/leak.sh" > /dev/null 2>&1
+check_no_leak "a run failing mid-step" "$B"
+
+# The production case: nothing recorded yet when the run ends.
+write_leak_driver 'gate_step "BAD FIRST" bash -c "exit 3"' trap
+B="$(leak_count)"; TMPDIR="$LEAK_TMP" bash "$tmpdir/leak.sh" > /dev/null 2>&1
+check_no_leak "a run failing in its first step" "$B"
+
+write_leak_driver 'false' trap
+B="$(leak_count)"; TMPDIR="$LEAK_TMP" bash "$tmpdir/leak.sh" > /dev/null 2>&1
+check_no_leak "a run failing before any step" "$B"
+
+write_leak_driver "$HOLD_STEP" trap
+B="$(leak_count)"; run_signalled TERM 2>/dev/null
+check_no_leak "a run SIGTERMed in its first step" "$B"
+
+write_leak_driver 'gate_step "OK" true
+'"$HOLD_STEP" trap
+B="$(leak_count)"; run_signalled TERM 2>/dev/null
+check_no_leak "a run SIGTERMed in a later step" "$B"
+
+write_leak_driver "$HOLD_STEP" trap
+B="$(leak_count)"; run_signalled INT 2>/dev/null
+check_no_leak "a run SIGINTed in its first step" "$B"
+
+write_leak_driver "$HOLD_STEP" trap
+B="$(leak_count)"; run_signalled HUP 2>/dev/null
+check_no_leak "a run SIGHUPed in its first step" "$B"
+
+# Callers the library cannot rely on: no trap at all, and begin twice.
+write_leak_driver 'gate_step "OK" true' notrap
+B="$(leak_count)"; TMPDIR="$LEAK_TMP" bash "$tmpdir/leak.sh" > /dev/null 2>&1
+check_no_leak "a caller that never arms the EXIT trap" "$B"
+
+write_leak_driver 'gate_step "OK" true' trap double
+B="$(leak_count)"; TMPDIR="$LEAK_TMP" bash "$tmpdir/leak.sh" > /dev/null 2>&1
+check_no_leak "a caller that calls gate_profile_begin twice" "$B"
+set -e
+
 echo ""
 echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
 [ "$FAIL" -eq 0 ]
