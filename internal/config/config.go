@@ -1007,6 +1007,9 @@ type Config struct {
 	// successor inside a window. Zero value = no repos = inert. This is a
 	// DETECTOR and never refuses anything — see auditsuccessor.go.
 	AuditSuccessor AuditSuccessorConfig
+	// Service configures `pogo service install` itself — today only which
+	// program the installed launchd plist / systemd unit execs (drellem2/pogo#105).
+	Service ServiceConfig
 	// Source is the path of the highest-precedence config file Load read, or
 	// "" when no config file was found and everything is defaults + env. pogod
 	// uses this to gate crew auto-start: a daemon with no config file is
@@ -3207,6 +3210,9 @@ func Load() *Config {
 		if fileCfg.AuditSuccessor.Window > 0 {
 			cfg.AuditSuccessor.Window = fileCfg.AuditSuccessor.Window
 		}
+		if fileCfg.Service.Launcher != "" {
+			cfg.Service.Launcher = fileCfg.Service.Launcher
+		}
 	}
 
 	// Environment variables override config file
@@ -3884,6 +3890,11 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if d, err := time.ParseDuration(unquotedVal); err == nil && d > 0 {
 					cfg.AuditSuccessor.Window = d
 				}
+			}
+		case "service":
+			switch key {
+			case "launcher":
+				cfg.Service.Launcher = unquotedVal
 			}
 		case "reaper":
 			switch key {

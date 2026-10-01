@@ -202,10 +202,8 @@ func InstallGHWatch() error {
 	}
 	plistPath := ghWatchPlistPath()
 	existing, _ := os.ReadFile(plistPath)
-	if string(existing) != rendered {
-		if err := os.WriteFile(plistPath, []byte(rendered), 0644); err != nil {
-			return fmt.Errorf("failed to write %s: %w", plistPath, err)
-		}
+	if _, err := writePlistWithBackup(plistPath, existing, rendered); err != nil {
+		return err
 	}
 
 	target := fmt.Sprintf("gui/%d", os.Getuid())

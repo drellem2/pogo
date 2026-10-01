@@ -45,6 +45,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 |---|---|---|---|---|
 | `[server]` | — | — | plumbing | Sets pogod's listen port and bind address. |
 | `[search]` | — | — | plumbing | Sets the indexer's limits and roots. The indexer reads your repos and writes only its own index. |
+| `[service]` | — | — | plumbing | Sets which program `pogo service install` writes into the launchd plist or systemd unit (`launcher`; default: pogod on PATH). Read only by the installer and the plist audit, never by pogod. See [Service launcher](#service-launcher). |
 | `[heartbeat]` | — | — | plumbing | Sets the tick that drives every watcher below, and the clock-jump threshold. |
 | `[agents]` | `autostart` | on | ACTS | Starts every configured crew agent (the coordinator and the PMs) when pogod boots, and again when an orchestration restart runs. Needs a config file. See [Crew auto-start](#crew-auto-start). |
 | `[agents.crew]` | — | — | plumbing | Sets the harness command and provider for crew agents. |
@@ -430,6 +431,45 @@ extra_path = ["~/my-node/bin", "/opt/tools/bin"]   # prepended to pogod's PATH
 
 `POGO_EXTRA_PATH` (colon-separated) overrides the file setting. Entries support
 `~` and `$HOME` expansion and win over every discovered location.
+
+## Service launcher
+
+`pogo service install` writes a launchd plist (macOS) or systemd unit (Linux)
+that runs pogod. The program it runs — `ProgramArguments[0]` in the plist,
+`ExecStart` in the unit — is chosen in this order:
+
+1. the `POGOD_LAUNCHER` environment variable;
+2. `launcher` under `[service]` in config.toml;
+3. `pogod` found on `PATH`.
+
+```toml
+[service]
+launcher = "~/.pogo/bin/pogod-launch.sh"
+```
+
+Set it when the host starts pogod through a wrapper, for example a script that
+injects credentials and then execs pogod. A named launcher must exist and be
+executable, or install fails. pogod itself never reads this key: only the
+installer and the plist audit in `pogo doctor` / the nightly deploy do.
+
+On macOS, install also checks the plist that is **already installed**. If its
+`ProgramArguments[0]` is neither pogod on PATH nor the configured launcher,
+install refuses before it stops anything, and names the program. Then either:
+
+- set `launcher` to that path (keeps it for every later install), or
+- `pogo service install --adopt-launcher` (keeps it for this install), or
+- `pogo service install --force-launcher` (replaces it).
+
+Every plist overwrite, by any `pogo service install*` command, first copies
+the previous plist to `<plist>.bak.<timestamp>`. The name does not end in
+`.plist`, so launchd does not load it as a second job.
+
+The plist audit reports a daemon plist with a custom launcher as such, with
+"set service.launcher first" as its remedy instead of `pogo service install`.
+It also names a missing `ProcessType` and a `KeepAlive` that is not an
+unconditional `true`, noting that `KeepAlive` restarts nothing on a host where
+launchd dispatches no nondemand spawns (see `internal/reconcile`).
+(drellem2/pogo#105)
 
 ## Scheduler
 

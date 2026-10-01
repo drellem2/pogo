@@ -198,6 +198,10 @@ type LaunchAgentAudit struct {
 	Installed     LaunchSchedule
 	Remedy        string // the command that re-renders and reloads this job
 	Detail        string
+	// Findings names WHAT drifted, for jobs whose drift this audit can
+	// classify (today only com.pogo.daemon — see classifyDaemonDrift). Empty
+	// means unclassified, not clean.
+	Findings []string
 }
 
 // managedLaunchAgent binds a label to the three things the audit needs: where
@@ -270,15 +274,19 @@ type managedLaunchAgent struct {
 	Path   func() string
 	Render func() (string, error)
 	Remedy string
+	// Classify, when set, refines a stale verdict by reading what drifted.
+	// It may rewrite Detail and Remedy; it must not change Status.
+	Classify func(res LaunchAgentAudit, installed, rendered []byte) LaunchAgentAudit
 }
 
 func managedLaunchAgents() []managedLaunchAgent {
 	return []managedLaunchAgent{
 		{
-			Label:  launchdLabel,
-			Path:   launchdPlistPath,
-			Render: func() (string, error) { s, _, err := renderLaunchdPlist(); return s, err },
-			Remedy: "pogo service install",
+			Label:    launchdLabel,
+			Path:     launchdPlistPath,
+			Render:   func() (string, error) { s, _, err := renderLaunchdPlist(); return s, err },
+			Remedy:   "pogo service install",
+			Classify: classifyDaemonDrift,
 		},
 		{
 			Label:  recoveryLabel,
@@ -322,9 +330,84 @@ func AuditLaunchAgents() []LaunchAgentAudit {
 	out := make([]LaunchAgentAudit, 0, len(agents))
 	for _, a := range agents {
 		rendered, err := a.Render()
-		out = append(out, auditLaunchAgent(a.Label, a.Path(), a.Remedy, rendered, err))
+		res := auditLaunchAgent(a.Label, a.Path(), a.Remedy, rendered, err)
+		if a.Classify != nil && res.Status == LaunchAgentStale {
+			if installed, rerr := os.ReadFile(res.Path); rerr == nil {
+				res = a.Classify(res, installed, []byte(rendered))
+			}
+		}
+		out = append(out, res)
 	}
 	return out
+}
+
+// classifyDaemonDrift says WHAT drifted in a stale com.pogo.daemon plist
+// (drellem2/pogo#105). The byte comparison above cannot, and for this job the
+// difference matters: its remedy, `pogo service install`, is destructive on a
+// host whose plist execs a custom launcher — the installer would write pogod's
+// path over it and drop whatever the launcher did first (on the reporting host,
+// inject agent credentials). Printing that command as the fix on exactly the
+// hosts where it is harmful is what this function stops.
+//
+// Three findings are named:
+//   - ProgramArguments[0] differs from what this build renders: a custom
+//     launcher (or a moved pogod). The Remedy becomes "set [service] launcher
+//     first", never the bare install command.
+//   - ProcessType is missing or not Interactive.
+//   - KeepAlive is not an unconditional true. It is reported, but as what it
+//     is: on this host launchd starts nothing on its own (see
+//     internal/reconcile), so KeepAlive=true is not restart coverage either.
+func classifyDaemonDrift(res LaunchAgentAudit, installed, rendered []byte) LaunchAgentAudit {
+	inst, err := decodePlistDict(installed)
+	if err != nil {
+		return res
+	}
+	want, err := decodePlistDict(rendered)
+	if err != nil {
+		return res
+	}
+
+	var findings []string
+	customLauncher := ""
+	if got, exp := plistProgram(installed), plistProgram(rendered); got != "" && got != exp {
+		customLauncher = got
+		findings = append(findings, fmt.Sprintf("custom launcher %s; `pogo service install` would replace it with %s — set service.launcher first ([service] launcher = %q in config.toml, or %s), or install with --adopt-launcher",
+			got, exp, got, LauncherEnv))
+	}
+	if wantPT, _ := want["ProcessType"].(string); wantPT != "" {
+		switch gotPT, ok := inst["ProcessType"]; {
+		case !ok:
+			findings = append(findings, fmt.Sprintf("no ProcessType key (this build writes %s)", wantPT))
+		case gotPT != wantPT:
+			findings = append(findings, fmt.Sprintf("ProcessType is %v, this build writes %s", gotPT, wantPT))
+		}
+	}
+	if b, ok := inst["KeepAlive"].(bool); !ok || !b {
+		have := "absent"
+		switch v := inst["KeepAlive"].(type) {
+		case bool:
+			have = "false"
+		case map[string]any:
+			have = "conditional (a dict)"
+		case nil:
+		default:
+			have = fmt.Sprintf("%v", v)
+		}
+		findings = append(findings, fmt.Sprintf("KeepAlive is %s, this build writes true — note KeepAlive is inert on this host (launchd starts nothing on its own; see internal/reconcile), so neither value is restart coverage", have))
+	}
+	if len(findings) == 0 {
+		return res
+	}
+
+	res.Findings = findings
+	res.Detail = fmt.Sprintf("installed plist at %s differs from this build: %s", res.Path, strings.Join(findings, "; "))
+	if customLauncher != "" {
+		res.Remedy = fmt.Sprintf("set [service] launcher = %q in config.toml, then pogo service install", customLauncher)
+		res.Detail += ". Do not run a bare `pogo service install` until the launcher is set"
+	} else {
+		res.Detail += fmt.Sprintf(" — run `%s`", res.Remedy)
+	}
+	return res
 }
 
 // LaunchAgentsSupported reports whether this platform has the jobs at all.
