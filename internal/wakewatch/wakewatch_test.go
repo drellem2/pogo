@@ -761,3 +761,227 @@ func TestMailDuringDowntimeIsPointedAfterArmed(t *testing.T) {
 		t.Fatalf("event order = %+v", h.events)
 	}
 }
+
+// --- retry of a failed pointer (mg-35a7e) ------------------------------------
+
+func (h *harness) setRunning(name string, running bool, started time.Time) {
+	for i := range h.fleet {
+		if h.fleet[i].Name == name {
+			h.fleet[i].Running = running
+			h.fleet[i].Started = started
+		}
+	}
+}
+
+func (h *harness) pointers() []map[string]any {
+	var out []map[string]any
+	for _, e := range h.events {
+		if e.typ == EventPointerSent {
+			out = append(out, e.d)
+		}
+	}
+	return out
+}
+
+// The acceptance case: the recipient is down when a pointer is attempted, comes
+// back, and a pointer is then delivered — for exactly the mail that failed.
+func TestFailedPointerIsResentOnceRecipientIsBack(t *testing.T) {
+	h := newHarness(t)
+	// pm-pogo goes down between the arrival and the send (the 02:03Z bounce).
+	h.nudgeFn = func(agent, _ string) (string, error) {
+		h.setRunning(agent, false, time.Time{})
+		return OutcomeFailed, errors.New("agent is not running")
+	}
+	w := h.watcher()
+	w.Start()
+	h.subject["m1"] = "deploy report"
+	h.mailSent("mayor", "pm-pogo", "m1")
+	w.Poll()
+	if p := h.pointers(); len(p) != 1 || p[0]["outcome"] != OutcomeFailed || p[0]["will_retry"] != true {
+		t.Fatalf("first attempt = %+v", p)
+	}
+	h.nudgeFn = nil
+
+	// Still down: nothing is typed, however long it stays down.
+	h.now = h.now.Add(5 * time.Minute)
+	w.Poll()
+	w.Recover()
+	if len(h.nudges) != 1 {
+		t.Fatalf("sent to a recipient that is down: %+v", h.nudges)
+	}
+
+	// Back, but only just spawned: held off its kickoff prompt.
+	h.setRunning("pm-pogo", true, h.now)
+	w.Poll()
+	if len(h.nudges) != 1 {
+		t.Fatalf("pointer typed into a just-spawned agent: %+v", h.nudges)
+	}
+
+	h.now = h.now.Add(DefaultRetryAfter)
+	w.Poll()
+	p := h.pointers()
+	if len(p) != 2 || len(h.nudges) != 2 {
+		t.Fatalf("no re-send once the recipient was back: %+v", p)
+	}
+	last := p[1]
+	if last["outcome"] != OutcomeDelivered || last["retry"] != 1 || fmt.Sprint(last["msg_ids"]) != "[m1]" {
+		t.Errorf("re-send = %+v", last)
+	}
+	if h.nudges[1].agent != "pm-pogo" || !strings.HasSuffix(h.nudges[1].text, "mg mail list pm-pogo") {
+		t.Errorf("re-send text = %+v", h.nudges[1])
+	}
+
+	// Delivered: never sent again.
+	h.now = h.now.Add(10 * time.Minute)
+	w.Poll()
+	if len(h.nudges) != 2 {
+		t.Errorf("delivered pointer re-sent: %+v", h.nudges)
+	}
+}
+
+// A pointer that fails while the recipient keeps running (mangled into a
+// kickoff prompt — the real 2026-10-01 failure) is re-sent after its backoff.
+func TestFailedPointerToRunningRecipientIsResentAfterBackoff(t *testing.T) {
+	h := newHarness(t)
+	h.nudgeFn = func(string, string) (string, error) {
+		return OutcomeFailed, errors.New("nudge submitted but mangled in transit")
+	}
+	w := h.watcher()
+	w.Start()
+	h.mailSent("pm-pogo", "mayor", "m1")
+	w.Poll()
+	h.nudgeFn = nil
+	w.Poll()
+	if len(h.nudges) != 1 {
+		t.Fatalf("re-sent before the backoff: %+v", h.nudges)
+	}
+	h.now = h.now.Add(DefaultRetryAfter)
+	w.Poll()
+	if p := h.pointers(); len(p) != 2 || p[1]["outcome"] != OutcomeDelivered {
+		t.Fatalf("pointers = %+v", p)
+	}
+}
+
+func TestFailedPointerIsNotResentOnceRead(t *testing.T) {
+	h := newHarness(t)
+	h.nudgeFn = func(string, string) (string, error) { return OutcomeFailed, errors.New("down") }
+	w := h.watcher()
+	w.Start()
+	h.mailSent("mayor", "pm-pogo", "m1")
+	w.Poll()
+	h.nudgeFn = nil
+	h.mailRead("pm-pogo", "m1")
+	h.now = h.now.Add(time.Hour)
+	w.Poll()
+	if len(h.nudges) != 1 {
+		t.Fatalf("pointed at mail already read: %+v", h.nudges)
+	}
+}
+
+func TestFailedPointerRetriesAreBounded(t *testing.T) {
+	h := newHarness(t)
+	h.nudgeFn = func(string, string) (string, error) { return OutcomeFailed, errors.New("pty busy") }
+	w := h.watcher()
+	w.Start()
+	h.mailSent("mayor", "pm-pogo", "m1")
+	w.Poll()
+	for i := 0; i < 20; i++ {
+		h.now = h.now.Add(time.Minute)
+		w.Poll()
+	}
+	p := h.pointers()
+	if len(p) != 1+DefaultMaxRetries {
+		t.Fatalf("%d attempts, want %d", len(p), 1+DefaultMaxRetries)
+	}
+	if p[len(p)-1]["will_retry"] != false || p[len(p)-2]["will_retry"] != true {
+		t.Errorf("will_retry not recorded: %+v", p)
+	}
+}
+
+// A failed pointer rides along with the recipient's next fresh pointer rather
+// than waiting out its own backoff.
+func TestFailedPointerRidesWithTheNextPointer(t *testing.T) {
+	h := newHarness(t)
+	h.nudgeFn = func(string, string) (string, error) { return OutcomeFailed, errors.New("down") }
+	w := h.watcher()
+	w.Start()
+	h.mailSent("mayor", "pm-pogo", "m1")
+	w.Poll()
+	h.nudgeFn = nil
+	h.now = h.now.Add(DefaultCoalesce)
+	h.mailSent("mayor", "pm-pogo", "m2")
+	w.Poll()
+	p := h.pointers()
+	if len(p) != 2 || fmt.Sprint(p[1]["msg_ids"]) != "[m1 m2]" || p[1]["retry"] != 1 {
+		t.Fatalf("pointers = %+v", p)
+	}
+}
+
+// The retry queue survives a pogod restart.
+func TestFailedPointerSurvivesRestart(t *testing.T) {
+	h := newHarness(t)
+	h.nudgeFn = func(string, string) (string, error) { return OutcomeFailed, errors.New("down") }
+	w := h.watcher()
+	w.Start()
+	h.mailSent("mayor", "pm-pogo", "m1")
+	w.Poll()
+	h.nudgeFn = nil
+
+	h.now = h.now.Add(time.Minute)
+	w2 := h.watcher()
+	w2.Start()
+	w2.Poll()
+	p := h.pointers()
+	if len(p) != 2 || fmt.Sprint(p[1]["msg_ids"]) != "[m1]" || p[1]["outcome"] != OutcomeDelivered {
+		t.Fatalf("pointers = %+v", p)
+	}
+}
+
+func TestCheckSeparatesDeliveredLateFromMisses(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "events.jsonl")
+	t0 := time.Date(2026, 10, 1, 2, 0, 0, 0, time.UTC)
+	var b strings.Builder
+	for _, id := range []string{"late", "retried", "lost", "latefail"} {
+		for _, l := range []map[string]any{
+			{"type": "mail.sent", "from": "pogo-self-deploy", "to": "mayor", "msg_id": id, "ts": t0.Add(time.Minute).Format(time.RFC3339)},
+			{"type": "mail.read", "mailbox": "mayor", "msg_id": id, "ts": t0.Add(2 * time.Minute).Format(time.RFC3339)},
+		} {
+			j, _ := json.Marshal(l)
+			b.Write(append(j, '\n'))
+		}
+	}
+	os.WriteFile(store, []byte(b.String()), 0o644)
+	ptr := func(at time.Duration, id, outcome string) events.Event {
+		return ev(t0.Add(at), EventPointerSent, map[string]any{"msg_ids": []any{id}, "outcome": outcome})
+	}
+	pogo := []events.Event{
+		ev(t0, EventArmed, map[string]any{}),
+		ev(t0.Add(110*time.Second), "scheduler_fire_delivered", map[string]any{"schedule_id": "mail-check-mayor", "to": "mayor"}),
+		ptr(3*time.Minute, "late", OutcomeDelivered),
+		ptr(90*time.Second, "retried", OutcomeFailed),
+		ptr(3*time.Minute, "retried", OutcomeDelivered),
+		ptr(90*time.Second, "lost", OutcomeFailed),
+		ptr(3*time.Minute, "latefail", OutcomeFailed),
+	}
+	rep := Check(pogo, store, t0.Add(-time.Hour), t0.Add(time.Hour))
+	want := map[string]string{"late": ClassDeliveredLate, "retried": ClassDeliveredLate, "lost": ClassMissFailed, "latefail": ClassMissLate}
+	for _, r := range rep.Rows {
+		if want[r.MsgID] != r.Class {
+			t.Errorf("%s: class %s, want %s (%s)", r.MsgID, r.Class, want[r.MsgID], r.Detail)
+		}
+		if r.Class == ClassDeliveredLate && r.PointerLagS != 120 {
+			t.Errorf("%s: lag %ds, want 120", r.MsgID, r.PointerLagS)
+		}
+	}
+	if m := rep.Misses(); len(m) != 2 {
+		t.Errorf("misses = %+v", m)
+	}
+	var out strings.Builder
+	rep.Render(&out)
+	for _, s := range []string{"DELIVERED-LATE: 2", "lag=120s", "MISSES: 2"} {
+		if !strings.Contains(out.String(), s) {
+			t.Errorf("render lacks %q:\n%s", s, out.String())
+		}
+	}
+}

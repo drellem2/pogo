@@ -33,8 +33,11 @@ box) within 10 minutes of that fire. Each such read is classed:
 
   COVERED         a pointer (or re-nudge) was delivered or queued before the read
   MISS            no pointer was sent for it at all
-  MISS-LATE       the only pointer came after the read
-  MISS-FAILED     a pointer was attempted before the read and not delivered
+  DELIVERED-LATE  no pointer was delivered before the read, but one was
+                  delivered after it — the timer won the race; the row shows
+                  the send-to-pointer lag
+  MISS-LATE       the only pointers came after the read, and none was delivered
+  MISS-FAILED     a pointer was attempted before the read and never delivered
   BOUNCED         its recipient was not running when it was sent
   SKIPPED         deliberately not pointed at (self-sent, not an agent's box)
   PRE-ARM         sent before wakewatch armed — nothing to judge

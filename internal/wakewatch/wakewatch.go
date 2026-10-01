@@ -20,6 +20,10 @@
 //     Params.RenudgeEvery, up to Params.MaxRenudges times — and after that the
 //     work is reported unconsumed: a `wake_unconsumed` event and one mail to the
 //     coordinator.
+//   - RETRY. A pointer whose send FAILED is re-sent once its recipient is next
+//     seen running and past its own start by Params.RetryAfter — up to
+//     Params.MaxRetries times, only for triggers still unconsumed, and
+//     persisted across a restart (mg-35a7e; see takeRetryLocked).
 //   - BOUNCE. Mail to a name that denotes an agent that is NOT running (a reaped
 //     polecat, its work-item box, a parked or stopped crew agent) is reported to
 //     the sender and the coordinator: "recipient <x> is not running; your mail is
@@ -121,6 +125,12 @@ type Params struct {
 	Fresh time.Duration
 	// PollInterval: how often the log is tailed.
 	PollInterval time.Duration
+	// RetryAfter is the backoff unit for re-sending a pointer that FAILED
+	// (mg-35a7e): retry n waits n*RetryAfter after the failure, and never
+	// lands within RetryAfter of the recipient's own start.
+	RetryAfter time.Duration
+	// MaxRetries bounds those re-sends; past it the work is left to recovery.
+	MaxRetries int
 }
 
 // Defaults.
@@ -133,6 +143,8 @@ const (
 	DefaultLookback         = 24 * time.Hour
 	DefaultFresh            = 10 * time.Minute
 	DefaultPollInterval     = 3 * time.Second
+	DefaultRetryAfter       = 20 * time.Second
+	DefaultMaxRetries       = 3
 )
 
 // DefaultParams returns the design's starting values.
@@ -146,6 +158,8 @@ func DefaultParams() Params {
 		Lookback:         DefaultLookback,
 		Fresh:            DefaultFresh,
 		PollInterval:     DefaultPollInterval,
+		RetryAfter:       DefaultRetryAfter,
+		MaxRetries:       DefaultMaxRetries,
 	}
 }
 
@@ -175,6 +189,12 @@ func (p Params) withDefaults() Params {
 	if p.PollInterval <= 0 {
 		p.PollInterval = d.PollInterval
 	}
+	if p.RetryAfter <= 0 {
+		p.RetryAfter = d.RetryAfter
+	}
+	if p.MaxRetries <= 0 {
+		p.MaxRetries = d.MaxRetries
+	}
 	return p
 }
 
@@ -183,6 +203,12 @@ type AgentRef struct {
 	Name       string
 	WorkItemID string
 	Running    bool
+	// Started is when this incarnation of the agent was spawned (zero if
+	// unknown). A retried pointer is held off a freshly spawned agent: its
+	// kickoff prompt may still be in the composer, and a pointer typed then is
+	// merged into it — which is how the 2026-10-01 02:03Z pointer to mayor
+	// failed ("mangled in transit", mg-35a7e).
+	Started time.Time
 }
 
 // Item is what wakewatch needs to know about a work item.
@@ -234,6 +260,18 @@ type State struct {
 	// polecat's box is still recognised as an agent's — so mail to it bounces —
 	// after the registry has forgotten it.
 	Seen map[string]SeenAgent `json:"seen,omitempty"`
+	// Retry holds, per recipient, pointers whose send FAILED and that will be
+	// re-sent once the recipient is next seen running (mg-35a7e). Persisted, so
+	// a failure in the minute before a pogod restart is not forgotten by it.
+	Retry map[string]*Retry `json:"retry,omitempty"`
+}
+
+// Retry is one recipient's failed pointers awaiting a re-send.
+type Retry struct {
+	Triggers []Trigger `json:"triggers"`
+	FailedAt time.Time `json:"failed_at"`
+	// Attempts is how many sends of these triggers have failed so far.
+	Attempts int `json:"attempts"`
 }
 
 // Renudge is one work key's recovery bookkeeping.
@@ -689,8 +727,15 @@ func (w *Watcher) enqueue(recipient string, t Trigger) {
 
 // flushLocked sends every coalesced batch whose window has elapsed.
 func (w *Watcher) flushLocked() {
-	names := make([]string, 0, len(w.pend))
+	set := map[string]bool{}
 	for n := range w.pend {
+		set[n] = true
+	}
+	for n := range w.st.Retry {
+		set[n] = true
+	}
+	names := make([]string, 0, len(set))
+	for n := range set {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -700,16 +745,23 @@ func (w *Watcher) flushLocked() {
 }
 
 func (w *Watcher) flushOne(recipient string) {
-	p := w.pend[recipient]
-	if p == nil || len(p.batch) == 0 {
-		return
-	}
 	now := w.d.Now()
-	if last, ok := w.lastSent[recipient]; ok && now.Sub(last) < w.p.Coalesce {
+	var fresh []Trigger
+	if p := w.pend[recipient]; p != nil && len(p.batch) > 0 {
+		if last, ok := w.lastSent[recipient]; !ok || now.Sub(last) >= w.p.Coalesce {
+			fresh = p.batch
+		}
+	}
+	// Failed pointers ride along with any fresh one; on their own they wait
+	// out their backoff.
+	batch, retries := w.takeRetryLocked(recipient, now, len(fresh) > 0)
+	if len(batch) == 0 && len(fresh) == 0 {
 		return
 	}
-	batch := p.batch
-	delete(w.pend, recipient)
+	if len(fresh) > 0 {
+		delete(w.pend, recipient)
+	}
+	batch = append(batch, fresh...)
 	w.lastSent[recipient] = now
 	text := BuildPointer("", batch)
 	latest := batch[len(batch)-1]
@@ -719,8 +771,117 @@ func (w *Watcher) flushOne(recipient string) {
 		"count":     len(batch),
 		"text_len":  len(text),
 	}
+	if retries > 0 {
+		d["retry"] = retries
+	}
 	addIDs(d, batch)
-	w.send(EventPointerSent, recipient, latest.ItemID, text, d)
+	w.sendPointer(recipient, latest.ItemID, text, d, batch, retries)
+}
+
+// takeRetryLocked returns recipient's failed pointers if they are due for a
+// re-send, and removes them from the retry queue; retries is how many sends of
+// them have already failed.
+//
+// WHY a retry queue rather than recovery or a boot-time "you have unread mail"
+// pointer (mg-35a7e): recovery only re-points work older than RenudgeAfter
+// (15 min) and counts against the three-try liveness budget, so a pointer lost
+// in a bounce stayed lost for a quarter of an hour — and once the timers are
+// off, nothing reads it sooner. A boot pointer would fire on every spawn
+// whether or not anything was lost, and would race the same kickoff prompt
+// that mangled the original. The retry re-sends exactly the triggers that
+// failed, filtered at send time to the ones still unconsumed.
+//
+// Due means: wakewatch can see (a blind model cannot tell read from unread),
+// the recipient is running, it has been running for at least RetryAfter, and
+// — unless ride is set because a fresh pointer is going out anyway — the
+// failure is at least retries*RetryAfter old.
+func (w *Watcher) takeRetryLocked(recipient string, now time.Time, ride bool) ([]Trigger, int) {
+	r := w.st.Retry[recipient]
+	if r == nil {
+		return nil, 0
+	}
+	if r.Triggers = w.unconsumed(r.Triggers); len(r.Triggers) == 0 {
+		delete(w.st.Retry, recipient)
+		return nil, 0
+	}
+	if w.blind != "" {
+		return nil, 0
+	}
+	ref, ok := w.agentRef(recipient)
+	if !ok || !ref.Running {
+		return nil, 0
+	}
+	if !ref.Started.IsZero() && now.Sub(ref.Started) < w.p.RetryAfter {
+		return nil, 0
+	}
+	if !ride && now.Sub(r.FailedAt) < time.Duration(r.Attempts)*w.p.RetryAfter {
+		return nil, 0
+	}
+	delete(w.st.Retry, recipient)
+	return r.Triggers, r.Attempts
+}
+
+// unconsumed keeps the triggers whose work is still in the model and not yet
+// read, archived, claimed or touched by its agent.
+func (w *Watcher) unconsumed(ts []Trigger) []Trigger {
+	var out []Trigger
+	for _, t := range ts {
+		if t.Kind == "assign" {
+			if a := w.assigns[t.ItemID]; a != nil && !a.consumed {
+				out = append(out, t)
+			}
+			continue
+		}
+		if m := w.mails[t.MsgID]; m != nil && !m.consumed {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// agentRef finds a registry entry by agent name, preferring a running one.
+func (w *Watcher) agentRef(name string) (AgentRef, bool) {
+	if w.d.Agents == nil {
+		return AgentRef{}, false
+	}
+	var best AgentRef
+	found := false
+	for _, a := range w.d.Agents() {
+		if a.Name == name && (!found || (a.Running && !best.Running)) {
+			best, found = a, true
+		}
+	}
+	return best, found
+}
+
+// requeueLocked puts triggers whose send failed back on recipient's retry
+// queue.
+func (w *Watcher) requeueLocked(recipient string, batch []Trigger, attempts int, now time.Time) {
+	if w.st.Retry == nil {
+		w.st.Retry = map[string]*Retry{}
+	}
+	r := w.st.Retry[recipient]
+	if r == nil {
+		r = &Retry{}
+		w.st.Retry[recipient] = r
+	}
+	have := map[string]bool{}
+	for _, t := range r.Triggers {
+		have[t.Key()] = true
+	}
+	var merged []Trigger
+	for _, t := range batch {
+		if !have[t.Key()] {
+			have[t.Key()] = true
+			merged = append(merged, t)
+		}
+	}
+	// Older failures first, so the latest arrival stays the one described.
+	r.Triggers = append(r.Triggers, merged...)
+	r.FailedAt = now
+	if attempts > r.Attempts {
+		r.Attempts = attempts
+	}
 }
 
 // addIDs records the msg/item ids a pointer covers — every one of them, since
@@ -749,7 +910,25 @@ func addIDs(d map[string]any, batch []Trigger) {
 
 // send types text into recipient's terminal and records the outcome.
 func (w *Watcher) send(eventType, recipient, itemID, text string, d map[string]any) {
-	do := func() {
+	w.sendThen(eventType, recipient, itemID, text, d, nil, nil)
+}
+
+// sendPointer sends a pointer and, if it FAILED, queues its triggers to be
+// re-sent once the recipient is next seen running — up to MaxRetries times
+// (mg-35a7e). The failed event says which: will_retry.
+func (w *Watcher) sendPointer(recipient, itemID, text string, d map[string]any, batch []Trigger, retries int) {
+	willRetry := retries < w.p.MaxRetries
+	w.sendThen(EventPointerSent, recipient, itemID, text, d, &willRetry, func(outcome string) {
+		if outcome == OutcomeFailed && willRetry {
+			w.requeueLocked(recipient, batch, retries+1, w.d.Now())
+		}
+	})
+}
+
+// sendThen types text, records the outcome, then runs after(outcome) under
+// w.mu. willRetry, when non-nil, is recorded on a failed event.
+func (w *Watcher) sendThen(eventType, recipient, itemID, text string, d map[string]any, willRetry *bool, after func(string)) {
+	do := func() string {
 		outcome, err := w.d.Nudge(recipient, text)
 		if outcome == "" {
 			outcome = OutcomeDelivered
@@ -761,14 +940,31 @@ func (w *Watcher) send(eventType, recipient, itemID, text string, d map[string]a
 		if err != nil {
 			d["error"] = err.Error()
 		}
+		if outcome == OutcomeFailed && willRetry != nil {
+			d["will_retry"] = *willRetry
+		}
 		w.d.Emit(eventType, itemID, d)
+		return outcome
 	}
 	if w.d.Async {
 		w.wg.Add(1)
-		go func() { defer w.wg.Done(); do() }()
+		go func() {
+			defer w.wg.Done()
+			outcome := do()
+			if after != nil {
+				w.mu.Lock()
+				after(outcome)
+				w.saveState()
+				w.mu.Unlock()
+			}
+		}()
 		return
 	}
-	do()
+	// Synchronous (tests): the caller already holds w.mu.
+	outcome := do()
+	if after != nil {
+		after(outcome)
+	}
 }
 
 // bounce reports mail addressed to an agent that is not running.
@@ -1000,6 +1196,13 @@ func (w *Watcher) pruneLocked(now time.Time) {
 	for k, s := range w.st.Seen {
 		if now.Sub(s.At) > seenRetention {
 			delete(w.st.Seen, k)
+		}
+	}
+	// A recipient that never comes back must not hold its retry forever: once
+	// its work is read, claimed or past Lookback, the entry goes.
+	for k, r := range w.st.Retry {
+		if r.Triggers = w.unconsumed(r.Triggers); len(r.Triggers) == 0 {
+			delete(w.st.Retry, k)
 		}
 	}
 }
