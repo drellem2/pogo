@@ -54,6 +54,7 @@ func wakeWatchAgents(reg *agent.Registry) func() []wakewatch.AgentRef {
 				Name:       a.Name,
 				WorkItemID: a.WorkItemID,
 				Running:    a.GetStatus() == agent.StatusRunning,
+				Started:    a.StartTime,
 			})
 		}
 		return out

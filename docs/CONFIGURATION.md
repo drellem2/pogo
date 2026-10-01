@@ -2599,6 +2599,16 @@ An agent is woken when there is something for it to do, and only then
   covers a reaped polecat, its work-item box, and a parked or configured-but-absent
   crew agent. Mail to a box that is no agent's, such as `human`, is neither pointed
   at nor bounced.
+- **Retry.** A pointer whose send FAILED (the recipient was down or
+  restarting, or the text was mangled into a just-spawned agent's kickoff
+  prompt) is re-sent once the recipient is next seen running and has been
+  running for at least 20 seconds. Retry *n* waits *n*×20s after the failure,
+  up to 3 retries; a failed pointer also rides along with the recipient's next
+  fresh pointer. Only triggers still unread or unclaimed at send time are
+  re-sent, the queue is kept in `state.json` across a restart, and it is
+  suspended while blind. The failed `wake_pointer_sent` carries `will_retry`,
+  and a re-send carries `retry: <n>`. Past the budget, recovery's re-nudge
+  after 15 minutes is the next attempt (mg-35a7e).
 
 Every decision is an event in `events.log`, the silent ones included:
 `wake_pointer_sent`, `wake_renudge`, `wake_unconsumed`, `wake_bounce`,
@@ -2621,10 +2631,13 @@ file, only events written after start are arrivals.
 `pogo check-wakewatch [--since 24h] [--json]` is phase 2's gate. It joins every
 mail a timer-driven mail-check turn read (a read in one of the fire's boxes
 within 10 minutes of a `mail-check-*` fire) against the pointers sent before it.
-It prints the misses: `MISS` (no pointer), `MISS-LATE` (the pointer came after
-the read) and `MISS-FAILED` (a pointer was attempted and not delivered). Every
-other row is explained: `COVERED`, `BOUNCED`, `SKIPPED`, `PRE-ARM` and
-`NO-SEND-RECORD`. It exits 1 on any miss and 3 when it is blind.
+It prints the misses: `MISS` (no pointer), `MISS-LATE` (the only pointers came
+after the read and none was delivered) and `MISS-FAILED` (a pointer was attempted
+before the read and never delivered, then or later). Every other row is
+explained: `COVERED`, `DELIVERED-LATE` (no pointer was delivered before the
+read, but one was delivered after it: the timer won the race; the row shows
+the send-to-pointer lag and the report shows the longest), `BOUNCED`,
+`SKIPPED`, `PRE-ARM` and `NO-SEND-RECORD`. It exits 1 on any miss and 3 when it is blind.
 
 ```toml
 [wake_watch]

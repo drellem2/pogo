@@ -36,9 +36,16 @@ const (
 	ClassCovered = "COVERED"
 	// ClassMiss: no pointer was attempted for this mail at all.
 	ClassMiss = "MISS"
-	// ClassMissLate: the only pointer came after the read.
+	// ClassMissLate: the only pointer came after the read, and none was
+	// delivered.
 	ClassMissLate = "MISS-LATE"
-	// ClassMissFailed: a pointer was attempted and not delivered.
+	// ClassDeliveredLate: no pointer was delivered before the read, but one
+	// WAS delivered after it — the timer won a race the pointer would have
+	// covered (mg-35a7e). Not a miss; the row carries the send-to-pointer lag
+	// so the race's size is on the page, not a manual join away.
+	ClassDeliveredLate = "DELIVERED-LATE"
+	// ClassMissFailed: a pointer was attempted before the read, not delivered,
+	// and never delivered after it either.
 	ClassMissFailed = "MISS-FAILED"
 	// ClassBounced: the recipient was not running when it was sent.
 	ClassBounced = "BOUNCED"
@@ -70,8 +77,12 @@ type CheckRow struct {
 	Sent       time.Time `json:"sent,omitempty"`
 	Fire       time.Time `json:"fire"`
 	Read       time.Time `json:"read"`
-	Class      string    `json:"class"`
-	Detail     string    `json:"detail,omitempty"`
+	// Pointer is the first delivered (or queued) pointer for a DELIVERED-LATE
+	// row, and PointerLagS its distance from the send, in seconds.
+	Pointer     time.Time `json:"pointer,omitempty"`
+	PointerLagS int       `json:"pointer_lag_s,omitempty"`
+	Class       string    `json:"class"`
+	Detail      string    `json:"detail,omitempty"`
 }
 
 // CheckReport is the join's result.
@@ -217,7 +228,10 @@ func Check(pogoEvents []events.Event, storePath string, since, now time.Time) Ch
 			row.Sent = s.at
 			row.From = s.From
 		}
-		row.Class, row.Detail = classify(have, s.at, l.at, rep.Armed, attempts[l.MsgID], bounced[l.MsgID], skipped[l.MsgID])
+		row.Class, row.Detail, row.Pointer = classify(have, s.at, l.at, rep.Armed, attempts[l.MsgID], bounced[l.MsgID], skipped[l.MsgID])
+		if !row.Pointer.IsZero() {
+			row.PointerLagS = int(row.Pointer.Sub(s.at).Seconds())
+		}
 		rep.Counts[row.Class]++
 		rep.Rows = append(rep.Rows, row)
 	}
@@ -225,38 +239,54 @@ func Check(pogoEvents []events.Event, storePath string, since, now time.Time) Ch
 	return rep
 }
 
-func classify(have bool, sentAt, readAt time.Time, armed []time.Time, atts []attempt, bounced bool, skipReason string) (string, string) {
+// classify returns the row's class, its detail, and — for DELIVERED-LATE —
+// when the first late pointer was delivered.
+func classify(have bool, sentAt, readAt time.Time, armed []time.Time, atts []attempt, bounced bool, skipReason string) (string, string, time.Time) {
+	var none time.Time
 	if !have {
-		return ClassNoSend, "no mail.sent for this id in the store"
+		return ClassNoSend, "no mail.sent for this id in the store", none
 	}
 	if len(armed) == 0 || sentAt.Before(armed[0]) {
-		return ClassPreArm, "sent before wakewatch armed"
+		return ClassPreArm, "sent before wakewatch armed", none
 	}
 	if bounced {
-		return ClassBounced, "recipient was not running when it was sent"
+		return ClassBounced, "recipient was not running when it was sent", none
 	}
 	if skipReason != "" {
-		return ClassSkipped, skipReason
+		return ClassSkipped, skipReason, none
 	}
-	var late, failed bool
-	for _, a := range atts {
+	sorted := append([]attempt(nil), atts...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].at.Before(sorted[j].at) })
+	var late, failed int
+	var lateOK time.Time
+	for _, a := range sorted {
 		ok := a.outcome == OutcomeDelivered || a.outcome == OutcomeQueued
 		if a.at.After(readAt) {
-			late = true
+			late++
+			if ok && lateOK.IsZero() {
+				lateOK = a.at
+			}
 			continue
 		}
 		if ok {
-			return ClassCovered, a.outcome
+			return ClassCovered, a.outcome, none
 		}
-		failed = true
+		failed++
 	}
 	switch {
-	case failed:
-		return ClassMissFailed, "a pointer was attempted before the read and not delivered"
-	case late:
-		return ClassMissLate, "the only pointer came after the read"
+	case !lateOK.IsZero():
+		d := fmt.Sprintf("pointer delivered %s after the send, %s after the read",
+			lateOK.Sub(sentAt).Round(time.Second), lateOK.Sub(readAt).Round(time.Second))
+		if failed > 0 {
+			d += fmt.Sprintf(", after %d failed attempt(s) before the read", failed)
+		}
+		return ClassDeliveredLate, d, lateOK
+	case failed > 0:
+		return ClassMissFailed, "a pointer was attempted before the read and never delivered", none
+	case late > 0:
+		return ClassMissLate, "the only pointer came after the read, and was not delivered", none
 	}
-	return ClassMiss, "no pointer was sent for this mail"
+	return ClassMiss, "no pointer was sent for this mail", none
 }
 
 // attribute finds the latest fire at or before t within CheckReadWindow.
@@ -356,7 +386,7 @@ func (r CheckReport) Render(w io.Writer) {
 	if len(r.Armed) > 0 {
 		fmt.Fprintf(w, "  wakewatch armed: %d time(s), first %s\n", len(r.Armed), r.Armed[0].UTC().Format(time.RFC3339))
 	}
-	classes := []string{ClassCovered, ClassMiss, ClassMissLate, ClassMissFailed, ClassBounced, ClassSkipped, ClassPreArm, ClassNoSend}
+	classes := []string{ClassCovered, ClassDeliveredLate, ClassMiss, ClassMissLate, ClassMissFailed, ClassBounced, ClassSkipped, ClassPreArm, ClassNoSend}
 	var parts []string
 	for _, c := range classes {
 		if n := r.Counts[c]; n > 0 {
@@ -369,6 +399,25 @@ func (r CheckReport) Render(w io.Writer) {
 	fmt.Fprintf(w, "  reads by class: %s\n", strings.Join(parts, " "))
 	for _, b := range r.Blind {
 		fmt.Fprintf(w, "  BLIND: %s\n", b)
+	}
+	var late []CheckRow
+	maxLag := 0
+	for _, row := range r.Rows {
+		if row.Class == ClassDeliveredLate {
+			late = append(late, row)
+			if row.PointerLagS > maxLag {
+				maxLag = row.PointerLagS
+			}
+		}
+	}
+	if len(late) > 0 {
+		fmt.Fprintf(w, "DELIVERED-LATE: %d (not misses: a pointer was delivered, after the timer-driven read; longest send-to-pointer lag %s)\n",
+			len(late), (time.Duration(maxLag) * time.Second).String())
+		for _, m := range late {
+			fmt.Fprintf(w, "  %-14s %s box=%s agent=%s sent=%s read=%s pointer=%s lag=%ds — %s\n",
+				m.Class, m.MsgID, m.Box, m.Agent, m.Sent.UTC().Format(time.RFC3339), m.Read.UTC().Format(time.RFC3339),
+				m.Pointer.UTC().Format(time.RFC3339), m.PointerLagS, m.Detail)
+		}
 	}
 	misses := r.Misses()
 	if len(misses) == 0 {

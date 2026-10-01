@@ -22,7 +22,10 @@ func TestWakeWatchConfigDefaultsMatchPackageDefaults(t *testing.T) {
 		Lookback:         config.DefaultWakeWatchLookback,
 	})
 	want := wakewatch.DefaultParams()
+	// Not configurable: Fresh and PollInterval, and the failed-pointer retry
+	// backoff and budget (mg-35a7e).
 	got.Fresh, got.PollInterval = want.Fresh, want.PollInterval
+	got.RetryAfter, got.MaxRetries = want.RetryAfter, want.MaxRetries
 	if got != want {
 		t.Fatalf("config defaults %+v != wakewatch defaults %+v", got, want)
 	}
