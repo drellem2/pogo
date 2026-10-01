@@ -390,7 +390,7 @@ func (rc Recipient) Body(r Report) string {
 		"UNTIL IT IS RESOLVED, treat the affected file as a prompt you cannot fully\n" +
 		"trust rather than as a prompt that is fine. The costly shape of this defect is\n" +
 		"not a missing paragraph, it is a live prompt that ASSERTS something no longer\n" +
-		"true — and the agent reading it has no way to know its copy is out of date.\n" +
+		"true — and the agent reading it has no way to know its copy differs.\n" +
 		"That is what this notice is for.\n\n")
 
 	fmt.Fprintf(&b, "SCOPE OF THE SWEEP. %d shipped prompt(s) were compared against %s; %d differ or\n"+

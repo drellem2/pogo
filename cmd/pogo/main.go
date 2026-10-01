@@ -4044,9 +4044,15 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 							fmt.Sprintf("%d hand-edited prompt(s) diverged from the embedded source: %s — 'pogo agent prompt install' will NOT overwrite your edits; it writes the shipped copy to <name>.dist. Reconcile each canonical against its .dist sidecar (run install first if the .dist is absent), then restart affected agents",
 								len(reconcile), strings.Join(reconcile, ", ")))
 					}
+					// A WARN, not a fail: a deliberate in-place edit is a
+					// legitimate state ([prompt_edit] offers "keep the edit"),
+					// and on an org-templated host every customized prompt is in
+					// it. Failing here would leave --check red with no remedy
+					// short of discarding the edit — install skips the file.
+					// What #125 needs is that doctor stop calling it up-to-date.
 					if len(rewritten) > 0 {
-						fail("agent prompts up-to-date (body differs from stamp)",
-							fmt.Sprintf("%d prompt(s) carry a stamp for this binary's embed but a body that is not it: %s — the file was rewritten in place after install (a hand-edit, or an org template's own copy). 'pogo agent prompt install' skips these and writes no .dist. If the body is intended, nothing is wrong and no command is needed. To restore the shipped text for ONE file, move that file aside and run 'pogo agent prompt install' — not --force, which overwrites every edited prompt at once",
+						warn("agent prompts up-to-date (body differs from stamp)",
+							fmt.Sprintf("%d prompt(s) carry a stamp for this binary's embed but a body that is not it: %s — the file was rewritten in place after install (a hand-edit, or an org template's own copy). 'pogo agent prompt install' skips these and writes no .dist. If the body is intended, nothing is wrong and no command is needed; `pogo check-prompt-edits` reports each file. To restore the shipped text for ONE file, move that file aside and run 'pogo agent prompt install' — not --force, which overwrites every edited prompt at once",
 								len(rewritten), strings.Join(rewritten, ", ")))
 					}
 				} else {

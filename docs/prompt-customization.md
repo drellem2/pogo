@@ -390,7 +390,7 @@ false "verified". You have two safe options:
 |---|---|---|
 | `pogod-promptsync` | a **shipped update could not be applied** because of your edits — there is a `.dist` sidecar waiting | reconcile the canonical against its `.dist` |
 | `pogod-promptedit` | the edits exist and **no shipped update has collided with them yet** | keep the edit, or `pogo install` to drop it |
-| `pogod-promptstale` | the installed file **differs from the reference corpus** — see below | redeploy, or `pogo agent prompt install` |
+| `pogod-promptstale` | the installed file **differs from the reference corpus** — see below | redeploy from the reference (`pogo agent prompt install` writes this binary's embed, which helps only when the binary was built from the reference) |
 
 Reconciling a declined sync resolves the first two together.
 
