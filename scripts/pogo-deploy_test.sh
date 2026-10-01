@@ -1876,10 +1876,15 @@ grep -q 'unexpected="\$(unexpected_lost "\$lost" "\$pre_owners" "\$states"' "$RU
 grep -q 'expected="\$(expected_lost_summary "\$lost" "\$pre_owners" "\$states")"' "$RUNNER" \
     && pass "the set-aside losses are logged by name, not dropped" \
     || fail "the post-check does not log the expected losses it set aside"
-# The alert is gated on the subtraction, not on the raw loss.
-awk '/unexpected="\$\(unexpected_lost/{u=1} u && /if \[ -n "\$unexpected" \]; then/{g=1} g && /alert "\[pogo-deploy\] mail-check schedules LOST/{print "ok"; exit}' "$RUNNER" | grep -q ok \
-    && pass "the LOST alert fires only under 'if [ -n \$unexpected ]'" \
-    || fail "the LOST alert is not gated on the unexpected set"
+# The UNFILTERED marker is not stripped on its way to the body (drellem2/pogo#122):
+# it is the body's only way to say that nothing was set aside.
+grep -q "unexpected_lost .*sed '/\^UNFILTERED" "$RUNNER" \
+    && fail "the callsite strips the UNFILTERED marker before the body can see it" \
+    || pass "the callsite hands unexpected_lost's output to the body unstripped"
+# main reaches the section. The section itself is RUN, end to end, below.
+grep -q '^    post_bounce_check "\$pre" "\$pre_owners"$' "$RUNNER" \
+    && pass "main runs post_bounce_check on the pre-bounce ids and owner map" \
+    || fail "main does not call post_bounce_check with the pre-bounce snapshot"
 grep -q 'states="\$(agent_states)" || states="?"' "$RUNNER" \
     && pass "the callsite turns an unreadable registry into '?' instead of into 'nothing is running'" \
     || fail "the callsite does not guard agent_states' failure"
@@ -1889,6 +1894,149 @@ grep -q 'pre_owners="\$(mail_check_owners)"' "$RUNNER" \
 [ "$(grep -c 'Restore by nudging the affected agents to re-register' "$RUNNER")" -eq 0 ] \
     && pass "the unconditional nudge remedy is GONE from the runner" \
     || fail "the runner still contains the unconditional 'nudge to re-register' remedy"
+
+# --- the marker reaches the body, and the pre-bounce types can be unreadable --
+# The body's UNFILTERED note is keyed on the marker unexpected_lost emits, not
+# only on STATES — a caller that strips it loses the sentence (drellem2/pogo#122).
+case "$(lost_schedule_body "$(printf 'UNFILTERED\nmail-check-doctor')" "$OWNERS_FIX" "$STATES_FIX" 120)" in
+    *"UNFILTERED: the agent registry"*) pass "the body says UNFILTERED when the marker is in what it was handed" ;;
+    *) fail "the UNFILTERED marker in LOST did not reach the body's note" ;;
+esac
+case "$(lost_schedule_body "$(printf 'UNFILTERED\nmail-check-doctor')" "$OWNERS_FIX" "$STATES_FIX" 120)" in
+    *"  UNFILTERED —"*) fail "the body wrote a remedy paragraph for the UNFILTERED marker as if it were an id" ;;
+    *) pass "the marker is not mistaken for a schedule id" ;;
+esac
+# mail_check_owners with an unreadable agent list: the rows survive, untyped,
+# and the UNTYPED line says so.
+OWN="$(POGO_CLI="$OWNDIR/pogo" POGO_STUB_AGENTS="$OWNDIR/no-such-file" POGO_STUB_SCHED="$OWNDIR/sched.json" mail_check_owners)"
+{ printf '%s\n' "$OWN" | grep -qx 'mail-check-doctor doctor ' && owners_untyped "$OWN"; } \
+    && pass "unreadable pre-bounce agent list: owners still mapped, and marked UNTYPED" \
+    || fail "unreadable pre-bounce agent list gave owners: '$OWN'"
+OWN="$(POGO_CLI="$OWNDIR/pogo" POGO_STUB_AGENTS="$OWNDIR/agents.json" POGO_STUB_SCHED="$OWNDIR/sched.json" mail_check_owners)"
+owners_untyped "$OWN" \
+    && fail "a readable agent list was marked UNTYPED" \
+    || pass "a readable agent list is not marked UNTYPED"
+UNTYPED_OWNERS="$(printf '%s\n' 'mail-check-mg-aaaa caaaa ' UNTYPED)"
+B="$(lost_schedule_body mail-check-mg-aaaa "$UNTYPED_OWNERS" "mayor running" 120)"
+case "$B" in
+    *"OWNER TYPES UNREADABLE"*) pass "untyped owners: the body says the owner types were unreadable" ;;
+    *) fail "untyped owners: the body does not explain why a drained polecat alerted" ;;
+esac
+case "$B" in
+    *"Start the agent instead"*) fail "untyped owners: a gone agent of unknown kind got the confident crew 'start it' remedy" ;;
+    *"what KIND of agent it was is unknown"*) pass "untyped owners: a gone agent's remedy says its kind is unknown" ;;
+    *) fail "untyped owners: unexpected remedy: $B" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# post_bounce_check, END TO END against a stubbed pogo (drellem2/pogo#122)
+# ---------------------------------------------------------------------------
+# The pins above say main is wired; this runs the section. The snapshot is taken
+# by the real mail_check_ids / mail_check_owners from the PRE fixtures, the stub
+# is then flipped to the POST fixtures, and post_bounce_check reads those. Each
+# run is a child bash that sources the runner, with alert() stubbed there, so no
+# later assertion reads a fixture.
+PB_DIR="$WORK/postbounce"; mkdir -p "$PB_DIR"
+cat > "$PB_DIR/pogo" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "agent list") [ "$PB_AGENTS" = FAIL ] && exit 1; cat "$PB_AGENTS" ;;
+  "schedule list") cat "$PB_SCHED" ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$PB_DIR/pogo"
+pb_sched() {  # pb_sched FILE AGENT... — one mail-check per agent; polecats keyed on mg-<x>
+    local f="$1" a id sep=""; shift
+    { echo "["
+      for a in "$@"; do
+          case "$a" in c*) id="mail-check-mg-${a#c}" ;; *) id="mail-check-$a" ;; esac
+          printf '%s  {"id": "%s", "agent": "%s", "kind": "mail-check"}\n' "$sep" "$id" "$a"; sep=","
+      done
+      echo "]"; } > "$f"
+}
+pb_agents() {  # pb_agents FILE NAME:TYPE...
+    local f="$1" a sep=""; shift
+    { echo "["
+      for a in "$@"; do
+          printf '%s  {"name": "%s", "type": "%s", "status": "running"}\n' "$sep" "${a%%:*}" "${a#*:}"; sep=","
+      done
+      echo "]"; } > "$f"
+}
+pb_sched "$PB_DIR/pre-sched" mayor doctor caaaa cbbbb
+pb_agents "$PB_DIR/pre-agents" mayor:crew doctor:crew caaaa:polecat cbbbb:polecat
+pb_sched "$PB_DIR/post-sched-crew" mayor doctor
+pb_sched "$PB_DIR/post-sched-nodoctor" mayor
+pb_agents "$PB_DIR/post-agents-crew" mayor:crew doctor:crew
+pb_agents "$PB_DIR/post-agents-nodoctor" mayor:crew
+pb_run() {  # pb_run PRE_AGENTS POST_SCHED POST_AGENTS — log on stdout, mail in $PB_DIR/mail
+    : > "$PB_DIR/mail"
+    HOME="$PB_DIR" POGO_HOME="$PB_DIR" POGO_DEPLOY_GRACE=0 PB_DIR="$PB_DIR" \
+    bash -c 'source "'"$RUNNER"'"
+             POGO_CLI="$PB_DIR/pogo"; MG=""
+             alert() { printf "SUBJECT: %s\n%s\n" "$1" "$2" >> "$PB_DIR/mail"; return 0; }
+             export PB_SCHED="$PB_DIR/pre-sched" PB_AGENTS="$1"
+             pre="$(mail_check_ids)"; pre_owners="$(mail_check_owners)"
+             export PB_SCHED="$2" PB_AGENTS="$3"
+             post_bounce_check "$pre" "$pre_owners" 2>&1' _ "$@"
+}
+
+# 1. Two polecats drained, crew restored: the night went as intended. No mail.
+L="$(pb_run "$PB_DIR/pre-agents" "$PB_DIR/post-sched-crew" "$PB_DIR/post-agents-crew")"
+[ ! -s "$PB_DIR/mail" ] \
+    && pass "e2e: a drain of two polecats with crew restored mails NOTHING" \
+    || fail "e2e: drained polecats still mailed: $(cat "$PB_DIR/mail")"
+case "$L" in
+    *"expected loss: mail-check-mg-aaaa (caaaa, drained polecat) mail-check-mg-bbbb (cbbbb, drained polecat)"*)
+        pass "e2e: the drained schedules are logged by name as expected losses" ;;
+    *) fail "e2e: the expected losses are not in the log: $L" ;;
+esac
+
+# 2. The positive control for (1): crew that did not come back DOES mail, alone.
+L="$(pb_run "$PB_DIR/pre-agents" "$PB_DIR/post-sched-nodoctor" "$PB_DIR/post-agents-nodoctor")"
+M="$(cat "$PB_DIR/mail")"
+case "$M" in
+    *"SUBJECT: [pogo-deploy] mail-check schedules LOST"*"mail-check-doctor — doctor is NOT RUNNING"*)
+        pass "e2e: gone crew mails, through the same harness that mailed nothing in (1)" ;;
+    *) fail "e2e: gone crew did not mail: $M" ;;
+esac
+case "$M" in
+    *mail-check-mg-aaaa*|*UNFILTERED*|*"OWNER TYPES"*) fail "e2e: the gone-crew mail carries drained polecats or a marker: $M" ;;
+    *) pass "e2e: ...and names only the crew loss, with no UNFILTERED / UNTYPED note" ;;
+esac
+
+# 3. Post-bounce registry unreadable: nothing subtracted, and the BODY says so.
+L="$(pb_run "$PB_DIR/pre-agents" "$PB_DIR/post-sched-crew" FAIL)"
+M="$(cat "$PB_DIR/mail")"
+case "$M" in
+    *mail-check-mg-aaaa*mail-check-mg-bbbb*"UNFILTERED: the agent registry could not be read"*)
+        pass "e2e: unreadable registry mails every loss, and the mail body carries the UNFILTERED note" ;;
+    *) fail "e2e: unreadable registry mail lacks the losses or the UNFILTERED note: $M" ;;
+esac
+case "$L" in
+    *"mail-check re-check: UNFILTERED"*) pass "e2e: ...and the log says UNFILTERED too" ;;
+    *) fail "e2e: the UNFILTERED log line is missing: $L" ;;
+esac
+
+# 4. PRE-bounce agent list unreadable: the drained polecats alert, and say why.
+L="$(pb_run FAIL "$PB_DIR/post-sched-crew" "$PB_DIR/post-agents-crew")"
+M="$(cat "$PB_DIR/mail")"
+case "$M" in
+    *mail-check-mg-aaaa*"OWNER TYPES UNREADABLE"*) pass "e2e: unreadable pre-bounce types: the mail says the owner types were unreadable" ;;
+    *) fail "e2e: unreadable pre-bounce types: no explanation in the mail: $M" ;;
+esac
+case "$M" in
+    *"Start the agent instead"*) fail "e2e: an untyped gone agent was told to start, as if it were crew" ;;
+    *) pass "e2e: ...and no untyped gone agent gets the confident crew remedy" ;;
+esac
+case "$L" in
+    *"OWNER TYPES UNREADABLE"*) pass "e2e: ...and the log says so" ;;
+    *) fail "e2e: the OWNER TYPES UNREADABLE log line is missing: $L" ;;
+esac
+unset -f pb_sched pb_agents pb_run
+declare -f alert | grep -q 'mail send' \
+    && pass "the real alert() is intact after the post-bounce fixtures" \
+    || fail "alert() is still stubbed after the post-bounce fixtures"
 
 # ---------------------------------------------------------------------------
 # drain_budget — the window-derived drain (mg-8f7e)
