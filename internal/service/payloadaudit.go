@@ -108,6 +108,11 @@ type PayloadScriptAudit struct {
 	// nothing in this repo executes it (mg-de0c).
 	Remedy string
 	Detail string
+	// DeclaredUpstream is the [lineage] reference <repo>@<ref>:<path> this row was
+	// compared against INSTEAD of this build's copy, or "" when it was compared
+	// against this build (drellem2/pogo#126). Summaries read it so they never say
+	// "the copy this build ships" about a row that was not compared with this build.
+	DeclaredUpstream string
 }
 
 // managedPayloadScript binds an installed payload to the three things the audit needs:
@@ -352,7 +357,7 @@ func auditPayloadScript(label, name, path, source string, sourceErr error, remed
 // a source it could not read is NOT CHECKED, never a match.
 func auditPayloadLineage(label, name, path string, l runnerLineage, remedy string, plistInstalled bool) PayloadScriptAudit {
 	spec := l.Spec()
-	res := PayloadScriptAudit{Label: label, Name: name, Path: path, Source: spec, Remedy: remedy}
+	res := PayloadScriptAudit{Label: label, Name: name, Path: path, Source: spec, Remedy: remedy, DeclaredUpstream: spec}
 
 	installed, instErr := os.ReadFile(path)
 	if instErr == nil {

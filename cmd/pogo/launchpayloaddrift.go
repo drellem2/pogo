@@ -68,8 +68,12 @@ func launchPayloadLine(audits []service.PayloadScriptAudit, supported bool) (sta
 	// reason the plist row gives: the population renders on the clean line too, and a
 	// clean line carrying the disclaimer verbatim is indistinguishable from a real
 	// one to anything grepping for it, this file's own tests included.
-	population := fmt.Sprintf("%d installed payload script(s) examined: %d match this build, %d drifted, %d orphaned, %d not installed, %d could not be checked",
-		len(audits), len(ok), len(stale), len(orphan), len(absent), len(unknown))
+	matchWhat := "this build"
+	if declaredUpstreams(audits) != nil {
+		matchWhat = "their reference"
+	}
+	population := fmt.Sprintf("%d installed payload script(s) examined: %d match %s, %d drifted, %d orphaned, %d not installed, %d could not be checked",
+		len(audits), len(ok), matchWhat, len(stale), len(orphan), len(absent), len(unknown))
 	population += ". A payload script is COPIED into place by `pogo service install-*`; a merge does not refresh it, so the plist audit passing says nothing about this one"
 
 	// Orphans lead. A drifted script runs old code; an orphaned one does not run at
@@ -98,11 +102,43 @@ func launchPayloadLine(audits []service.PayloadScriptAudit, supported bool) (sta
 		for _, a := range absent {
 			names = append(names, fmt.Sprintf("%s (`%s`)", a.Name, a.Remedy))
 		}
-		return "pass", fmt.Sprintf("every installed payload script is byte-identical to the copy this build ships; %s not installed at all, alongside a job that is also not installed. %s",
-			strings.Join(names, ", "), population)
+		return "pass", fmt.Sprintf("every installed payload script is byte-identical to %s; %s not installed at all, alongside a job that is also not installed. %s",
+			payloadReference(ok), strings.Join(names, ", "), population)
 	}
 
-	return "pass", fmt.Sprintf("every installed payload script is byte-identical to the copy this build ships. %s", population)
+	return "pass", fmt.Sprintf("every installed payload script is byte-identical to %s. %s", payloadReference(ok), population)
+}
+
+// declaredUpstreams lists the rows compared against a declared [lineage] upstream
+// rather than this build's copy, as "<name> (<repo>@<ref>:<path>)". nil when there
+// are none.
+func declaredUpstreams(audits []service.PayloadScriptAudit) []string {
+	var out []string
+	for _, a := range audits {
+		if a.DeclaredUpstream != "" {
+			out = append(out, fmt.Sprintf("%s (%s)", a.Name, a.DeclaredUpstream))
+		}
+	}
+	return out
+}
+
+// payloadReference names what the given payload rows were compared against, for a
+// summary sentence about all of them (drellem2/pogo#126). "the copy this build
+// ships" is true only of a row with no declared [lineage]: a runner compared
+// against a declared upstream was never compared with this build, and a summary
+// that says it matches — or differs from — "the copy this build ships" reports a
+// comparison that did not happen.
+func payloadReference(audits []service.PayloadScriptAudit) string {
+	declared := declaredUpstreams(audits)
+	switch {
+	case len(declared) == 0:
+		return "the copy this build ships"
+	case len(declared) == len(audits):
+		return "the declared [lineage] upstream: " + strings.Join(declared, "; ")
+	default:
+		return "their reference: the copy this build ships, except " + strings.Join(declared, "; ") +
+			", compared against the declared [lineage] upstream instead"
+	}
 }
 
 // payloadStateLabel is the fixed-width tag each payload row leads with in

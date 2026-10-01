@@ -139,6 +139,10 @@ type activationScript struct {
 	MissingIDs []string `json:"missing_ids,omitempty"`
 	Remedy     string   `json:"remedy,omitempty"`
 	Detail     string   `json:"detail"`
+	// DeclaredUpstream is the [lineage] reference this script was compared
+	// against instead of this build's copy, "" when it was compared against this
+	// build (drellem2/pogo#126).
+	DeclaredUpstream string `json:"declared_upstream,omitempty"`
 }
 
 // activationReport is the whole answer, in one value, so the human text and the
@@ -251,26 +255,32 @@ func buildActivationReport(audits []service.LaunchAgentAudit, payloads []service
 		}
 	}
 
+	var okPayloads, stalePayloads, unreadablePayloads []service.PayloadScriptAudit
 	for _, p := range payloads {
 		r.Scripts = append(r.Scripts, activationScript{
-			Label:      p.Label,
-			Name:       p.Name,
-			Path:       p.Path,
-			Source:     p.Source,
-			State:      p.Status,
-			MissingIDs: p.MissingIDs,
-			Remedy:     p.Remedy,
-			Detail:     p.Detail,
+			Label:            p.Label,
+			Name:             p.Name,
+			Path:             p.Path,
+			Source:           p.Source,
+			State:            p.Status,
+			MissingIDs:       p.MissingIDs,
+			Remedy:           p.Remedy,
+			Detail:           p.Detail,
+			DeclaredUpstream: p.DeclaredUpstream,
 		})
 		switch p.Status {
 		case service.PayloadStale:
 			r.ScriptsDrifted++
+			stalePayloads = append(stalePayloads, p)
 		case service.PayloadOrphan:
 			r.ScriptsOrphaned++
 		case service.PayloadAbsent:
 			r.ScriptsAbsent++
 		case service.PayloadUnknown:
 			r.ScriptsUnreadable++
+			unreadablePayloads = append(unreadablePayloads, p)
+		default:
+			okPayloads = append(okPayloads, p)
 		}
 	}
 
@@ -298,7 +308,7 @@ func buildActivationReport(audits []service.LaunchAgentAudit, payloads []service
 		r.Headline = fmt.Sprintf("%d of %d installed payload script(s) named by a launchd job ARE NOT THERE — the job fires and the exec fails, silently", r.ScriptsOrphaned, r.ScriptsExamined)
 	case r.Drifted > 0 && r.ScriptsDrifted > 0:
 		r.Verdict = activationDrifted
-		r.Headline = fmt.Sprintf("%d of %d managed launchd job(s) disagree with the plist this build renders, AND %d of %d installed payload script(s) differ from the code this build ships", r.Drifted, r.Examined, r.ScriptsDrifted, r.ScriptsExamined)
+		r.Headline = fmt.Sprintf("%d of %d managed launchd job(s) disagree with the plist this build renders, AND %d of %d installed payload script(s) differ from %s", r.Drifted, r.Examined, r.ScriptsDrifted, r.ScriptsExamined, payloadReference(stalePayloads))
 	case r.Drifted > 0:
 		r.Verdict = activationDrifted
 		r.Headline = fmt.Sprintf("%d of %d managed launchd job(s) disagree with the plist this build renders", r.Drifted, r.Examined)
@@ -310,13 +320,16 @@ func buildActivationReport(audits []service.LaunchAgentAudit, payloads []service
 		// that is not the code on this box, so a survey of the source reports every
 		// one of its defects fixed.
 		r.Verdict = activationDrifted
-		r.Headline = fmt.Sprintf("every managed plist matches this build, but %d of %d installed payload script(s) DIFFER FROM THE CODE THIS BUILD SHIPS — the job is correctly scheduled and the program it runs is not current", r.ScriptsDrifted, r.ScriptsExamined)
+		r.Headline = fmt.Sprintf("every managed plist matches this build, but %d of %d installed payload script(s) DIFFER FROM %s — the job is correctly scheduled, and the program it runs is not that copy", r.ScriptsDrifted, r.ScriptsExamined, payloadReference(stalePayloads))
 	case r.Unreadable > 0:
 		r.Verdict = activationUnknown
 		r.Headline = fmt.Sprintf("%d of %d managed launchd job(s) could not be compared, so this run cannot say the box is current", r.Unreadable, r.Examined)
 	case r.ScriptsUnreadable > 0:
 		r.Verdict = activationUnknown
 		r.Headline = fmt.Sprintf("%d of %d installed payload script(s) could not be compared — this build could not locate the source it would install — so this run cannot say the file each job executes is current", r.ScriptsUnreadable, r.ScriptsExamined)
+		if declared := declaredUpstreams(unreadablePayloads); declared != nil {
+			r.Headline = fmt.Sprintf("%d of %d installed payload script(s) could not be compared against their reference (%s is compared against its declared [lineage] upstream, not this build) — so this run cannot say the file each job executes matches it", r.ScriptsUnreadable, r.ScriptsExamined, strings.Join(declared, "; "))
+		}
 	case r.Absent > 0:
 		// Absent is UNKNOWN, not ACTIVATED, and the difference matters here in
 		// a way it does not in the doctor row. The row is read by a person who
@@ -335,7 +348,7 @@ func buildActivationReport(audits []service.LaunchAgentAudit, payloads []service
 		r.Headline = fmt.Sprintf("every examined plist matches this build, but %d loaded pogo job(s) are outside this audit with NO recorded reason — a job that arrived by an install path nobody checked against the auditor", len(scope.Unexplained()))
 	default:
 		r.Verdict = activationActivated
-		r.Headline = fmt.Sprintf("all %d managed launchd job(s) on this box match the plist this build renders, and all %d installed payload script(s) are byte-identical to the copy this build ships", r.Examined, r.ScriptsExamined)
+		r.Headline = fmt.Sprintf("all %d managed launchd job(s) on this box match the plist this build renders, and all %d installed payload script(s) are byte-identical to %s", r.Examined, r.ScriptsExamined, payloadReference(okPayloads))
 	}
 	return r
 }

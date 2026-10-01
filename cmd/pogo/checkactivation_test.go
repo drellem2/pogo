@@ -423,3 +423,47 @@ func TestCheckActivationIsRegisteredTopLevel(t *testing.T) {
 		t.Error("check-activation is registered under `pogo service`, where an old binary answers an unknown subcommand with exit 0 — see checkactivation.go's placement argument")
 	}
 }
+
+// The headlines name a declared [lineage] reference rather than "this build ships"
+// when the runner was compared against that reference (drellem2/pogo#126).
+func TestActivationHeadlineNamesADeclaredLineageReference(t *testing.T) {
+	const spec = "/repos/org-pogo@main:launchd/pogo-deploy.sh"
+	runner := okPayload("com.pogo.deploy", "pogo-deploy.sh")
+	runner.Source, runner.DeclaredUpstream = spec, spec
+	labels := []string{"com.pogo.deploy"}
+	audits := []service.LaunchAgentAudit{okAudit("com.pogo.deploy")}
+
+	clean := buildActivationReport(audits, []service.PayloadScriptAudit{runner}, true, cleanScope(labels...), testBuild)
+	if clean.Verdict != activationActivated {
+		t.Fatalf("verdict = %q, want %q: %s", clean.Verdict, activationActivated, clean.Headline)
+	}
+	if strings.Contains(clean.Headline, "this build ships") || !strings.Contains(clean.Headline, spec) {
+		t.Errorf("clean headline does not name the declared reference:\n%s", clean.Headline)
+	}
+	if len(clean.Scripts) != 1 || clean.Scripts[0].DeclaredUpstream != spec {
+		t.Errorf("the script row does not carry its declared upstream: %+v", clean.Scripts)
+	}
+
+	stale := runner
+	stale.Status = service.PayloadStale
+	drifted := buildActivationReport(audits, []service.PayloadScriptAudit{stale}, true, cleanScope(labels...), testBuild)
+	if drifted.Verdict != activationDrifted {
+		t.Fatalf("verdict = %q, want %q: %s", drifted.Verdict, activationDrifted, drifted.Headline)
+	}
+	if strings.Contains(strings.ToLower(drifted.Headline), "this build ships") || !strings.Contains(drifted.Headline, spec) {
+		t.Errorf("drift headline does not name the declared reference:\n%s", drifted.Headline)
+	}
+
+	unread := runner
+	unread.Status = service.PayloadUnknown
+	unknown := buildActivationReport(audits, []service.PayloadScriptAudit{unread}, true, cleanScope(labels...), testBuild)
+	if strings.Contains(unknown.Headline, "this build could not locate") || !strings.Contains(unknown.Headline, spec) {
+		t.Errorf("unknown headline blames this build's source for a declared upstream:\n%s", unknown.Headline)
+	}
+
+	// Positive control: an undeclared runner keeps this build's wording.
+	plain := buildActivationReport(audits, []service.PayloadScriptAudit{okPayload("com.pogo.deploy", "pogo-deploy.sh")}, true, cleanScope(labels...), testBuild)
+	if !strings.Contains(plain.Headline, "byte-identical to the copy this build ships") {
+		t.Errorf("undeclared clean headline lost its wording:\n%s", plain.Headline)
+	}
+}

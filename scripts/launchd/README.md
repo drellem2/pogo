@@ -579,7 +579,7 @@ one line:
 runner: current <sha> (blob <blob>, <path>)
 runner: refreshed <old-blob> -> <new-blob> (effective next run) deploy-src <sha>, prev kept at <path>.prev
 runner: stale <old-blob> -> <new-blob> (dry-run — not refreshed) deploy-src <sha>
-runner: not-checked reason=<no-sync|not-installed|symlink|deadline|...> — <what>
+runner: not-checked reason=<no-sync|not-installed|symlink|lineage|deadline|...> — <what>
 runner: refresh-failed <old-blob> -> <new-blob> reason=<why> ...   (also mailed)
 ```
 
@@ -595,6 +595,10 @@ runner: refresh-failed <old-blob> -> <new-blob> reason=<why> ...   (also mailed)
   `internal/service/deploy.go` plus `com.pogo.deploy.plist`. The plist belongs to
   `install-deploy`, and `pogo check-activation` reports plist drift nightly.
 - **Never the run's rc.** A failed refresh is its own line and its own mail.
+- **Never across a declared lineage.** When `[lineage] runner_*` in
+  `config.toml` names an upstream other than drellem2/pogo, the step logs
+  `runner: not-checked reason=lineage` and leaves the runner alone: refreshing
+  it is that upstream's business.
 - **Not `net-control.sh`.** Only the runner is refreshed. Its sibling library is
   still refreshed only by `install-deploy`.
 

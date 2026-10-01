@@ -184,3 +184,38 @@ func TestDoctorCheck_LaunchPayloadLineIsPresent(t *testing.T) {
 		t.Errorf("row = %q; this detector must never set doctor's exit code — reconciling is a machine-local action with a blast radius and doctor's callers did not ask to be blocked on it", line)
 	}
 }
+
+// A runner compared against a declared [lineage] upstream was never compared with
+// this build, so the clean row must name the declared reference and not say "the copy
+// this build ships" about it (drellem2/pogo#126). The undeclared neighbour still is
+// this build's copy, and the sentence keeps saying so.
+func TestPayloadRowNamesADeclaredLineageReference(t *testing.T) {
+	const spec = "/repos/org-pogo@main:launchd/pogo-deploy.sh"
+	runner := okScript("com.pogo.deploy", "pogo-deploy.sh")
+	runner.Source, runner.DeclaredUpstream = spec, spec
+
+	status, detail := launchPayloadLine([]service.PayloadScriptAudit{runner}, true)
+	if status != "pass" {
+		t.Fatalf("status = %q, want pass — detail: %s", status, detail)
+	}
+	if strings.Contains(detail, "this build ships") || strings.Contains(detail, "match this build") {
+		t.Errorf("a row compared only against a declared lineage claims a comparison with this build:\n%s", detail)
+	}
+	if !strings.Contains(detail, "declared [lineage] upstream") || !strings.Contains(detail, spec) {
+		t.Errorf("the clean row does not name the declared reference %s:\n%s", spec, detail)
+	}
+
+	_, mixed := launchPayloadLine([]service.PayloadScriptAudit{runner, okScript("com.pogo.deploy", "net-control.sh")}, true)
+	if !strings.Contains(mixed, "the copy this build ships, except pogo-deploy.sh ("+spec+")") {
+		t.Errorf("a mixed population must say which row was compared against what:\n%s", mixed)
+	}
+	if !strings.Contains(mixed, "2 match their reference") {
+		t.Errorf("the population still says it matched this build:\n%s", mixed)
+	}
+
+	// Positive control: with nothing declared the wording is unchanged.
+	_, plain := launchPayloadLine([]service.PayloadScriptAudit{okScript("com.pogo.deploy", "pogo-deploy.sh")}, true)
+	if !strings.Contains(plain, "byte-identical to the copy this build ships") {
+		t.Errorf("the undeclared clean row lost its wording:\n%s", plain)
+	}
+}

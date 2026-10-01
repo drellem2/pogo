@@ -251,6 +251,9 @@ func TestPayloadAuditDeclaredLineageComparesAgainstTheDeclaredUpstream(t *testin
 	if a.Source != l.Spec() || !strings.Contains(a.Detail, repo+"@HEAD:bin/pogo-deploy.sh") {
 		t.Errorf("Source = %q / detail %q; want the declared <repo>@<ref>:<path> named", a.Source, a.Detail)
 	}
+	if a.DeclaredUpstream != l.Spec() {
+		t.Errorf("DeclaredUpstream = %q, want %q: summaries read it to avoid saying \"this build ships\" about this row", a.DeclaredUpstream, l.Spec())
+	}
 
 	inst = writeFile(t, dir, "drift.sh", runnerInstalled)
 	a = auditPayloadLineage("com.pogo.deploy", "pogo-deploy.sh", inst, l, "pogo service install-deploy", true)
