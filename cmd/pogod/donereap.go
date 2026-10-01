@@ -151,7 +151,10 @@ import (
 // stopped; PTY quiescence can. It also self-extends in the one case that
 // worried us: an incoming coordinator mail is delivered as a PTY nudge, the
 // answer is more PTY output, so a polecat handling a follow-up keeps resetting
-// its own clock and is only reaped once it goes quiet again.
+// its own clock and is only reaped once it goes quiet again. (That stays the
+// fast path. Since gh#128 it is no longer the ONLY path: a polecat whose PTY
+// never goes quiet is bounded by a timer from the transition instead — see THE
+// DONE TIMER below.)
 //
 // WHAT IT DELIBERATELY CANNOT DO. It never marks an item done (the item is
 // already done — that is the trigger) and never restarts. The
@@ -271,6 +274,55 @@ import (
 // half-minute. Folding it into the terminal probe would have made one call do
 // both, at the cost of a combined signature neither caller wants.
 //
+// # THE DONE TIMER (drellem2/pogo#128)
+//
+// Everything above leaned on one qualifier — the PTY going quiet — and the PTY
+// is not a measure of work. It is a measure of ANIMATION: Agent.LastOutputAt's
+// own doc says so, and internal/wedgewatch exists because a Claude Code session
+// parked at a prompt redraws its spinner forever. A done polecat whose harness
+// keeps redrawing never opens the quiet window, so this reaper never fired on
+// it at all. Measured in gh#128: 51 workers reaped in one evening, every one at
+// 2m2s-2m26s idle, and two more (bdd6, 9d97), both `done`, that never appeared
+// in a single donereap line and were stopped by hand. Not a slow reap — a
+// binary one: the window opened within one tick or it never opened.
+//
+// So the qualifier is now a DISJUNCTION: the item is terminal AND (the polecat
+// has been quiet for the grace OR doneReapMaxWait has passed since this reaper
+// first saw the item terminal). PTY quiet stays the fast path — it is what
+// fires in the ordinary case, and it is what lets a tail of post-`done` work end
+// early. The timer is the bound for the case quiet cannot see, and unlike the
+// silence detector its worst case is knowable in advance.
+//
+// It is the same move #26 made one mechanism over (stop depending on PTY quiet
+// rather than tune the window), applied here only as a ceiling, because the
+// quiet path is still right for the 96% it serves.
+//
+// WHAT THE TIMER IS ANCHORED TO. The first tick on which this daemon READ the
+// item as terminal, recorded per polecat name in firstDone. `mg done` runs in
+// the polecat's own process (see WHY IT POLLS), so the transition itself is not
+// observable; first-observed is within one heartbeat of it while pogod is up,
+// and it restarts with the daemon, which can only make the timer LATER, never
+// earlier. An item that reads non-terminal again drops its record, and so does a
+// polecat that leaves the live set, so the map is bounded by the fleet.
+//
+// WHAT IT DOES NOT CHANGE. The review exemption (mg-aaf6) is applied AFTER the
+// done-or-timer decision and BEFORE the stop, exactly as before, so a builder
+// under an open review is held whichever path would have fired. That ordering is
+// why doneReapMaxWait is not the ceiling the exemption's comment warns against:
+// the 15m ceiling priced there was a bound on the REVIEW WAIT, and 2 of the 17
+// measured waits exceeded it. This timer never bounds a review wait — the
+// exemption is checked ahead of it — so those 17 numbers do not price it. The
+// gate branch (mg-9af1) is untouched: a gated item is not done, so no timer
+// starts, and it still requires the quiet window.
+//
+// THE COST, STATED. To start the timer the reaper must learn an item is done
+// while its polecat is still writing, so the done probe now runs for every live
+// polecat with output on every tick, not only the quiet ones. One `mg show` per
+// live polecat per 30-second tick; the review and stage probes stay lazy and
+// gated as before. A probe error on a polecat that is not yet quiet is not
+// logged — the polecat is not a candidate either way, and the quiet tick that
+// would make it one logs the same error then.
+//
 // # THE ONE THING IT DOES MAIL (mg-f120)
 //
 // "Never mails" held until mg-f120, and the exception is narrow enough to state
@@ -302,6 +354,27 @@ import (
 // different and looser question (did a deferred polecat's post-merge flow
 // happen at all).
 const doneReapIdleGrace = 2 * time.Minute
+
+// doneReapMaxWait is how long after this reaper first sees a polecat's work item
+// terminal it stops the polecat even though its PTY never went quiet
+// (drellem2/pogo#128). See THE DONE TIMER in the file comment for why the
+// qualifier needed a second path.
+//
+// Ten minutes, priced against what the timer can actually catch. It only ever
+// reaches a polecat whose item is ALREADY done and which is not under an open
+// review (the exemption is checked first), so the work it could cut short is
+// post-`done` tail work: a verdict mail and a successor `mg new` are seconds, and
+// the longest legitimate tail is answering a coordinator follow-up turn, which
+// the polecat protocol bounds to minutes. Ten minutes is five times the quiet
+// grace and comfortably longer than that tail. The cost of the other side is a
+// slot held by a finished worker: unbounded before this change (bdd6 and 9d97
+// were stopped by hand), at most ten minutes and one tick after it.
+//
+// It is deliberately NOT the 15m deferDoneBackstopTimeout the review-exemption
+// comment rejects as a ceiling: that number bounded a review WAIT, which this
+// timer never does, and a done-anchored timer starts later than any wait it
+// could be confused with — at the done transition, not at PR-open.
+const doneReapMaxWait = 10 * time.Minute
 
 // doneReapRegistry is the slice of agent.Registry the done-item reaper needs.
 // Narrow on purpose, like polecatReaper: it can read who is alive and it can
@@ -351,6 +424,10 @@ type doneReaper struct {
 	// doneReapIdleGrace; a negative value would stop a done polecat the instant
 	// it is seen, which only a test should ask for.
 	grace time.Duration
+	// maxWait is the done timer (drellem2/pogo#128): a polecat whose item has
+	// read terminal for at least this long is stopped whether or not its PTY
+	// went quiet. Zero falls back to doneReapMaxWait; only a test sets it.
+	maxWait time.Duration
 	// filer is told that the item completed, so the agent that commissioned it
 	// hears (mg-f120). Nil means not wired, which is what every test that is not
 	// about this seam leaves it as.
@@ -370,6 +447,11 @@ type doneReaper struct {
 	// been exempt. It is a log-deduplication record, never an input to the
 	// decision — every tick re-derives the exemption from that tick's live set.
 	exempt map[string]string
+	// firstDone maps a polecat name to the first tick on which its work item
+	// read terminal — the anchor of the done timer. Pruned when the polecat
+	// leaves the live set or its item reads non-terminal again, so it is bounded
+	// by the fleet and cannot carry a stale anchor onto a reopened item.
+	firstDone map[string]time.Time
 }
 
 // newDoneReaper builds a reaper over reg. done is the terminal-state probe,
@@ -379,7 +461,7 @@ func newDoneReaper(reg doneReapRegistry, done func(id string) (bool, error), rev
 	if grace == 0 {
 		grace = doneReapIdleGrace
 	}
-	return &doneReaper{reg: reg, itemDone: done, itemReviews: reviews, grace: grace}
+	return &doneReaper{reg: reg, itemDone: done, itemReviews: reviews, grace: grace, maxWait: doneReapMaxWait}
 }
 
 // SetFilerNotifier wires the completion notification (mg-f120). Separate from
@@ -471,18 +553,46 @@ func (d *doneReaper) Check(now time.Time) []string {
 		if !d.eligible(p) {
 			continue
 		}
+		quiet := p.IdleFor >= d.grace
 		done, err := d.itemDone(p.WorkItemID)
 		if err != nil {
+			if !quiet {
+				// Not a candidate on either path yet, and the tick that makes it
+				// one will log this same error. Logging here would print it every
+				// 30 seconds for every busy polecat while the store is down.
+				continue
+			}
 			// Cannot read the item: say so and leave the polecat running. This
 			// is one of the two branches that log a non-action, because they are
 			// the ones where the reaper wanted to decide and could not.
 			log.Printf("donereap: could not read work item %s for polecat %s (%v) — leaving it running (mg-56d1)", p.WorkItemID, p.Name, err)
 			continue
 		}
+		// The done timer (gh#128): anchor it on the first tick the item reads
+		// terminal, and drop the anchor if it ever reads open again.
+		var doneFor time.Duration
+		if done {
+			if d.firstDone == nil {
+				d.firstDone = map[string]time.Time{}
+			}
+			at, ok := d.firstDone[p.Name]
+			if !ok {
+				at = now
+				d.firstDone[p.Name] = at
+			}
+			doneFor = now.Sub(at)
+		} else {
+			delete(d.firstDone, p.Name)
+		}
+		timerFired := done && doneFor >= d.doneWait()
+		if !quiet && !timerFired {
+			continue
+		}
 		// The gate branch (mg-9af1). Reached only when the item is NOT terminal,
 		// because a done item has already answered the question this asks and
 		// because the terminal branch carries obligations this one must not: the
-		// gate reap reports no completion, since none has happened.
+		// gate reap reports no completion, since none has happened. It has no
+		// timer, so reaching here with !done means the polecat is quiet.
 		gatedAt := ""
 		if !done {
 			stage, err := d.gatedStage(p.WorkItemID)
@@ -571,9 +681,17 @@ func (d *doneReaper) Check(now time.Time) []string {
 				"not leave through `done`) and it has been idle %s (>= %s); freeing its slot. The item stays claimed by nobody "+
 				"and gated against re-dispatch (mg-69b1); it is NOT closed (mg-9af1)",
 				p.Name, p.WorkItemID, gatedAt, p.IdleFor.Truncate(time.Second), d.grace)
-		} else {
-			log.Printf("donereap: stopping polecat %s — work item %s is done and it has been idle %s (>= %s); freeing its slot (mg-56d1)",
+		} else if quiet {
+			log.Printf("donereap: stopping polecat %s — work item %s is done and it has been idle %s (>= %s); freeing its slot "+
+				"[path=quiet] (mg-56d1)",
 				p.Name, p.WorkItemID, p.IdleFor.Truncate(time.Second), d.grace)
+		} else {
+			// The path gh#128 added. Named separately so a reader can count how
+			// often the quiet window failed to open — the number that says whether
+			// the PTY is still a usable qualifier at all.
+			log.Printf("donereap: stopping polecat %s — work item %s has been done for %s (>= %s) but its PTY never went quiet "+
+				"(last write %s ago, grace %s); freeing its slot [path=done-timer] (drellem2/pogo#128)",
+				p.Name, p.WorkItemID, doneFor.Truncate(time.Second), d.doneWait(), p.IdleFor.Truncate(time.Second), d.grace)
 		}
 		if err := d.reg.StopWithCause(p.Name, mergedPolecatStopTimeout, cause); err != nil {
 			// Losing the race with a clean exit lands here ("agent not found"),
@@ -590,6 +708,15 @@ func (d *doneReaper) Check(now time.Time) []string {
 	for name := range d.exempt {
 		if !seen[name] {
 			delete(d.exempt, name)
+		}
+	}
+	// Same for the done-timer anchors. Here dropping an entry CAN change a
+	// decision — it restarts the timer — which is right for a polecat that is
+	// gone and harmless for one that is not, since only a live, done polecat
+	// ever gets an anchor back.
+	for name := range d.firstDone {
+		if !seen[name] {
+			delete(d.firstDone, name)
 		}
 	}
 	return stopped
@@ -635,6 +762,16 @@ func (d *doneReaper) openReviews(live []agent.PolecatActivity) map[string]string
 	return out
 }
 
+// doneWait is the effective done timer: maxWait, or doneReapMaxWait when it is
+// unset. A zero must never mean "reap the instant it reads done" — that is the
+// mid-mail stop the quiet grace exists to prevent.
+func (d *doneReaper) doneWait() time.Duration {
+	if d.maxWait <= 0 {
+		return doneReapMaxWait
+	}
+	return d.maxWait
+}
+
 // eligible applies the two cheap, local gates before the reaper spends an `mg
 // show` on a polecat. Split out so the tests can pin each refusal
 // independently of the store probe.
@@ -650,5 +787,8 @@ func (d *doneReaper) eligible(p agent.PolecatActivity) bool {
 	if !p.HasOutput {
 		return false
 	}
-	return p.IdleFor >= d.grace
+	// Idleness is NOT a gate here any more (drellem2/pogo#128): a done polecat
+	// whose spinner never stops must still be probed, or the done timer could
+	// never start. Check applies the quiet-or-timer qualifier after the probe.
+	return true
 }
