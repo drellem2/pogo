@@ -160,9 +160,9 @@ func (l *lifecycle) recordShutdown(sd daemonlife.Shutdown) {
 // installSignalRecorder records each of recordedSignals and then dies of it.
 // A signal pogod inherited as IGNORED (nohup's SIGHUP, a `&` job's SIGINT) is
 // not recorded: recording it would make pogod killable by a signal it is
-// currently immune to. An inherited-ignored SIGHUP is additionally caught and
-// discarded (catchIgnoredSIGHUP) so that pogod's children do not inherit the
-// ignore — pogod's own immunity is unchanged (drellem2/pogo#106).
+// currently immune to. Such a signal is additionally caught and discarded
+// (catchIgnoredSignals) so that pogod's children do not inherit the ignore —
+// pogod's own immunity is unchanged (drellem2/pogo#106).
 func (l *lifecycle) installSignalRecorder() {
 	var sigs []os.Signal
 	for _, s := range recordedSignals {
@@ -170,15 +170,19 @@ func (l *lifecycle) installSignalRecorder() {
 			sigs = append(sigs, s)
 		}
 	}
-	// After the loop: once caught, signal.Ignored(SIGHUP) reads false, and the
-	// recorder must still leave an inherited-ignored SIGHUP unrecorded.
-	if catchIgnoredSIGHUP() {
+	// After the loop: once caught, signal.Ignored reads false, and the
+	// recorder must still leave an inherited-ignored signal unrecorded.
+	caught := catchIgnoredSignals()
+	if len(caught) > 0 {
 		pid := os.Getpid()
 		if l != nil {
 			pid = l.cur.PID
 		}
-		log.Printf("pogod: SIGHUP was ignored at launch (nohup?); pogod stays immune, children get default (pid=%d)", pid)
-		events.Emit(context.Background(), daemonlife.SIGHUPIgnoredAtLaunchEvent(pid, time.Now()))
+		for _, s := range caught {
+			name := daemonlife.SignalName(s)
+			log.Printf("pogod: %s was ignored at launch (%s); pogod stays immune, children get default (pid=%d)", name, ignoredAtLaunchHint[s], pid)
+			events.Emit(context.Background(), daemonlife.SignalIgnoredAtLaunchEvent(pid, name, time.Now()))
+		}
 	}
 	if len(sigs) == 0 {
 		return
@@ -194,31 +198,67 @@ func (l *lifecycle) installSignalRecorder() {
 	}()
 }
 
-// catchIgnoredSIGHUP turns an inherited SIG_IGN for SIGHUP into a handler that
-// drains and discards it, and reports whether it did. pogod stays exactly as
-// immune to SIGHUP as it was; what changes is what its CHILDREN inherit.
+// inheritableIgnores are the signals whose inherited SIG_IGN Go leaves in
+// place, and so would pass on to every child pogod execs. A launcher ignores
+// SIGHUP via `nohup` or a wrapper that runs
 //
-// SIG_IGN survives fork AND execve, so a pogod launched under `nohup` (or by a
-// wrapper with `trap ” HUP`) used to hand SIG_IGN to every agent it spawned.
-// Those agents then survived the PTY hangup that is supposed to take them down
-// with pogod, and outlived it unreachable. A CAUGHT signal, by contrast, is
-// reset to SIG_DFL by execve, so catching it here is enough: every child pogod
-// execs starts with SIGHUP at its default disposition.
+//	trap '' HUP
+//
+// and ignores SIGINT by starting pogod as a `&` job of a shell without job
+// control, which sets SIGINT to SIG_IGN for the whole tree under it. The
+// SIGINT case does real damage downstream: a child bash silently refuses to
+// install `trap ... INT` (`trap -p INT` prints nothing), so a refinery gate's
+// interrupt cleanup never runs and a SIGINT test in the gate fails on a clean
+// tree.
+//
+// SIGQUIT is deliberately absent although that same `&` ignores it: the Go
+// runtime honours an inherited SIG_IGN only for SIGHUP and SIGINT
+// (runtime.sigInstallGoHandler), and installs its own handler for SIGQUIT
+// regardless. pogod's SIGQUIT is therefore already caught, and execve already
+// resets it to default in children. Measured: under an ignoring launcher a Go
+// process reads signal.Ignored(SIGQUIT) == false and its /bin/sh child dies
+// of `kill -QUIT $$` (TestIgnoredSignalsAreNotPassedToChildren pins this).
+var inheritableIgnores = []os.Signal{syscall.SIGHUP, syscall.SIGINT}
+
+// ignoredAtLaunchHint is the usual cause of each inherited ignore, for the
+// startup log line.
+var ignoredAtLaunchHint = map[os.Signal]string{
+	syscall.SIGHUP: "nohup?",
+	syscall.SIGINT: "started as a background job?",
+}
+
+// catchIgnoredSignals turns an inherited SIG_IGN for each of inheritableIgnores
+// into a handler that drains and discards it, and returns the signals it
+// converted. pogod stays exactly as immune to them as it was; what changes is
+// what its CHILDREN inherit.
+//
+// SIG_IGN survives fork AND execve, so a pogod launched with one of these
+// ignored used to hand SIG_IGN to every agent it spawned. Under SIGHUP those
+// agents survived the PTY hangup that is supposed to take them down with
+// pogod, and outlived it unreachable. A CAUGHT signal, by contrast, is reset to
+// SIG_DFL by execve, so catching it here is enough: every child pogod execs
+// starts with the signal at its default disposition.
 //
 // There is no other in-process route. signal.Reset restores the disposition Go
 // found at startup — SIG_IGN — and a child shell's `trap - HUP` cannot undo an
 // ignore that was in place when the shell started (POSIX).
-func catchIgnoredSIGHUP() bool {
-	if !signal.Ignored(syscall.SIGHUP) {
-		return false
+func catchIgnoredSignals() []os.Signal {
+	var ignored []os.Signal
+	for _, s := range inheritableIgnores {
+		if signal.Ignored(s) {
+			ignored = append(ignored, s)
+		}
+	}
+	if len(ignored) == 0 {
+		return nil
 	}
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGHUP)
+	signal.Notify(ch, ignored...)
 	go func() {
 		for range ch {
 		}
 	}()
-	return true
+	return ignored
 }
 
 // dieOf re-delivers sig at its default disposition, so the exit status is the
