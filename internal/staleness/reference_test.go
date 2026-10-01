@@ -67,7 +67,7 @@ func TestReferenceFrozenAtDeployIsNotClean(t *testing.T) {
 	writeFile(t, filepath.Join(installed, "crew", "doctor.md"), stamped(v1))
 
 	// The prompt fix ships AFTER the deploy. The mirror is not told.
-	advance(t, upstream, PromptsSubtree+"/crew/doctor.md", string(lines(121, "doctor v2")),
+	advance(t, upstream, DefaultPromptsSubtree+"/crew/doctor.md", string(lines(121, "doctor v2")),
 		"the DOCTOR's refinery-history advice names its window")
 
 	rep := CheckPrompts(context.Background(), PromptOptions{
@@ -342,7 +342,7 @@ func TestCheckPromptsSkipRemoteLeavesTheCorpusVerdictIntact(t *testing.T) {
 	body := lines(40, "mayor")
 	upstream := fixtureRepo(t, map[string][]byte{"mayor.md": body})
 	mirror := mirrorOf(t, upstream)
-	advance(t, upstream, PromptsSubtree+"/mayor.md", string(lines(41, "mayor")), "a prompt shipped")
+	advance(t, upstream, DefaultPromptsSubtree+"/mayor.md", string(lines(41, "mayor")), "a prompt shipped")
 
 	installed := t.TempDir()
 	writeFile(t, filepath.Join(installed, "mayor.md"), stamped(body))

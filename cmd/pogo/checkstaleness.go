@@ -82,7 +82,14 @@ func defaultStampPath() string {
 // human is mid-edit, and it exists on exactly the hosts that have a nightly.
 // Falling back to the working directory keeps the command usable from a
 // checkout, which is where its own tests and a developer run it.
-func defaultReferenceRepo() string {
+//
+// A declared `[lineage] prompt_repo` comes first (drellem2/pogo#125): it is the
+// operator naming the corpus's upstream, which on an org-templated host is not
+// the deploy checkout at all.
+func defaultReferenceRepo(declared string) string {
+	if declared != "" {
+		return declared
+	}
 	src, ok := staleness.DeployReferenceRepo(config.PogoHome())
 	if ok {
 		return src
@@ -98,6 +105,7 @@ func newCheckStalenessCmd(jsonOutput *bool) *cobra.Command {
 	var (
 		refRepo      string
 		ref          string
+		subtree      string
 		promptsDir   string
 		stampPath    string
 		logPath      string
@@ -111,7 +119,7 @@ func newCheckStalenessCmd(jsonOutput *bool) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "check-staleness",
-		Short: "Report a nightly redeploy that did not happen and a prompt corpus behind the repo (never fixes)",
+		Short: "Report a nightly redeploy that did not happen and a prompt corpus that differs from its reference (never fixes)",
 		Long: `Two witnesses for the same failure: the fleet is running something older than
 what shipped, and nothing said so.
 
@@ -124,7 +132,9 @@ what shipped, and nothing said so.
 
   prompts    Does the installed prompt corpus under ~/.pogo/agents match the one
              a git ref ships? Compared file by file on a hash of the body, in
-             both directions.
+             both directions. The reference is repo + ref + subtree, from
+             --repo/--ref/--subtree, else the [lineage] block in config.toml,
+             else ~/.pogo/deploy-src @ origin/main : internal/agent/prompts.
 
 WHY IT IS NOT ALREADY COVERED. On 2026-08-04 the nightly had not succeeded since
 07-31 — four nights it never fired at all, and nothing alarmed on any of them —
@@ -198,6 +208,24 @@ hand-edited canonical takes the conflict cell and gets a .dist sidecar
 (` + "`" + `pogo check-prompt-edits` + "`" + ` owns that half). ` + "`" + `--skip-ceilings` + "`" + ` drops the block, and
 with it one HTTP call to the daemon and two git reads.
 
+A DIFFERENCE IS NOT A DIRECTION (drellem2/pogo#125). A hash says two files
+differ; it cannot say which is newer, so the report says "differs from the
+reference" and never "superseded" or "behind". On a host whose ~/.pogo comes
+from an org template, drellem2/pogo is not the corpus's upstream: its current
+prompts differ from drellem2/pogo's because the org customized them. Name the
+real upstream in config.toml so every run — this command and pogod's sweep —
+judges against it:
+
+  [lineage]
+  prompt_repo    = "~/src/org-dotpogo"
+  prompt_ref     = "origin/main"
+  prompt_subtree = "agents"
+
+Until a lineage is declared (or --repo/--subtree name the reference), a report
+whose installed tree holds files the reference does not ship is HEDGED: it says
+the reference may not be this corpus's upstream, and prescribes no install.
+pogod's sweep sends no mail in that state.
+
 WHAT IT DOES NOT JUDGE, and says so every run: files under the corpus
 directories that the ref does not ship. ~/.pogo/agents holds plenty of
 legitimately local material — the crew/pm-*.md stubs, pm/anti-drift-protocol.md, the
@@ -239,8 +267,19 @@ its subject healthy.`,
 			if stampPath == "" {
 				stampPath = defaultStampPath()
 			}
+			// An explicit --repo or --subtree is the caller naming the
+			// reference, which counts as declaring its lineage for this run;
+			// --ref alone does not, since it moves along the same upstream.
+			lineage := config.Load().Lineage
+			declared := lineage.PromptDeclared || cmd.Flags().Changed("repo") || cmd.Flags().Changed("subtree")
 			if refRepo == "" {
-				refRepo = defaultReferenceRepo()
+				refRepo = defaultReferenceRepo(lineage.PromptRepo)
+			}
+			if ref == "" {
+				ref = lineage.PromptRef
+			}
+			if subtree == "" {
+				subtree = lineage.PromptSubtree
 			}
 			if promptsDir == "" {
 				promptsDir = agent.PromptDir()
@@ -298,6 +337,8 @@ its subject healthy.`,
 				promptRep = staleness.CheckPrompts(cmd.Context(), staleness.PromptOptions{
 					Repo:          refRepo,
 					Ref:           ref,
+					Subtree:       subtree,
+					Declared:      declared,
 					InstalledRoot: promptsDir,
 					SkipRemote:    skipRemote,
 					Fetch:         doFetch,
@@ -323,6 +364,10 @@ its subject healthy.`,
 				}
 				if promptsRan {
 					out["prompts"] = promptRep
+					// The hedge is a judgement over the report, not a field of
+					// it; surfaced so a script can tell "differs" from "differs
+					// from something that may not be the upstream".
+					out["prompts_hedged"] = promptRep.Hedged()
 				}
 				cli.PrintJSON(out)
 			} else {
@@ -348,8 +393,9 @@ its subject healthy.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&refRepo, "repo", "", "Git repo to read the shipped corpus from (default: ~/.pogo/deploy-src, else the working directory)")
-	cmd.Flags().StringVar(&ref, "ref", "origin/main", "Git ref holding the shipped prompt corpus")
+	cmd.Flags().StringVar(&refRepo, "repo", "", "Git repo to read the shipped corpus from (default: [lineage] prompt_repo, else ~/.pogo/deploy-src, else the working directory)")
+	cmd.Flags().StringVar(&ref, "ref", "", "Git ref holding the shipped prompt corpus (default: [lineage] prompt_ref, else origin/main)")
+	cmd.Flags().StringVar(&subtree, "subtree", "", "Path inside the repo where the corpus lives (default: [lineage] prompt_subtree, else "+staleness.DefaultPromptsSubtree+")")
 	cmd.Flags().StringVar(&promptsDir, "prompts-dir", "", "Installed prompt corpus to judge (default: ~/.pogo/agents)")
 	cmd.Flags().StringVar(&stampPath, "stamp", "", "Deploy attempt record to read (default: $POGO_DEPLOY_STAMP, else ~/.pogo/deploy-attempt.stamp)")
 	cmd.Flags().StringVar(&logPath, "deploy-log", "", "Deploy log to read the did-not-run witness from (default: ~/Library/Logs/pogo/pogo-deploy.log)")
@@ -514,7 +560,7 @@ func printPromptWitness(r staleness.PromptReport) {
 	fmt.Printf("prompts — installed corpus vs a git ref (never this binary's own embed)\n")
 	fmt.Printf("  installed:    %s\n", r.InstalledRoot)
 	if r.Err != "" {
-		fmt.Printf("  reference:    %s @ %s\n", r.Reference.Repo, r.Reference.Ref)
+		fmt.Printf("  reference:    %s @ %s : %s\n", r.Reference.Repo, r.Reference.Ref, r.Reference.Subtree)
 		printReferenceLimit(r.Reference, r.Remote.Fetched)
 		fmt.Printf("  COULD NOT CHECK: %s\n", r.Err)
 		fmt.Println("             This is not an all-clear. Nothing was compared.")
@@ -522,6 +568,12 @@ func printPromptWitness(r staleness.PromptReport) {
 	}
 	fmt.Printf("  reference:    %s @ %s = %s (committed %s)\n",
 		r.Reference.Repo, r.Reference.Ref, shortSHA(r.Reference.Commit), r.Reference.CommitTime)
+	fmt.Printf("  subtree:      %s\n", r.Reference.Subtree)
+	if r.Reference.Declared {
+		fmt.Println("  lineage:      declared — this reference was named as the corpus's upstream")
+	} else {
+		fmt.Println("  lineage:      not declared — defaults; see [lineage] in `pogo check-staleness --help`")
+	}
 	printReferenceLimit(r.Reference, r.Remote.Fetched)
 	printRemoteWitness(r.Remote)
 
@@ -534,7 +586,8 @@ func printPromptWitness(r staleness.PromptReport) {
 	if len(r.Deltas) == 0 {
 		fmt.Printf("  ok: all %d shipped prompt(s) match the reference.\n", r.Shipped)
 	} else {
-		fmt.Printf("  STALE: %d of %d shipped prompt(s) differ from the reference.\n", len(r.Deltas), r.Shipped)
+		fmt.Printf("  DIFFERS from the reference: %d of %d prompt(s) the reference ships (%s @ %s : %s).\n",
+			len(r.Deltas), r.Shipped, r.Reference.Repo, r.Reference.Ref, r.Reference.Subtree)
 		// Say what decided this, in the output and not only in the source. The
 		// line counts on the right are the most legible thing on the screen and
 		// a reader will reach for them; the measurement that produced mg-8bcb's
@@ -546,18 +599,39 @@ func printPromptWitness(r staleness.PromptReport) {
 		for _, d := range r.Deltas {
 			fmt.Printf("    %-34s %-14s %s\n", d.Path, d.Kind, d.LineNote())
 		}
-		fmt.Println("  Every agent reading these is running a superseded prompt.")
-		printCeilings(r.Ceilings)
-		if remedy := staleness.CeilingRemedy(r.Ceilings); remedy != "" {
-			fmt.Printf("  %s\n", remedy)
+		// No sentence about which side is newer (drellem2/pogo#125). The hash
+		// establishes difference; "every agent is running a superseded
+		// prompt" asserted an order it had no way to know, and on an
+		// org-templated host it was false for every file it named.
+		fmt.Println("  A hash says these DIFFER; it does not say which side is newer.")
+		if r.Hedged() {
+			// The installer remedies are withheld: `pogo agent prompt install`
+			// writes this binary's embed, which is not the reference either,
+			// and on a host downstream of another upstream every install
+			// would overwrite current prompts with generic defaults.
+			fmt.Printf("  HEDGED: the reference may not be this corpus's upstream — %d installed file(s) are\n", len(r.Unjudged))
+			fmt.Println("          not in it (listed below) and no [lineage] is declared. If this host's ~/.pogo")
+			fmt.Println("          comes from an org template, these differences are probably its customizations.")
+			fmt.Println("  Fix: none prescribed. Declare the real upstream in config.toml ([lineage] prompt_repo,")
+			fmt.Println("       prompt_ref, prompt_subtree) or pass --repo/--ref/--subtree, then re-run.")
 		} else {
-			fmt.Println("  Fix: redeploy, or 'pogo agent prompt install' from a build of the reference.")
+			printCeilings(r.Ceilings)
+			if remedy := staleness.CeilingRemedy(r.Ceilings); remedy != "" {
+				fmt.Printf("  %s\n", remedy)
+			} else {
+				fmt.Println("  Fix: redeploy from the reference. (`pogo agent prompt install` writes THIS binary's embed,")
+				fmt.Println("       which is not the reference; it helps only when this binary was built from it.)")
+			}
 		}
 	}
 	// The census, clean or not — the same posture check-prompts takes with the
 	// flag values it cannot decide. A report that printed only its findings
 	// would read as though it had judged everything it walked past.
-	fmt.Printf("  not judged: %d installed file(s) the reference does not ship (locally added)\n", len(r.Unjudged))
+	why := "locally added"
+	if !r.Reference.Declared {
+		why = "locally added — or shipped by an upstream that is not this reference"
+	}
+	fmt.Printf("  not judged: %d installed file(s) the reference does not ship (%s)\n", len(r.Unjudged), why)
 	for _, u := range r.Unjudged {
 		fmt.Printf("    %s\n", u)
 	}
@@ -758,12 +832,12 @@ func printRemoteWitness(r staleness.RemoteState) {
 		fmt.Println("                To answer it: re-run with --fetch.")
 	case r.CorpusCommits == 0:
 		fmt.Printf("                %d commit(s) have shipped since, NONE of them touching %s —\n",
-			r.Commits, staleness.PromptsSubtree)
+			r.Commits, remoteSubtree(r))
 		fmt.Println("                so the corpus verdict below is about the live corpus after all. Not a finding here;")
 		fmt.Println("                a stale BINARY is a different subject and this witness does not judge it.")
 	default:
 		fmt.Printf("                %d commit(s) have shipped since, %d of them touching %s:\n",
-			r.Commits, r.CorpusCommits, staleness.PromptsSubtree)
+			r.Commits, r.CorpusCommits, remoteSubtree(r))
 		for _, c := range r.Corpus {
 			fmt.Printf("                  %s  %s\n", c.SHA, c.Subject)
 		}
@@ -773,6 +847,16 @@ func printRemoteWitness(r staleness.RemoteState) {
 		fmt.Println("                Every agent is reading a corpus that predates those, whatever the verdict below says.")
 		fmt.Println("                Fix: redeploy, or 'pogo agent prompt install' from a build of the remote head.")
 	}
+}
+
+// remoteSubtree names the path a RemoteState's corpus count was taken under.
+// A state built without one (older JSON, a hand-built test value) is about the
+// default subtree, which is the only one that existed before drellem2/pogo#125.
+func remoteSubtree(r staleness.RemoteState) string {
+	if r.Subtree != "" {
+		return r.Subtree
+	}
+	return staleness.DefaultPromptsSubtree
 }
 
 func shortSHA(s string) string {

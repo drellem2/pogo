@@ -68,7 +68,8 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[carrier_drift]` | `enabled` | on | observes | Mails when a live carrier's GitHub issue has moved on without it. It never comments, closes, or edits. Code: `internal/carrierdrift`. |
 | `[review_decl]` | `enabled` | on | observes | Mails when a work item is missing its `reviews:` declaration. It never writes one. Code: `internal/reviewdecl`. |
 | `[prompt_edit]` | `enabled` | on | observes | Mails when an installed prompt was hand-edited after install. It never rewrites the prompt. Code: `internal/promptedit`. |
-| `[prompt_stale]` | `enabled` | on | observes | Mails when the installed prompts are behind the repo. It never reinstalls. Code: `internal/promptstale`. |
+| `[prompt_stale]` | `enabled` | on | observes | Mails when the installed prompts differ from the reference corpus. It never reinstalls, and it sends no mail when the reference may not be the corpus's upstream (see [Lineage](#lineage--naming-your-configurations-upstream)). Code: `internal/promptstale`. |
+| `[lineage]` | — | — | plumbing | Names the upstream of this host's prompt corpus (`prompt_repo`, `prompt_ref`, `prompt_subtree`) for `pogo check-staleness` and `[prompt_stale]`. With no block they use `~/.pogo/deploy-src` @ `origin/main` : `internal/agent/prompts`, and hedge their verdict. See [Lineage](#lineage--naming-your-configurations-upstream). |
 | `[ack_watch]` | `enabled` | on | observes | Mails when an agent completes too few of its scheduled fires. See [ack-watch](#the-scheduler-completion-deficit-detector-ack-watch). |
 | `[deaf_watch]` | `enabled` | on | observes | Mails when a running agent has no mail loop that could wake it. See [deaf-watch](#the-missing-mail-loop-announcer-deaf-watch). |
 | `[wake_watch]` | `enabled` | on | ACTS | Types a pointer of at most 100 characters into an agent's terminal when mail or an assignment arrives for it, re-points work left unconsumed and then mails `mayor`, and mails the sender and `mayor` when mail goes to an agent that is not running. Phase 1 is shadow: the mail-check timers stay on. See [wake-watch](#the-pointer-waker-wake-watch). Code: `internal/wakewatch`. |
@@ -144,6 +145,44 @@ Agent behavior is defined by prompt files under `internal/agent/prompts/` —
 (disposable worker agents); installed copies live in `~/.pogo/agents/`. The `extends <template> with config <toml>`
 directive synthesizes a crew prompt from a base plus a TOML. See
 [docs/prompt-customization.md](prompt-customization.md) and [PROMPT_GUIDELINES.md](PROMPT_GUIDELINES.md).
+
+## Lineage — naming your configuration's upstream
+
+`pogo check-staleness` and pogod's `[prompt_stale]` sweep compare the installed
+prompts in `~/.pogo/agents` against a corpus in git. By default that corpus is
+drellem2/pogo's: `~/.pogo/deploy-src` at `origin/main`, under
+`internal/agent/prompts`. If your `~/.pogo` comes from an org template, that is
+the wrong upstream. Your current prompts differ from drellem2/pogo's because your
+org customized them, not because they are out of date. Declare the real upstream:
+
+```toml
+[lineage]
+prompt_repo    = "~/src/org-dotpogo"   # a git checkout; ~ is expanded
+prompt_ref     = "origin/main"
+prompt_subtree = "agents"              # where the corpus lives in that repo
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `prompt_repo` | `~/.pogo/deploy-src` (else, for the CLI only, the working directory) | Git repo holding the corpus. If it is not a checkout, pogod disarms the sweep and does not fall back to the default. |
+| `prompt_ref` | `[prompt_stale] ref`, else `origin/main` | Ref inside the repo. `[prompt_stale] ref` still works when no lineage ref is set. |
+| `prompt_subtree` | `internal/agent/prompts` | Corpus root inside the repo. Its layout must mirror `~/.pogo/agents`. |
+
+Setting any of the three keys **declares** the lineage. `--ref` alone does not.
+On the command line, `--repo`, `--ref` and `--subtree` override the block, and
+an explicit `--repo` or `--subtree` counts as a declaration for that run.
+
+**Without a declaration the verdict is hedged.** The check compares hashes, so it
+can tell that two files differ but not which one is newer. If prompts differ
+*and* the installed tree has files the reference does not ship, the report says
+the reference may not be this corpus's upstream. In that case it prescribes no
+install, and pogod's sweep logs the result instead of mailing it. On a host that
+really does track drellem2/pogo, those extra files are usually local stubs.
+Declaring the default reference explicitly
+(`prompt_subtree = "internal/agent/prompts"`) removes the hedge.
+
+drellem2/pogo#126 extends this block to the other artifacts a host takes from
+an upstream. Their keys will carry their own prefix.
 
 ## Where `config.toml` lives, and how the two files combine
 

@@ -82,6 +82,12 @@ type Options struct {
 	// be told the runner is disarmed rather than have it read as clean.
 	Repo string
 	Ref  string
+	// Subtree is the corpus root inside Repo; empty means
+	// staleness.DefaultPromptsSubtree. Declared records that Repo/Ref/Subtree
+	// came from a [lineage] declaration. Both from config.LineageConfig
+	// (drellem2/pogo#125).
+	Subtree  string
+	Declared bool
 	// Root is the installed prompt tree (~/.pogo/agents). Required.
 	Root string
 	// Coordinator is the configured coordinator name, used to address prompts
@@ -161,6 +167,8 @@ type Watcher struct {
 	enabled       bool
 	repo          string
 	ref           string
+	subtree       string
+	declared      bool
 	root          string
 	coordinator   string
 	mail          MailFunc
@@ -219,6 +227,8 @@ func New(opts Options) *Watcher {
 		enabled:       opts.Enabled,
 		repo:          opts.Repo,
 		ref:           opts.Ref,
+		subtree:       opts.Subtree,
+		declared:      opts.Declared,
 		root:          opts.Root,
 		coordinator:   opts.Coordinator,
 		mail:          opts.Mail,
@@ -274,6 +284,8 @@ func (w *Watcher) sample(ctx context.Context, now time.Time) Report {
 	raw := staleness.CheckPrompts(ctx, staleness.PromptOptions{
 		Repo:          w.repo,
 		Ref:           w.ref,
+		Subtree:       w.subtree,
+		Declared:      w.declared,
 		InstalledRoot: w.root,
 		SkipRemote:    w.skipRemote,
 		// Fetch stays false. See the package doc: a detector that mutates the
@@ -302,6 +314,7 @@ func (w *Watcher) sample(ctx context.Context, now time.Time) Report {
 		},
 	})
 	rep := FromStaleness(raw, w.coordinator)
+	subtree := rep.Reference.Subtree
 	// Set explicitly rather than threaded through FromStaleness: the witness
 	// reports a skipped query as an unarmed one, and only the caller that asked
 	// for the skip can tell the two apart.
@@ -314,7 +327,7 @@ func (w *Watcher) sample(ctx context.Context, now time.Time) Report {
 		// suppression store — a failed sweep must not forget what a working one
 		// announced.
 		w.emit(events.Event{EventType: errorEvent, Agent: "pogod", Details: map[string]any{
-			"error": rep.Err, "repo": w.repo, "ref": w.ref, "root": w.root,
+			"error": rep.Err, "repo": w.repo, "ref": w.ref, "subtree": subtree, "root": w.root,
 		}})
 		log.Printf("promptstale: ⚠ sweep could not run (%s) — the corpus is UNJUDGED, not current", rep.Err)
 		return rep
@@ -331,6 +344,9 @@ func (w *Watcher) sample(ctx context.Context, now time.Time) Report {
 		"root":                w.root,
 		"repo":                w.repo,
 		"ref":                 w.ref,
+		"subtree":             subtree,
+		"lineage_declared":    w.declared,
+		"hedged":              rep.Hedged,
 		"reference_commit":    rep.Reference.Commit,
 		"shipped_paths":       rep.Shipped,
 		"findings":            len(rep.Findings),
@@ -342,6 +358,23 @@ func (w *Watcher) sample(ctx context.Context, now time.Time) Report {
 		details["reference_fetch_age_seconds"] = rep.Reference.Fetch.AgeSeconds
 	}
 	w.emit(events.Event{EventType: ranEvent, Agent: "pogod", Details: details})
+
+	if rep.Hedged {
+		// NO MAIL (drellem2/pogo#125). The installed tree carries files this
+		// reference does not ship and no [lineage] says the reference is its
+		// upstream — the signature of an org-templated host being judged
+		// against drellem2/pogo. Mailing every agent that its current prompt
+		// "is not the version the repo ships" is the false verdict the issue
+		// was filed about, delivered unrequested. Logged instead, and the
+		// suppression store is left alone so declaring a lineage later
+		// announces anything real as new.
+		log.Printf("promptstale: %d prompt(s) differ from %s @ %s:%s, but %d installed file(s) are not in that "+
+			"reference and no [lineage] is declared — it may not be this corpus's upstream. NOT mailing. "+
+			"Declare [lineage] prompt_repo/prompt_ref/prompt_subtree to judge against the real upstream (or to "+
+			"confirm this one); `pogo check-staleness` shows the full report",
+			len(rep.Findings), w.repo, w.ref, subtree, len(rep.Unjudged))
+		return rep
+	}
 
 	w.notify(rep, now)
 	return rep
@@ -504,6 +537,14 @@ func (w *Watcher) Summary() string {
 	if w.skipRemote {
 		remote = "remote-qualifier=off"
 	}
-	return fmt.Sprintf("interval=%s renotify=%s root=%s reference=%s@%s coordinator=%s %s (report-only, never fetches)",
-		w.interval, w.renotifyAfter, w.root, w.repo, w.ref, w.coordinator, remote)
+	lineage := "lineage=undeclared"
+	if w.declared {
+		lineage = "lineage=declared"
+	}
+	subtree := w.subtree
+	if subtree == "" {
+		subtree = staleness.DefaultPromptsSubtree
+	}
+	return fmt.Sprintf("interval=%s renotify=%s root=%s reference=%s@%s:%s %s coordinator=%s %s (report-only, never fetches)",
+		w.interval, w.renotifyAfter, w.root, w.repo, w.ref, subtree, lineage, w.coordinator, remote)
 }

@@ -232,7 +232,7 @@ func TestCheckPromptsCarriesCeilingsEndToEnd(t *testing.T) {
 	// old one — the shape of a binary built before a prompt change.
 	repo := fixtureRepo(t, map[string][]byte{"mayor.md": oldBody})
 	oldRev := revParse(t, repo, "HEAD")
-	writeFile(t, filepath.Join(repo, PromptsSubtree, "mayor.md"), newBody)
+	writeFile(t, filepath.Join(repo, DefaultPromptsSubtree, "mayor.md"), newBody)
 	git(t, repo, "add", "-A")
 	git(t, repo, "commit", "-q", "-m", "advance the corpus")
 

@@ -97,8 +97,9 @@ func TestComparePromptsIsTwoSided(t *testing.T) {
 	if len(deltas) != 1 {
 		t.Fatalf("a LONGER installed file was not reported: %+v", deltas)
 	}
-	if note := deltas[0].LineNote(); !strings.Contains(note, "LONGER") {
-		t.Errorf("LineNote = %q, want it to name the direction", note)
+	// Which file has more lines, never which is newer (drellem2/pogo#125).
+	if note := deltas[0].LineNote(); !strings.Contains(note, "1 more lines than ref") {
+		t.Errorf("LineNote = %q, want it to say the installed copy has more lines", note)
 	}
 }
 
@@ -276,7 +277,7 @@ func fixtureRepo(t *testing.T, files map[string][]byte) string {
 	repo := t.TempDir()
 	git(t, repo, "init", "-q", "-b", "main")
 	for rel, data := range files {
-		writeFile(t, filepath.Join(repo, PromptsSubtree, filepath.FromSlash(rel)), data)
+		writeFile(t, filepath.Join(repo, DefaultPromptsSubtree, filepath.FromSlash(rel)), data)
 	}
 	git(t, repo, "add", "-A")
 	git(t, repo, "commit", "-q", "-m", "corpus")
@@ -363,7 +364,7 @@ func TestLoadShippedCorpusEmptySubtreeIsAnError(t *testing.T) {
 	git(t, repo, "add", "-A")
 	git(t, repo, "commit", "-q", "-m", "empty")
 
-	if _, _, err := LoadShippedCorpus(context.Background(), repo, "main"); err == nil {
+	if _, _, err := LoadShippedCorpus(context.Background(), repo, "main", ""); err == nil {
 		t.Fatal("a ref shipping no prompts was accepted as a reference")
 	}
 }

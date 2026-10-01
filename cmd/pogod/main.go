@@ -2623,12 +2623,17 @@ Flags:
 	// shipped.
 	var promptStaleWatcher *promptstale.Watcher
 	if cfg.PromptStale.Enabled {
-		refRepo, armed := staleness.DeployReferenceRepo(config.PogoHome())
+		// [lineage] names the corpus's upstream when it is not this repo's
+		// deploy checkout (drellem2/pogo#125); without it, the deploy checkout
+		// and drellem2/pogo's subtree.
+		refRepo, armed := staleness.PromptReferenceRepo(config.PogoHome(), cfg.Lineage.PromptRepo)
 		if armed {
 			promptStaleWatcher = promptstale.New(promptstale.Options{
 				Enabled:       true,
 				Repo:          refRepo,
 				Ref:           cfg.PromptStale.Ref,
+				Subtree:       cfg.Lineage.PromptSubtree,
+				Declared:      cfg.Lineage.PromptDeclared,
 				Root:          agent.PromptDir(),
 				Coordinator:   coordinator,
 				Mail:          client.SendMGMail,
