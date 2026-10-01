@@ -670,3 +670,147 @@ func TestDoneReapLapseIsLoggedExactlyOnceWhenStopKeepsFailing(t *testing.T) {
 			"record must not stop the reaper retrying", n)
 	}
 }
+
+// TestDoneReapTimerReapsANeverQuietSpinner is the acceptance control for the
+// done timer (drellem2/pogo#128). bdd6 and 9d97 were `done`, their harness
+// spinners kept the PTY warm, and the quiet window never opened — no donereap
+// line for either, ever, and both were stopped by hand. Here the spinner wrote a
+// second ago on EVERY tick, so only the timer can reap it, and it must: not
+// before doneReapMaxWait from the first tick that read the item done, and on the
+// first tick at or after it.
+func TestDoneReapTimerReapsANeverQuietSpinner(t *testing.T) {
+	logged := captureLog(t)
+
+	reg := &fakeDoneReg{live: []agent.PolecatActivity{
+		{Name: "bdd6", WorkItemID: "mg-bdd6", IdleFor: time.Second, HasOutput: true},
+	}}
+	r := newDoneReaper(reg, doneStore(map[string]string{"mg-bdd6": "done"}), noReviews, 2*time.Minute)
+	if r.maxWait != doneReapMaxWait {
+		t.Fatalf("newDoneReaper must arm the compiled done timer, got %s", r.maxWait)
+	}
+
+	t0 := time.Now()
+	for _, at := range []time.Duration{0, 30 * time.Second, doneReapMaxWait - time.Second} {
+		if got := r.Check(t0.Add(at)); len(got) != 0 {
+			t.Fatalf("reaped %v at +%s — inside the done timer a writing polecat may still be mid-mail", got, at)
+		}
+	}
+	got := r.Check(t0.Add(doneReapMaxWait))
+	if len(got) != 1 || got[0] != "bdd6" {
+		t.Fatalf("the done timer did not fire: want [bdd6] reaped %s after it first read done, got %v. "+
+			"This is gh#128's never-quiet spinner holding a slot forever", doneReapMaxWait, got)
+	}
+	if !strings.Contains(logged(), "path=done-timer") {
+		t.Fatalf("the stop did not say which path fired — the count of timer reaps is the number that says "+
+			"whether PTY quiet is still a usable qualifier (log=%q)", logged())
+	}
+	if _, kept := r.firstDone["bdd6"]; !kept {
+		// Still in the map until the next snapshot omits it; the next Check prunes.
+		t.Fatalf("precondition: the anchor should survive until the polecat leaves the snapshot")
+	}
+	r.Check(t0.Add(doneReapMaxWait + 30*time.Second))
+	if _, kept := r.firstDone["bdd6"]; kept {
+		t.Fatalf("the done-timer anchor outlived its polecat — firstDone must be pruned when it leaves the snapshot")
+	}
+}
+
+// TestDoneReapTimerHoldsABuilderUnderOpenReview pins the ordering the timer's
+// value depends on: the review exemption (mg-aaf6) is checked ahead of BOTH
+// paths. A self-closed builder whose spinner never stops and whose reviewer is
+// still running must survive past the timer — for as long as the reviewer lives
+// — and be reaped once the reviewer is gone. If the timer ran ahead of the
+// exemption it would be the review-wait ceiling donereap.go rejects.
+func TestDoneReapTimerHoldsABuilderUnderOpenReview(t *testing.T) {
+	builder := agent.PolecatActivity{Name: "paaf6", WorkItemID: "mg-aaf6", IdleFor: time.Second, HasOutput: true}
+	reviewer := agent.PolecatActivity{Name: "p1c60", WorkItemID: "mg-1c60", IdleFor: time.Second, HasOutput: true}
+	reg := &fakeDoneReg{live: []agent.PolecatActivity{builder, reviewer}}
+	r := newDoneReaper(reg,
+		doneStore(map[string]string{"mg-aaf6": "done", "mg-1c60": "claimed"}),
+		reviewsStore(map[string]string{"mg-1c60": "mg-aaf6"}),
+		2*time.Minute)
+
+	t0 := time.Now()
+	for _, at := range []time.Duration{0, doneReapMaxWait, 2 * doneReapMaxWait, time.Hour} {
+		if got := r.Check(t0.Add(at)); len(got) != 0 {
+			t.Fatalf("reaped %v at +%s while a live reviewer declares `reviews: mg-aaf6` — the done timer "+
+				"must not run ahead of the review exemption (gh#131)", got, at)
+		}
+	}
+
+	reg.mu.Lock()
+	reg.live = []agent.PolecatActivity{builder}
+	reg.mu.Unlock()
+	if got := r.Check(t0.Add(time.Hour + 30*time.Second)); len(got) != 1 || got[0] != "paaf6" {
+		t.Fatalf("once the reviewer is gone the long-expired timer should reap the builder, got %v", got)
+	}
+}
+
+// TestDoneReapTimerRestartsWhenTheItemReopens. The anchor is "first seen done",
+// and an item that reads open again is not done — so a later close must start a
+// fresh timer rather than inherit one that would fire immediately.
+func TestDoneReapTimerRestartsWhenTheItemReopens(t *testing.T) {
+	status := map[string]string{"mg-re": "done"}
+	reg := &fakeDoneReg{live: []agent.PolecatActivity{
+		{Name: "re", WorkItemID: "mg-re", IdleFor: time.Second, HasOutput: true},
+	}}
+	r := newDoneReaper(reg, doneStore(status), noReviews, 2*time.Minute)
+
+	t0 := time.Now()
+	r.Check(t0)
+	status["mg-re"] = "claimed"
+	r.Check(t0.Add(time.Minute))
+	status["mg-re"] = "done"
+	r.Check(t0.Add(2 * time.Minute))
+	if got := r.Check(t0.Add(doneReapMaxWait + time.Minute)); len(got) != 0 {
+		t.Fatalf("reaped %v on a timer anchored before the item reopened", got)
+	}
+	if got := r.Check(t0.Add(doneReapMaxWait + 2*time.Minute)); len(got) != 1 {
+		t.Fatalf("the fresh timer should fire %s after the second close, got %v", doneReapMaxWait, got)
+	}
+}
+
+// TestDoneReapQuietPathIsNamed: the ordinary reap still fires on the quiet
+// window, long before the timer, and says so.
+func TestDoneReapQuietPathIsNamed(t *testing.T) {
+	logged := captureLog(t)
+	reg := &fakeDoneReg{live: []agent.PolecatActivity{
+		{Name: "q", WorkItemID: "mg-q", IdleFor: 3 * time.Minute, HasOutput: true},
+	}}
+	r := newDoneReaper(reg, doneStore(map[string]string{"mg-q": "done"}), noReviews, 2*time.Minute)
+	if got := r.Check(time.Now()); len(got) != 1 {
+		t.Fatalf("a quiet done polecat must be reaped on the first tick, got %v", got)
+	}
+	if !strings.Contains(logged(), "path=quiet") {
+		t.Fatalf("the quiet reap did not name its path (log=%q)", logged())
+	}
+}
+
+// TestDoneReapZeroTimerFallsBack: a zero maxWait (a reaper built as a struct
+// literal) must mean the compiled default, never "reap the instant it reads
+// done" — that would stop a writing polecat mid-mail.
+func TestDoneReapZeroTimerFallsBack(t *testing.T) {
+	reg := &fakeDoneReg{live: []agent.PolecatActivity{
+		{Name: "z", WorkItemID: "mg-z", IdleFor: time.Second, HasOutput: true},
+	}}
+	r := &doneReaper{reg: reg, itemDone: doneStore(map[string]string{"mg-z": "done"}), grace: 2 * time.Minute}
+	if got := r.Check(time.Now()); len(got) != 0 {
+		t.Fatalf("a zero done timer reaped a writing polecat on first sight: %v", got)
+	}
+}
+
+// TestDoneReapBusyProbeErrorIsSilent: the done probe now runs for writing
+// polecats too, so a store outage must not print a line per busy polecat per
+// tick — only the quiet ones, which were candidates before gh#128, log it.
+func TestDoneReapBusyProbeErrorIsSilent(t *testing.T) {
+	logged := captureLog(t)
+	reg := &fakeDoneReg{live: []agent.PolecatActivity{
+		{Name: "busy", WorkItemID: "mg-busy", IdleFor: time.Second, HasOutput: true},
+	}}
+	r := newDoneReaper(reg, func(string) (bool, error) { return false, errors.New("store down") }, noReviews, time.Minute)
+	if got := r.Check(time.Now()); len(got) != 0 {
+		t.Fatalf("an unreadable item must not license a stop, got %v", got)
+	}
+	if strings.Contains(logged(), "mg-busy") {
+		t.Fatalf("a busy polecat's probe error was logged (log=%q)", logged())
+	}
+}
