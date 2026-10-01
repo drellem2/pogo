@@ -146,3 +146,18 @@ func TestOwnerRulingsForMgbackupAndVixreport(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigbackupIsOwnedByPogoConfig pins mg-476b9: com.pogo.configbackup was
+// loaded on the reference box and rendered as "1 with NONE". Its plist ships
+// from the pogo-config repo (~/.pogo/bin), so the reason must say so. The
+// unknown label is the positive control that the loud default still fires.
+func TestConfigbackupIsOwnedByPogoConfig(t *testing.T) {
+	s := scopeLaunchAgents(nil, []string{"com.pogo.configbackup", "com.pogo.some-new-thing"})
+	un := s.Unexplained()
+	if len(un) != 1 || un[0].Label != "com.pogo.some-new-thing" {
+		t.Errorf("Unexplained = %+v, want only the unruled control job", un)
+	}
+	if r := launchAgentExclusionReasons()["com.pogo.configbackup"]; !strings.Contains(r, "pogo-config") {
+		t.Errorf("com.pogo.configbackup: reason %q does not name the pogo-config repo that ships its plist", r)
+	}
+}

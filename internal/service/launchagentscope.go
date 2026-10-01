@@ -123,11 +123,12 @@ func (s LaunchAgentScope) Unexplained() []LaunchAgentExclusion {
 // this table cannot have is the one it was built to prevent: a job with no entry
 // is reported, loudly, as unexplained.
 const (
-	ownedByReminders = "installed by pogo-reminders, not by any installer in this repo (`internal/service` renders no plist for it), so this build has no expected copy to compare the installed one against"
-	ownedByPogoPA    = "installed by pogo-pa, not by any installer in this repo, so this build has no expected copy to compare the installed one against"
-	ownedBySleepwake = "installed by pogo-sleepwake, not by any installer in this repo, so this build has no expected copy to compare the installed one against"
-	ownedByPA        = "installed by hand by the pa agent (mg-0f79: Daniel's 07:00 weekday VIX regime report, pa-owned), from an untracked plist it keeps in ~/.pogo/bin — not by any installer in this repo — so this build has no expected copy to compare the installed one against"
-	ownedByBridget   = "installed by the bridget repo (cloverross/bridget, see docs/design/bridget-integration-design.md), not by any installer in this repo, so this build has no expected copy to compare the installed one against"
+	ownedByReminders  = "installed by pogo-reminders, not by any installer in this repo (`internal/service` renders no plist for it), so this build has no expected copy to compare the installed one against"
+	ownedByPogoPA     = "installed by pogo-pa, not by any installer in this repo, so this build has no expected copy to compare the installed one against"
+	ownedBySleepwake  = "installed by pogo-sleepwake, not by any installer in this repo, so this build has no expected copy to compare the installed one against"
+	ownedByPA         = "installed by hand by the pa agent (mg-0f79: Daniel's 07:00 weekday VIX regime report, pa-owned), from an untracked plist it keeps in ~/.pogo/bin — not by any installer in this repo — so this build has no expected copy to compare the installed one against"
+	ownedByPogoConfig = "installed by hand from the pogo-config repo (drellem2/pogo-config, checked out live at ~/.pogo), which tracks the plist as bin/com.pogo.configbackup.plist (mg-a48a: hourly by-path commit and fast-forward push of the live ~/.pogo tree, user config) — not by any installer in this repo, and no copy of the plist exists in this repo — so this build has no expected copy to compare the installed one against"
+	ownedByBridget    = "installed by the bridget repo (cloverross/bridget, see docs/design/bridget-integration-design.md), not by any installer in this repo, so this build has no expected copy to compare the installed one against"
 )
 
 func launchAgentExclusionReasons() map[string]string {
@@ -167,6 +168,11 @@ func launchAgentExclusionReasons() map[string]string {
 
 		// Ruled pa-owned by Daniel 2026-09-29 (mg-79c6a).
 		"com.pogo.vixreport": ownedByPA,
+
+		// The live ~/.pogo checkout's own backup job. Its plist and script
+		// ship from pogo-config, not from this repo (checked 2026-10-01,
+		// mg-476b9), so it is user config and stays outside the registry.
+		"com.pogo.configbackup": ownedByPogoConfig,
 	}
 }
 
