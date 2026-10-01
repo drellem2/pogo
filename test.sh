@@ -104,12 +104,22 @@ gate_step "Testing Go packages" bash scripts/signal-witness.sh bash scripts/tmpd
 # 18.7s measured (rank 7 of 25, 3.4% of the gate): it runs three `go test`
 # invocations over a deliberately small slice that still touches every caller,
 # rather than the ~300s internal/agent costs in full.
-gate_step "Testing the \$TMPDIR leak guard" bash scripts/tmpdir-leak_test.sh
+# EVERY ROW BELOW RUNS UNDER THE SAME $TMPDIR GUARD (mg-b9621), not only the Go
+# row above. The shell suites were never measured, and on darwin they could not
+# have been: a template-less `mktemp -d` ignores $TMPDIR there, so their
+# fixtures went straight into the developer's real $TMPDIR — 2,910 `tmp.*`
+# directories and 13.4G by 2026-10-01 (figures from mg-2f3ba), with origin.git,
+# wt-*, gobin/out/repo, rec.* and built pogod binaries inside. The guard now
+# routes those calls into its private $TMPDIR (scripts/lib/tmpdir-mktemp), so a
+# shell suite that abandons a fixture fails ITS row, by name, and nothing it
+# leaves reaches the real $TMPDIR. A new row that skips the wrapper fails
+# scripts/tmpdir-leak_test.sh's Test 15.
+gate_step "Testing the \$TMPDIR leak guard" bash scripts/tmpdir-leak-guard.sh bash scripts/tmpdir-leak_test.sh
 
 # The macguffin store backup and restore (mg-b01d): append-only push to a repo
 # outside the store, alert-once on failure, and a restore that brings back the
 # empty maildir/work dirs git cannot carry. Temp store only; never ~/.macguffin.
-gate_step "Testing the mg store backup/restore" bash scripts/mg-store-backup_test.sh
+gate_step "Testing the mg store backup/restore" bash scripts/tmpdir-leak-guard.sh bash scripts/mg-store-backup_test.sh
 
 # The signal witness (mg-3bd1). The load-bearing pair is Tests 3 and 4: the
 # witness's verdict is the ANCESTOR reading, and "every ancestor survived"
@@ -119,7 +129,7 @@ gate_step "Testing the mg store backup/restore" bash scripts/mg-store-backup_tes
 # from a kill and a witness that called it one would be manufacturing the
 # false fact this whole item exists to stop. ~4s, mostly the two fixtures
 # settling.
-gate_step "Testing the merge gate's signal witness" bash scripts/signal-witness_test.sh
+gate_step "Testing the merge gate's signal witness" bash scripts/tmpdir-leak-guard.sh bash scripts/signal-witness_test.sh
 
 # The signal sender (mg-cbc3). The load-bearing test is Test 3: the sender is a
 # subshell that is neither this suite's shell nor the wrapper's parent, so a
@@ -135,13 +145,13 @@ gate_step "Testing the merge gate's signal witness" bash scripts/signal-witness_
 # command returns, so `trap ...; sleep 30` caught the signal and then sat for
 # the full 30 seconds before acting on it — the test passed the whole time and
 # the cost was invisible until the gate's own step profile named the row.
-gate_step "Testing the merge gate's signal sender" bash scripts/signal-sender_test.sh
+gate_step "Testing the merge gate's signal sender" bash scripts/tmpdir-leak-guard.sh bash scripts/signal-sender_test.sh
 
-gate_step "Testing neovim plugin" bash nvim/test_nvim.sh
+gate_step "Testing neovim plugin" bash scripts/tmpdir-leak-guard.sh bash nvim/test_nvim.sh
 
-gate_step "Testing bash shell integration" bash shell/bashrc_test.sh
+gate_step "Testing bash shell integration" bash scripts/tmpdir-leak-guard.sh bash shell/bashrc_test.sh
 
-gate_step "Testing pogo-self-deploy driver" bash scripts/pogo-self-deploy_test.sh
+gate_step "Testing pogo-self-deploy driver" bash scripts/tmpdir-leak-guard.sh bash scripts/pogo-self-deploy_test.sh
 
 # The build stamp (mg-3141). Every locally-built binary reported commit:"" and
 # branch:"" — present and empty — because the ldflags lived only in goreleaser,
@@ -156,14 +166,14 @@ gate_step "Testing pogo-self-deploy driver" bash scripts/pogo-self-deploy_test.s
 # naming a wrong symbol path links cleanly and fails only at runtime. ~9s, two
 # of which are its positive control: a build with the flags withheld, required
 # to come back RED.
-gate_step "Testing the build stamp (pogo/pogod can say what they contain)" bash scripts/stamp_test.sh
+gate_step "Testing the build stamp (pogo/pogod can say what they contain)" bash scripts/tmpdir-leak-guard.sh bash scripts/stamp_test.sh
 
 # The size-triggered module-cache reclaim (mg-b7c3). Runs here rather than only
 # in the Go suite because the decision this job exists for — fire, refuse, or
 # defer — lives in the shell script, not in the installer. Its stubs are on PATH,
 # so the real script takes real branches and `go clean -modcache` is never
 # reached with a real cache behind it.
-gate_step "Testing the Go module cache reclaim" bash scripts/pogo-reclaim_test.sh
+gate_step "Testing the Go module cache reclaim" bash scripts/tmpdir-leak-guard.sh bash scripts/pogo-reclaim_test.sh
 
 # The packaged test isolation itself (mg-78a5). FOUR tickets were filed for one
 # defect — a test reading the developer's live ~/.pogo, live daemon or live fleet
@@ -174,7 +184,7 @@ gate_step "Testing the Go module cache reclaim" bash scripts/pogo-reclaim_test.s
 # live suite because the live suite now depends on it: an isolation that is
 # broken should be reported here, by name, rather than as a live-control
 # cascade.
-gate_step "Testing the packaged test isolation (scripts/pogo-sandbox)" bash scripts/pogo-sandbox_test.sh
+gate_step "Testing the packaged test isolation (scripts/pogo-sandbox)" bash scripts/tmpdir-leak-guard.sh bash scripts/pogo-sandbox_test.sh
 
 # The live control for the mg-de08 mail-check post-check (mg-c02d). Stands up a
 # sandboxed pogod and drives the ASSEMBLED verify path — the unit test above
@@ -182,7 +192,7 @@ gate_step "Testing the packaged test isolation (scripts/pogo-sandbox)" bash scri
 # mail-check reap for 30s after boot); that is the price of the only assertion
 # that shows the redeploy post-check can go RED at all, and mg-f206's unattended
 # nightly redeploy rests on it.
-gate_step "Testing pogo-self-deploy live mail-check control" bash scripts/pogo-self-deploy_live_test.sh
+gate_step "Testing pogo-self-deploy live mail-check control" bash scripts/tmpdir-leak-guard.sh bash scripts/pogo-self-deploy_live_test.sh
 
 # The control on the control's SANDBOX (mg-3412). The live suite above is only
 # worth its isolation, and under four concurrent polecats that isolation failed:
@@ -193,7 +203,7 @@ gate_step "Testing pogo-self-deploy live mail-check control" bash scripts/pogo-s
 # never again be read as a regression (or hand do_prove a deploy gate). It runs
 # AFTER the live suite deliberately: that run passing is the positive direction
 # this file therefore does not have to pay 60s to restate.
-gate_step "Testing the live control's sandbox isolation and setup-failure reporting" bash scripts/pogo-self-deploy_live_setup_test.sh
+gate_step "Testing the live control's sandbox isolation and setup-failure reporting" bash scripts/tmpdir-leak-guard.sh bash scripts/pogo-self-deploy_live_setup_test.sh
 
 # The merged-not-closed ALERT and the merged-work GATE, against a pogod that is
 # NOT a test binary (mg-161a). This is the one control in the tree that cmd/pogod
@@ -208,7 +218,7 @@ gate_step "Testing the live control's sandbox isolation and setup-failure report
 # It asserts BOTH arms of the delivery (no coordinator mailbox -> the undelivered
 # event; registered -> the mail on disk and in `mg mail list`), and it separates
 # this alert from the pre-existing filernotify one that fires on the same merges.
-gate_step "Testing the merged-not-closed alert and merged-work gate at runtime" bash scripts/mergedopen-runtime_test.sh
+gate_step "Testing the merged-not-closed alert and merged-work gate at runtime" bash scripts/tmpdir-leak-guard.sh bash scripts/mergedopen-runtime_test.sh
 
 # The pogod condition annunciator's live controls (mg-342d). The MERGE-TIME
 # SUBSET — the negative control plus A2, the enumeration's own highest severity —
@@ -227,20 +237,20 @@ gate_step "Testing the merged-not-closed alert and merged-work gate at runtime" 
 # nobody reads, and a control nobody runs is the same defect wearing a test's
 # clothes. The remaining rows (A4/A7/A11, A5, A9, A10, A14) are run with
 # `scripts/pogo-condition-controls.sh` — ~3 minutes, not every merge.
-gate_step "Testing the pogod condition annunciator (live controls: negative + A2)" bash scripts/pogo-condition-controls.sh NEG A2
+gate_step "Testing the pogod condition annunciator (live controls: negative + A2)" bash scripts/tmpdir-leak-guard.sh bash scripts/pogo-condition-controls.sh NEG A2
 
 # The deploy script's SIGINT interrupt-safety control (mg-e201). Relocated OUT of
 # the live_test.sh artifact gate (do_prove's comsub) because it tests the DEPLOY
 # SCRIPT's INT trap, not the pogod detector, and its own-process-group Ctrl-C model
 # only holds in this DIRECT context, not inside do_prove's `out="$(bash ...)"`.
-gate_step "Testing pogo-self-deploy SIGINT interrupt-safety control" bash scripts/pogo-self-deploy_sigint_test.sh
+gate_step "Testing pogo-self-deploy SIGINT interrupt-safety control" bash scripts/tmpdir-leak-guard.sh bash scripts/pogo-self-deploy_sigint_test.sh
 
 # The nightly redeploy TRIGGER (mg-42ac). Pure-helper tests only — sourcing the
 # runner cannot fire a deploy, and every case here is a refusal: the two skips
 # (outside-window, no-drift) and the aborts (dirty tree, diverged tree, no
 # token). All of them fail the same visible way — a nightly that deploys
 # nothing — so the suite exists to tell them apart.
-gate_step "Testing pogo-deploy nightly trigger" bash scripts/pogo-deploy_test.sh
+gate_step "Testing pogo-deploy nightly trigger" bash scripts/tmpdir-leak-guard.sh bash scripts/pogo-deploy_test.sh
 
 # The runner-side network positive control (mg-db96). Separate suite because the
 # control is a separate artifact — scripts/lib/net-control.sh is a library any
@@ -250,7 +260,7 @@ gate_step "Testing pogo-deploy nightly trigger" bash scripts/pogo-deploy_test.sh
 # report RED. A positive control that has only ever been seen going green is not
 # known to work, so the suite FAILS rather than skipping when it cannot arrange
 # an absence of network to test against.
-gate_step "Testing the network positive control" bash scripts/net-control_test.sh
+gate_step "Testing the network positive control" bash scripts/tmpdir-leak-guard.sh bash scripts/net-control_test.sh
 
 # The FROM-SOURCE runner for the staleness witness (mg-dd49). The judgement is
 # tested in internal/staleness; what this suite holds is the property that makes
@@ -261,7 +271,7 @@ gate_step "Testing the network positive control" bash scripts/net-control_test.s
 # section 2: a POISONED `pogo` first on PATH, asserted both by its marker file
 # and by the exit status, because either alone passes against a fallback that
 # happens to agree.
-gate_step "Testing the from-source staleness runner" bash scripts/check-staleness_test.sh
+gate_step "Testing the from-source staleness runner" bash scripts/tmpdir-leak-guard.sh bash scripts/check-staleness_test.sh
 
 # The per-package test budget and its overrun report (mg-a465). The
 # load-bearing case is the POSITIVE CONTROL: a package is made to exceed the
@@ -270,7 +280,7 @@ gate_step "Testing the from-source staleness runner" bash scripts/check-stalenes
 # give that — it panics — so without this file the fix looks applied and isn't.
 # Costs 12.1s measured (5s of it deliberate sleeping); the budget is overridable
 # so that control runs in seconds rather than 20 minutes.
-gate_step "Testing the Go per-package test budget and overrun report" bash scripts/go-test-budget_test.sh
+gate_step "Testing the Go per-package test budget and overrun report" bash scripts/tmpdir-leak-guard.sh bash scripts/go-test-budget_test.sh
 
 # The TREE-WIDE sweep for unbounded `go test` (mg-37d4). The budget check above
 # is per-site and mg-a465's wiring assertions name TWO files; this walks every
@@ -298,8 +308,8 @@ gate_step "Testing the Go per-package test budget and overrun report" bash scrip
 # alone rather than rewritten: it pins a stronger per-file property (that these
 # two files route through go-test-budget.sh at all), and widening another
 # ticket's test is not this one's business.
-gate_step "Checking every Go test invocation in the tree is bounded" bash scripts/unbounded-go-test.sh
-gate_step "Testing the unbounded-invocation sweep" bash scripts/unbounded-go-test_test.sh
+gate_step "Checking every Go test invocation in the tree is bounded" bash scripts/tmpdir-leak-guard.sh bash scripts/unbounded-go-test.sh
+gate_step "Testing the unbounded-invocation sweep" bash scripts/tmpdir-leak-guard.sh bash scripts/unbounded-go-test_test.sh
 
 # The EXTERNAL redeploy witness (mg-ce10), implementing the rule that a detector
 # for "X did not happen" must not be ACTIVATED BY X. driftwatch reports the
@@ -313,7 +323,7 @@ gate_step "Testing the unbounded-invocation sweep" bash scripts/unbounded-go-tes
 # deploy provides. Section 6 is the second-order version — a stale
 # remote-tracking ref in a checkout the deploy is what fetches — and asserts the
 # local-ref reading reports health on a state the default reading alerts on.
-gate_step "Testing the external redeploy revision probe" bash scripts/revision-probe_test.sh
+gate_step "Testing the external redeploy revision probe" bash scripts/tmpdir-leak-guard.sh bash scripts/revision-probe_test.sh
 
 # The ARMING of that probe (mg-a03d). mg-ce10 landed the witness and wired it to
 # nothing — 501 lines, zero schedules, zero plists, zero callers — which is the
@@ -331,7 +341,7 @@ gate_step "Testing the external redeploy revision probe" bash scripts/revision-p
 # argument aimed at the installer's own render guards: both had only ever been
 # shown to ACCEPT, and one of them was the `| grep -q` spelling that admits a
 # live placeholder at exit 0 once the render outgrows a pipe buffer (mg-712e).
-gate_step "Testing the revision probe's launchd arming" bash scripts/install-revision-probe_test.sh
+gate_step "Testing the revision probe's launchd arming" bash scripts/tmpdir-leak-guard.sh bash scripts/install-revision-probe_test.sh
 
 # The EXTERNAL witness that the FLEET is still completing turns (mg-f867). Same
 # rule as the two steps above, one level out: a detector hosted INSIDE the
@@ -347,7 +357,7 @@ gate_step "Testing the revision probe's launchd arming" bash scripts/install-rev
 # chatty stub mg, with the FIRST assertion being that the old `pipefail + grep -q`
 # idiom really does get 141 against that fixture, so the section cannot pass by
 # certifying timing luck (mg-7ce7).
-gate_step "Testing the external fleet-liveness probe" bash scripts/fleet-liveness-probe_test.sh
+gate_step "Testing the external fleet-liveness probe" bash scripts/tmpdir-leak-guard.sh bash scripts/fleet-liveness-probe_test.sh
 
 # The ARMING of that probe. The load-bearing cases are section 4 — the argument
 # vector read back out of the rendered plist and EXECUTED, because a plist can
@@ -356,7 +366,7 @@ gate_step "Testing the external fleet-liveness probe" bash scripts/fleet-livenes
 # REFUSES the install. 5e is this ticket's rule turned on its own remedy: the
 # installer's placeholder guard is asserted against a 200KB render that defeats
 # the `| grep -q` spelling it deliberately does not use.
-gate_step "Testing the fleet-liveness probe's launchd arming" bash scripts/install-fleet-liveness-probe_test.sh
+gate_step "Testing the fleet-liveness probe's launchd arming" bash scripts/tmpdir-leak-guard.sh bash scripts/install-fleet-liveness-probe_test.sh
 
 # The gate's own per-step profile (mg-eed9). The load-bearing case is Test 4,
 # and it is a positive control rather than a smoke test: the profile's `cores`
@@ -366,18 +376,26 @@ gate_step "Testing the fleet-liveness probe's launchd arming" bash scripts/insta
 # looks like a thing in which nothing computes. Reintroducing that one
 # substitution turns the CPU-burning step's reading from 0.26s to 0.00s and
 # takes three assertions RED with it (measured).
+#
+# The ONE row not under the $TMPDIR guard, and deliberately (mg-b9621): measured
+# under it, this suite abandons one pogo-gate-profile.* file per run — the leak
+# filed as mg-c1a5e against scripts/lib/gate-profile.sh and being fixed there.
+# Guarding the row now would fail every gate on a defect another ticket owns;
+# allowlisting the name would hide that defect from the guard for good. When
+# mg-c1a5e lands, wrap this row and drop its exception from Test 15 of
+# scripts/tmpdir-leak_test.sh, which fails if any OTHER row goes unguarded.
 gate_step "Testing the gate's per-step profile" bash scripts/gate-profile_test.sh
 
-gate_step "Testing build.sh" bash build_test.sh
+gate_step "Testing build.sh" bash scripts/tmpdir-leak-guard.sh bash build_test.sh
 
-gate_step "Testing changelog fragment assembler" bash scripts/assemble-changelog_test.sh
+gate_step "Testing changelog fragment assembler" bash scripts/tmpdir-leak-guard.sh bash scripts/assemble-changelog_test.sh
 
 # Changelog coverage (mg-7904). The assembler's LOUD-EMPTY guard checks a weaker
 # property (non-empty) than CONTRIBUTING's rule (a fragment per change), so it
 # passes while a release ships describing only part of itself. The load-bearing
 # case here is the POSITIVE CONTROL: the check is shown to FAIL on a range with
 # a known-missing fragment before any passing case is trusted.
-gate_step "Testing changelog coverage check" bash scripts/changelog-coverage_test.sh
+gate_step "Testing changelog coverage check" bash scripts/tmpdir-leak-guard.sh bash scripts/changelog-coverage_test.sh
 
 # Release-roll + link references (mg-cef7). Two silent, recurring release-path
 # defects: update_changelog() emitted the `## [X.Y.Z]` heading with NO
@@ -389,20 +407,20 @@ gate_step "Testing changelog coverage check" bash scripts/changelog-coverage_tes
 # set-based check must report DUPLICATE HEADINGS and must NOT report missing link
 # references — the count check's misdiagnosis, whose obvious remedy would have
 # entrenched the corruption by giving the spurious headings link targets.
-gate_step "Testing changelog release-roll and link references" bash scripts/roll-changelog_test.sh
+gate_step "Testing changelog release-roll and link references" bash scripts/tmpdir-leak-guard.sh bash scripts/roll-changelog_test.sh
 
 # Version read/write (mg-cb8dc). bump-version.sh and check-version.sh read the
 # version with a text grep a comment could match; at the v0.11.0 cut one did,
 # and the bump aborted (mg-3225). The fixtures here quote the pattern in
 # comments, and Test 1 is the positive control that the OLD grep breaks on them.
 # CI's version-check job runs this file too.
-gate_step "Testing the version declaration read/write and check-version.sh" bash scripts/check-version_test.sh
+gate_step "Testing the version declaration read/write and check-version.sh" bash scripts/tmpdir-leak-guard.sh bash scripts/check-version_test.sh
 
 # The work-item scope guard (mg-f1d5). Every case runs against a stub `mg` and a
 # fixture worktree in a temp dir, so the suite never reads the developer's live
 # ~/.macguffin. The load-bearing case is the opt-in one: a guard that blocked an
 # agent nobody opted in for would be ripped out of every fleet within the hour.
-gate_step "Testing work-item scope guard" bash scripts/mg-scope-guard_test.sh
+gate_step "Testing work-item scope guard" bash scripts/tmpdir-leak-guard.sh bash scripts/mg-scope-guard_test.sh
 
 # The expired-premise instrument (mg-027b). It reads an mg store and prices the
 # candidate triggers architect proposed; the suite builds its own fixture stores
@@ -412,7 +430,7 @@ gate_step "Testing work-item scope guard" bash scripts/mg-scope-guard_test.sh
 # because the finding is that architect's trigger as stated would have missed the
 # case that motivated it. A genuinely-simultaneous pair sits beside it as the
 # positive control, so the negative cannot pass by the population being empty.
-gate_step "Testing the expired-premise rate instrument" bash scripts/premise-expiry-rate_test.sh
+gate_step "Testing the expired-premise rate instrument" bash scripts/tmpdir-leak-guard.sh bash scripts/premise-expiry-rate_test.sh
 
 # The CI-vs-gate coverage instrument and the EXIT trap that prints it (mg-82a6).
 # Runs against fixture gate/workflow files in a temp dir, so the assertions do
@@ -422,4 +440,4 @@ gate_step "Testing the expired-premise rate instrument" bash scripts/premise-exp
 # that finds nothing must exit 2 and SAY it could not measure, because "0 rows
 # shared" is the most alarming reading this instrument can emit and must never
 # be producible by the parser having rotted.
-gate_step "Testing the CI-vs-gate coverage instrument" bash scripts/ci-coverage_test.sh
+gate_step "Testing the CI-vs-gate coverage instrument" bash scripts/tmpdir-leak-guard.sh bash scripts/ci-coverage_test.sh

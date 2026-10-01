@@ -133,6 +133,12 @@ fresh_sandbox() {
     POGO_SANDBOX_DIR=""
     POGO_SANDBOX_ISOLATED=""
     pogo_sandbox_create "cond-$1"
+    # Remembered for the EXIT trap (mg-b9621). The two lines above this blank
+    # POGO_SANDBOX_DIR, and pogo_sandbox_down removes only the root it currently
+    # names, so every control except the LAST one abandoned its whole sandbox —
+    # home/, xdg/, pogod.log — on every run. Not torn down here instead: the next
+    # pogo_sandbox_isolate captures `go env` under the previous sandbox's HOME.
+    COND_SANDBOXES+=("$POGO_SANDBOX_DIR")
     pogo_sandbox_isolate
     # pogo_sandbox_isolate pins POGO_AGENT_AUTOSTART=false so a stray config
     # cannot spawn the machine's fleet. Two controls (A2's wake, A5) need a crew
@@ -177,6 +183,7 @@ fresh_sandbox() {
 # $POGOD_LOG — that compounds ("pogod.log.reboot.healed.healed") and every
 # assertion afterwards greps a file that does not exist. Use boot_log NAME.
 POGOD_PID=""
+COND_SANDBOXES=()
 POGOD_LOG=""
 
 # boot_log NAME — a fresh, non-compounding log path inside this sandbox.
@@ -557,8 +564,29 @@ control_negative() {
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+# One teardown for everything this file creates, armed BEFORE anything is
+# created, with the signals named (a bare EXIT trap does not run on SIGTERM).
+# The built pogod's directory used to be removed by nothing at all (mg-b9621).
+COND_BUILD_DIR=""
+cond_teardown() {
+    halt
+    pogo_sandbox_down 2>/dev/null || true
+    local d
+    for d in ${COND_SANDBOXES[@]+"${COND_SANDBOXES[@]}"}; do
+        POGO_SANDBOX_DIR="$d"
+        pogo_sandbox_down 2>/dev/null || true
+    done
+    [ -n "$COND_BUILD_DIR" ] && rm -rf "$COND_BUILD_DIR"
+    return 0
+}
+trap 'cond_teardown' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
 if [ -z "$POGOD_BIN" ]; then
-    POGOD_BIN="$(mktemp -d)/pogod"
+    COND_BUILD_DIR="$(mktemp -d)"
+    POGOD_BIN="$COND_BUILD_DIR/pogod"
     printf 'building pogod from %s ...\n' "$REPO_ROOT"
     (cd "$REPO_ROOT" && go build -o "$POGOD_BIN" ./cmd/pogod) \
         || pogo_sandbox_fail "could not build pogod from $REPO_ROOT — the controls below would have measured nothing"
@@ -566,7 +594,6 @@ fi
 [ -x "$POGOD_BIN" ] || pogo_sandbox_fail "pogod binary not found at $POGOD_BIN"
 command -v mg >/dev/null 2>&1 || pogo_sandbox_fail "\`mg\` is not on PATH, so no control in this file could read a maildir back"
 
-trap 'halt; pogo_sandbox_down 2>/dev/null || true' EXIT
 
 WANT="${*:-ALL}"
 want() { case " $WANT " in *" ALL "*|*" $1 "*) return 0 ;; esac; return 1; }
