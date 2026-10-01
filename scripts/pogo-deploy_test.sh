@@ -1661,6 +1661,117 @@ case "$B" in
     *) fail "the missing id is no longer in the mail: $B" ;;
 esac
 
+# --- the body claims no liveness it did not measure (drellem2/pogo#122) -----
+# It used to close with "the agents that are still there are alive", printed on
+# every path including the one where the registry was unreadable.
+for st in "$STATES_FIX" "?"; do
+    case "$(lost_schedule_body mail-check-doctor "$OWNERS_FIX" "$st" 120)" in
+        *"are alive"*) fail "the body asserts agents are alive, which nothing measured (states='$st')" ;;
+        *) pass "the body makes no unmeasured 'agents are alive' claim (states=$( [ "$st" = "?" ] && echo '?' || echo read))" ;;
+    esac
+done
+case "$(lost_schedule_body mail-check-doctor "$OWNERS_FIX" "?" 120)" in
+    *UNFILTERED*) pass "unreadable registry: the body says nothing was set aside as expected" ;;
+    *) fail "unreadable registry: the body does not say its list is unfiltered" ;;
+esac
+case "$(lost_schedule_body mail-check-doctor "$OWNERS_FIX" "$STATES_FIX" 120)" in
+    *UNFILTERED*) fail "readable registry: the body claims it is UNFILTERED" ;;
+    *) pass "readable registry: no UNFILTERED note" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Expected losses are subtracted, by NAME (drellem2/pogo#122)
+# ---------------------------------------------------------------------------
+# The pre snapshot precedes the drain, so every drained polecat's schedule is
+# "lost". On 2026-08-20 the alert named 11 ids, all drained polecats, and mailed
+# RED to mayor and human. A drain that restores every live agent must alert on
+# nothing; a crew loss must still alert, whatever polecats share the night.
+
+# A night that drained three polecats and restored all crew. The polecats are
+# gone from the registry; crew is running and its schedules came back (so they
+# are not in LOST at all).
+DRAIN_OWNERS="$(printf '%s\n' \
+    'mail-check-mg-aaaa caaaa polecat' \
+    'mail-check-mg-bbbb cbbbb polecat' \
+    'mail-check-mg-cccc ccccc polecat' \
+    'mail-check-mayor mayor crew' \
+    'mail-check-pa pa crew' \
+    'mail-check-doctor doctor crew' \
+    'mail-check-pm-dealdesk pm-dealdesk crew' \
+    'mail-check-architect architect crew' \
+    'mail-check-mg-dddd cdddd polecat')"
+DRAIN_STATES="$(printf '%s\n' \
+    'mayor running' \
+    'pa running' \
+    'pm-dealdesk parked' \
+    'architect restarting' \
+    'cdddd running')"
+DRAINED="$(printf '%s\n' mail-check-mg-aaaa mail-check-mg-bbbb mail-check-mg-cccc)"
+
+U="$(unexpected_lost "$DRAINED" "$DRAIN_OWNERS" "$DRAIN_STATES")"
+[ -z "$U" ] \
+    && pass "expected loss: N drained polecats with crew restored -> nothing to alert on" \
+    || fail "expected loss: drained polecats still alert: '$U'"
+E="$(expected_lost_summary "$DRAINED" "$DRAIN_OWNERS" "$DRAIN_STATES")"
+case "$E" in
+    *"mail-check-mg-aaaa (caaaa, drained polecat)"*"mail-check-mg-bbbb (cbbbb, drained polecat)"*"mail-check-mg-cccc (ccccc, drained polecat)"*)
+        pass "expected loss: every set-aside id is logged by name, owner and reason" ;;
+    *) fail "expected loss: the log line does not name each drained schedule: '$E'" ;;
+esac
+
+# Crew alive, schedule missing: the loss this alert was always right about.
+U="$(unexpected_lost "$(printf '%s\n' "$DRAINED" mail-check-pa)" "$DRAIN_OWNERS" "$DRAIN_STATES")"
+[ "$U" = "mail-check-pa" ] \
+    && pass "expected loss: a running crew agent's missing schedule still alerts, alone, beside drained polecats" \
+    || fail "expected loss: crew-alive loss was '$U', want just mail-check-pa"
+
+# Crew GONE: the 07-17 / doctor case. Gone is expected only for a polecat.
+U="$(unexpected_lost "$(printf '%s\n' mail-check-doctor "$DRAINED")" "$DRAIN_OWNERS" "$DRAIN_STATES")"
+[ "$U" = "mail-check-doctor" ] \
+    && pass "expected loss: a crew agent gone after the bounce still alerts" \
+    || fail "expected loss: gone crew was '$U', want just mail-check-doctor"
+case "$(expected_lost_summary mail-check-doctor "$DRAIN_OWNERS" "$DRAIN_STATES")" in
+    "") pass "expected loss: gone crew is never logged as an expected loss" ;;
+    *) fail "expected loss: gone crew was set aside as expected" ;;
+esac
+
+# Parked: dormant on purpose, its reap is the reap working.
+U="$(unexpected_lost mail-check-pm-dealdesk "$DRAIN_OWNERS" "$DRAIN_STATES")"
+[ -z "$U" ] \
+    && pass "expected loss: a parked agent's schedule is not alerted" \
+    || fail "expected loss: parked agent alerted: '$U'"
+case "$(expected_lost_summary mail-check-pm-dealdesk "$DRAIN_OWNERS" "$DRAIN_STATES")" in
+    *"mail-check-pm-dealdesk (pm-dealdesk, parked)"*) pass "expected loss: the parked set-aside is logged by name" ;;
+    *) fail "expected loss: the parked set-aside is not in the log line" ;;
+esac
+
+# Names, not counts: a POLECAT whose agent is still running lost its schedule —
+# that is not the drain, and it alerts even though other polecats' losses are
+# expected on the same night.
+U="$(unexpected_lost "$(printf '%s\n' "$DRAINED" mail-check-mg-dddd)" "$DRAIN_OWNERS" "$DRAIN_STATES")"
+[ "$U" = "mail-check-mg-dddd" ] \
+    && pass "expected loss: a running polecat's missing schedule alerts (judged by name, not by tally)" \
+    || fail "expected loss: running polecat was '$U', want just mail-check-mg-dddd"
+
+# Odd status and unmapped id: neither is known to be the reap working.
+U="$(unexpected_lost "$(printf '%s\n' mail-check-architect mail-check-orphan)" "$DRAIN_OWNERS" "$DRAIN_STATES")"
+[ "$U" = "$(printf '%s\n' mail-check-architect mail-check-orphan)" ] \
+    && pass "expected loss: odd-status and unmapped ids still alert" \
+    || fail "expected loss: odd/unmapped were '$U'"
+
+# An unreadable roster is not an empty one: nothing subtracted, and marked.
+U="$(unexpected_lost "$(printf '%s\n' "$DRAINED" mail-check-pa)" "$DRAIN_OWNERS" "?")"
+[ "$U" = "$(printf '%s\n' UNFILTERED mail-check-mg-aaaa mail-check-mg-bbbb mail-check-mg-cccc mail-check-pa)" ] \
+    && pass "expected loss: STATES='?' returns every id, marked UNFILTERED" \
+    || fail "expected loss: STATES='?' returned '$U'"
+[ -z "$(expected_lost_summary "$DRAINED" "$DRAIN_OWNERS" "?")" ] \
+    && pass "expected loss: STATES='?' sets nothing aside in the log" \
+    || fail "expected loss: STATES='?' logged an expected loss it could not judge"
+# ...and an EMPTY (readable) registry is not '?': every polecat is genuinely gone.
+[ -z "$(unexpected_lost "$DRAINED" "$DRAIN_OWNERS" "")" ] \
+    && pass "expected loss: an empty readable registry still sets drained polecats aside" \
+    || fail "expected loss: an empty registry was treated as unreadable"
+
 # --- mail_check_owners parses the two documents it is given ------------------
 # Fixture-driven, because the failure this guards is silent: an owner map that
 # comes back empty degrades every remedy to "unknown" and the alert still sends.
@@ -1754,9 +1865,21 @@ R="$(POGO_CLI="" agent_states)"; RRC=$?
 # --- the callsite is wired to all of it -------------------------------------
 # The helpers can be perfect and unreached. These read the runner itself, because
 # the alternative is running a whole nightly bounce to find out.
-grep -q 'lost_schedule_body "\$lost" "\$pre_owners" "\$states"' "$RUNNER" \
-    && pass "the alert body is COMPUTED from the lost ids, the owner map and the registry" \
-    || fail "the lost-schedule alert does not call lost_schedule_body with all three inputs"
+# The body is written about the UNEXPECTED losses only (drellem2/pogo#122):
+# handing it "$lost" would put every drained polecat back into the mail.
+grep -q 'lost_schedule_body "\$unexpected" "\$pre_owners" "\$states"' "$RUNNER" \
+    && pass "the alert body is COMPUTED from the unexpected lost ids, the owner map and the registry" \
+    || fail "the lost-schedule alert does not call lost_schedule_body with the unexpected ids and all three inputs"
+grep -q 'unexpected="\$(unexpected_lost "\$lost" "\$pre_owners" "\$states"' "$RUNNER" \
+    && pass "the post-check subtracts expected losses from what it read, with the pre-bounce owners and the post-bounce registry" \
+    || fail "the post-check does not compute unexpected_lost from lost, pre_owners and states"
+grep -q 'expected="\$(expected_lost_summary "\$lost" "\$pre_owners" "\$states")"' "$RUNNER" \
+    && pass "the set-aside losses are logged by name, not dropped" \
+    || fail "the post-check does not log the expected losses it set aside"
+# The alert is gated on the subtraction, not on the raw loss.
+awk '/unexpected="\$\(unexpected_lost/{u=1} u && /if \[ -n "\$unexpected" \]; then/{g=1} g && /alert "\[pogo-deploy\] mail-check schedules LOST/{print "ok"; exit}' "$RUNNER" | grep -q ok \
+    && pass "the LOST alert fires only under 'if [ -n \$unexpected ]'" \
+    || fail "the LOST alert is not gated on the unexpected set"
 grep -q 'states="\$(agent_states)" || states="?"' "$RUNNER" \
     && pass "the callsite turns an unreadable registry into '?' instead of into 'nothing is running'" \
     || fail "the callsite does not guard agent_states' failure"
