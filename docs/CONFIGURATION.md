@@ -69,7 +69,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[review_decl]` | `enabled` | on | observes | Mails when a work item is missing its `reviews:` declaration. It never writes one. Code: `internal/reviewdecl`. |
 | `[prompt_edit]` | `enabled` | on | observes | Mails when an installed prompt was hand-edited after install. It never rewrites the prompt. Code: `internal/promptedit`. |
 | `[prompt_stale]` | `enabled` | on | observes | Mails when the installed prompts differ from the reference corpus. It never reinstalls, and it sends no mail when the reference may not be the corpus's upstream (see [Lineage](#lineage--naming-your-configurations-upstream)). Code: `internal/promptstale`. |
-| `[lineage]` | — | — | plumbing | Names the upstream of this host's prompt corpus (`prompt_repo`, `prompt_ref`, `prompt_subtree`) for `pogo check-staleness` and `[prompt_stale]`. With no block they use `~/.pogo/deploy-src` @ `origin/main` : `internal/agent/prompts`, and hedge their verdict. See [Lineage](#lineage--naming-your-configurations-upstream). |
+| `[lineage]` | — | — | plumbing | Names the upstream of this host's prompt corpus (`prompt_repo`, `prompt_ref`, `prompt_subtree`) for `pogo check-staleness` and `[prompt_stale]`, and of its deploy runner (`runner_repo`, `runner_ref`, `runner_path`) for the payload audit, `pogo service install-deploy` and the nightly's runner self-refresh. With no block they use drellem2/pogo's defaults and hedge their verdict. See [Lineage](#lineage--naming-your-configurations-upstream). |
 | `[ack_watch]` | `enabled` | on | observes | Mails when an agent completes too few of its scheduled fires. See [ack-watch](#the-scheduler-completion-deficit-detector-ack-watch). |
 | `[deaf_watch]` | `enabled` | on | observes | Mails when a running agent has no mail loop that could wake it. See [deaf-watch](#the-missing-mail-loop-announcer-deaf-watch). |
 | `[wake_watch]` | `enabled` | on | ACTS | Types a pointer of at most 100 characters into an agent's terminal when mail or an assignment arrives for it, re-points work left unconsumed and then mails `mayor`, and mails the sender and `mayor` when mail goes to an agent that is not running. Phase 1 is shadow: the mail-check timers stay on. See [wake-watch](#the-pointer-waker-wake-watch). Code: `internal/wakewatch`. |
@@ -181,8 +181,46 @@ really does track drellem2/pogo, those extra files are usually local stubs.
 Declaring the default reference explicitly
 (`prompt_subtree = "internal/agent/prompts"`) removes the hedge.
 
-drellem2/pogo#126 extends this block to the other artifacts a host takes from
-an upstream. Their keys will carry their own prefix.
+### The deploy runner
+
+`pogo service install-deploy` copies drellem2/pogo's
+`scripts/launchd/pogo-deploy.sh` to `~/.pogo/bin/pogo-deploy.sh`, and the nightly
+refreshes that copy from `~/.pogo/deploy-src`. If your runner comes from an org
+template instead, declare where it lives:
+
+```toml
+[lineage]
+runner_repo = "~/src/org-dotpogo"    # a git checkout; ~ is expanded
+runner_ref  = "origin/main"
+runner_path = "bin/pogo-deploy.sh"   # the runner's path in that repo
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `runner_repo` | `~/.pogo/deploy-src` | Git repo holding the runner. |
+| `runner_ref` | `origin/main` | Ref inside the repo. It does not inherit `prompt_ref`. |
+| `runner_path` | `scripts/launchd/pogo-deploy.sh` | The runner's path inside the repo. |
+
+Setting any of the three keys **declares** the runner lineage. The prompt keys
+and the runner keys are separate, so a host can take its prompts from an org
+repo and still run drellem2/pogo's runner. A declaration changes three things:
+
+- The payload audit (`pogo doctor --check`, `pogo check-activation`) compares
+  the installed runner against `<runner_repo>@<runner_ref>:<runner_path>` rather
+  than this build's copy. It reads the ref as it stands and does not fetch.
+- If the declared repo's `origin` is not drellem2/pogo (or cannot be read),
+  `pogo service install-deploy` refuses to replace an installed runner that
+  differs from this build's copy. Pass `--force` to replace it anyway; the
+  previous copy is kept as `pogo-deploy.sh.prev`.
+- In the same case, the nightly's runner self-refresh logs
+  `runner: not-checked reason=lineage` and leaves the runner alone.
+
+**Without a declaration** the payload audit still compares against this build's
+copy and still reports a difference, but it no longer tells you to run
+`install-deploy`: the difference may be an older install, or a runner from
+another upstream. The plist audit does the same for any job whose
+`ProgramArguments` differs from what this build renders: it says which program
+the job runs and what the installer would replace it with, and gives no command.
 
 ## Where `config.toml` lives, and how the two files combine
 

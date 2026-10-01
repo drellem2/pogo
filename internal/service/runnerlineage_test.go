@@ -170,12 +170,20 @@ func TestGenericPlistAuditNamesOtherKeysAndKeepsItsRemedy(t *testing.T) {
 func TestPayloadAuditUndeclaredStatesTheDifferenceWithoutAnImperative(t *testing.T) {
 	dir := t.TempDir()
 	src := writeFile(t, dir, "src.sh", runnerSource)
-	inst := writeFile(t, dir, "inst.sh", runnerInstalled)
+	inst := writeFile(t, dir, "pogo-deploy.sh", runnerInstalled)
 
 	a := auditPayloadScript("com.pogo.deploy", "pogo-deploy.sh", inst, src, nil,
 		"pogo service install-deploy", "scripts/launchd/pogo-deploy.sh", true)
 	if a.Status != PayloadStale {
 		t.Fatalf("status = %q, want stale", a.Status)
+	}
+	// The runner_* hint belongs on the runner row only; another payload gets
+	// the hedge without a key that does not describe it.
+	other := writeFile(t, dir, "pogo-recovery.sh", runnerInstalled)
+	r := auditPayloadScript("com.pogo.recovery", "pogo-recovery.sh", other, src, nil,
+		"pogo service install-recovery", "scripts/launchd/pogo-recovery.sh", true)
+	if strings.Contains(r.Detail, "runner_repo") || strings.Contains(r.Detail, "Run `") || !strings.Contains(r.Detail, "another upstream") {
+		t.Errorf("recovery stale detail: want the hedge, no runner_* hint, no imperative:\n%s", r.Detail)
 	}
 	if strings.Contains(a.Detail, "Run `") || strings.Contains(a.Detail, "run `") {
 		t.Errorf("undeclared stale detail still gives an imperative:\n%s", a.Detail)
