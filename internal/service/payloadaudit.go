@@ -133,6 +133,10 @@ type managedPayloadScript struct {
 	PlistPath  func() string
 	Remedy     string
 	SourceNote string
+	// Lineage marks the row [lineage] runner_* describes (drellem2/pogo#126).
+	// When that lineage is declared, this row is compared against
+	// <runner_repo>@<runner_ref>:<runner_path> instead of this build's copy.
+	Lineage bool
 }
 
 func managedPayloadScripts() []managedPayloadScript {
@@ -145,6 +149,7 @@ func managedPayloadScripts() []managedPayloadScript {
 			PlistPath:  deployPlistPath,
 			Remedy:     "pogo service install-deploy",
 			SourceNote: "scripts/launchd/pogo-deploy.sh",
+			Lineage:    true,
 		},
 		{
 			Label:      deployLabel,
@@ -187,13 +192,21 @@ func AuditPayloadScripts() []PayloadScriptAudit {
 		return nil
 	}
 	scripts := managedPayloadScripts()
+	lineage := resolveRunnerLineage()
 	out := make([]PayloadScriptAudit, 0, len(scripts))
 	for _, s := range scripts {
-		src, fallback, srcErr := payloadSourceOrFallback(s)
 		plistInstalled := false
 		if _, err := os.Stat(s.PlistPath()); err == nil {
 			plistInstalled = true
 		}
+		// A declared runner lineage replaces the source outright: the host has
+		// said its runner comes from somewhere else, so this build's copy is
+		// not what it should match (drellem2/pogo#126).
+		if s.Lineage && lineage.Declared {
+			out = append(out, auditPayloadLineage(s.Label, s.Name, s.Path(), lineage, s.Remedy, plistInstalled))
+			continue
+		}
+		src, fallback, srcErr := payloadSourceOrFallback(s)
 		a := auditPayloadScript(s.Label, s.Name, s.Path(), src, srcErr, s.Remedy, s.SourceNote, plistInstalled)
 		a.SourceFallback = fallback
 		// Only where a comparison actually happened. An ABSENT or ORPHAN row is a
@@ -316,9 +329,80 @@ func auditPayloadScript(label, name, path, source string, sourceErr error, remed
 
 	res.Status = PayloadStale
 	res.MissingIDs = missingWorkItemIDs(srcBytes, installed)
-	res.Detail = fmt.Sprintf("THE FILE %s EXECUTES IS NOT THE FILE THIS BUILD SHIPS: %s (%d lines, installed %s) differs from %s (%d lines). A merge does not refresh a copied file, so every fix merged since that install is INERT on this box while every source-only survey reports it fixed. %s Run `%s`",
+	// No "Run `install-*`" here (drellem2/pogo#126). Byte drift says the two
+	// files differ; it does not say which one is right. On a host whose copy
+	// comes from another upstream (an org template), the installer would
+	// replace that upstream's file with this build's, and a diagnostic that
+	// prints the command as the fix hands the operator the clobber. Hosts that
+	// declare a [lineage] runner are compared against their own upstream in
+	// auditPayloadLineage instead.
+	res.Detail = fmt.Sprintf("THE FILE %s EXECUTES IS NOT THE FILE THIS BUILD SHIPS: %s (%d lines, installed %s) differs from %s (%d lines). If the installed copy is an older install, every fix merged since is INERT on this box, because a merge does not refresh a copied file. %s If it comes from another upstream, this is not drift: declare it with [lineage] runner_repo/runner_ref/runner_path (pogo-deploy.sh) so it is compared against that upstream. `%s` would replace it with this build's copy",
 		label, path, res.InstalledLines, installedAgeNote(res.InstalledMod), source, res.SourceLines,
 		missingIDsNote(res.MissingIDs), remedy)
+	return res
+}
+
+// auditPayloadLineage compares an installed payload against the copy the host's
+// declared [lineage] names — <repo>@<ref>:<path> — rather than this build's
+// (drellem2/pogo#126). Same states as auditPayloadScript, and the same rule that
+// a source it could not read is NOT CHECKED, never a match.
+func auditPayloadLineage(label, name, path string, l runnerLineage, remedy string, plistInstalled bool) PayloadScriptAudit {
+	spec := l.Spec()
+	res := PayloadScriptAudit{Label: label, Name: name, Path: path, Source: spec, Remedy: remedy}
+
+	installed, instErr := os.ReadFile(path)
+	if instErr == nil {
+		res.InstalledLines = countLines(installed)
+		if fi, err := os.Stat(path); err == nil {
+			res.InstalledMod = fi.ModTime()
+		}
+	}
+
+	srcBytes, srcErr := l.Read()
+	if srcErr != nil {
+		res.Status = PayloadUnknown
+		res.Detail = fmt.Sprintf("NOT CHECKED: [lineage] declares this runner's upstream as %s, and it could not be read (%v), so %s was not compared against anything. It was deliberately NOT compared against this build's copy instead: the declaration says that is the wrong upstream",
+			spec, srcErr, path)
+		return res
+	}
+	res.SourceLines = countLines(srcBytes)
+
+	// Who would refresh the file, said without an imperative: install-deploy
+	// installs THIS BUILD's copy, which is the declared upstream's only when
+	// that upstream is drellem2/pogo.
+	installer := fmt.Sprintf("`%s` would replace it with this build's copy", remedy)
+	if l.Foreign() {
+		installer = fmt.Sprintf("`%s` installs this build's copy, NOT %s's (%s), and refuses to overwrite this file without --force; refreshing it is the declared upstream's business", remedy, l.Repo, l.OriginNote())
+	}
+
+	switch {
+	case os.IsNotExist(instErr) && plistInstalled:
+		res.Status = PayloadOrphan
+		res.Detail = fmt.Sprintf("ORPHANED JOB: %s is installed and names %s as its program, and there is NO FILE THERE. launchd will fire the job on schedule and the exec will fail; the failure is not a pogo log line and nothing downstream observes it. The declared upstream's copy is %s; %s",
+			label, path, spec, installer)
+		return res
+	case os.IsNotExist(instErr):
+		res.Status = PayloadAbsent
+		res.Detail = fmt.Sprintf("not installed: no file at %s, and %s is not installed either, so this is consistent rather than broken. The declared upstream's copy is %s",
+			path, label, spec)
+		return res
+	case instErr != nil:
+		res.Status = PayloadUnknown
+		res.Detail = fmt.Sprintf("NOT CHECKED: %s could not be read (%v)", path, instErr)
+		return res
+	}
+
+	if bytes.Equal(installed, srcBytes) {
+		res.Status = PayloadOK
+		res.Detail = fmt.Sprintf("installed copy at %s is byte-identical to the declared upstream %s (%d lines)", path, spec, res.SourceLines)
+		return res
+	}
+
+	res.Status = PayloadStale
+	res.MissingIDs = missingWorkItemIDs(srcBytes, installed)
+	res.Detail = fmt.Sprintf("%s runs %s (%d lines, installed %s), which differs from the declared upstream %s (%d lines). %s %s",
+		label, path, res.InstalledLines, installedAgeNote(res.InstalledMod), spec, res.SourceLines,
+		missingIDsNote(res.MissingIDs), installer)
 	return res
 }
 

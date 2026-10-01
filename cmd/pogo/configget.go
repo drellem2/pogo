@@ -10,6 +10,7 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/service"
 )
 
 // configGetKeys are the keys `pogo config get` answers, each resolved exactly
@@ -31,6 +32,15 @@ var configGetKeys = map[string]func() string{
 	"agents.coordinator": func() string { return agent.CoordinatorName() },
 	"agents.escalation_box": func() string {
 		return config.Load().Agents.EscalationBoxName()
+	},
+	// "true" when [lineage] declares the deploy runner's upstream and it is not
+	// drellem2/pogo — pogo-deploy.sh's runner self-refresh then leaves the
+	// installed runner alone (drellem2/pogo#126). Otherwise "false".
+	"lineage.runner_foreign": func() string {
+		if service.RunnerLineageForeign() {
+			return "true"
+		}
+		return "false"
 	},
 }
 
