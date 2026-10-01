@@ -61,17 +61,29 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 
 	// Already-merged guard (gh #34): a polecat whose poll loop lost track of
 	// its MR can re-submit a branch that already landed on the target. Probe
-	// before attempting: if the branch tip is an ancestor of origin/<target>,
-	// resolve as merged without re-running gates or pushing — a second merge
-	// cycle would be a wasteful no-op. The probe only recognizes tips that
-	// landed verbatim; a branch whose commits were rewritten by the rebase in
-	// a prior merge falls through to the normal pipeline, which no-ops safely.
-	// A probe error is not fatal here — the pipeline's own fetch/checkout
-	// surfaces the real problem with full retry/lost handling.
-	if merged, sha, probeErr := r.probeAlreadyMerged(mr); probeErr == nil && merged {
-		log.Printf("refinery: MR %s branch=%s already merged into origin/%s — resolving as merged without re-running gates (no-op)", mr.ID, mr.Branch, mr.TargetRef)
+	// before attempting. A head contained in origin/<target> is NOT by itself
+	// proof of landing — a branch with no commits of its own looks exactly the
+	// same (mg-c184d) — so it resolves as merged only when a prior merged MR on
+	// record for this branch or work item contains it, and otherwise FAILS as a
+	// defect: the branch carries no commits. A branch whose commits were
+	// rewritten by the rebase in a prior merge is not contained and falls
+	// through to the normal pipeline, which no-ops safely. A probe error is not
+	// fatal here — the pipeline's own fetch/checkout surfaces the real problem
+	// with full retry/lost handling.
+	probe, probeErr := r.probeAlreadyMerged(mr)
+	switch {
+	case probeErr != nil:
+		log.Printf("refinery: MR %s already-merged probe inconclusive (%v) — proceeding with merge", mr.ID, probeErr)
+	case probe.HeadInTarget:
+		prior := r.priorMergeCovering(mr, wtDir, probe.Head)
+		if prior == nil {
+			return r.refuseEmptyBranch(mr, probe)
+		}
+		sha := probe.Head
+		log.Printf("refinery: MR %s branch=%s already merged into origin/%s by %s (landed as %s) — resolving as merged without re-running gates (no-op)",
+			mr.ID, mr.Branch, mr.TargetRef, prior.ID, shortSHA(prior.MergedSHA))
 		emitMerged(mr, 0, sha, 0, true)
-		gateOutput := fmt.Sprintf("(branch already merged into origin/%s — quality gates, push, and deploy skipped)", mr.TargetRef)
+		gateOutput := fmt.Sprintf("(branch already merged into origin/%s by %s — quality gates, push, and deploy skipped)", mr.TargetRef, prior.ID)
 		// The post-merge step is NOT skipped here, unlike gates/push/deploy.
 		// Those are skipped because repeating them would be a no-op; the tag is
 		// skipped only if it already exists, which runPostMergeSteps decides for
@@ -86,8 +98,11 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 			MergedSHA:      sha,
 			AlreadyMerged:  true,
 		}, nil
-	} else if probeErr != nil {
-		log.Printf("refinery: MR %s already-merged probe inconclusive (%v) — proceeding with merge", mr.ID, probeErr)
+	default:
+		// The head is ahead of the target. Record that before anything can be
+		// pushed, so restart recovery can attribute a later containment to this
+		// MR's own push rather than to ancestry (mg-c184d).
+		r.recordTargetAtStart(mr, probe.Target)
 	}
 
 	cfg := r.loadConfig(wtDir, mr.RepoPath)

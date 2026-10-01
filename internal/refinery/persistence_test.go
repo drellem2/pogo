@@ -120,10 +120,11 @@ func TestStateCorruptFileBackedUpAndStartsEmpty(t *testing.T) {
 }
 
 // setupRecoveryOrigin builds a bare origin with main plus a pushed branch, and
-// returns (originDir, gate marker path). The work clone gets a test.sh gate
+// returns (originDir, gate marker path, main's sha BEFORE any merge — the
+// TargetAtStart a real processMerge would have persisted before pushing). The work clone gets a test.sh gate
 // that touches the marker — recovery must never re-run gates, so the marker
 // must not exist after a merged-resolution recovery.
-func setupRecoveryOrigin(t *testing.T, branch string, mergeToMain bool) (string, string) {
+func setupRecoveryOrigin(t *testing.T, branch string, mergeToMain bool) (string, string, string) {
 	t.Helper()
 	originDir := initBareOrigin(t, "main")
 	marker := filepath.Join(t.TempDir(), "gates-ran")
@@ -132,6 +133,7 @@ func setupRecoveryOrigin(t *testing.T, branch string, mergeToMain bool) (string,
 	run(t, workDir, "git", "clone", originDir, ".")
 	run(t, workDir, "git", "config", "user.email", "test@test.com")
 	run(t, workDir, "git", "config", "user.name", "Test")
+	preMain := strings.TrimSpace(gitOutput(t, workDir, "rev-parse", "origin/main"))
 	run(t, workDir, "git", "checkout", "-b", branch)
 	os.WriteFile(filepath.Join(workDir, "test.sh"), []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755)
 	os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("feature"), 0o644)
@@ -145,7 +147,7 @@ func setupRecoveryOrigin(t *testing.T, branch string, mergeToMain bool) (string,
 		run(t, workDir, "git", "merge", "--ff-only", branch)
 		run(t, workDir, "git", "push", "origin", "main")
 	}
-	return originDir, marker
+	return originDir, marker, preMain
 }
 
 // writeInFlightState persists a state file whose Processing slot holds mr,
@@ -167,16 +169,29 @@ func TestRecoveryCrashWindows(t *testing.T) {
 		name         string
 		mergedToMain bool
 		deleteBranch bool
-		wantStatus   MergeStatus
-		wantLost     bool
-		wantRequeued bool
-		wantOnMerged bool
+		// noStartRecord omits TargetAtStart, as for an MR that never got past
+		// the landing probe — so containment cannot be credited to its push.
+		noStartRecord bool
+		wantStatus    MergeStatus
+		wantLost      bool
+		wantRequeued  bool
+		wantOnMerged  bool
 	}{
 		{
 			name:         "post-push pre-history crash resolves to merged without re-running gates",
 			mergedToMain: true,
 			wantStatus:   StatusMerged,
 			wantOnMerged: true,
+		},
+		{
+			// mg-c184d: ancestry alone never proves landing. With no record
+			// that the head was ever AHEAD of main, a contained head is the
+			// empty-branch shape — re-queue, and let the re-run refuse it.
+			name:          "contained head with no start record re-queues instead of resolving merged",
+			mergedToMain:  true,
+			noStartRecord: true,
+			wantStatus:    StatusQueued,
+			wantRequeued:  true,
 		},
 		{
 			name:         "crash before push re-queues at head",
@@ -194,7 +209,7 @@ func TestRecoveryCrashWindows(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			originDir, marker := setupRecoveryOrigin(t, "polecat-fix", tc.mergedToMain)
+			originDir, marker, preMain := setupRecoveryOrigin(t, "polecat-fix", tc.mergedToMain)
 			if tc.deleteBranch {
 				run(t, originDir, "git", "update-ref", "-d", "refs/heads/polecat-fix")
 			}
@@ -209,6 +224,9 @@ func TestRecoveryCrashWindows(t *testing.T) {
 				Status:     StatusProcessing,
 				SubmitTime: fixedNow.Add(-time.Minute),
 			}
+			if !tc.noStartRecord {
+				inFlight.TargetAtStart = preMain
+			}
 			writeInFlightState(t, statePath, inFlight)
 
 			r := newPersistent(t, statePath)
@@ -221,6 +239,11 @@ func TestRecoveryCrashWindows(t *testing.T) {
 
 			var onMergedFired bool
 			r.SetOnMerged(func(mr *MergeRequest) { onMergedFired = mr.ID == "mr-inflight" })
+			defer func() {
+				if !tc.wantOnMerged && onMergedFired {
+					t.Error("OnMerged fired for a recovered MR that did not land")
+				}
+			}()
 
 			r.resolveRecovered()
 
@@ -281,7 +304,7 @@ func TestRecoveryCrashWindows(t *testing.T) {
 // in-progress rebase left behind by a crash — today ensureWorktree only
 // checks .git existence, so without the cleanup every later git op fails.
 func TestRecoveryRequeueCleansCloneMidRebase(t *testing.T) {
-	originDir, _ := setupRecoveryOrigin(t, "polecat-fix", false)
+	originDir, _, _ := setupRecoveryOrigin(t, "polecat-fix", false)
 	statePath := filepath.Join(t.TempDir(), "refinery-state.json")
 	inFlight := &MergeRequest{
 		ID: "mr-inflight", RepoPath: originDir, Branch: "polecat-fix",
