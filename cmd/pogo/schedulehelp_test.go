@@ -25,6 +25,8 @@ func TestScheduleLong_StatesAgentLifecycle(t *testing.T) {
 		"restart_on_crash=false",
 		"a respawn suppressed by the synthetic-failure detector",
 		"Schedules of any other\nkind are never removed by an agent's exit",
+		// A requested stop holds the row briefly (drellem2/pogo#217).
+		"the removal waits 30s and is skipped if the agent is running\nagain by then",
 		// The durable fix, and why repeating it is safe.
 		"re-register its schedules at startup",
 		"restarted outside pogod",

@@ -1470,6 +1470,20 @@ above is only as good as the data it reads, and at boot neither the registry
 nor the desired state is loaded yet. It fails safe in the only direction that
 matters — a delayed reap is invisible, a premature one is the outage.
 
+**Requested-stop hold (drellem2/pogo#217).** The eager reap in pogod's exit
+hook runs only for an agent pogod will not respawn (`restart_on_crash = false`,
+or a suppressed respawn). For a stop someone asked for (`stop_cause=request`)
+it no longer reaps on the spot: it holds the agent's mail-check rows for 30s
+(`requestedStopReapGrace`) and reaps at the end only if no agent by that name
+is running by then. The sweep honours the hold (`registryLiveness` answers
+UNKNOWN for a held agent), since it ticks every heartbeat and would otherwise
+reap inside the same window. Before this, a supervisor's stop+start of an
+on-demand seat lost the seat's mail-check about 2ms after the stop, and the
+restarted agent came up deaf. That outcome and the false A6 `restart_failed`
+were mutually exclusive per seat, because `restart_on_crash` picks which arm
+of the exit hook runs. Stops issued by pogod itself (reapers, a fleet drain)
+are not followed by a start, so they still reap eagerly.
+
 **Do not delete the alarm.** The GC's rationale is that it keeps
 `scheduler_fire_failed` events from accumulating. For an EXPECTED agent a fire
 failure is not garbage — it is the fault reporting itself, so such an agent

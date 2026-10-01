@@ -91,3 +91,38 @@ func TestExpectedRespawnRefusalsAreDistinguishable(t *testing.T) {
 		t.Error("an unrelated error was classified as a guard refusal")
 	}
 }
+
+// TestRespawnOfARunningAgentIsErrRespawnAgentAlive pins the refusal a deferred
+// respawn gets when something else started the agent inside its backoff
+// (drellem2/pogo#159, #217): the sentinel, with the message unchanged.
+func TestRespawnOfARunningAgentIsErrRespawnAgentAlive(t *testing.T) {
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	a, err := reg.Spawn(SpawnRequest{Name: "racer", Type: TypeCrew, Command: []string{"cat"}, RestartOnCrash: true})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	_, err = reg.Respawn("racer")
+	if !errors.Is(err, ErrRespawnAgentAlive) {
+		t.Fatalf("respawn of a running agent returned %v, want ErrRespawnAgentAlive", err)
+	}
+	if err.Error() != `agent "racer" is still running` {
+		t.Errorf("message changed: %q", err.Error())
+	}
+	if IsExpectedRespawnRefusal(err) {
+		t.Error("ErrRespawnAgentAlive was classified as a guard refusal")
+	}
+	if requested, _ := a.StopRequested(); requested {
+		t.Error("StopRequested is true before any stop")
+	}
+	if err := reg.Stop("racer", 2*time.Second); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if requested, cause := a.StopRequested(); !requested || cause != StopCauseRequest {
+		t.Errorf("StopRequested after Stop = (%v, %q), want (true, %q)", requested, cause, StopCauseRequest)
+	}
+}
