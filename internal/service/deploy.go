@@ -307,14 +307,26 @@ func renderDeployPlist() (string, deployData, error) {
 	return buf.String(), data, nil
 }
 
+// DeployOptions are the `pogo service install-deploy` flags.
+type DeployOptions struct {
+	// Force overwrites an installed runner that [lineage] declares comes from
+	// an upstream other than drellem2/pogo. The previous copy is still kept as
+	// .prev.
+	Force bool
+}
+
 // InstallDeploy sets up the nightly deploy agent: installs pogo-deploy.sh into
 // ~/.pogo/bin/ (keeping a changed previous copy as .prev — installRunnerFile),
 // writes the plist, and bootstraps it. Idempotent.
 //
+// It refuses, before writing anything, to replace an installed runner that
+// differs from this build's when [lineage] declares the runner's upstream is
+// not drellem2/pogo (drellem2/pogo#126) — see guardRunnerOverwrite.
+//
 // It does NOT create or populate the deploy checkout. The runner clones it on
 // first use, which keeps a network operation out of an install that an operator
 // may be running precisely because the box is unhealthy.
-func InstallDeploy() error {
+func InstallDeploy(opts DeployOptions) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("deploy agent is macOS-only (GOOS=%s)", runtime.GOOS)
 	}
@@ -324,17 +336,25 @@ func InstallDeploy() error {
 		return err
 	}
 
-	for _, d := range []string{filepath.Dir(deployScriptInstallPath()), logDir()} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			return fmt.Errorf("failed to create %s: %w", d, err)
-		}
-	}
-
 	scriptBytes, err := os.ReadFile(src)
 	if err != nil {
 		return fmt.Errorf("failed to read %s: %w", src, err)
 	}
 	dst := deployScriptInstallPath()
+	forced, err := guardRunnerOverwrite(dst, scriptBytes, resolveRunnerLineage(), opts.Force)
+	if err != nil {
+		return err
+	}
+	if forced != "" {
+		fmt.Println(forced)
+	}
+
+	for _, d := range []string{filepath.Dir(dst), logDir()} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			return fmt.Errorf("failed to create %s: %w", d, err)
+		}
+	}
+
 	backedUp, err := installRunnerFile(dst, scriptBytes)
 	if err != nil {
 		return err
@@ -382,8 +402,8 @@ func InstallDeploy() error {
 	}
 
 	target := fmt.Sprintf("gui/%d", os.Getuid())
-	exec.Command("launchctl", "bootout", target, plistPath).Run() // best-effort
-	out, err := exec.Command("launchctl", "bootstrap", target, plistPath).CombinedOutput()
+	deployLaunchctl("bootout", target, plistPath) // best-effort
+	out, err := deployLaunchctl("bootstrap", target, plistPath)
 	if err != nil {
 		return fmt.Errorf("launchctl bootstrap failed: %s: %w", string(out), err)
 	}
@@ -395,6 +415,46 @@ func InstallDeploy() error {
 		data.Hours[0], data.Minute, retryFireList(data.Hours, data.Minute))
 	fmt.Printf("Logs:     %s/pogo-deploy.log\n", data.LogDir)
 	return nil
+}
+
+// deployLaunchctl runs the launchctl calls InstallDeploy makes. A seam so a
+// test that drives InstallDeploy can never boot out the host's real
+// com.pogo.deploy: bootout by plist path acts on the LABEL, not the file.
+var deployLaunchctl = func(args ...string) ([]byte, error) {
+	return exec.Command("launchctl", args...).CombinedOutput()
+}
+
+// guardRunnerOverwrite decides whether install-deploy may replace the runner at
+// dst with this build's content (drellem2/pogo#126).
+//
+// install-deploy used to write the runner unconditionally. On a host whose
+// runner comes from an org template that is a cross-lineage clobber, not an
+// update: the reporting host's installed runner was byte-identical to its org's
+// bin/pogo-deploy.sh and ~680 lines away from drellem2/pogo's in each
+// direction. The .prev copy makes the overwrite reversible; it does not stop it.
+//
+// So: when the installed runner differs from this build's AND [lineage]
+// declares a runner upstream that is not drellem2/pogo, refuse unless forced.
+// Nothing else changes behaviour — an undeclared host, a host that declares
+// drellem2/pogo, an absent runner and an identical runner all install as before,
+// because none of them has a declaration this install would contradict.
+//
+// It returns a notice to print when force was what let the write through.
+func guardRunnerOverwrite(dst string, content []byte, l runnerLineage, force bool) (string, error) {
+	existing, err := os.ReadFile(dst)
+	if err != nil || bytes.Equal(existing, content) || !l.Foreign() {
+		return "", nil
+	}
+	if force {
+		return fmt.Sprintf("--force: replacing %s, whose declared upstream is %s (%s), with this build's runner; the previous copy is kept at %s.prev",
+			dst, l.Spec(), l.OriginNote(), dst), nil
+	}
+	return "", fmt.Errorf("refusing to install the deploy runner: %s differs from this build's copy, and [lineage] declares the runner's upstream as %s (%s), which is not drellem2/pogo. "+
+		"Installing would replace that upstream's runner with drellem2/pogo's. Nothing was changed.\n"+
+		"  - to keep it: refresh %s from its declared upstream; this installer does not install from there\n"+
+		"  - to replace it anyway: pogo service install-deploy --force (the current copy is kept as %s.prev)\n"+
+		"  - if the declaration is wrong: remove the runner_* keys from [lineage] in config.toml",
+		dst, l.Spec(), l.OriginNote(), dst, dst)
 }
 
 // installRunnerFile puts content at dst the way the nightly's own self-refresh

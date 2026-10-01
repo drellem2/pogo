@@ -907,6 +907,7 @@ chicken-and-egg.`,
 		},
 	}
 
+	var installDeployForce bool
 	var cmdServiceInstallDeploy = &cobra.Command{
 		Use:   "install-deploy",
 		Short: "Install the nightly redeploy LaunchAgent (com.pogo.deploy)",
@@ -925,14 +926,21 @@ entirely when there is no drift, and then hands off to pogo-self-deploy with
 
 Deliberately separate from ` + "`pogo service install-recovery`" + `: recovery is the
 tier-3 safety net that bounces a wedged pogod, and folding a rebuild-from-main
-into it would make every emergency restart a deploy.`,
+into it would make every emergency restart a deploy.
+
+If [lineage] in config.toml declares the runner's upstream (runner_repo,
+runner_ref, runner_path) and that upstream is not drellem2/pogo, the install
+refuses to replace an installed runner that differs from this build's copy.
+Pass --force to replace it anyway; the previous copy is kept as .prev.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := service.InstallDeploy(); err != nil {
+			if err := service.InstallDeploy(service.DeployOptions{Force: installDeployForce}); err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
 		},
 	}
+
+	cmdServiceInstallDeploy.Flags().BoolVar(&installDeployForce, "force", false, "Replace an installed runner even when [lineage] declares it comes from an upstream other than drellem2/pogo (the previous copy is kept as .prev)")
 
 	var cmdServiceUninstallDeploy = &cobra.Command{
 		Use:   "uninstall-deploy",

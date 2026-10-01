@@ -483,6 +483,12 @@ const (
 	// [lineage] prompt_subtree is declared. Pinned equal to
 	// staleness.DefaultPromptsSubtree by a test there.
 	DefaultLineagePromptSubtree = "internal/agent/prompts"
+	// DefaultLineageRunnerPath is where drellem2/pogo keeps the nightly deploy
+	// runner that `pogo service install-deploy` copies to
+	// ~/.pogo/bin/pogo-deploy.sh — the path the runner comparisons read when no
+	// [lineage] runner_path is declared (drellem2/pogo#126). Equal to the
+	// RUNNER_REPO_PATH the runner's own self-refresh reads.
+	DefaultLineageRunnerPath = "scripts/launchd/pogo-deploy.sh"
 
 	// DefaultAckWatchInterval is how often pogod's completion-deficit detector
 	// samples the scheduler's ack counters (mg-1935). Coarse: the condition is a
@@ -1502,17 +1508,25 @@ type PromptStaleConfig struct {
 // comparing but to let the host name its upstream, and to hedge the verdict
 // where it has not.
 //
-// Keys are prefixed by the corpus they describe (`prompt_*`), so the block can
-// grow a declaration per managed artifact — drellem2/pogo#126 extends it for
-// the others — without one corpus's keys shadowing another's.
+// Keys are prefixed by the artifact they describe (`prompt_*`, `runner_*`), so
+// each managed artifact carries its own declaration without one artifact's keys
+// shadowing another's. They are separate on purpose: an org template can take
+// its prompts from its own repo and still run drellem2/pogo's deploy runner, and
+// a shared repo/ref pair could not say so (drellem2/pogo#126).
 //
 //	[lineage]
 //	prompt_repo    = "~/src/org-dotpogo"   # git repo holding the corpus upstream
 //	prompt_ref     = "origin/main"         # ref within it
 //	prompt_subtree = "agents"              # corpus root within the repo
+//	runner_repo    = "~/src/org-dotpogo"   # git repo holding the deploy runner
+//	runner_ref     = "origin/main"         # ref within it
+//	runner_path    = "bin/pogo-deploy.sh"  # the runner's path within the repo
 //
-// Read by `pogo check-staleness` (flags override it) and by pogod's prompt
-// staleness sweep (internal/promptstale).
+// The prompt keys are read by `pogo check-staleness` (flags override them) and
+// by pogod's prompt staleness sweep (internal/promptstale). The runner keys are
+// read by the payload audit and `pogo service install-deploy`
+// (internal/service), and by pogo-deploy.sh's runner self-refresh through
+// `pogo config get lineage.runner_foreign`.
 type LineageConfig struct {
 	// PromptRepo is the git repo the prompt corpus is judged against. Empty
 	// means the deploy checkout (~/.pogo/deploy-src), resolved by the caller.
@@ -1531,7 +1545,33 @@ type LineageConfig struct {
 	// unhedged verdict when the installed tree carries files the reference
 	// does not ship.
 	PromptDeclared bool
+
+	// RunnerRepo is the git repo the installed deploy runner
+	// (~/.pogo/bin/pogo-deploy.sh) is judged against. Empty means the deploy
+	// checkout (~/.pogo/deploy-src), resolved by the caller. A leading ~ is
+	// expanded.
+	RunnerRepo string
+	// RunnerRef is the ref inside RunnerRepo. After Load it is never empty:
+	// DefaultPromptStaleRef when undeclared. It does NOT inherit prompt_ref —
+	// the two artifacts may come from different upstreams.
+	RunnerRef string
+	// RunnerPath is the runner's path inside RunnerRepo. Defaults to
+	// DefaultLineageRunnerPath.
+	RunnerPath string
+	// RunnerDeclared reports whether ANY runner_* key was set in a config file.
+	// Only a declaration licenses comparing the installed runner against
+	// something other than this build's copy, and only a declaration of a
+	// foreign upstream makes `pogo service install-deploy` refuse to overwrite
+	// it.
+	RunnerDeclared bool
 }
+
+// Declared reports whether the host declared an upstream for ANY managed
+// artifact — the prompt corpus or the deploy runner. A diagnostic that needs
+// one artifact's answer reads that artifact's flag (PromptDeclared,
+// RunnerDeclared); this is the host-level question "has the operator said
+// where this configuration comes from at all".
+func (l LineageConfig) Declared() bool { return l.PromptDeclared || l.RunnerDeclared }
 
 // GHIntakeConfig configures pogod's gh-issue INTAKE detector (mg-039b): the
 // heartbeat-driven runner that reconciles the OPEN issues on the watched repos
@@ -2596,6 +2636,8 @@ func Load() *Config {
 		// so an explicit [prompt_stale] ref still reaches it.
 		Lineage: LineageConfig{
 			PromptSubtree: DefaultLineagePromptSubtree,
+			RunnerRef:     DefaultPromptStaleRef,
+			RunnerPath:    DefaultLineageRunnerPath,
 		},
 		AckWatch: AckWatchConfig{
 			Enabled:          true,
@@ -2874,6 +2916,18 @@ func Load() *Config {
 		}
 		if fileCfg.Lineage.PromptDeclared {
 			cfg.Lineage.PromptDeclared = true
+		}
+		if fileCfg.Lineage.RunnerRepo != "" {
+			cfg.Lineage.RunnerRepo = fileCfg.Lineage.RunnerRepo
+		}
+		if fileCfg.Lineage.RunnerRef != "" {
+			cfg.Lineage.RunnerRef = fileCfg.Lineage.RunnerRef
+		}
+		if fileCfg.Lineage.RunnerPath != "" {
+			cfg.Lineage.RunnerPath = fileCfg.Lineage.RunnerPath
+		}
+		if fileCfg.Lineage.RunnerDeclared {
+			cfg.Lineage.RunnerDeclared = true
 		}
 		if fileCfg.ghIntakeEnabledSet {
 			cfg.GHIntake.Enabled = fileCfg.GHIntake.Enabled
@@ -4493,6 +4547,21 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if unquotedVal != "" {
 					cfg.Lineage.PromptSubtree = unquotedVal
 					cfg.Lineage.PromptDeclared = true
+				}
+			case "runner_repo":
+				if unquotedVal != "" {
+					cfg.Lineage.RunnerRepo = expandTildePath(unquotedVal)
+					cfg.Lineage.RunnerDeclared = true
+				}
+			case "runner_ref":
+				if unquotedVal != "" {
+					cfg.Lineage.RunnerRef = unquotedVal
+					cfg.Lineage.RunnerDeclared = true
+				}
+			case "runner_path":
+				if unquotedVal != "" {
+					cfg.Lineage.RunnerPath = unquotedVal
+					cfg.Lineage.RunnerDeclared = true
 				}
 			}
 		case "agents":

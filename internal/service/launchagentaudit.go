@@ -57,6 +57,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -202,6 +203,10 @@ type LaunchAgentAudit struct {
 	// classify (today only com.pogo.daemon — see classifyDaemonDrift). Empty
 	// means unclassified, not clean.
 	Findings []string
+	// DiffKeys are the top-level plist keys whose values differ between the
+	// installed copy and this build's render, sorted (drellem2/pogo#126).
+	// Empty on a stale row means one side could not be decoded.
+	DiffKeys []string
 }
 
 // managedLaunchAgent binds a label to the three things the audit needs: where
@@ -449,15 +454,104 @@ func auditLaunchAgent(label, path, remedy, rendered string, renderErr error) Lau
 
 	res.Status = LaunchAgentStale
 	res.ScheduleDrift = !res.Expected.Equal(res.Installed)
+	res.DiffKeys = plistKeyDiff(installed, []byte(rendered))
+
+	// A changed ProgramArguments is the one difference that is not this
+	// build's to undo (drellem2/pogo#126, the generic half of #105): the job
+	// runs a program somebody put there — a wrapper, an org's runner — and the
+	// installer would replace it with this build's. So it is STATED, with what
+	// the installer would do, and no imperative is given.
+	programNote := ""
+	if containsString(res.DiffKeys, "ProgramArguments") {
+		programNote = fmt.Sprintf("installed job runs %s, not %s; `%s` would replace it",
+			argsNote(plistArgs(installed)), argsNote(plistArgs([]byte(rendered))), remedy)
+	}
+	keysNote := ""
+	if len(res.DiffKeys) > 0 {
+		keysNote = "differing keys: " + strings.Join(res.DiffKeys, ", ")
+	}
+
 	switch {
 	case res.ScheduleDrift && !res.Installed.Decoded:
 		res.Detail = fmt.Sprintf("installed plist at %s differs from this build AND could not be decoded, so its schedule is unknown; this build expects %s — run `%s`", path, res.Expected, remedy)
+	case res.ScheduleDrift && programNote != "":
+		res.Detail = fmt.Sprintf("installed plist at %s FIRES AT DIFFERENT TIMES than this build expects: installed %s, expected %s (%s). Every expected fire the installed copy lacks is INERT — it produces no log line and no failure, so nothing downstream can observe its absence. And the %s",
+			path, res.Installed, res.Expected, keysNote, programNote)
 	case res.ScheduleDrift:
 		res.Detail = fmt.Sprintf("installed plist at %s FIRES AT DIFFERENT TIMES than this build expects: installed %s, expected %s. Every expected fire the installed copy lacks is INERT — it produces no log line and no failure, so nothing downstream can observe its absence. Run `%s`", path, res.Installed, res.Expected, remedy)
+	case programNote != "":
+		res.Detail = fmt.Sprintf("installed plist at %s differs from this build in keys other than its schedule (%s; %s): %s",
+			path, keysNote, res.Installed.scheduleNote(), programNote)
+	case keysNote != "":
+		res.Detail = fmt.Sprintf("installed plist at %s differs from this build in keys other than its schedule (%s; %s), so re-running the installer would rewrite it — run `%s`", path, keysNote, res.Installed.scheduleNote(), remedy)
 	default:
 		res.Detail = fmt.Sprintf("installed plist at %s differs from this build in keys other than its schedule (%s), so re-running the installer would rewrite it — run `%s`", path, res.Installed.scheduleNote(), remedy)
 	}
 	return res
+}
+
+// plistKeyDiff names the top-level keys whose values differ between two plists
+// — present in one and not the other, or present in both with different values
+// — sorted. nil when either side does not decode, or when they agree on every
+// key (whitespace or key order alone): the byte comparison already said they
+// differ, and an empty list then means "not in any value", not "clean".
+func plistKeyDiff(installed, rendered []byte) []string {
+	a, err := decodePlistDict(installed)
+	if err != nil {
+		return nil
+	}
+	b, err := decodePlistDict(rendered)
+	if err != nil {
+		return nil
+	}
+	var keys []string
+	for k, av := range a {
+		if bv, ok := b[k]; !ok || !reflect.DeepEqual(av, bv) {
+			keys = append(keys, k)
+		}
+	}
+	for k := range b {
+		if _, ok := a[k]; !ok {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// plistArgs returns ProgramArguments as strings, or nil.
+func plistArgs(data []byte) []string {
+	doc, err := decodePlistDict(data)
+	if err != nil {
+		return nil
+	}
+	arr, _ := doc["ProgramArguments"].([]any)
+	out := make([]string, 0, len(arr))
+	for _, v := range arr {
+		out = append(out, fmt.Sprint(v))
+	}
+	return out
+}
+
+// argsNote renders an argument vector for a sentence: the program alone when
+// that is all there is, else the whole vector quoted.
+func argsNote(args []string) string {
+	switch len(args) {
+	case 0:
+		return "no ProgramArguments"
+	case 1:
+		return args[0]
+	}
+	return fmt.Sprintf("%q", args)
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // scheduleNote phrases the schedule for a job whose drift is NOT in its

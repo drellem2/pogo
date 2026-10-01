@@ -102,3 +102,89 @@ func homeDirForTest(t *testing.T) string {
 	t.Helper()
 	return expandTildePath("~")
 }
+
+// TestLineageRunnerDefaults: with no runner_* key the runner reference is
+// drellem2/pogo's — the deploy checkout (empty repo, resolved by the caller),
+// origin/main, scripts/launchd/pogo-deploy.sh — and it is NOT declared, so no
+// install refuses and no audit compares against anything but this build
+// (drellem2/pogo#126).
+func TestLineageRunnerDefaults(t *testing.T) {
+	layeredSandbox(t)
+
+	cfg := Load()
+
+	if cfg.Lineage.RunnerRepo != "" {
+		t.Errorf("runner_repo = %q, want empty (the deploy checkout, resolved by the caller)", cfg.Lineage.RunnerRepo)
+	}
+	if cfg.Lineage.RunnerRef != "origin/main" {
+		t.Errorf("runner_ref = %q, want origin/main", cfg.Lineage.RunnerRef)
+	}
+	if cfg.Lineage.RunnerPath != "scripts/launchd/pogo-deploy.sh" {
+		t.Errorf("runner_path = %q, want scripts/launchd/pogo-deploy.sh", cfg.Lineage.RunnerPath)
+	}
+	if cfg.Lineage.RunnerDeclared || cfg.Lineage.Declared() {
+		t.Error("no [lineage] block was written, yet the runner lineage reads as declared")
+	}
+}
+
+// TestLineageRunnerDeclared: each runner key is read, ~ is expanded, and the
+// runner declaration is independent of the prompt one in both directions.
+func TestLineageRunnerDeclared(t *testing.T) {
+	_, home := layeredSandbox(t)
+	write(t, home, "[lineage]\nrunner_repo = \"~/src/org-dotpogo\"\nrunner_ref = \"origin/trunk\"\nrunner_path = \"bin/pogo-deploy.sh\"\n")
+
+	cfg := Load()
+
+	if want := filepath.Join(homeDirForTest(t), "src", "org-dotpogo"); cfg.Lineage.RunnerRepo != want {
+		t.Errorf("runner_repo = %q, want %q (~ expanded)", cfg.Lineage.RunnerRepo, want)
+	}
+	if cfg.Lineage.RunnerRef != "origin/trunk" {
+		t.Errorf("runner_ref = %q, want origin/trunk", cfg.Lineage.RunnerRef)
+	}
+	if cfg.Lineage.RunnerPath != "bin/pogo-deploy.sh" {
+		t.Errorf("runner_path = %q, want bin/pogo-deploy.sh", cfg.Lineage.RunnerPath)
+	}
+	if !cfg.Lineage.RunnerDeclared || !cfg.Lineage.Declared() {
+		t.Errorf("runner keys did not declare: RunnerDeclared=%v Declared()=%v", cfg.Lineage.RunnerDeclared, cfg.Lineage.Declared())
+	}
+	if cfg.Lineage.PromptDeclared {
+		t.Error("runner keys declared the PROMPT lineage; the two artifacts may have different upstreams")
+	}
+	if cfg.Lineage.PromptRef != "origin/main" {
+		t.Errorf("prompt_ref = %q; a runner_ref leaked into the prompt reference", cfg.Lineage.PromptRef)
+	}
+}
+
+// TestLineagePromptKeysDoNotDeclareTheRunner: a host that names only its prompt
+// upstream still runs drellem2/pogo's runner, so install-deploy must not start
+// refusing — but Declared() covers both.
+func TestLineagePromptKeysDoNotDeclareTheRunner(t *testing.T) {
+	_, home := layeredSandbox(t)
+	write(t, home, "[lineage]\nprompt_repo = \"~/src/org-dotpogo\"\nprompt_ref = \"origin/trunk\"\n")
+
+	cfg := Load()
+	if cfg.Lineage.RunnerDeclared {
+		t.Error("prompt keys declared the runner lineage")
+	}
+	if cfg.Lineage.RunnerRef != "origin/main" {
+		t.Errorf("runner_ref = %q, want origin/main — it must not inherit prompt_ref", cfg.Lineage.RunnerRef)
+	}
+	if !cfg.Lineage.Declared() {
+		t.Error("Declared() = false with prompt keys set")
+	}
+}
+
+// TestLineageRunnerPathAloneDeclares: naming only where the runner lives is
+// still a declaration.
+func TestLineageRunnerPathAloneDeclares(t *testing.T) {
+	_, home := layeredSandbox(t)
+	write(t, home, "[lineage]\nrunner_path = \"bin/pogo-deploy.sh\"\n")
+
+	cfg := Load()
+	if !cfg.Lineage.RunnerDeclared {
+		t.Error("runner_path alone did not declare the runner lineage")
+	}
+	if cfg.Lineage.RunnerRef != "origin/main" || cfg.Lineage.RunnerRepo != "" {
+		t.Errorf("repo=%q ref=%q, want the defaults", cfg.Lineage.RunnerRepo, cfg.Lineage.RunnerRef)
+	}
+}
