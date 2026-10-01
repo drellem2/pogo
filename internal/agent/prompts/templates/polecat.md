@@ -149,9 +149,30 @@ Follow these steps exactly, in order. Skipping any step is a failure.
     "unverified": ["<anything you are asserting without having measured it — [] if nothing>"]}
    EOF
    jq -e . /tmp/{{.Id}}-verdict.json >/dev/null || echo 'NOT VALID JSON — fix it before submitting; submit rejects it while you can still hear about it'
+   # Pre-submit check (mg-c184d): refuse to submit a branch that would deliver nothing.
+   presubmit_check() {
+     local target="$1" dirty ahead
+     git fetch origin || { echo "REFUSING TO SUBMIT: git fetch origin failed — cannot tell what this branch carries"; return 1; }
+     dirty=$(git status --porcelain) || { echo "REFUSING TO SUBMIT: git status failed"; return 1; }
+     if [ -n "$dirty" ]; then
+       echo "REFUSING TO SUBMIT: uncommitted work in this worktree — commit and push it, or discard it deliberately:"
+       echo "$dirty"; return 1
+     fi
+     ahead=$(git rev-list --count "origin/$target..HEAD") || { echo "REFUSING TO SUBMIT: git rev-list origin/$target..HEAD failed"; return 1; }
+     if [ "$ahead" -eq 0 ]; then
+       echo "REFUSING TO SUBMIT: $BRANCH carries no commits ahead of origin/$target — nothing would be delivered."
+       echo "Commit and push your work. (If an earlier MR of yours already merged this branch, do not resubmit: check it with pogo refinery show <id>.)"
+       return 1
+     fi
+     [ "$(git rev-parse HEAD)" = "$(git rev-parse -q --verify "origin/$BRANCH")" ] || { echo "REFUSING TO SUBMIT: origin/$BRANCH is not your HEAD — git push origin \"$BRANCH\" first"; return 1; }
+     echo "pre-submit OK: $ahead commit(s) ahead of origin/$target, worktree clean, branch pushed"
+   }
+   presubmit_check {{if .Branch}}{{.Branch}}{{else}}main{{end}} &&
    pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}} \
        --verdict-file=/tmp/{{.Id}}-verdict.json
    ```
+   **The `presubmit_check` line is not optional, and its refusal is not something to work around.** A branch that is clean but has nothing ahead of the target, or that has its work sitting uncommitted in the worktree, delivers nothing — and on 2026-10-01 exactly that branch was resolved as "already merged", the item closed `done`, and the polecat reaped with ~240 lines of work uncommitted (mg-3b86e). The refinery now refuses such a branch too (`class=defect`, "branch carries no commits ahead of <target>"), but that is the backstop; this check catches it while you can still fix it. It keys on git's exit status, so a failed `git` refuses rather than reading as "nothing to report". If it refuses: commit, push, and re-run step 5.
+
    `"verdict"` is your own word for how the work came out — `pass`, `partial`, `blocked`, whatever is true. Nothing enumerates the legal values and nothing reads the contents: this is the record of what **you** concluded, and the only reader who benefits is the one who later asks what this branch was supposed to have done. A verdict of `partial` with an honest `unverified` list is worth more than a `pass` nobody can check.
 
    {{if .Branch}}On this track you call `mg done --result` yourself in step 7 and nothing preempts you, so `--verdict-file` is not strictly required. Pass it anyway — it is recorded on the merge request and readable from `pogo refinery show <id> --json` even if your process does not survive to step 7.{{else}}**This is the only moment you can record a verdict.** pogod closes your work item the instant your branch merges and stops you about half a second later; `mg` refuses a second `mg done` rather than overwriting the first, so the `mg done --result` in step 7 arrives at an already-closed item and is turned away. Nothing overwrites your verdict — you are simply beaten to the item, and until mg-dfea the protocol called that refusal success. Skip `--verdict-file` and your work item closes recording only which branch merged (mg-dfea).{{end}}
@@ -175,7 +196,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    **This loop is the channel that works — the mail is redundancy.** A `MERGE FAILED` notice now arrives in `$POGO_AGENT_NAME` as well as `{{.Id}}` (mg-1fcc); before that it went only to the work-item box, and four polecats in a row recovered anyway because the poll finds the failure at failure time and mail cannot beat that. The mail matters for the one case the loop cannot cover: an author who has finished polling, or was stopped, finds out never. So do not substitute mail-watching for this loop, and do not treat a missing notice as a reason to stop polling.
 
-   If your branch already landed on the target (e.g. you resubmitted after losing track of a merged MR), the refinery detects it and resolves the MR as `merged` immediately — without re-running gates or pushing — with `"already_merged": true` in the `--json` output. Treat it exactly like a normal `merged`: proceed to step 7, and do **not** submit the branch again.
+   If your branch already landed on the target under an earlier MR of yours (e.g. you resubmitted after losing track of a merged MR), the refinery finds that MR in its own record and resolves the new one as `merged` immediately — without re-running gates or pushing — with `"already_merged": true` in the `--json` output. Treat it exactly like a normal `merged`: proceed to step 7, and do **not** submit the branch again. A branch that is merely *contained* in the target with no such record is NOT treated as landed: it carries no commits of its own, and the refinery fails it `class=defect`, "branch carries no commits ahead of <target>" (mg-c184d). That failure means nothing was delivered — your work is most likely uncommitted or unpushed in this worktree. Commit, push, and resubmit.
 
    Two non-terminal outcomes need explicit handling — do NOT treat them as merge failures:
    - **`lost`** — the refinery lost this MR across a pogod restart (the branch is intact on origin). Resubmit **once** with the same step-5 command, capture the new MR ID, and go back to polling. If the resubmitted MR also comes back `lost`, stop resubmitting and mail the mayor instead.

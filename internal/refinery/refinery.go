@@ -161,6 +161,11 @@ type MergeRequest struct {
 	// before processing began (a re-submit of a merged branch, gh #34). The
 	// MR resolves as StatusMerged — so poll loops keying off status terminate
 	// normally — but gates, push, and deploy were skipped as no-ops.
+	//
+	// Set ONLY when the refinery's own history holds a prior merged MR for the
+	// same branch or work item that the head is reachable from. A head that is
+	// merely an ancestor of the target with no such record carries no commits
+	// of its own and FAILS as a defect instead (mg-c184d).
 	AlreadyMerged bool `json:"already_merged,omitempty"`
 	// DeployError is set when a post-merge deploy hook ran and failed. The
 	// merge itself still succeeded (Status remains StatusMerged); deploy
@@ -180,9 +185,17 @@ type MergeRequest struct {
 	// worker is the one actor guaranteed not to outlive the merge.
 	//
 	// On the already-merged no-op path this is the branch tip, which the probe
-	// has just confirmed is an ancestor of the target — i.e. still the commit
-	// the branch's content landed as. Empty only when git could not be asked.
+	// has just confirmed is reachable from a PRIOR merged MR's MergedSHA — i.e.
+	// still the commit the branch's content landed as (mg-c184d). Empty only
+	// when git could not be asked.
 	MergedSHA string `json:"merged_sha,omitempty"`
+	// TargetAtStart is origin/<target> as the refinery saw it when this MR
+	// began processing and its branch head was NOT yet contained in it. It is
+	// persisted before anything is pushed, so restart recovery can tell "this
+	// MR's own push landed the branch" (head ahead of TargetAtStart, now in the
+	// target) from "the branch never carried anything" (mg-c184d). Empty when
+	// processing never got past the landing probe.
+	TargetAtStart string `json:"target_at_start,omitempty"`
 	// PostMergeTag names a git tag the REFINERY creates on MergedSHA and pushes
 	// after a successful merge, when the submitter declares one
 	// (`--post-merge-tag`). It exists because of a constraint that no other
@@ -758,6 +771,9 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	req.ID = generateID()
 	req.Status = StatusQueued
 	req.SubmitTime = time.Now()
+	// Refinery-observed, never submitter-supplied: recovery reads it as proof
+	// that this MR's own push is what landed the branch (mg-c184d).
+	req.TargetAtStart = ""
 
 	r.queue = append(r.queue, &req)
 	r.byID[req.ID] = &req

@@ -558,6 +558,9 @@ var verdictStages = map[string]string{
 	"build":             "the build gate ran on this tree and returned a verdict",
 	"test":              "the test gate ran on this tree and returned a verdict",
 	"closing-ref-check": "a commit message on this branch would close a GitHub issue",
+	// mg-c184d: the branch head is already contained in the target and no prior
+	// merged MR landed it, so there is nothing to merge.
+	stageEmptyBranch: "the branch carries no commits ahead of its target, so there is nothing to merge — commit and push the work, then resubmit",
 }
 
 // classifyFailure places a failed attempt and answers whether re-running it

@@ -1125,7 +1125,7 @@ The refinery successfully merged a branch (gates passed, fast-forward push to ta
   - `attempt` (int, required): attempt number that succeeded (`0` when no merge attempt ran: restart recovery found the merge already pushed, or the branch was already merged at processing time)
   - `author` (string, required since mg-e9ee): submitting agent (e.g. `"cat-mg-0241"`). Carried on the outcome events, not only on `refinery_merge_attempted`, so a reader reconstructing history from the log can name the author of a merge whose attempt event has rotated out from under it. It is not the same string as `work_item_id`, which is the author with any `cat-` prefix stripped.
   - `duration_seconds` (number, optional): total time from `refinery_merge_attempted` (attempt 1) to merge
-  - `already_merged` (bool, optional): `true` when the branch had already landed on the target before processing began (a re-submitted branch, gh #34) — the MR resolved as merged without running gates or pushing, and no `refinery_merge_attempted` event precedes this one
+  - `already_merged` (bool, optional): `true` when the branch had already landed on the target before processing began (a re-submitted branch, gh #34) — the MR resolved as merged without running gates or pushing, and no `refinery_merge_attempted` event precedes this one. Since mg-c184d it is set only when the refinery's history holds a prior merged MR for the same branch or work item whose merged SHA contains the head; a head merely contained in the target with no such record carries no commits and fails instead (`refinery_merge_failed`, `stage: "empty-branch"`, `class: "defect"`)
 
 ```json
 {"schema_version":1,"timestamp":"2026-04-25T10:23:09.000000000Z","event_type":"refinery_merged","agent":"refinery","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"merge_request_id":"mr-9482","branch":"polecat-mg-0241","target":"main","merge_commit":"7f97c8b1a2b3c4d5","attempt":1,"duration_seconds":19.2}}
@@ -1143,7 +1143,7 @@ A merge attempt failed. Whether this is terminal depends on `attempt` and the co
   - `target` (string, required)
   - `attempt` (int, required)
   - `author` (string, required since mg-e9ee): submitting agent — see `refinery_merged`
-  - `stage` (string, required): which pipeline stage failed — `"fetch"`, `"rebase"`, `"closing-ref-check"`, `"build"`, `"test"`, `"push"`, `"unknown"`
+  - `stage` (string, required): which pipeline stage failed — `"fetch"`, `"rebase"`, `"closing-ref-check"`, `"build"`, `"test"`, `"push"`, `"empty-branch"` (since mg-c184d: the branch head is already contained in the target and no prior merged MR landed it — the branch carries no commits; terminal, `class: "defect"`, preceded by a `refinery_merge_attempted` with `attempt: 1`), `"unknown"`
   - `reason` (string, required): short error summary, single line, ≤ 200 chars
   - `terminal` (bool, required): `true` if the refinery has given up (no more retries); `false` if another attempt will follow
   - `gate_output_truncated` (string, optional): up to 1 KB of gate stderr/stdout for quick triage. Full output remains in the in-memory MR record (or persisted history once recommendation §1 lands).
