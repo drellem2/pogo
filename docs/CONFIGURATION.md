@@ -452,6 +452,14 @@ injects credentials and then execs pogod. A named launcher must exist and be
 executable, or install fails. pogod itself never reads this key: only the
 installer and the plist audit in `pogo doctor` / the nightly deploy do.
 
+`POGOD_LAUNCHER` is for a **one-off install** only; `[service] launcher` is
+the durable setting. The plist audit renders the expected plist through the
+same order, so it reads the variable too. If `POGOD_LAUNCHER` is exported in
+an interactive shell, `pogo doctor` run from that shell expects that launcher.
+The nightly deploy runs under launchd without the variable, so it expects the
+configured launcher, and the two audits disagree about the same plist. To
+keep a launcher across installs and audits, set it in config.toml.
+
 On macOS, install also checks the plist that is **already installed**. If its
 `ProgramArguments[0]` is neither pogod on PATH nor the configured launcher,
 install refuses before it stops anything, and names the program. Then either:

@@ -815,7 +815,9 @@ Launcher. The plist's ProgramArguments[0] (systemd: ExecStart) is, in order:
 the POGOD_LAUNCHER environment variable, the [service] launcher key in
 config.toml, or pogod on PATH. Set one when the host runs pogod through a
 wrapper script (for example one that injects credentials). A named launcher
-must exist and be executable.
+must exist and be executable. POGOD_LAUNCHER is for a one-off install: pogo
+doctor reads it too, but the nightly audit runs without it, so a launcher
+that should stick belongs in [service] launcher.
 
 On macOS, if the INSTALLED plist runs a program that is neither pogod on PATH
 nor the configured launcher, install refuses before stopping anything and

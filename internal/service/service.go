@@ -508,7 +508,7 @@ func renderLaunchdPlistFor(program string) (string, launchdData, error) {
 // supervising check are derived from one snapshot to avoid a TOCTTOU window
 // where an orphan transitions in/out between two separate launchctl calls.
 func launchctlListOutputForLabel() string {
-	out, err := exec.Command("launchctl", "list", launchdLabel).CombinedOutput()
+	out, err := launchctlRead("list", launchdLabel)
 	if err != nil {
 		return ""
 	}
@@ -733,6 +733,16 @@ var runInstallSequence = func(steps installSteps) (orchestrationRestore, error) 
 	return runOrchestratedInstall(liveOrchestrator{}, steps)
 }
 
+// launchctlRead runs a read-only launchctl query (`list`, `print`) and returns
+// its combined output. installLaunchd reaches launchctl through it twice
+// outside the orchestrated sequence: the fast-path `launchctl list` before the
+// steps exist, and the `launchctl print` dump in the failure mail. A variable
+// for the same tests, so a stubbed install reads a canned answer instead of
+// the host's launchd.
+var launchctlRead = func(args ...string) ([]byte, error) {
+	return exec.Command("launchctl", args...).CombinedOutput()
+}
+
 // installMailer delivers the install report. A variable for the same tests:
 // a refusal still mails, and a test must read that mail rather than send it.
 var installMailer = sendInstallMail
@@ -815,7 +825,7 @@ func launchctlListOutput() string {
 }
 
 func launchctlPrintOutput() string {
-	out, _ := exec.Command("launchctl", "print", kickstartLaunchdTarget()).CombinedOutput()
+	out, _ := launchctlRead("print", kickstartLaunchdTarget())
 	return strings.TrimRight(string(out), "\n")
 }
 
@@ -885,12 +895,30 @@ func verifyLaunchdRunning() error {
 	return fmt.Errorf("pogod did not become healthy within 10s after launchctl load")
 }
 
-func installSystemd() error {
+// renderSystemdUnit renders the pogo.service unit with ExecStart set to the
+// resolved launcher (see resolveLauncher) — the same override the launchd plist
+// takes.
+func renderSystemdUnit() (string, error) {
 	l, err := resolveLauncher()
+	if err != nil {
+		return "", err
+	}
+	tmpl, err := template.New("unit").Parse(systemdUnitTemplate)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, systemdData{PogodPath: l.Path}); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func installSystemd() error {
+	unit, err := renderSystemdUnit()
 	if err != nil {
 		return err
 	}
-	pogodPath := l.Path
 
 	unitPath := systemdUnitPath()
 
@@ -902,22 +930,8 @@ func installSystemd() error {
 		return fmt.Errorf("failed to create systemd user directory: %w", err)
 	}
 
-	data := systemdData{PogodPath: pogodPath}
-
-	tmpl, err := template.New("unit").Parse(systemdUnitTemplate)
-	if err != nil {
-		return err
-	}
-
-	f, err := os.Create(unitPath)
-	if err != nil {
+	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
 		return fmt.Errorf("failed to create %s: %w", unitPath, err)
-	}
-	defer f.Close()
-
-	if err := tmpl.Execute(f, data); err != nil {
-		os.Remove(unitPath)
-		return err
 	}
 
 	// Reload and enable

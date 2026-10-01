@@ -126,9 +126,20 @@ func TestResolveLauncherRejectsMissingAndNonExecutable(t *testing.T) {
 }
 
 // TestLauncherOverrideIsRenderedIntoProgramArguments: the override reaches the
-// plist launchd actually reads, and the systemd unit.
+// plist launchd actually reads, and the systemd unit's ExecStart.
 func TestLauncherOverrideIsRenderedIntoProgramArguments(t *testing.T) {
-	home, _, wrapper := launcherSandbox(t)
+	home, pogod, wrapper := launcherSandbox(t)
+
+	// Positive control: with no override both renderings exec pogod, so the
+	// assertions below are reading the field the override changes.
+	unit, err := renderSystemdUnit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(unit, "\nExecStart="+pogod+"\n") {
+		t.Fatalf("no override: unit does not exec pogod %q:\n%s", pogod, unit)
+	}
+
 	writeServiceConfig(t, home, wrapper)
 
 	rendered, _, err := renderLaunchdPlist()
@@ -137,6 +148,14 @@ func TestLauncherOverrideIsRenderedIntoProgramArguments(t *testing.T) {
 	}
 	if got := plistProgram([]byte(rendered)); got != wrapper {
 		t.Errorf("ProgramArguments[0] = %q; want the configured launcher %q", got, wrapper)
+	}
+
+	unit, err = renderSystemdUnit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(unit, "\nExecStart="+wrapper+"\n") {
+		t.Errorf("systemd unit does not exec the configured launcher %q:\n%s", wrapper, unit)
 	}
 }
 
@@ -183,28 +202,47 @@ func TestChooseInstallLauncher(t *testing.T) {
 	}
 }
 
-// stubInstall replaces the two seams installLaunchd reaches the world through.
-// The orchestrated sequence is never run: the stub records the steps it was
-// handed and returns an error, so a regression in the guard reaches a recorder,
-// not launchd or the live pogod.
+// stubInstall replaces the three seams installLaunchd reaches the world
+// through. The orchestrated sequence is never run: the stub records the steps
+// it was handed and returns an error, so a regression in the guard reaches a
+// recorder, not launchd or the live pogod. The read-only launchctl queries
+// outside the sequence (the fast-path `list`, the failure mail's `print`) get a
+// canned "not loaded" answer, so the tests do not read the host's launchd
+// either.
 type stubInstall struct {
-	ran   bool
-	steps installSteps
-	mails []string
+	ran       bool
+	steps     installSteps
+	mails     []string
+	launchctl [][]string
 }
 
 func stubInstallSeams(t *testing.T) *stubInstall {
 	t.Helper()
 	s := &stubInstall{}
-	prevRun, prevMail := runInstallSequence, installMailer
+	prevRun, prevMail, prevRead := runInstallSequence, installMailer, launchctlRead
 	runInstallSequence = func(steps installSteps) (orchestrationRestore, error) {
 		s.ran = true
 		s.steps = steps
 		return orchestrationRestore{}, errors.New("stub: orchestrated install not run in tests")
 	}
 	installMailer = func(subject, body string) { s.mails = append(s.mails, subject+"\n"+body) }
-	t.Cleanup(func() { runInstallSequence, installMailer = prevRun, prevMail })
+	launchctlRead = func(args ...string) ([]byte, error) {
+		s.launchctl = append(s.launchctl, args)
+		return []byte("Could not find service \"" + launchdLabel + "\" in domain for port\n"), errors.New("stub: exit status 113")
+	}
+	t.Cleanup(func() { runInstallSequence, installMailer, launchctlRead = prevRun, prevMail, prevRead })
 	return s
+}
+
+// launchctlVerbs lists the launchctl subcommands the stub was asked for.
+func (s *stubInstall) launchctlVerbs() []string {
+	var verbs []string
+	for _, a := range s.launchctl {
+		if len(a) > 0 {
+			verbs = append(verbs, a[0])
+		}
+	}
+	return verbs
 }
 
 // TestInstallRefusesAWrapperPlistBeforeTouchingAnything drives the real
@@ -233,6 +271,11 @@ func TestInstallRefusesAWrapperPlistBeforeTouchingAnything(t *testing.T) {
 	if len(stub.mails) != 1 || !strings.Contains(stub.mails[0], "untouched") {
 		t.Errorf("want one failure mail saying orchestration was untouched; got %q", stub.mails)
 	}
+	// The refusal precedes the fast-path `list`; only the mail's `print` runs,
+	// and it runs through the seam.
+	if got := strings.Join(stub.launchctlVerbs(), ","); got != "print" {
+		t.Errorf("launchctl reads through the seam = %q; want \"print\"", got)
+	}
 }
 
 // TestInstallPositiveControlProceedsAndBacksUp is the same drive with the
@@ -258,6 +301,12 @@ func TestInstallPositiveControlProceedsAndBacksUp(t *testing.T) {
 	_ = installLaunchd(InstallOptions{})
 	if !stub.ran {
 		t.Fatal("a plist naming pogod was refused: the guard fires on the case it must pass")
+	}
+	// Both read-only launchctl queries went to the stub, not the host: the
+	// fast-path `list` and, because the stubbed sequence fails, the mail's
+	// `print`.
+	if got := strings.Join(stub.launchctlVerbs(), ","); got != "list,print" {
+		t.Errorf("launchctl reads through the seam = %q; want \"list,print\"", got)
 	}
 	if err := stub.steps.writePlist(); err != nil {
 		t.Fatalf("writePlist: %v", err)
@@ -399,4 +448,33 @@ func TestAuditDaemonPositiveControl(t *testing.T) {
 	if LaunchAgentsSupported() {
 		t.Fatal("com.pogo.daemon not audited")
 	}
+}
+
+// TestAuditLaunchAgentsClassifiesAWrapperPlist drives the path doctor and the
+// nightly actually take — AuditLaunchAgents, not classifyDaemonDrift directly —
+// against an installed wrapper plist. It pins the Classify wiring in
+// managedLaunchAgents: with that field unset the audit still reports stale,
+// but offers the bare `pogo service install` that destroys the wrapper.
+func TestAuditLaunchAgentsClassifiesAWrapperPlist(t *testing.T) {
+	if !LaunchAgentsSupported() {
+		t.Skip("AuditLaunchAgents audits nothing off darwin")
+	}
+	_, _, wrapper := launcherSandbox(t)
+	installedDaemonPlist(t, wrapper)
+	for _, a := range AuditLaunchAgents() {
+		if a.Label != launchdLabel {
+			continue
+		}
+		if a.Status != LaunchAgentStale {
+			t.Fatalf("wrapper plist: status = %q; want stale", a.Status)
+		}
+		if !strings.Contains(a.Detail, "custom launcher "+wrapper) {
+			t.Errorf("Detail does not name the custom launcher — Classify not reached:\n%s", a.Detail)
+		}
+		if a.Remedy == "pogo service install" || !strings.Contains(a.Remedy, wrapper) {
+			t.Errorf("Remedy = %q; want the set-[service]-launcher remedy carrying %s", a.Remedy, wrapper)
+		}
+		return
+	}
+	t.Fatal("com.pogo.daemon not audited")
 }
