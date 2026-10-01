@@ -99,7 +99,7 @@ func TestRefusalNamesFinishedWorkers(t *testing.T) {
 		t.Fatalf("status = %d, want 503 with three claimed workers: %s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
-	for _, want := range []string{"already has 3 worker(s)", "d-cat", "already done", "drellem2/pogo#128"} {
+	for _, want := range []string{"already has 3 worker(s)", "d-cat", "already done or archived", "drellem2/pogo#128"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("refusal missing %q: %s", want, body)
 		}
@@ -180,18 +180,53 @@ func TestMGItemStatusReaderReadsTheStoreLayout(t *testing.T) {
 	// A live id that also names an archived item reads as its live status.
 	write("claimed/mg-both.md.1", "mg-both")
 	write("archive/2026-04/mg-both.md", "mg-both")
+	// pending/ and shelved/ are filed items outside FindFrom's default search;
+	// they read as their own status, not as absent (mg-36096) — and a parked id
+	// that also names an archived item reads as parked, not archived.
+	write("pending/mg-p1.md", "mg-p1")
+	write("shelved/mg-s1.md", "mg-s1")
+	write("pending/mg-pz.md", "mg-pz")
+	write("archive/2026-04/mg-pz.md", "mg-pz")
 
 	r := MGItemStatusReader{Root: root}
-	for id, want := range map[string]string{"mg-c1": "claimed", "mg-d1": "done", "mg-z1": "archived", "mg-both": "claimed"} {
+	for id, want := range map[string]string{
+		"mg-c1": "claimed", "mg-d1": "done", "mg-z1": "archived", "mg-both": "claimed",
+		"mg-p1": "pending", "mg-s1": "shelved", "mg-pz": "pending",
+	} {
 		got, err := r.ReadItemStatus(id)
 		if err != nil || got != want {
 			t.Errorf("ReadItemStatus(%s) = %q, %v; want %q", id, got, err, want)
 		}
 	}
-	for _, id := range []string{"mg-nope", "", "../x", "mg-*"} {
+	for _, id := range []string{"mg-nope", "", "../x", "mg-*", ".."} {
 		if got, err := r.ReadItemStatus(id); err == nil {
 			t.Errorf("ReadItemStatus(%q) = %q with no error — an absent item must not read as a status", id, got)
 		}
+	}
+}
+
+// TestItemTerminalFunc: the done-reaper's probe built from the store reader
+// (mg-36096) answers done/archived as terminal, every other status — pending
+// and shelved included — as open, and passes a read error through so the
+// reaper leaves the polecat running rather than asserting a completion.
+func TestItemTerminalFunc(t *testing.T) {
+	probe := ItemTerminalFunc(ItemStatusReaderFunc(func(id string) (string, error) {
+		if id == "mg-err" {
+			return "", os.ErrNotExist
+		}
+		return strings.TrimPrefix(id, "mg-"), nil
+	}))
+	for id, want := range map[string]bool{
+		"mg-done": true, "mg-archived": true,
+		"mg-available": false, "mg-claimed": false, "mg-pending": false, "mg-shelved": false,
+	} {
+		got, err := probe(id)
+		if err != nil || got != want {
+			t.Errorf("probe(%s) = %v, %v; want %v", id, got, err, want)
+		}
+	}
+	if _, err := probe("mg-err"); err == nil {
+		t.Error("probe(mg-err) returned no error — an unreadable item must not read as open or done")
 	}
 }
 

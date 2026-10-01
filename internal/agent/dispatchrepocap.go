@@ -489,7 +489,7 @@ func (r *Registry) repoCapRefusal(repo, workItemID string) string {
 	}
 	if len(occ.Finished) > 0 {
 		fmt.Fprintf(&b, "(%d more worker(s) are live but NOT counted, because their work item is already "+
-			"done and they are only waiting to be reaped: %s — drellem2/pogo#128.) ",
+			"done or archived (terminal) and they are only waiting to be reaped: %s — drellem2/pogo#128.) ",
 			len(occ.Finished), strings.Join(occ.Finished, ", "))
 	}
 	if occ.RefineryReserved > 0 {

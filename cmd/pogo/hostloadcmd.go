@@ -215,7 +215,7 @@ func printRepoOccupancy(w io.Writer, occ *agent.RepoOccupancy, hostWouldRefuse b
 	}
 	if n := len(occ.Finished); n > 0 {
 		fmt.Fprintf(w, "Finished:   %d more live, NOT counted — %s\n"+
-			"            (their work item is already done; they are waiting to be reaped — drellem2/pogo#128)\n",
+			"            (their work item is already done or archived; they are waiting to be reaped — drellem2/pogo#128)\n",
 			n, strings.Join(occ.Finished, ", "))
 	}
 	if n := len(occ.ReviewSlotHolds); n > 0 {

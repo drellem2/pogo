@@ -391,8 +391,9 @@ type doneReapRegistry interface {
 type doneReaper struct {
 	reg doneReapRegistry
 	// itemDone reports whether a work item reached a terminal state
-	// (client.MGWorkItemDone in production). An ERROR means "cannot tell", and
-	// the polecat is left alone: a store we could not read is not evidence of
+	// (agent.ItemTerminalFunc over agent.MGItemStatusReader in production — a
+	// store read, not one `mg show` per live polecat per tick, mg-36096). An
+	// ERROR means "cannot tell", and the polecat is left alone: a store we could not read is not evidence of
 	// completion. That direction matches resolvePostMergeWork, and for the same
 	// reason — the expensive mistake here is asserting a completion we have no
 	// standing to assert.
@@ -434,8 +435,9 @@ type doneReaper struct {
 	filer filerNotifier
 
 	// mu serialises Check against itself, and guards exempt. The heartbeat fires
-	// every ~30s and dispatches this in a goroutine, while a Check shells out to
-	// `mg show` once per live polecat and can block on a slow store — so two
+	// every ~30s and dispatches this in a goroutine, while a Check reads the store
+	// per live polecat (and shells out to `mg show` for the review and stage
+	// probes) and can block on a slow store — so two
 	// Checks can overlap. Without the guard the second would re-decide against
 	// the same polecat the first is already stopping, and issue a duplicate Stop.
 	mu       sync.Mutex

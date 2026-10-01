@@ -35,6 +35,21 @@ type ItemStatusReader interface {
 	ReadItemStatus(workItemID string) (status string, err error)
 }
 
+// ItemTerminalFunc adapts r to the "has this item reached a terminal state"
+// probe the done-reaper takes: true for done or archived, an error when the
+// status could not be read. It is the store read in place of client.
+// MGWorkItemDone's `mg show` subprocess, which the reaper paid once per live
+// polecat per heartbeat tick.
+func ItemTerminalFunc(r ItemStatusReader) func(id string) (bool, error) {
+	return func(id string) (bool, error) {
+		status, err := r.ReadItemStatus(id)
+		if err != nil {
+			return false, err
+		}
+		return IsTerminalItemStatus(status), nil
+	}
+}
+
 // ItemStatusReaderFunc adapts a function to ItemStatusReader.
 type ItemStatusReaderFunc func(string) (string, error)
 
@@ -49,6 +64,11 @@ func IsTerminalItemStatus(status string) bool {
 	return status == "done" || status == "archived"
 }
 
+// parkedStatusDirs are the store directories holding filed, non-terminal items
+// outside the default working set, in search order. Each directory's name is
+// the status it records.
+var parkedStatusDirs = []string{"pending", "shelved"}
+
 // MGItemStatusReader is the production ItemStatusReader: the status as the
 // macguffin store's directory layout records it.
 type MGItemStatusReader struct {
@@ -60,7 +80,7 @@ type MGItemStatusReader struct {
 // ReadItemStatus implements ItemStatusReader.
 //
 // The live status directories are searched first, exactly as workitem.FindFrom
-// searches them, and only then the archive. That order matches `mg show`: a
+// searches them, then pending/ and shelved/, and only then the archive. That order matches `mg show`: a
 // live id that ALSO names an archived item (the collision mgShowJSON documents)
 // reads as its live status, never as archived.
 func (m MGItemStatusReader) ReadItemStatus(id string) (string, error) {
@@ -81,9 +101,19 @@ func (m MGItemStatusReader) ReadItemStatus(id string) (string, error) {
 		return item.Status, nil
 	}
 	// workitem.FindFrom refuses ids with separators; mirror that before
-	// building a glob from one.
-	if strings.ContainsAny(id, `/\*?[`) {
+	// building a path or a glob from one.
+	if strings.ContainsAny(id, `/\*?[`) || id == ".." {
 		return "", fmt.Errorf("work item %q not found", id)
+	}
+	// pending/ and shelved/ hold FILED items that workitem.FindFrom does not
+	// search by default. Neither is terminal, so the cap counted a worker on
+	// one either way (fail-open); reading them here is what lets `pogo agent
+	// list` show their real status instead of none, and lets the done-reaper
+	// read them as "not done" rather than as a store it could not read.
+	for _, dir := range parkedStatusDirs {
+		if _, err := os.Stat(filepath.Join(work, dir, id+".md")); err == nil {
+			return dir, nil
+		}
 	}
 	if matches, err := filepath.Glob(filepath.Join(work, "archive", "*", id+".md")); err == nil && len(matches) > 0 {
 		if _, err := os.Stat(matches[0]); err == nil {

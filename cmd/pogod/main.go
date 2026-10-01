@@ -3314,7 +3314,7 @@ Flags:
 
 	var doneReap *doneReaper
 	if cfg.DoneReap.Enabled && agentRegistry != nil {
-		doneReap = newDoneReaper(agentRegistry, client.MGWorkItemDone, client.MGWorkItemReviews, cfg.DoneReap.IdleGrace)
+		doneReap = newDoneReaper(agentRegistry, agent.ItemTerminalFunc(agent.MGItemStatusReader{}), client.MGWorkItemReviews, cfg.DoneReap.IdleGrace)
 		doneReap.SetFilerNotifier(filerNotify)
 		// The gate reap (mg-9af1). Without this probe the reaper cannot see the
 		// one worker whose item is deliberately never allowed to reach done — a

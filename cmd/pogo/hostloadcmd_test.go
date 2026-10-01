@@ -45,7 +45,7 @@ func TestRepoOccupancyRendersEveryState(t *testing.T) {
 				Repo: "/dev/pogo", Count: 1, Polecats: []string{"a-cat"}, Finished: []string{"bdd6", "9d97"},
 				Cap: 3, ConfiguredCap: 3, RefineryKnown: true,
 			},
-			want: []string{"Workers:    1 — a-cat", "Finished:   2 more live, NOT counted — bdd6, 9d97", "already done"},
+			want: []string{"Workers:    1 — a-cat", "Finished:   2 more live, NOT counted — bdd6, 9d97", "already done or archived"},
 		},
 		{
 			name: "full repo names the refusal and its scope",

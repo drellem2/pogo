@@ -10,7 +10,7 @@ import (
 
 // TestDoneReapRegistrySatisfiesInterface is the compile-time half of the wiring
 // proof: the REAL registry — not just the test fake — is a doneReapRegistry, and
-// client.MGWorkItemDone has the shape the reaper's probe expects. Without this,
+// agent.ItemTerminalFunc has the shape the reaper's probe expects. Without this,
 // a rename on either side breaks the daemon while every unit test above still
 // passes against the fake.
 func TestDoneReapRegistrySatisfiesInterface(t *testing.T) {
@@ -18,9 +18,9 @@ func TestDoneReapRegistrySatisfiesInterface(t *testing.T) {
 	if reg == nil {
 		t.Fatal("unreachable: the assignment above is the assertion")
 	}
-	r := newDoneReaper(reg, client.MGWorkItemDone, client.MGWorkItemReviews, 0)
+	r := newDoneReaper(reg, agent.ItemTerminalFunc(agent.MGItemStatusReader{}), client.MGWorkItemReviews, 0)
 	if r.itemDone == nil {
-		t.Fatal("client.MGWorkItemDone did not fit the terminal-state probe signature")
+		t.Fatal("agent.ItemTerminalFunc did not fit the terminal-state probe signature")
 	}
 	if r.itemReviews == nil {
 		t.Fatal("client.MGWorkItemReviews did not fit the review-declaration probe signature (mg-aaf6)")
@@ -38,8 +38,11 @@ func TestDoneReapRegistrySatisfiesInterface(t *testing.T) {
 // not reproduce it one layer up.
 func TestDoneReapIsWiredToTheHeartbeat(t *testing.T) {
 	src := stripGoComments(readSourceFile(t, "main.go"))
-	if !strings.Contains(src, "newDoneReaper(agentRegistry, client.MGWorkItemDone") {
-		t.Error("pogod does not construct the done-item reaper over the real registry and store probe")
+	// The terminal-state probe is the store read, not `mg show`: the reaper
+	// asks it once per live polecat per ~30s tick, and a subprocess each was the
+	// cost mg-36096 removed.
+	if !strings.Contains(src, "newDoneReaper(agentRegistry, agent.ItemTerminalFunc(agent.MGItemStatusReader{})") {
+		t.Error("pogod does not construct the done-item reaper over the real registry and the store-read status probe (mg-36096)")
 	}
 	// The review exemption is fail-OPEN when its probe is nil (the builder gets
 	// reaped), so a daemon that constructs the reaper without one is a daemon
