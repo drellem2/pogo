@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDetectFindsTheLiveOrphan reconstructs the exact case doctor's sweep found
@@ -221,5 +222,156 @@ func TestReadTokenIsWhatMgAccepts(t *testing.T) {
 	// without it, and nobody reading this report IS the abandoned mailbox.
 	if got, want := ReadCommand("b468", "1785.1"), "mg mail read b468/1785.1 --force"; got != want {
 		t.Errorf("ReadCommand = %q, want %q", got, want)
+	}
+}
+
+// polecatNow is the fixed clock the polecat-population tests age mail against.
+var polecatNow = time.Date(2026, 10, 1, 4, 0, 0, 0, time.UTC)
+
+func ago(d time.Duration) string { return polecatNow.Add(-d).Format(time.RFC3339) }
+
+// TestSweepFindsMailInAPolecatBoxWithNoSchedule is mg-aa74's acceptance test.
+// Since mg-5496 phase 2 a polecat has NO mail-check schedule — wakewatch points
+// it at mail on arrival — so a sweep that enumerated only schedules would never
+// look at a polecat box again. Here the polecat has no schedule at all, mail
+// has sat unread in BOTH its boxes for an hour, and the sweep must still find
+// it: once the timer is gone, this is the only backstop for a pointer that
+// failed.
+func TestSweepFindsMailInAPolecatBoxWithNoSchedule(t *testing.T) {
+	msgs := map[string][]Message{
+		"paa74": {{ID: "1.1", From: "mayor", Subject: "STOP: wrong premise", Date: ago(time.Hour)}},
+		"aa74":  {{ID: "2.1", From: "pm-x", Subject: "scope note", Date: ago(40 * time.Minute)}},
+	}
+	rep := Sweep{
+		Checks:   nil, // no mail-check for anyone, the polecat included
+		Polecats: []Polecat{{Agent: "paa74", WorkItemID: "mg-aa74"}},
+		Boxes: []Mailbox{
+			{Name: "paa74", Unread: 1, Exists: true},
+			{Name: "aa74", Unread: 1, Exists: true},
+		},
+		List: func(m string) ([]Message, error) { return msgs[m], nil },
+		Now:  polecatNow,
+	}.Run()
+
+	if !rep.Actionable() || len(rep.Findings) != 2 {
+		t.Fatalf("want 2 findings (agent box and work-item box), got %+v", rep.Findings)
+	}
+	if rep.Polecats != 1 {
+		t.Errorf("polecats judged = %d, want 1", rep.Polecats)
+	}
+	for _, f := range rep.Findings {
+		if f.Kind != KindUnconsumed || f.Agent != "paa74" || f.ScheduleID != "" || len(f.Messages) != 1 {
+			t.Errorf("finding = %+v, want an unconsumed-polecat-mail finding for paa74 naming its message", f)
+		}
+	}
+	out := rep.Render()
+	for _, want := range []string{"STRANDED MAIL", "LIVE polecat paa74", "STOP: wrong premise",
+		`pogo nudge paa74 "mail waiting — mg mail list paa74"`, `mg mail list aa74"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q:\n%s", want, out)
+		}
+	}
+	// The recovery must NOT be a forced read: the polecat is alive and is the
+	// right reader, and reading on its behalf hides the mail from it.
+	if strings.Contains(out, "--force") {
+		t.Errorf("a live polecat's own mail must not be read on its behalf:\n%s", out)
+	}
+}
+
+// TestSweepLeavesYoungPolecatMailToWakewatch is the control the test above is
+// worthless without. Mail a few seconds or minutes old is the normal state of a
+// working polecat's box — the pointer is in flight or queued behind a turn — and
+// a sweep that flagged it would fire on the healthy majority.
+func TestSweepLeavesYoungPolecatMailToWakewatch(t *testing.T) {
+	msgs := map[string][]Message{
+		"paa74": {
+			{ID: "1.1", From: "mayor", Subject: "fresh", Date: ago(30 * time.Second)},
+			{ID: "1.2", From: "mayor", Subject: "already read, old", Date: ago(2 * time.Hour), Read: true},
+		},
+	}
+	rep := Sweep{
+		Polecats: []Polecat{{Agent: "paa74", WorkItemID: "mg-aa74"}},
+		Boxes:    []Mailbox{{Name: "paa74", Unread: 1, Exists: true}, {Name: "aa74", Unread: 0, Exists: true}},
+		List:     func(m string) ([]Message, error) { return msgs[m], nil },
+		Now:      polecatNow,
+	}.Run()
+	if rep.Actionable() {
+		t.Fatalf("young polecat mail was flagged: %+v", rep.Findings)
+	}
+	out := rep.Render()
+	if !strings.Contains(out, "No stranded mail") || !strings.Contains(out, "1 live polecat(s)") {
+		t.Errorf("render should be an all-clear that counts the polecat:\n%s", out)
+	}
+}
+
+// TestSweepPolecatGraceBoundaryAndUnreadableDates pins the edges of the age
+// rule: exactly-grace-old mail is judged, and a date that does not parse counts
+// as old — an age we cannot read is not evidence of youth.
+func TestSweepPolecatGraceBoundaryAndUnreadableDates(t *testing.T) {
+	for _, tc := range []struct {
+		name, date string
+	}{
+		{"exactly the grace", ago(DefaultGrace)},
+		{"unparseable date", "yesterday-ish"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := Sweep{
+				Polecats: []Polecat{{Agent: "pq", WorkItemID: ""}},
+				Boxes:    []Mailbox{{Name: "pq", Unread: 1, Exists: true}},
+				List: func(string) ([]Message, error) {
+					return []Message{{ID: "1", From: "mayor", Subject: "s", Date: tc.date}}, nil
+				},
+				Now: polecatNow,
+			}.Run()
+			if len(rep.Findings) != 1 {
+				t.Fatalf("want 1 finding, got %+v", rep.Findings)
+			}
+		})
+	}
+}
+
+// TestSweepPolecatFindingSurvivesAnUnreadableBox keeps a list failure from
+// muting the finding, as for abandoned boxes: mg's unread count already says
+// mail is there.
+func TestSweepPolecatFindingSurvivesAnUnreadableBox(t *testing.T) {
+	rep := Sweep{
+		Polecats: []Polecat{{Agent: "pq"}},
+		Boxes:    []Mailbox{{Name: "pq", Unread: 2, Exists: true}},
+		List:     func(string) ([]Message, error) { return nil, errors.New("mg exited 1") },
+		Now:      polecatNow,
+	}.Run()
+	if len(rep.Findings) != 1 || rep.Findings[0].ReadError == "" {
+		t.Fatalf("want 1 finding carrying the read error, got %+v", rep.Findings)
+	}
+}
+
+// TestSweepLeavesAScheduledPolecatToItsSchedule covers the rollout overlap: a
+// polecat spawned before mg-aa74 still has its mail-check, which opens both its
+// boxes on cadence. Its unread mail is the schedule's to read, exactly as
+// TestDetectStaysSilentOnHealthyFleets has it, and must not be double-reported.
+func TestSweepLeavesAScheduledPolecatToItsSchedule(t *testing.T) {
+	rep := Sweep{
+		Checks:   []MailCheck{{Agent: "p4f8c", ScheduleID: "mail-check-mg-4f8c", Polled: []string{"p4f8c", "mg-4f8c"}}},
+		Polecats: []Polecat{{Agent: "p4f8c", WorkItemID: "mg-4f8c"}},
+		Boxes:    []Mailbox{{Name: "p4f8c", Unread: 1, Exists: true}, {Name: "4f8c", Unread: 3, Exists: true}},
+		List: func(string) ([]Message, error) {
+			t.Error("a scheduled polecat's boxes were enumerated")
+			return nil, nil
+		},
+		Now: polecatNow,
+	}.Run()
+	if rep.Actionable() || rep.Polecats != 0 {
+		t.Fatalf("scheduled polecat was judged by the polecat path: polecats=%d findings=%+v", rep.Polecats, rep.Findings)
+	}
+}
+
+// TestSweepWithOnlyPolecatsIsNotNothingChecked: the "nothing was checked"
+// render is for a sweep that judged nothing. With polecat schedules gone, a
+// fleet whose only mail-checks are crew's — or none — still judged its
+// polecats, and must say so rather than disclaim the result.
+func TestSweepWithOnlyPolecatsIsNotNothingChecked(t *testing.T) {
+	rep := Sweep{Polecats: []Polecat{{Agent: "pq"}}, Boxes: []Mailbox{{Name: "pq", Exists: true}}, Now: polecatNow}.Run()
+	if out := rep.Render(); strings.Contains(out, "nothing was checked") {
+		t.Errorf("a sweep that judged a polecat claimed it checked nothing:\n%s", out)
 	}
 }

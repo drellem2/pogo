@@ -478,12 +478,6 @@ type Registry struct {
 	// registry, scheduler disabled) makes park skip schedule handling.
 	schedulePauser SchedulePauser
 
-	// mailCheckRegistrar, when set, auto-registers a per-polecat mail-check
-	// schedule at spawn so a review-loop polecat notices peer mail without
-	// polling (mg-e633). pogod wires it to its scheduler; nil (bare registry,
-	// scheduler disabled) makes spawn skip registration.
-	mailCheckRegistrar MailCheckRegistrar
-
 	// mailboxRegistrar, when set, provisions a polecat's mg mailboxes at spawn
 	// so it is addressable before anyone has mailed it (mg-7dc1). Since mg-d639
 	// a send to an unregistered name is refused rather than filed, so without
@@ -491,13 +485,6 @@ type Registry struct {
 	// starts. pogod wires it to `mg mail register`; nil (bare registry, no
 	// macguffin) makes spawn skip provisioning.
 	mailboxRegistrar MailboxRegistrar
-
-	// scheduleRegisterFailureReporter, when set, emits schedule_register_failed
-	// telemetry when a polecat's mail-check loop could not be registered —
-	// including when mailCheckRegistrar itself is nil (scheduler failed to load
-	// at startup). Wired independently of the registrar so the nil-registrar
-	// drop is still made loud (mg-6fe0). nil falls back to a log line.
-	scheduleRegisterFailureReporter ScheduleRegisterFailureReporter
 
 	// startVerifier, when set, reports whether a freshly spawned polecat has
 	// actually begun its work (claimed its mg work item) — the HARD

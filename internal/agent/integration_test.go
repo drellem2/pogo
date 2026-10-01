@@ -165,23 +165,26 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 		t.Errorf("expanded template must teach the polecat to read its branch")
 	}
 
-	// Verify the mail-check schedule instruction is present. Polecats are not
-	// on pogod's nudge cycle, so they need a mail-check schedule to proactively
-	// check mail. Post-mg-2f79 this uses pogod's sleep-resilient `pogo schedule`
-	// rather than Claude's in-process `CronCreate`. Post-mg-e633 spawn-polecat
-	// auto-registers it under the polecat's bare registry name, so the template
-	// instruction addresses `$POGO_AGENT_NAME` (matching the spawn-registered
-	// entry, keeping it idempotent) rather than the event identity.
-	scheduleChecks := []string{
-		"pogo schedule $POGO_AGENT_NAME", // pogod scheduler CLI, bare agent name
-		"--cron \"*/10 * * * *\"",        // 10-minute cadence
-		"--id mail-check-gt-a3f",         // idempotent registration key (work item id)
-		"mg mail list $POGO_AGENT_NAME",  // mailbox — the AGENT NAME, see below
-		"mg mail list gt-a3f",            // AND the work-item box, see below
+	// Verify the mail instructions. Until mg-aa74 this demanded a `*/10`
+	// mail-check registration (`pogo schedule ... --id mail-check-<id>`);
+	// since mg-5496 phase 2 polecats have none — wakewatch sends a pointer
+	// nudge when mail arrives — so the registration must be ABSENT and the
+	// pointer must be described. Both mailboxes are still named, because the
+	// pointer tells the polecat to run `mg mail list <box>`.
+	mailChecks := []string{
+		"wakewatch",                     // how mail now reaches the polecat
+		"pointer nudge",                 // ...and what it looks like
+		"mg mail list $POGO_AGENT_NAME", // mailbox — the AGENT NAME, see below
+		"mg mail list gt-a3f",           // AND the work-item box, see below
 	}
-	for _, check := range scheduleChecks {
+	for _, check := range mailChecks {
 		if !strings.Contains(expanded, check) {
-			t.Errorf("expanded template missing mail-check schedule instruction %q", check)
+			t.Errorf("expanded template missing mail instruction %q", check)
+		}
+	}
+	for _, retired := range []string{"--id mail-check-gt-a3f", "--cron \"*/10 * * * *\""} {
+		if strings.Contains(expanded, retired) {
+			t.Errorf("expanded template still registers a mail-check (%q); pogod stopped giving polecats one in mg-aa74", retired)
 		}
 	}
 
@@ -207,19 +210,12 @@ func TestPolecatTemplateExpansion(t *testing.T) {
 			"mail leaves it unread (mg-4f8c)")
 	}
 
-	// Verify guidance against additional schedules is still present — only the
-	// one mail-check schedule is allowed.
-	if !strings.Contains(expanded, "One mail-check schedule only") {
-		t.Errorf("expanded template missing guidance limiting background triggers to the mail-check schedule")
+	// Verify guidance against background schedules is present — since mg-aa74
+	// a polecat registers none at all.
+	if !strings.Contains(expanded, "No background schedules") {
+		t.Errorf("expanded template missing guidance forbidding background schedules")
 	}
 
-	// `CronCreate` should still be mentioned, but only as the documented
-	// ephemeral-in-session option that is explicitly NOT for the mail-check
-	// loop. Catch a regression where someone re-introduces it as the primary
-	// mechanism by checking for the ephemeral guidance heading.
-	if !strings.Contains(expanded, "ephemeral") {
-		t.Errorf("expanded template missing CronCreate-as-ephemeral guidance")
-	}
 }
 
 // TestMayorStartSpawnPolecat is an end-to-end test that verifies:

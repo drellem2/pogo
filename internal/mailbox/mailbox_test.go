@@ -1,6 +1,9 @@
 package mailbox
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestCanonicalMatchesWhatMGResolves pins the one rule that makes two spellings
 // the same inbox. Verified against the live `mg` binary: `mg mail list mg-aa96`
@@ -57,5 +60,30 @@ func TestReadsIsTheOnePredicate(t *testing.T) {
 	// report true for an arbitrary name.
 	if Reads("Check your mail and handle any unread messages.", "p4f8c") {
 		t.Error("Reads reported a match against a message that names no mailbox at all")
+	}
+}
+
+// TestPolecatBoxes pins the polecat mailbox set that spawn provisioning and the
+// stranded-mail sweep both read (mg-aa74). The cases are the ones the old
+// nudge-derived set covered, so retiring the nudge changed the source of the
+// answer and not the answer.
+func TestPolecatBoxes(t *testing.T) {
+	cases := []struct {
+		name, agentName, workItemID string
+		want                        []string
+	}{
+		{"prefixed work item", "p7dc1", "mg-7dc1", []string{"p7dc1", "mg-7dc1"}},
+		{"bare work item", "pc-x", "wi42", []string{"pc-x", "wi42"}},
+		{"no work item", "pc-y", "", []string{"pc-y"}},
+		{"blank work item", "pc-y", "  ", []string{"pc-y"}},
+		{"names collapse to one box", "aa96", "mg-aa96", []string{"aa96"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PolecatBoxes(tc.agentName, tc.workItemID)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("PolecatBoxes(%q, %q) = %v, want %v", tc.agentName, tc.workItemID, got, tc.want)
+			}
+		})
 	}
 }

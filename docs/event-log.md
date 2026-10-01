@@ -1700,7 +1700,7 @@ It exists because the judgement already existed and had exactly one reader. `pog
   - `agents` (array of string, required): the bare agent names, sorted — the argument the operator could not construct. This is the field that makes the log answer "which one" without opening the mail
   - `identities` (array of string, required): the same agents as event-log identities (`crew-<name>`), the shape a notifier matches senders against
   - `scanned` (int, required): agents in the registry
-  - `judged` (int, required): how many of them diagnose had standing to judge. The gap is coverage, not health — polecats (mg-e633/mg-6fe0 own their registration path), configured-but-stopped agents, and agents whose prompt tree could not be read are deliberately **unjudged**. `judged: 0` is not an all-clear
+  - `judged` (int, required): how many of them diagnose had standing to judge. The gap is coverage, not health — polecats (no mail loop by design since mg-aa74; wakewatch and check-strandedmail cover them), configured-but-stopped agents, and agents whose prompt tree could not be read are deliberately **unjudged**. `judged: 0` is not an all-clear
   - `notified` (string, required): comma-separated mailboxes the notice was sent to
   - `escalated` (bool, required): true when `human` was copied as well
   - `coordinator` (bool, required): true when the roster names `notify_to` itself, which escalates **immediately** regardless of `escalate_after`. Mailing an agent that has no mail loop about its own missing mail loop is not a weaker alert, it is no alert; the coordinator is itself a crew agent and has had the fleet's defects before its peers (mg-d385)

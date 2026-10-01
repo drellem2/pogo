@@ -40,7 +40,8 @@ import (
 // THE FIX AND WHY IT IS HERE. pogod already knows the work-item id at spawn — it
 // arrives as `--id` — so it can take the claim itself, before the process starts.
 // That converts a convention someone must remember into a mechanism, the same
-// move registerPolecatMailCheck made for the mail-check loop (mg-e633).
+// move the spawn-time mail-check registration made for the mail-check loop
+// (mg-e633; retired by mg-aa74 when wakewatch pointers replaced the loop).
 //
 // The claim is taken BEFORE r.Spawn, not after, and the ordering is the whole
 // point rather than an implementation detail. Claiming after the process is

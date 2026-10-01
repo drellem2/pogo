@@ -44,12 +44,9 @@ import (
 //
 // WHICH BOXES. Both of them, and NOT by writing the list down twice. A polecat's
 // mail can be in its agent name or its work-item id, because which one holds it
-// is a property of the sender rather than of the polecat (mg-4f8c) — so the
-// mail-check nudge instructs it to read both. Registering a different set than
-// the nudge reads reopens this ticket as "registered the box nobody reads", so
-// the set is DERIVED from that nudge (see polecatMailboxes): the boxes
-// provisioned are literally the boxes the polecat is told to open, and a later
-// edit to either side moves both.
+// is a property of the sender rather than of the polecat (mg-4f8c). The set
+// comes from mailbox.PolecatBoxes (see polecatMailboxes), the same function the
+// stranded-mail sweep reads, so a box is provisioned exactly when it is watched.
 
 // MailboxRegistrar provisions an agent's mg mailbox so mail can be addressed to
 // it before anyone has mailed it.
@@ -90,30 +87,22 @@ func (r *Registry) getMailboxRegistrar() MailboxRegistrar {
 }
 
 // polecatMailboxes returns every mailbox that must exist for a polecat to be
-// reachable — by READING THEM OUT of the mail-check nudge the same spawn
-// registers, rather than by recomputing them.
-//
-// The recomputation is the bug this avoids. pm-pogo's constraint on the fix was
-// that spawn-registration must create whatever set the polecat's instructions
-// tell it to read, and that the two must agree; a second derivation that drifts
-// by one `mg-` prefix or one dropped work-item box satisfies neither, and fails
-// silently in the direction that is hardest to see — a provisioned box nobody
-// opens, or an opened box nobody could provision. Reading the nudge makes
-// agreement structural: PolecatMailCheckMessage is the single statement of where
-// this polecat's mail lives, and both the instruction and the provisioning are
-// consequences of it.
-//
-// This is the same lesson as internal/mailbox's package comment, applied one
-// level up: two components answering "where does this agent's mail live?"
-// independently is how mg-aa96 and mg-4f8c happened.
+// reachable. It is mailbox.PolecatBoxes, and deliberately not a second
+// derivation: until mg-aa74 this set was read back out of the polecat's
+// mail-check nudge so provisioning and polling agreed by construction. The
+// nudge is gone (wakewatch points at mail on arrival instead), so the shared
+// function is now what keeps provisioning, wakewatch's recipient resolution and
+// the stranded-mail sweep naming the same boxes. Two components answering
+// "where does this agent's mail live?" independently is how mg-aa96 and
+// mg-4f8c happened.
 func polecatMailboxes(agentName, workItemID string) []string {
-	return mailbox.ListInvocations(PolecatMailCheckMessage(agentName, workItemID))
+	return mailbox.PolecatBoxes(agentName, workItemID)
 }
 
 // registerPolecatMailboxes provisions the mailboxes a freshly spawned polecat
 // must be reachable at.
 //
-// NON-FATAL to the spawn, like the mail-check loop beside it: the polecat is
+// NON-FATAL to the spawn: the polecat is
 // already running, and killing a live worker over an unprovisioned inbox trades
 // a reachability problem for a lost work item. But not silent either — an
 // unaddressable polecat is the exact failure this ticket is about, and it
@@ -145,9 +134,9 @@ func (r *Registry) registerPolecatMailboxes(agentName, workItemID string) {
 
 // reportMailboxRegisterFailed records that a polecat mailbox could not be
 // provisioned. It emits straight to the event log rather than going through a
-// settable reporter: unlike the mail-check registrar there is nothing here that
-// pogod wires late, so the indirection that mg-6fe0 needed (a reporter that
-// survives a scheduler which never loaded) would buy nothing.
+// settable reporter: there is nothing here that pogod wires late, so a reporter
+// that survives a scheduler which never loaded (mg-6fe0's indirection, retired
+// with the spawn-time mail-check in mg-aa74) would buy nothing.
 func (r *Registry) reportMailboxRegisterFailed(agentName, box, reason string) {
 	events.Emit(context.Background(), events.Event{
 		EventType: "mailbox_register_failed",

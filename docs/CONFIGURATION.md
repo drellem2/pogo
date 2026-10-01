@@ -2661,8 +2661,9 @@ are **report-only**.
   `agent.Registry.MailLoopReport`, which runs diagnose's own `mailLoopFor` over
   every agent. Two implementations of "who is owed a mail loop" would drift, and
   the announcer would start reporting REDs `diagnose` denies.
-- **Who is not judged, deliberately.** Polecats (they register their own loop at
-  spawn, mg-e633, and escalate on failure, mg-6fe0); a configured agent that is
+- **Who is not judged, deliberately.** Polecats (since mg-aa74 they have no mail
+  loop by design — wakewatch points them at mail on arrival, and
+  `pogo check-strandedmail` is the backstop); a configured agent that is
   not running ("not there" is not a fault); an agent whose prompt tree cannot be
   read. That last one is the cry-wolf guard mg-738f argued for: a wrong "yes"
   costs a false RED, and a health signal that cries wolf gets ignored.
@@ -3445,6 +3446,22 @@ than one that arrived late; if the recipient is still running, the original
 sender must re-send. A sweep with no mail-checks to judge says so rather than
 printing an all-clear. Exit status is 0 when nothing is stranded and 1 when
 anything is, so it can gate a schedule or CI step.
+
+**Live polecats are enumerated directly (mg-aa74).** Since mg-5496 phase 2 a
+polecat has **no mail-check schedule**: pogod no longer registers one at spawn,
+and wakewatch sends the polecat a short pointer nudge when mail arrives in
+either of its boxes. A sweep built only on schedules would therefore stop
+looking at polecat boxes without saying so. The sweep now also lists running
+polecats from pogod and, for each one with no mail-check of its own, judges both
+of its boxes (`mailbox.PolecatBoxes`: the agent name and the work-item id — the
+same set spawn provisions). Unread mail older than `--grace` (default `15m`,
+wakewatch's re-nudge threshold) is reported as `unconsumed_polecat_mail`. With
+the timer gone, that is most likely a pointer that failed, and this sweep is
+the only remaining backstop. Younger mail is left to wakewatch. The recovery
+printed for these findings is a `pogo nudge`, **not** a forced read: the polecat
+is alive and is the right reader, and reading its mail for it would mark the
+mail read and hide it from the polecat. A polecat that still has a mail-check (one
+spawned before mg-aa74) is left to that schedule.
 
 Source of truth: `internal/strandedmail/`, `cmd/pogo/checkstrandedmail.go`.
 

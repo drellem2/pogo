@@ -2730,9 +2730,9 @@ func TestInitPromptsRefusalIsAtomic(t *testing.T) {
 	}
 }
 
-// polecatMailCheckTemplates is every template that prescribes a mail-check
-// schedule. Kept as one list so a new polecat template cannot be added with a
-// mailbox rule of its own.
+// polecatMailCheckTemplates is every polecat template — every one that tells
+// its agent where its mail is and how it learns that mail arrived. Kept as one
+// list so a new polecat template cannot be added with a mailbox rule of its own.
 var polecatMailCheckTemplates = []string{
 	"prompts/templates/polecat.md",
 	"prompts/templates/polecat-qa.md",
@@ -2742,25 +2742,42 @@ var polecatMailCheckTemplates = []string{
 	"prompts/templates/polecat-build-pr.md",
 }
 
-// TestPolecatTemplatesIncludeMailCheckCron locks in the requirement that
-// every polecat template instructs the agent to register a mail-check cron at
-// startup. Without this, polecats won't proactively read mail and the mayor
-// can't reach them mid-task. See work item mg-c1d3.
-func TestPolecatTemplatesIncludeMailCheckCron(t *testing.T) {
+// TestPolecatTemplatesRegisterNoMailCheck is mg-c1d3's test inverted by
+// mg-aa74 (mg-5496 phase 2). It used to REQUIRE every polecat template to
+// register a `*/10` mail-check, because without one a polecat never noticed mail
+// mid-task. pogod's wakewatch now sends a pointer nudge when mail arrives, so
+// the timer is spend with no work behind it — and a template that still told
+// polecats to register one would quietly restore the whole cost, since pogod no
+// longer registers it at spawn and nothing else would notice the template doing
+// so.
+//
+// So the template must say how mail DOES arrive (a wakewatch pointer), must not
+// carry a mail-check registration, and must still name `mg mail list`, which is
+// what the pointer tells the polecat to run.
+func TestPolecatTemplatesRegisterNoMailCheck(t *testing.T) {
 	for _, path := range polecatMailCheckTemplates {
 		data, err := defaultPrompts.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		s := string(data)
-		if !strings.Contains(s, "CronCreate") {
-			t.Errorf("%s: expected CronCreate instruction in template", path)
+		for _, retired := range []string{
+			"--id mail-check-",
+			`--cron "*/10 * * * *"`,
+			"## Reacting to scheduler fires",
+			"pogo schedule ack",
+			"One mail-check schedule only",
+		} {
+			if strings.Contains(s, retired) {
+				t.Errorf("%s: still carries %q — polecats have no mail-check schedule since mg-aa74; "+
+					"a template that registers one re-creates the timer pogod stopped registering", path, retired)
+			}
 		}
-		if !strings.Contains(s, "mg mail list") {
-			t.Errorf("%s: expected the mail-check prompt to call `mg mail list`", path)
-		}
-		if !strings.Contains(s, "*/10 * * * *") {
-			t.Errorf("%s: expected the cron schedule `*/10 * * * *` (every 10 minutes)", path)
+		for _, want := range []string{"wakewatch", "pointer nudge", "mg mail list"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("%s: missing %q — the template must say how mail reaches the polecat now "+
+					"that there is no timer (mg-aa74)", path, want)
+			}
 		}
 	}
 }
@@ -2810,14 +2827,6 @@ func TestPolecatTemplatesReadBothMailboxes(t *testing.T) {
 			t.Errorf("%s: expected the mail-check prompt to ALSO read `mg mail list {{.Id}}` — "+
 				"which box holds a message is decided by the sender, so mail from anyone who addressed "+
 				"the work item is sitting in that box and nothing else will ever open it (mg-4f8c)", path)
-		}
-		// The schedule id stays keyed on the work item: it names the unit of
-		// work and is what the coordinator removes on stop. It is a THIRD
-		// identity, distinct from either mailbox. Asserting it here is what
-		// stops a future edit from "fixing" things by collapsing the id onto
-		// the agent name.
-		if !strings.Contains(s, "--id mail-check-{{.Id}}") {
-			t.Errorf("%s: expected the schedule id to stay keyed on the work item (`--id mail-check-{{.Id}}`)", path)
 		}
 		// The two traps that make every other failure here read as something
 		// else. Without the --force note a polecat meeting the cross-box
@@ -5723,8 +5732,9 @@ func TestPromptsSayABodyEditAfterDispatchReachesNobody(t *testing.T) {
 // mg-9ccc's correction ended by sending the editor to mail, and the sentence it
 // installed promised more than mail can do: "the mail is the only channel that
 // reaches the worker". Mail reaches a {{.Worker}} only if the {{.Worker}}
-// OUTLIVES the send and gets a mail-check fire (agent.PolecatMailCheckCron,
-// `*/10`) before it finishes. A short item finishes first, routinely.
+// OUTLIVES the send and reads it before it finishes (then on a `*/10`
+// mail-check fire; since mg-aa74 on a wakewatch pointer). A short item finishes
+// first, routinely.
 //
 // doctor followed the prescribed procedure exactly and got a false assurance
 // from it: it resolved pda12 from `pogo agent list` (running, 27m uptime),
@@ -5852,25 +5862,18 @@ func TestPromptsSayMailToADispatchedWorkerIsBestEffort(t *testing.T) {
 	}
 }
 
-// The cadence the mg-2726 paragraph quotes is the one pogod actually registers.
+// The mg-2726 paragraph no longer teaches a polecat mail-check cadence
+// (mg-aa74).
 //
-// The correction's whole mechanism is "mail lands only if the worker gets a
-// mail-check fire before it finishes", and it names that cadence as `*/10` so
-// the reader can weigh it against how long the item will take. That number is
-// agent.PolecatMailCheckCron, not a constant of the prose — if the auto-
-// registered cadence ever moves, three prompts start teaching a stale interval
-// and the arithmetic a reader does with it comes out wrong in the safe-looking
-// direction.
-func TestPromptsQuoteTheRealPolecatMailCheckCadence(t *testing.T) {
-	// `*/10 * * * *` — the paragraph quotes the minute field alone, which is
-	// how the fleet refers to it everywhere else.
-	minutes, _, _ := strings.Cut(PolecatMailCheckCron, " ")
-	if minutes != "*/10" {
-		t.Fatalf("PolecatMailCheckCron minute field is %q, but mayor.md, "+
-			"pm-template.md and crew/doctor.md all tell the reader a dispatched "+
-			"{{.Worker}} reads mail on a `*/10` fire (mg-2726). Update the three "+
-			"prompts and this test together", minutes)
-	}
+// The correction's mechanism is "mail lands only if the worker reads it before
+// it finishes". Until mg-aa74 the read was a `*/10` mail-check fire that pogod
+// registered at spawn, and the paragraph quoted that cadence so a reader could
+// weigh it against the item's length. pogod no longer registers it: wakewatch
+// points the polecat at mail on arrival, and a busy one reads the pointer at its
+// turn boundary. A prompt still saying "gets a mail-check fire (`*/10`)" would
+// have the reader budget ten minutes for something that now takes about one —
+// or, worse, wait for a fire that will never come.
+func TestPromptsDoNotQuoteARetiredPolecatMailCheckCadence(t *testing.T) {
 	for _, path := range []string{
 		"prompts/mayor.md",
 		"prompts/pm/pm-template.md",
@@ -5880,9 +5883,14 @@ func TestPromptsQuoteTheRealPolecatMailCheckCadence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		if !strings.Contains(string(data), "mail-check fire (`"+minutes+"`)") {
-			t.Errorf("%s: does not name the mail-check cadence %q as the thing the "+
-				"mail has to beat (mg-2726)", path, minutes)
+		s := string(data)
+		if strings.Contains(s, "mail-check fire (`*/10`)") {
+			t.Errorf("%s: still tells the reader a {{.Worker}} reads mail on a `*/10` mail-check "+
+				"fire; pogod stopped registering that schedule in mg-aa74", path)
+		}
+		if !strings.Contains(s, "wakewatch sends it a short pointer nudge") || !strings.Contains(s, "turn boundary") {
+			t.Errorf("%s: the mg-2726 paragraph must say what the mail now has to beat — a wakewatch "+
+				"pointer read at the {{.Worker}}'s next turn boundary (mg-aa74)", path)
 		}
 	}
 }

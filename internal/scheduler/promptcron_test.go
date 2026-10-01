@@ -111,13 +111,15 @@ func TestPromptSchedulesDoNotCollide(t *testing.T) {
 
 	// Vacuity guard: this test is worthless if the extraction quietly finds
 	// nothing. The prompts registered 11 schedules across 9 files when this
-	// was written; assert a floor rather than an exact count so adding a
-	// prompt does not fail the build for the wrong reason.
+	// was written; mg-aa74 removed the six polecat templates' mail-checks
+	// (polecats are woken by wakewatch pointers now), leaving 6 across 3.
+	// Assert a floor rather than an exact count so adding a prompt does not
+	// fail the build for the wrong reason.
 	total := 0
 	for _, cs := range byFile {
 		total += len(cs)
 	}
-	if total < 10 {
+	if total < 5 {
 		t.Fatalf("found only %d cron registrations across %d prompt files — the extraction is broken, not the prompts", total, len(byFile))
 	}
 	// pm-template is the file this rule was written for; if its three

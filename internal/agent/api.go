@@ -1003,11 +1003,11 @@ func mailLoopFor(a *Agent, p MailCheckProvider) mailLoopState {
 // missed three populations and every boundary was drawn by its own acceptance
 // criterion:
 //
-//   - POLECATS (unregistered / no prompt) — NOT judged, deliberately. They
-//     register their own loop at spawn (mg-e633) with their own escalation path
-//     on failure (mg-6fe0); one between spawn and registration is not a fault.
-//     This is mg-61a0/mg-13a3's population, and it is covered by the witness,
-//     not by diagnose.
+//   - POLECATS (unregistered / no prompt) — NOT judged, deliberately. Since
+//     mg-aa74 (mg-5496 phase 2) a polecat has NO mail loop by design: wakewatch
+//     points it at mail on arrival, and check-strandedmail enumerates live
+//     polecats' boxes as the backstop. Judging them here would turn every
+//     healthy polecat RED.
 //   - A CONFIGURED AGENT THAT IS NOT RUNNING — NOT judged. That is the "not
 //     there" case above, and UNKNOWN is the right answer.
 //   - AN AGENT WITH AN UNREADABLE PROMPT TREE — NOT judged; we cannot classify
@@ -2416,21 +2416,18 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// Provision the polecat's mailboxes BEFORE registering the loop that reads
-	// them, because the ordering is the one thing that makes the pair coherent:
-	// the nudge tells the polecat to open two boxes, and since mg-d639 an
-	// unregistered name is a refusal rather than an empty inbox. Registering
-	// first means the first fire of that loop cannot land on a box that does not
-	// exist yet (mg-7dc1).
+	// Provision the polecat's mailboxes. Since mg-d639 an unregistered name is a
+	// refusal rather than an empty inbox, so a polecat whose boxes do not exist
+	// is unreachable by mail from its first second (mg-7dc1).
+	//
+	// No mail-check schedule is registered here any more (mg-aa74, mg-5496
+	// phase 2). It used to be (mg-e633): a */10 timer woke the polecat to poll
+	// both boxes. wakewatch now sends a short pointer nudge when mail ARRIVES in
+	// either box, re-sends it while the mail stays unread, and reports it
+	// unconsumed to the coordinator after that; `pogo check-strandedmail`
+	// enumerates live polecats' boxes as the backstop for a pointer that failed.
+	// A polecat with no mail-check is therefore the healthy state, not a deaf one.
 	r.registerPolecatMailboxes(spawnReq.Name, spawnReq.Id)
-
-	// Auto-register the polecat's mail-check loop so a builder<->reviewer review
-	// loop can round-trip without the mayor registering schedules by hand
-	// (mg-e633). Addressed to the bare agent name, which is the identity pogod
-	// delivers nudges to and reaps under when the polecat exits. Best-effort:
-	// the polecat is already running, so a registration failure is logged, not
-	// fatal.
-	r.registerPolecatMailCheck(spawnReq.Name, spawnReq.Id)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

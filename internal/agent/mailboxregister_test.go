@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -92,61 +93,6 @@ func TestSpawnPolecatRegistersBothMailboxes(t *testing.T) {
 	want := []string{"pc-boxes", "wi42"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("spawn provisioned %v, want both boxes %v — a box that is not registered refuses mail addressed to it (mg-d639), so an omitted one makes the polecat unreachable at that name", got, want)
-	}
-}
-
-// TestSpawnPolecatRegistersEveryMailboxItsNudgeReads is pm-pogo's explicit
-// constraint on this fix, as an assertion: spawn-registration must create
-// whatever set the polecat's own instructions tell it to read, and the two names
-// must AGREE — otherwise this reopens as "registered the box nobody reads".
-//
-// It compares the provisioned set against the boxes parsed out of the real
-// mail-check nudge rather than against a literal, which is the point. A literal
-// would only restate what the code does; this fails whenever the two sides
-// diverge, in either direction — a box added to the nudge but never provisioned
-// (mail to it is refused) and a box provisioned but dropped from the nudge (mail
-// to it is delivered and never read) are both caught, and both are silent in
-// production.
-func TestSpawnPolecatRegistersEveryMailboxItsNudgeReads(t *testing.T) {
-	testsandbox.Isolate(t)
-
-	writeTemplate(t, "agreepc", "# agree polecat\nbody {{.Id}}\n")
-
-	reg, err := NewRegistry(shortSocketDir(t))
-	if err != nil {
-		t.Fatalf("NewRegistry: %v", err)
-	}
-	defer reg.StopAll(2 * time.Second)
-	reg.SetCommandConfig(catCommandConfig{})
-
-	boxes := &fakeMailboxRegistrar{}
-	mc := &fakeMailCheckRegistrar{}
-	reg.SetMailboxRegistrar(boxes)
-	reg.SetMailCheckRegistrar(mc)
-
-	spawnPolecatViaAPI(t, reg, SpawnPolecatAPIRequest{
-		Name:     "pc-agree",
-		Template: "agreepc",
-		Id:       "mg-7dc1",
-	})
-
-	calls := mc.recorded()
-	if len(calls) != 1 {
-		t.Fatalf("RegisterMailCheck called %d times, want 1", len(calls))
-	}
-	read := canonicalSet(mailbox.ListInvocations(calls[0].message))
-	if len(read) == 0 {
-		t.Fatal("the registered mail-check nudge names no mailbox at all; there is nothing for provisioning to agree with")
-	}
-	provisioned := canonicalSet(boxes.recorded())
-
-	if len(read) != len(provisioned) {
-		t.Fatalf("nudge reads %v but spawn provisioned %v — a box in one list and not the other is silent in both directions (refused mail, or delivered mail nobody opens)", read, provisioned)
-	}
-	for i := range read {
-		if read[i] != provisioned[i] {
-			t.Fatalf("nudge reads %v but spawn provisioned %v — they must name the same boxes", read, provisioned)
-		}
 	}
 }
 
@@ -242,17 +188,20 @@ func TestSpawnPolecatWithoutMailboxRegistrarStillSpawns(t *testing.T) {
 	})
 }
 
-// TestPolecatMailboxesMatchesTheNudge is the unit-level version of the agreement
-// property, run without a spawn so it also pins the prefix handling.
+// TestPolecatMailboxesMatchesTheSweep is the unit-level agreement property, run
+// without a spawn so it also pins the prefix handling. Until mg-aa74 the other
+// side of the agreement was the polecat's mail-check nudge; that nudge is gone,
+// and the side that must now agree is mailbox.PolecatBoxes, which the
+// stranded-mail sweep enumerates live polecats' boxes with.
 //
-// The `mg-` case is the one worth stating: the nudge names the work item as
-// `mg-7dc1` while `mg mail list 7dc1` reads the same box, because mg strips the
-// prefix. Provisioning passes the nudge's spelling through untouched and lets mg
+// The `mg-` case is the one worth stating: the work item is spelled `mg-7dc1`
+// while `mg mail list 7dc1` reads the same box, because mg strips the prefix.
+// Provisioning passes the spelling through untouched and lets mg
 // canonicalize — verified against mg v0.3.1-dev.19 on 2026-08-07, where
 // `mg mail register mg-abcd` reported {"mailbox":"abcd","created":true}. A pogo
 // -side stripper here would be a SECOND canonicalizer, which is the defect
 // internal/mailbox exists to prevent.
-func TestPolecatMailboxesMatchesTheNudge(t *testing.T) {
+func TestPolecatMailboxesMatchesTheSweep(t *testing.T) {
 	cases := []struct {
 		name, agentName, workItemID string
 		want                        []string
@@ -267,7 +216,7 @@ func TestPolecatMailboxesMatchesTheNudge(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := canonicalSet(polecatMailboxes(tc.agentName, tc.workItemID))
-			read := canonicalSet(mailbox.ListInvocations(PolecatMailCheckMessage(tc.agentName, tc.workItemID)))
+			shared := canonicalSet(mailbox.PolecatBoxes(tc.agentName, tc.workItemID))
 			if len(got) != len(tc.want) {
 				t.Fatalf("polecatMailboxes(%q,%q) = %v, want %v", tc.agentName, tc.workItemID, got, tc.want)
 			}
@@ -276,8 +225,8 @@ func TestPolecatMailboxesMatchesTheNudge(t *testing.T) {
 					t.Fatalf("polecatMailboxes(%q,%q) = %v, want %v", tc.agentName, tc.workItemID, got, tc.want)
 				}
 			}
-			if len(read) != len(got) {
-				t.Fatalf("provisioned %v but the nudge reads %v", got, read)
+			if strings.Join(shared, ",") != strings.Join(got, ",") {
+				t.Fatalf("provisioned %v but mailbox.PolecatBoxes (what the stranded-mail sweep watches) says %v", got, shared)
 			}
 		})
 	}

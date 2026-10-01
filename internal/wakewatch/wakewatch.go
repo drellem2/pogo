@@ -26,9 +26,13 @@
 //     unread in <box>". Mail to a box that is not an agent at all (`human`, a
 //     probe's selftest box) is neither pointed at nor bounced.
 //
-// # SHADOW (phase 1)
+// # SHADOW (phase 1), then POLECATS (phase 2)
 //
-// Nothing here replaces the mail-check timers; they stay on. Phase 2's gate is
+// In phase 1 nothing here replaced the mail-check timers. Since phase 2
+// (mg-aa74) POLECATS have no timer: pogod no longer registers one at spawn, so
+// for a polecat this pointer IS the wake, and `pogo check-strandedmail` —
+// which enumerates live polecats' boxes — is the backstop for a pointer that
+// failed. Crew keep their timers until phase 3 (mg-a2ff). Phase 2's gate was
 // `pogo check-wakewatch` (see Check), which joins every mail a timer-driven
 // mail-check turn read against the pointers sent before it and lists the misses.
 // Every decision this package takes — including the ones where it deliberately

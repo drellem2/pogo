@@ -1681,13 +1681,14 @@ all moved their recurring schedules from Claude's in-process `CronCreate` to
   many cron points were missed. The agent-name suffix matches the polecat
   `mail-check-<work-item-id>` convention and avoids the registry-purge
   failure mode seen with short / generic IDs (mg-8e5d).
-- `internal/agent/prompts/templates/polecat.md`, `polecat-qa.md`,
-  `polecat-build-pr.md`, and `polecat-triage.md` — one
-  per-polecat mail-check schedule with id `mail-check-<work-item-id>`. The
-  coordinator removes these in step 3 of its coordination loop when stopping a
-  polecat; pogod also auto-GCs them as a backstop (see **Stale mail-check GC**
-  below) so an agent whose process vanishes without an explicit `schedule rm`
-  doesn't leave a schedule firing into the void.
+- `internal/agent/prompts/templates/polecat*.md` — **no schedule since
+  mg-aa74** (mg-5496 phase 2). Polecats used to get one per-polecat
+  mail-check with id `mail-check-<work-item-id>`, registered at spawn and in
+  the template. Now wakewatch sends a pointer nudge when their mail arrives,
+  and `pogo check-strandedmail` enumerates live polecats' boxes as the
+  backstop for a pointer that failed. A polecat spawned before the change
+  keeps its schedule until it exits, and the reap and stale-GC paths below
+  still remove it.
 - `internal/agent/prompts/mayor.md` — unchanged. The coordinator's in-process
   coordination loop still uses `ScheduleWakeup` for dynamic self-pacing
   (it's event-driven through mail and idempotent across sleep, so missed

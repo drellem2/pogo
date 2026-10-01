@@ -31,8 +31,10 @@ func collapseSpace(s string) string {
 // misreading #183 removed, whatever deliverer.go says.
 //
 // Positive control: the same walk must find the NEW wording in at least as many
-// prompt files as quoted the line when this was written (8), or a broken walk —
-// wrong FS, renamed directory — would pass by finding nothing.
+// prompt files as quote the line — 8 when this was written, 2 since mg-aa74
+// removed the scheduler-fire section from the six polecat templates (polecats
+// no longer receive scheduler fires) — or a broken walk — wrong FS, renamed
+// directory — would pass by finding nothing.
 func TestLatenessLine_QuotedCopiesDoNotClaimAMeasurement(t *testing.T) {
 	const current = "(on 2026-08-19 a fire sent 10s late was not read for 4h19m)"
 
@@ -60,8 +62,8 @@ func TestLatenessLine_QuotedCopiesDoNotClaimAMeasurement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk prompts: %v", err)
 	}
-	if quoting < 8 {
-		t.Fatalf("found the current lateness wording in only %d prompt files, want >= 8 — the walk is broken, not the prompts", quoting)
+	if quoting < 2 {
+		t.Fatalf("found the current lateness wording in only %d prompt files, want >= 2 — the walk is broken, not the prompts", quoting)
 	}
 
 	for _, rel := range []string{"ARCHITECTURE.md", filepath.Join("cmd", "pogo", "main.go")} {

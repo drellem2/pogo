@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/scheduler"
@@ -19,9 +21,10 @@ import (
 // finds mail nothing will ever READ — the residue a repointed mail-check leaves
 // behind.
 func newCheckStrandedMailCmd(jsonOutput *bool) *cobra.Command {
-	return &cobra.Command{
+	var grace time.Duration
+	cmd := &cobra.Command{
 		Use:   "check-strandedmail",
-		Short: "Report mail sitting in a mailbox no live mail-check reads (never acts)",
+		Short: "Report mail nothing is going to read: abandoned boxes, and live polecats' unconsumed mail (never acts)",
 		Long: `Report every mailbox that holds unread mail which no live mail-check polls.
 
 Each mail-check schedule carries two identities: the agent it is FOR, and the
@@ -51,8 +54,19 @@ have to forge a sender (mg mail send writes a new message with a new From),
 which turns a recoverable orphan into a message whose provenance is a lie. The
 report prints the exact ` + "`mg mail read`" + ` for each stranded message instead.
 
-A sweep with no mail-check schedules to judge says so in as many words rather
-than printing an all-clear: "nothing is wrong" and "I could not look" rendering
+LIVE POLECATS ARE ENUMERATED DIRECTLY (mg-aa74). Since mg-5496 phase 2 a
+polecat has no mail-check schedule: wakewatch sends it a pointer nudge when
+mail arrives. A sweep that enumerated schedules alone would therefore stop
+looking at polecat boxes altogether. So every RUNNING polecat with no mail-check
+of its own has both of its boxes (agent name and work-item id) judged, and
+unread mail older than --grace is reported as unconsumed — most likely a
+pointer that failed. Younger mail is left to wakewatch, which is still pointing
+at it. The recovery printed for these is a nudge, NOT a forced read: the
+polecat is alive and is the right reader, and reading on its behalf would mark
+the mail read and hide it from the agent it was for.
+
+A sweep with no mail-check schedules and no live polecats to judge says so in
+as many words rather than printing an all-clear: "nothing is wrong" and "I could not look" rendering
 identically is the exact failure this whole lineage is about.
 
 Exit status is 0 when nothing is stranded, 1 when any mailbox holds mail nobody
@@ -81,12 +95,34 @@ reads (so it can gate a schedule or CI step).`,
 				})
 			}
 
+			// Live polecats, by registry (mg-aa74): the population no schedule
+			// enumerates any more. Fail rather than judge without them — a sweep
+			// that silently skipped every polecat would print the all-clear this
+			// command exists to withhold.
+			agents, err := client.ListAgents()
+			if err != nil {
+				cli.ExitWithError(*jsonOutput, fmt.Sprintf("cannot list agents from pogod: %v", err), cli.ExitError)
+			}
+			var polecats []strandedmail.Polecat
+			for _, a := range agents {
+				if a.Type != agent.TypePolecat || a.Status != agent.StatusRunning {
+					continue
+				}
+				polecats = append(polecats, strandedmail.Polecat{Agent: a.Name, WorkItemID: a.WorkItemID})
+			}
+
 			boxes, err := strandedmail.EnumerateMailboxes()
 			if err != nil {
 				cli.ExitWithError(*jsonOutput, fmt.Sprintf("cannot enumerate mailboxes: %v", err), cli.ExitError)
 			}
 
-			rep := strandedmail.Detect(checks, boxes, strandedmail.ListMessages)
+			rep := strandedmail.Sweep{
+				Checks:   checks,
+				Polecats: polecats,
+				Boxes:    boxes,
+				List:     strandedmail.ListMessages,
+				Grace:    grace,
+			}.Run()
 			if *jsonOutput {
 				cli.PrintJSON(rep)
 			} else {
@@ -97,4 +133,7 @@ reads (so it can gate a schedule or CI step).`,
 			}
 		},
 	}
+	cmd.Flags().DurationVar(&grace, "grace", strandedmail.DefaultGrace,
+		"unread mail in a live polecat's box younger than this is left to wakewatch and not reported")
+	return cmd
 }

@@ -41,11 +41,18 @@ func TestEveryShippedPromptRegistersAMailCheckSchedule(t *testing.T) {
 	mailCheckID := regexp.MustCompile(`--id\s+mail-check-(\S+)`)
 
 	// exempt lists prompts that legitimately register no mail-check loop, with
-	// the reason. It is empty: every prompt currently shipped boots an agent
-	// that must be reachable by mail. A future non-agent document under
-	// prompts/ belongs here WITH a reason — adding an entry should feel like a
-	// claim someone has to defend, which is exactly what was missing before.
+	// the reason. A future non-agent document under prompts/ belongs here WITH
+	// a reason — adding an entry should feel like a claim someone has to
+	// defend, which is exactly what was missing before.
 	exempt := map[string]string{}
+
+	// Polecat templates are exempt as a CLASS since mg-aa74 (mg-5496 phase 2):
+	// a polecat is woken by wakewatch's pointer nudge when mail arrives, and
+	// pogod no longer gives it a timer. The exemption is conditional rather
+	// than a blanket pass — the template must say how mail DOES reach the
+	// polecat, so a new polecat template that says nothing about it is still
+	// caught here as deaf.
+	const polecatPrefix, polecatWake = "templates/polecat", "wakewatch"
 
 	var checked int
 	err := fs.WalkDir(DefaultPromptsFS(), ".", func(p string, d fs.DirEntry, err error) error {
@@ -65,6 +72,15 @@ func TestEveryShippedPromptRegistersAMailCheckSchedule(t *testing.T) {
 		}
 		checked++
 		body := string(b)
+
+		if strings.HasPrefix(p, polecatPrefix) {
+			if !strings.Contains(body, polecatWake) {
+				t.Errorf("%s: a polecat template registers no mail-check (correct since mg-aa74) but never "+
+					"says the agent is woken by a %s pointer — an agent booted from it is told of no "+
+					"way its mail reaches it", p, polecatWake)
+			}
+			return nil
+		}
 
 		if !registration.MatchString(body) {
 			t.Errorf("%s: no `pogo schedule ... --cron` registration.\n"+

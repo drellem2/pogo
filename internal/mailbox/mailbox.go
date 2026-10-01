@@ -3,11 +3,11 @@
 //
 // It is a leaf package with no pogo dependencies for a structural reason. The
 // registration guard lives in internal/scheduler, the stranded-mail sweep in
-// internal/strandedmail, and the text of the nudge that tells a polecat where
-// to look in internal/agent — and internal/scheduler already imports
-// internal/agent, so internal/agent cannot import it back. Without somewhere
-// neutral to put these three functions, the agent side would have to keep its
-// own copy of "same mailbox?".
+// internal/strandedmail, and polecat mailbox provisioning in internal/agent —
+// and internal/scheduler already imports internal/agent, so internal/agent
+// cannot import it back. Without somewhere neutral to put these functions, the
+// agent side would have to keep its own copy of "same mailbox?" and "which
+// boxes are a polecat's?" (PolecatBoxes).
 //
 // That copy is the bug. This whole lineage (mg-aa96, mg-4f8c) is two components
 // answering "where does this agent's mail live?" differently and nothing
@@ -82,4 +82,28 @@ func Reads(message, name string) bool {
 		}
 	}
 	return false
+}
+
+// PolecatBoxes is every mailbox a polecat's mail can be in: its agent name,
+// then its work-item id when the spawn carried one that is a different box.
+//
+// Before mg-aa74 this set was read back out of the polecat's mail-check nudge
+// (ListInvocations), which made provisioning agree with what the polecat polled
+// by construction. Polecats no longer poll — wakewatch points them at mail when
+// it arrives (mg-5496 phase 2) — so the nudge is gone and this is now the one
+// statement of the set. Three consumers must agree on it: spawn provisioning
+// (a box not registered refuses mail, mg-d639), wakewatch's recipient
+// resolution (agent name or work-item box), and the stranded-mail sweep, which
+// is the backstop for a pointer that failed. A box one of them knew and another
+// did not would be silent in exactly the way this package exists to prevent.
+//
+// Spellings are passed through as given — mg canonicalizes on register and on
+// read — and a work-item id that canonicalizes to the agent name is one box,
+// not two spellings of it.
+func PolecatBoxes(agentName, workItemID string) []string {
+	boxes := []string{agentName}
+	if strings.TrimSpace(workItemID) != "" && Canonical(workItemID) != Canonical(agentName) {
+		boxes = append(boxes, workItemID)
+	}
+	return boxes
 }

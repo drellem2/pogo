@@ -422,103 +422,18 @@ func (p schedulePauser) RestoreForAgent(entries []json.RawMessage) (int, error) 
 	return restored, firstErr
 }
 
-// mailCheckRegistrar implements agent.MailCheckRegistrar against the scheduler
-// so spawn-polecat can auto-register a polecat's mail-check loop at spawn time
-// (mg-e633). The entry is addressed to the polecat's bare registry name — the
-// identity PogodDeliverer.Get resolves for PTY nudge delivery and the reap path
-// (RemoveMailChecksForAgent) matches on exit — with a mail-check-<id> schedule
-// id so the scheduler's stale-entry sweep leaves it alone (mg-8e5d). Replay
-// policy "once" and nudge delivery mirror the crew-agent mail-check convention.
-type mailCheckRegistrar struct {
-	sched *scheduler.Scheduler
-	// escalate, when set, nudges the mayor that a live polecat was left with no
-	// mail-check reachability channel after verify+retry both failed. nil
-	// disables escalation (tests). Called ONLY on the persistent post-retry
-	// path — never for the benign startup nil-registrar (mg-6fe0).
-	escalate func(agentName, scheduleID string)
-}
-
-// RegisterMailCheck adds the polecat's mail-check schedule, then VERIFIES it
-// actually persisted and retries ONCE if not. A mail-check loop is a polecat's
-// primary reachability channel, so "best-effort" is the wrong contract:
-// Scheduler.Add's persist is a disk write that can transiently fail, and a
-// silent drop leaves a live worker unreachable. The verify+retry recovers that
-// transient persist-IO suspect; on a persistent failure it escalates to the
-// mayor (a live polecat going dark) and returns the error so the agent layer
-// records schedule_register_failed telemetry. It CANNOT recover a nil
-// registrar — that path never reaches here, it is handled a layer up (mg-6fe0).
-func (m mailCheckRegistrar) RegisterMailCheck(agentName, workItemID, cron, message string) error {
-	if m.sched == nil {
-		return nil
-	}
-	scheduleID := scheduler.MailCheckIDPrefix + workItemID
-	entry := scheduler.Entry{
-		Agent:        agentName,
-		ID:           scheduleID,
-		Kind:         scheduler.KindMailCheck,
-		Cron:         cron,
-		ReplayPolicy: scheduler.ReplayOnce,
-		Delivery:     scheduler.DeliveryNudge,
-		Message:      message,
-	}
-
-	err := m.addAndVerify(entry, agentName, scheduleID)
-	if err == nil {
-		return nil
-	}
-	// Retry once — recovers a transient persist-IO failure (Add rolls its own
-	// memory state back on a persist error, so the retry re-adds cleanly).
-	if err = m.addAndVerify(entry, agentName, scheduleID); err == nil {
-		return nil
-	}
-
-	// Persistent after retry: a live polecat with no reachability channel.
-	// Escalate to the mayor so a human/coordinator can intervene.
-	if m.escalate != nil {
-		m.escalate(agentName, scheduleID)
-	}
-	return err
-}
-
-// addAndVerify performs one Add followed by a Get to confirm the entry is
-// actually present afterward (Add reports persist errors, but a defensive Get
-// also catches a lost write / concurrent reap). Returns nil only when the entry
-// is verified present.
-func (m mailCheckRegistrar) addAndVerify(entry scheduler.Entry, agentName, scheduleID string) error {
-	if _, err := m.sched.Add(entry, time.Now()); err != nil {
-		return err
-	}
-	if _, ok := m.sched.Get(agentName, scheduleID); !ok {
-		return fmt.Errorf("mail-check schedule %s for %s absent after Add", scheduleID, agentName)
-	}
-	return nil
-}
-
 // mgMailboxRegistrar implements agent.MailboxRegistrar against the `mg` CLI so
 // spawn-polecat provisions a polecat's mailboxes at spawn time (mg-7dc1).
 //
-// It is wired unconditionally, NOT inside the scheduler-loaded branch that gates
-// mailCheckRegistrar. The two are independent: the mail-check loop needs a
-// scheduler, whereas addressability needs only macguffin. A daemon whose
-// scheduler failed to load still spawns polecats that people mail by hand, and
-// on that daemon a mailbox is the only reachability they have left.
+// It is wired unconditionally, NOT inside the scheduler-loaded branch:
+// addressability needs only macguffin. A daemon whose scheduler failed to load
+// still spawns polecats that people mail, and since mg-aa74 a polecat has no
+// mail-check schedule at all — its mailboxes plus wakewatch's pointers are its
+// whole reachability.
 type mgMailboxRegistrar struct{}
 
 func (mgMailboxRegistrar) RegisterMailbox(name string) error {
 	return client.RegisterMGMailbox(name)
-}
-
-// scheduleRegisterFailureReporter implements agent.ScheduleRegisterFailureReporter
-// by writing schedule_register_failed telemetry to the scheduler's own-root
-// events.log (logPath). It is wired EVEN WHEN scheduler.New fails — its whole
-// reason to exist is to make the startup nil-registrar drop loud — so it carries
-// the resolved own-root path directly rather than a *Scheduler (which may not
-// exist). Event-only: escalation to the mayor is the registrar adapter's job on
-// the persistent post-retry path, not this reporter's (mg-6fe0).
-type scheduleRegisterFailureReporter struct{ logPath string }
-
-func (r scheduleRegisterFailureReporter) ReportScheduleRegisterFailed(agentName, scheduleKey, reason string) {
-	scheduler.EmitScheduleRegisterFailedTo(r.logPath, agentName, scheduler.MailCheckIDPrefix+scheduleKey, reason)
 }
 
 // schedulerStallWindows implements agent.StallScheduleProvider against the
@@ -1206,8 +1121,9 @@ func (d *stallFallbackDamper) announce(recipient string) bool {
 // inform it". Nor does it double-deliver: mail is sent only when the PTY nudge
 // returned an error, i.e. only when nothing was written.
 //
-// The shape mirrors newMailCheckReachabilityEscalator below, which already got
-// this right — try the PTY, fall back to mail on failure.
+// The shape mirrors the polecat mail-check reachability escalator (mg-6fe0,
+// retired with the spawn-time mail-check in mg-aa74), which already got this
+// right — try the PTY, fall back to mail on failure.
 //
 // ptyTimeout is the wait-idle budget. Production passes
 // agent.DefaultNudgeTimeout (see newStallNudger); tests inject a short one so
@@ -1372,34 +1288,6 @@ func newStallNudgerWithTimeout(reg *agent.Registry, mail func(to, from, subject,
 func newStallNudger(reg *agent.Registry, mail func(to, from, subject, body string) error, fallbackCap int) stallwatch.Nudger {
 	return newStallNudgerWithTimeoutAndDamper(reg, mail, agent.DefaultNudgeTimeout,
 		newStallFallbackDamper(fallbackCap))
-}
-
-// newMailCheckReachabilityEscalator builds the mayor-nudge fired when a
-// polecat's mail-check schedule could not be registered even after
-// verify+retry (mg-6fe0). A live polecat with no mail-check loop has no
-// proactive reachability channel — it will miss reviewer findings and
-// re-review requests that drive the modify<->review loop — so this is a
-// coordination alert, not a cosmetic one. Delivery mirrors newStallNudger:
-// wait-idle PTY nudge when the mayor is running (never interrupts a busy turn),
-// durable macguffin mail otherwise so the signal survives an offline mayor.
-func newMailCheckReachabilityEscalator(reg *agent.Registry, coordinator string) func(agentName, scheduleID string) {
-	return func(agentName, scheduleID string) {
-		msg := fmt.Sprintf(
-			"reachability alert: polecat %s could not register its mail-check schedule %s after verify+retry — "+
-				"it has NO proactive mail channel and may miss reviewer findings / re-review requests. "+
-				"Re-register it (`pogo schedule %s --cron \"*/10 * * * *\" --id %s ...`) or restart it.",
-			agentName, scheduleID, agentName, scheduleID)
-		if reg != nil {
-			if a := reg.Get(coordinator); a != nil && a.Status == agent.StatusRunning {
-				if err := a.NudgeWithMode(msg, agent.NudgeWaitIdle, agent.DefaultNudgeTimeout); err == nil {
-					return
-				}
-			}
-		}
-		if err := client.SendMGMail(coordinator, "pogod", "polecat reachability alert", msg); err != nil {
-			log.Printf("pogod: mail-check reachability escalation to %s failed: %v", coordinator, err)
-		}
-	}
 }
 
 // newStartVerifier builds the post-spawn start-verification query for the
@@ -2216,15 +2104,6 @@ Flags:
 		conditions.Raise(conditionSchedulerNoHome(coordinator, err.Error()), time.Now())
 	} else {
 		conditions.Clear(rowA2SchedulerNoHome, time.Now())
-		// Wire the schedule-register failure reporter FIRST, independent of
-		// whether the scheduler below actually loads. If scheduler.New fails, the
-		// mail-check registrar is never installed and every polecat spawn takes
-		// the nil-registrar path — the startup suspect this telemetry exists to
-		// surface (mg-6fe0). The reporter targets the scheduler's own-root
-		// events.log, resolvable from schedPath even without a live *Scheduler.
-		agentRegistry.SetScheduleRegisterFailureReporter(
-			scheduleRegisterFailureReporter{logPath: scheduler.EventLogPath(schedPath)})
-
 		deliverer := &scheduler.PogodDeliverer{
 			Registry: agentRegistry,
 			Mail:     client.SendMGMail,
@@ -2277,15 +2156,6 @@ Flags:
 			agentRegistry.SetMailCheckProvider(schedulerMailChecks{sched: s})
 			// Let park/wake pause and restore an agent's schedules (mg-41e1).
 			agentRegistry.SetSchedulePauser(schedulePauser{sched: s})
-			// Auto-register a polecat's mail-check loop at spawn so review
-			// loops round-trip without manual schedule registration (mg-e633).
-			// On a persistent registration failure (verify+retry both failed),
-			// escalate to the mayor: a live polecat with no reachability channel
-			// is a coordination problem, not a cosmetic one (mg-6fe0).
-			agentRegistry.SetMailCheckRegistrar(mailCheckRegistrar{
-				sched:    s,
-				escalate: newMailCheckReachabilityEscalator(agentRegistry, coordinator),
-			})
 			log.Printf("pogod: scheduler loaded from %s", schedPath)
 		}
 	}
