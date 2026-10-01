@@ -76,8 +76,14 @@ type RepoOccupancy struct {
 	// branch is in the refinery's merge queue and the per-repo credit
 	// (MergeQueuedCredit) covers them (mg-976f). They are alive and polling,
 	// not building; a failed gate can send one back to building, which is why
-	// the credit is bounded. Live = Count + len(MergeQueued).
+	// the credit is bounded. Live = Count + len(MergeQueued) + len(Finished).
 	MergeQueued []string `json:"merge_queued,omitempty"`
+	// Finished are live workers in Repo that are NOT counted, because their
+	// work item already reads terminal (done/archived) — they have nothing
+	// left to build and are waiting only to be reaped (drellem2/pogo#128). A
+	// worker whose status could not be read is NOT here: it is counted, as it
+	// was before #128. Never in Polecats or MergeQueued.
+	Finished []string `json:"finished,omitempty"`
 	// MergeQueuedOverCredit are workers whose branch is in the queue but who
 	// ARE counted, because the credit was already spent. They are in Polecats.
 	MergeQueuedOverCredit []string `json:"merge_queued_over_credit,omitempty"`
@@ -280,11 +286,24 @@ func (r *Registry) RepoOccupancyFor(repo string) RepoOccupancy {
 	if len(live) > 0 {
 		workItems = r.polecatWorkItems()
 	}
+	// Finished workers first (drellem2/pogo#128), so a worker that is both
+	// finished and still in the merge queue does not spend the merge-queue
+	// credit on a slot it would not have held anyway.
 	excused := map[string]bool{}
+	occ.Finished = finishedPolecats(live, workItems, r.getItemStatusReader())
+	for _, name := range occ.Finished {
+		excused[name] = true
+	}
 	if cfg.MergeQueuedCredit > 0 && len(live) > 0 {
 		if q := r.getMergeQueue(); q != nil {
 			if mrs, known := q.QueuedIn(norm); known {
-				queued := mergeQueuedPolecats(live, workItems, mrs)
+				var waiting []string
+				for _, name := range live {
+					if !excused[name] {
+						waiting = append(waiting, name)
+					}
+				}
+				queued := mergeQueuedPolecats(waiting, workItems, mrs)
 				for i, name := range queued {
 					if i < cfg.MergeQueuedCredit {
 						excused[name] = true
@@ -336,6 +355,30 @@ func (r *Registry) RepoOccupancyFor(repo string) RepoOccupancy {
 	occ.WouldRefuse = cfg.Armed() && occ.Count+held >= occ.Cap
 	occ.WouldRefuseGHIssueBuild = cfg.Armed() && occ.Count+held+2 > occ.Cap
 	return occ
+}
+
+// finishedPolecats returns, in live's (sorted) order, the live workers whose
+// work item reads terminal. A worker with no work item, or whose status could
+// not be read, is left out — and so stays counted. That is the fail-open
+// direction for a cap: a worker we could not classify might be building, and
+// counting it is exactly what the cap did before #128.
+func finishedPolecats(live []string, workItems map[string]string, sr ItemStatusReader) []string {
+	if sr == nil {
+		return nil
+	}
+	var out []string
+	for _, name := range live {
+		id := strings.TrimSpace(workItems[name])
+		if id == "" {
+			continue
+		}
+		status, err := sr.ReadItemStatus(id)
+		if err != nil || !IsTerminalItemStatus(status) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 // mergeQueuedPolecats returns, in live's (sorted) order, the live workers that
@@ -443,6 +486,11 @@ func (r *Registry) repoCapRefusal(repo, workItemID string) string {
 	if len(occ.MergeQueuedOverCredit) > 0 {
 		fmt.Fprintf(&b, "(%s also only waiting on the merge queue, but the credit for waiting workers "+
 			"is spent, so they count.) ", strings.Join(occ.MergeQueuedOverCredit, ", "))
+	}
+	if len(occ.Finished) > 0 {
+		fmt.Fprintf(&b, "(%d more worker(s) are live but NOT counted, because their work item is already "+
+			"done and they are only waiting to be reaped: %s — drellem2/pogo#128.) ",
+			len(occ.Finished), strings.Join(occ.Finished, ", "))
 	}
 	if occ.RefineryReserved > 0 {
 		fmt.Fprintf(&b, "%d of the %d configured slots is RESERVED for the refinery, which has a "+

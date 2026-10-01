@@ -597,6 +597,10 @@ type Registry struct {
 	// flowReader reads a work item's state carrier for the review-slot
 	// reserve (mg-bf42). Nil means MGFlowReader{}.
 	flowReader FlowReader
+	// itemStatusReader reads a work item's status, so the per-repo cap can
+	// leave out a worker whose item is already terminal and /agents can report
+	// it (drellem2/pogo#128). Nil means MGItemStatusReader{}.
+	itemStatusReader ItemStatusReader
 
 	// repoResolver turns a work item's `repo` field into the path the cap
 	// counts workers in, when that field is a bare NAME rather than a path.

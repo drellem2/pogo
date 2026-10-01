@@ -2203,12 +2203,8 @@ running kept the old silent behaviour, and the only way to find out was to run
 					if a.LastActivity != "" {
 						activity = "  last-activity=" + a.LastActivity
 					}
-					workItem := ""
-					if a.WorkItemID != "" {
-						workItem = "  work-item=" + a.WorkItemID
-					}
 					fmt.Printf("%-20s  pid=%-6d  type=%-8s  status=%-10s  uptime=%s%s%s%s\n",
-						a.Name, a.PID, a.Type, a.Status, a.Uptime, mailWarnCell(a), activity, workItem)
+						a.Name, a.PID, a.Type, a.Status, a.Uptime, mailWarnCell(a), activity, agentListWorkCells(a))
 				}
 				printMailWarnSummary(os.Stdout, agents)
 				printAbsentFooter()

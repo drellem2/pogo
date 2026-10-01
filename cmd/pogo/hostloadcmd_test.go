@@ -37,6 +37,17 @@ func TestRepoOccupancyRendersEveryState(t *testing.T) {
 			deny: []string{"would currently be refused"},
 		},
 		{
+			// drellem2/pogo#128: a worker whose item is done is left out of the
+			// count, and must be NAMED, or the operator reconciling this against
+			// `pogo agent list` finds a worker the count never mentions.
+			name: "finished workers are named and not counted",
+			occ: &agent.RepoOccupancy{
+				Repo: "/dev/pogo", Count: 1, Polecats: []string{"a-cat"}, Finished: []string{"bdd6", "9d97"},
+				Cap: 3, ConfiguredCap: 3, RefineryKnown: true,
+			},
+			want: []string{"Workers:    1 — a-cat", "Finished:   2 more live, NOT counted — bdd6, 9d97", "already done"},
+		},
+		{
 			name: "full repo names the refusal and its scope",
 			occ: &agent.RepoOccupancy{
 				Repo: "/dev/pogo", Count: 3, Polecats: []string{"a-cat", "b-cat", "c-cat"},

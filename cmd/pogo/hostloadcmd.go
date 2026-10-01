@@ -213,6 +213,11 @@ func printRepoOccupancy(w io.Writer, occ *agent.RepoOccupancy, hostWouldRefuse b
 		fmt.Fprintf(w, "            %d more waiting on the queue but counted — the credit is spent: %s\n",
 			n, strings.Join(occ.MergeQueuedOverCredit, ", "))
 	}
+	if n := len(occ.Finished); n > 0 {
+		fmt.Fprintf(w, "Finished:   %d more live, NOT counted — %s\n"+
+			"            (their work item is already done; they are waiting to be reaped — drellem2/pogo#128)\n",
+			n, strings.Join(occ.Finished, ", "))
+	}
 	if n := len(occ.ReviewSlotHolds); n > 0 {
 		held := make([]string, n)
 		for i, h := range occ.ReviewSlotHolds {

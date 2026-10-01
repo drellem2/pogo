@@ -40,6 +40,16 @@ type AgentInfo struct {
 	Uptime         string      `json:"uptime"`
 	LastActivity   string      `json:"last_activity,omitempty"`
 	WorkItemID     string      `json:"work_item_id,omitempty"`
+	// SourceRepo is the repository the agent's worktree was cut from — the repo
+	// the per-repo dispatch cap attributes it to. Empty for an agent with no
+	// worktree (crew, --no-worktree polecats). drellem2/pogo#128.
+	SourceRepo string `json:"source_repo,omitempty"`
+	// WorkItemStatus is WorkItemID's status as the store reads it right now
+	// ("claimed", "done", ...), from the same reader the per-repo cap uses to
+	// leave a finished worker out of its count — so `pogo agent list` shows the
+	// fact the cap decided on. Set only on GET /agents, and empty when the
+	// status could not be read: absence is "unknown", never "not done".
+	WorkItemStatus string `json:"work_item_status,omitempty"`
 	// Model is the model this agent was spawned on, or "" when pogo pinned none
 	// and the harness's own configuration decides (mg-e7f5). Omitted when empty:
 	// absence here means "not pinned by pogo", which is the normal case.
@@ -610,6 +620,7 @@ func agentInfoLocked(a *Agent) (AgentInfo, string) {
 		ProcessName:    ProcessName(a.Type, a.Name),
 		Uptime:         agentUptime(a),
 		WorkItemID:     a.WorkItemID,
+		SourceRepo:     a.SourceRepo,
 		Model:          a.Model,
 		RateLimited:    a.RateLimited,
 	}
@@ -713,8 +724,14 @@ func (r *Registry) handleAgents(w http.ResponseWriter, req *http.Request) {
 	case "GET":
 		agents := r.List()
 		infos := make([]AgentInfo, len(agents))
+		sr := r.getItemStatusReader()
 		for i, a := range agents {
 			infos[i] = agentInfo(a)
+			if id := strings.TrimSpace(infos[i].WorkItemID); id != "" {
+				if status, err := sr.ReadItemStatus(id); err == nil {
+					infos[i].WorkItemStatus = status
+				}
+			}
 		}
 		// Surface parked (dormant) agents alongside running ones so the
 		// mayor's stall-watch can skip them mechanically (mg-41e1). Parked
