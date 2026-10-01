@@ -96,6 +96,7 @@ func (w *ghWatchWitness) Check(conds conditionSink, now time.Time) {
 		conds.Clear(rowA13TeardownNotArmed, now)
 		conds.Clear(rowA13IntakeNotArmed, now)
 		conds.Clear(rowA13IntakeNoCred, now)
+		conds.Clear(rowA13IntakeWatchEmpty, now)
 		return
 	}
 
@@ -149,5 +150,16 @@ func (w *ghWatchWitness) Check(conds conditionSink, now time.Time) {
 	default:
 		conds.Clear(rowA13IntakeNotArmed, now)
 		conds.Clear(rowA13IntakeNoCred, now)
+	}
+	// Armed and watching nothing (drellem2/pogo#121). Judged only for an armed
+	// detector — a disarmed one's watch list is moot until its arming row
+	// clears — and only from a record that carries the list: a record written
+	// before IntakeWatch existed says nothing about it.
+	if w.intakeEnabled && f.Intake.Arming == ghwatch.Armed &&
+		f.IntakeWatch != nil && len(f.IntakeWatch.Repos) == 0 {
+		conds.Raise(conditionIntakeWatchEmpty(w.intakeTo,
+			"watch list empty ("+f.IntakeWatch.Source+")"), now)
+	} else {
+		conds.Clear(rowA13IntakeWatchEmpty, now)
 	}
 }

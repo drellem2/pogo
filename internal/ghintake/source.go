@@ -671,8 +671,9 @@ func Reverify(inv Inventory, verify Verifier) Inventory {
 //
 // Empty is the honest zero value. A deployment that wants intake coverage names
 // its repos in [gh_intake] repos, or runs the issue poller, whose state
-// directory DiscoverRepos reads. ResolveRepos reports "no repos configured" so
-// the absence is stated rather than looking like a clean scan.
+// directory DiscoverRepos reads. ResolveRepos reports "no repos configured" and
+// Detect sets Report.BlindWatchList, so the absence is a finding rather than a
+// clean scan.
 var DefaultRepos []string
 
 // PollerStateDirName is the subdirectory of POGO_HOME in which the issue poller
@@ -725,16 +726,26 @@ func DiscoverRepos(stateDir string) []string {
 	return out
 }
 
-// ResolveRepos picks the watch list: an explicit configured list wins, then
-// discovery from the poller's state directory, then DefaultRepos. The second
-// return value names which source was used, so a report can say where its
-// population came from instead of presenting a list as self-evident.
+// ResolveRepos picks the watch list: an explicit flag list wins, then the
+// configured list ([gh_intake] repos), then discovery from the poller's state
+// directory, then DefaultRepos. The second return value names which source was
+// used, so a report can say where its population came from instead of
+// presenting a list as self-evident.
+//
+// flag and configured are separate inputs so the label is TRUE. With one input
+// a `--repo` list was reported as coming from "config" — and the CLI, which did
+// not read config at all, then told an operator whose [gh_intake] repos was
+// being ignored that their list came from config (drellem2/pogo#121). Callers
+// without a flag (the gh-watch job) pass nil.
 //
 // With DefaultRepos empty (its shipped value — see there), the last branch
-// returns no repos and says so. An empty watch list and a watch list whose
-// every repo is clean both produce zero findings; only the source string tells
-// them apart, which is why it is returned rather than inferred.
-func ResolveRepos(configured []string, stateDir string) ([]string, string) {
+// returns no repos and says so. An empty watch list is a finding in its own
+// right — see Report.BlindWatchList — but the source string is still what tells
+// a reader WHICH emptiness this is.
+func ResolveRepos(flag, configured []string, stateDir string) ([]string, string) {
+	if len(flag) > 0 {
+		return flag, "--repo"
+	}
 	if len(configured) > 0 {
 		return configured, "config"
 	}

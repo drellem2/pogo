@@ -1534,8 +1534,10 @@ type GHIntakeConfig struct {
 	// "discover it", which reads the issue poller's own state directory
 	// (`$POGO_HOME/gh-issues/seen-<owner>-<repo>.json`) so the two halves of the
 	// reconciliation cannot drift: a repo added to the poller is covered on the
-	// next sample with no second edit to forget. With neither, a built-in default
-	// applies. See internal/ghintake.ResolveRepos.
+	// next sample with no second edit to forget. With neither, the watch list is
+	// empty and the detector reports a BLIND WATCH LIST (drellem2/pogo#121). Read
+	// by `pogo gh-watch` and `pogo check-intake` alike (check-intake's --repo
+	// overrides it). See internal/ghintake.ResolveRepos.
 	Repos []string
 }
 

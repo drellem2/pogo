@@ -166,21 +166,25 @@ func TestResolveReposPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, src := ResolveRepos([]string{"acme/widgets"}, dir)
+	// The flag beats config, and is labelled as the flag. Until
+	// drellem2/pogo#121 there was one input and a --repo list was reported as
+	// coming from "config".
+	got, src := ResolveRepos([]string{"other/thing"}, []string{"acme/widgets"}, dir)
+	if len(got) != 1 || got[0] != "other/thing" || src != "--repo" {
+		t.Errorf("flag list must win and say --repo: %v from %q", got, src)
+	}
+
+	got, src = ResolveRepos(nil, []string{"acme/widgets"}, dir)
 	if len(got) != 1 || got[0] != "acme/widgets" || src != "config" {
-		t.Errorf("configured list must win: %v from %q", got, src)
+		t.Errorf("configured list must beat poller state and say config: %v from %q", got, src)
 	}
 
-	got, src = ResolveRepos(nil, dir)
+	got, src = ResolveRepos(nil, nil, dir)
 	if len(got) != 1 || got[0] != "drellem2/pogo" || !strings.HasPrefix(src, "poller state") {
-		t.Errorf("discovery must be second: %v from %q", got, src)
+		t.Errorf("discovery must be third: %v from %q", got, src)
 	}
 
-	// Last: nothing configured and no poller state. There is no built-in repo
-	// list to fall through to (mg-f04b — it named pogo's own upstream repos, so
-	// an unconfigured install polled a tracker belonging to someone else), so
-	// the watch list is empty and the SOURCE says which emptiness this is.
-	got, src = ResolveRepos(nil, filepath.Join(dir, "nope"))
+	got, src = ResolveRepos(nil, nil, filepath.Join(dir, "nope"))
 	if len(got) != 0 || src != "no repos configured" {
 		t.Errorf("unconfigured must resolve to nothing: %v from %q", got, src)
 	}

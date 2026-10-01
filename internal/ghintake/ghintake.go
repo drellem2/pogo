@@ -64,8 +64,14 @@
 //     that matters. So a scan that examined zero work items is reported as a
 //     BLIND scan (KindBlindStore) rather than as a wall of misses.
 //
-// The two failures are opposite in shape (one silently clean, one loudly wrong)
-// and identical in consequence: the detector stops being trusted. Both are
+//   - An EMPTY watch list yields no issues and no repo errors. Folded in, that
+//     reads exactly like the first case's false all-clear, with nothing failed
+//     to give it away: zero scanned, zero uncarried, exit 0. So a scan with no
+//     repos to watch is reported as a BLIND WATCH LIST (Report.BlindWatchList),
+//     the issue-side mirror of the blind store (drellem2/pogo#121).
+//
+// The failures are opposite in shape (silently clean, loudly wrong) and
+// identical in consequence: the detector stops being trusted. All of them are
 // named outcomes here.
 //
 // # The carrier population: the `gh:` marker, not the tag and not the title
@@ -397,6 +403,13 @@ type Report struct {
 	// there is nothing to reconcile against, and reporting every open issue as a
 	// miss would be the detector shouting loudest exactly when it knows least.
 	BlindStore bool
+	// BlindWatchList is set when the scan watched ZERO repos. It is the
+	// issue-side mirror of BlindStore: no repo means no issue could be listed,
+	// so "0 uncarried" says nothing at all, and without this flag it rendered —
+	// and exited — exactly like a clean scan of a healthy tracker
+	// (drellem2/pogo#121). Actionable, like BlindStore: a detector watching
+	// nothing is itself the finding.
+	BlindWatchList bool
 	// Carried counts open issues that DO have a carrier — the positive half, so
 	// "0 uncarried" can be read as "and 9 were checked and carried" rather than
 	// as "the scan found nothing".
@@ -441,11 +454,12 @@ func (r Report) RejectedCredential() bool { return r.Credential == CredentialRej
 
 // Actionable reports whether the scan found something a coordinator must act on.
 //
-// A repo error counts, and so does a blind store: a detector that cannot see is
-// itself the finding. That is the whole lesson of the ten hours #99 spent
-// uncarried — every instrument said fine because no instrument was looking.
+// A repo error counts, and so do a blind store and an empty watch list: a
+// detector that cannot see is itself the finding. That is the whole lesson of
+// the ten hours #99 spent uncarried — every instrument said fine because no
+// instrument was looking.
 func (r Report) Actionable() bool {
-	return len(r.Uncarried) > 0 || len(r.RepoErrors) > 0 || r.BlindStore
+	return len(r.Uncarried) > 0 || len(r.RepoErrors) > 0 || r.BlindStore || r.BlindWatchList
 }
 
 // carriersFor indexes carrier refs by normalised ref.
@@ -481,6 +495,13 @@ func Detect(inv Inventory, now time.Time, grace time.Duration) Report {
 
 	idx := carriersFor(inv.Carriers)
 	rep.CarrierRefs = len(idx)
+
+	// No repo watched means no issue could have been listed, so whatever
+	// follows reconciles nothing. It is set independently of BlindStore: a scan
+	// can be blind on both sides, and each blindness has its own remedy.
+	if len(inv.Repos) == 0 {
+		rep.BlindWatchList = true
+	}
 
 	// A scan that examined no work items has no carrier population, and joining
 	// against an empty set would classify every open issue as a miss. Report the
@@ -563,6 +584,15 @@ func (r Report) Render() string {
 			"matters.\n\n" +
 			"Likely causes: `mg` not on PATH, an unreadable or uninitialised store, or a\n" +
 			"--root pointing somewhere empty.\n\n")
+	}
+
+	if r.BlindWatchList {
+		b.WriteString("BLIND WATCH LIST — the scan watched ZERO repos.\n\n" +
+			"No open issue was listed, so nothing was reconciled. \"0 uncarried\" below means\n" +
+			"nothing was looked at, not that everything is carried.\n\n" +
+			"Name the repos to watch in [gh_intake] repos (read by `pogo check-intake` and\n" +
+			"`pogo gh-watch`), pass --repo to `pogo check-intake`, or run the issue poller,\n" +
+			"whose state directory ($POGO_HOME/gh-issues) is read when neither is set.\n\n")
 	}
 
 	if len(r.Uncarried) > 0 {
@@ -746,6 +776,9 @@ func (r Report) MailSubject() string {
 	var parts []string
 	if r.BlindStore {
 		parts = append(parts, "BLIND SCAN (0 work items examined)")
+	}
+	if r.BlindWatchList {
+		parts = append(parts, "BLIND WATCH LIST (0 repos watched) — set [gh_intake] repos")
 	}
 	if n := len(r.Uncarried); n > 0 {
 		refs := make([]string, 0, n)

@@ -362,17 +362,18 @@ func (w *Watcher) sample(now time.Time) {
 
 	subject := "gh-issue intake: " + rep.MailSubject()
 	details := map[string]any{
-		"uncarried_count": len(rep.Uncarried),
-		"repo_errors":     len(rep.RepoErrors),
-		"item_errors":     len(rep.ItemErrors),
-		"blind_store":     rep.BlindStore,
-		"fresh_count":     len(rep.Fresh),
-		"scanned":         rep.Scanned,
-		"carried":         rep.Carried,
-		"carrier_refs":    rep.CarrierRefs,
-		"items_scanned":   rep.ItemsScanned,
-		"notified":        strings.Join(recipients, ","),
-		"escalated":       stalled,
+		"uncarried_count":  len(rep.Uncarried),
+		"repo_errors":      len(rep.RepoErrors),
+		"item_errors":      len(rep.ItemErrors),
+		"blind_store":      rep.BlindStore,
+		"blind_watch_list": rep.BlindWatchList,
+		"fresh_count":      len(rep.Fresh),
+		"scanned":          rep.Scanned,
+		"carried":          rep.Carried,
+		"carrier_refs":     rep.CarrierRefs,
+		"items_scanned":    rep.ItemsScanned,
+		"notified":         strings.Join(recipients, ","),
+		"escalated":        stalled,
 	}
 	for _, to := range recipients {
 		if err := w.mail(to, mailFrom, subject, body); err != nil {
@@ -394,10 +395,10 @@ func (w *Watcher) sample(now time.Time) {
 // otherwise reset the clock on an old one, and the stalest finding — the one
 // escalation exists for — would be the one that never aged.
 //
-// Repo errors and a blind store are tracked too. A detector that has been unable
-// to see for four hours is exactly as escalation-worthy as an issue nobody
-// carried for four hours; the ten hours #99 went missing were ten hours in which
-// nothing was looking.
+// Repo errors, a blind store and an empty watch list are tracked too. A detector
+// that has been unable to see for four hours is exactly as escalation-worthy as
+// an issue nobody carried for four hours; the ten hours #99 went missing were
+// ten hours in which nothing was looking.
 func (w *Watcher) trackAges(rep Report, now time.Time) time.Time {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -421,6 +422,9 @@ func (w *Watcher) trackAges(rep Report, now time.Time) time.Time {
 	}
 	if rep.BlindStore {
 		note("blind_store")
+	}
+	if rep.BlindWatchList {
+		note("blind_watch_list")
 	}
 	w.firstSeen = seen
 	return oldest
@@ -450,6 +454,12 @@ func (w *Watcher) shouldMail(print string, now time.Time) bool {
 func (r Report) fingerprint(escalated bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "escalated=%t blind=%t cred=%s\n", escalated, r.BlindStore, r.Credential)
+	// Written only when set, so the print of every OTHER finding set is
+	// byte-identical to the one an older build persisted, and the upgrade does
+	// not re-mail an unchanged set.
+	if r.BlindWatchList {
+		b.WriteString("blind_watch_list\n")
+	}
 	for _, f := range r.Uncarried {
 		fmt.Fprintf(&b, "uncarried|%s\n", f.Issue.Ref())
 	}

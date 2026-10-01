@@ -1,7 +1,10 @@
 package ghintake
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -400,6 +403,54 @@ func TestBlindStoreMailsAsBlindnessNotAsFindings(t *testing.T) {
 	}
 	if ev.last().Details["blind_store"] != true {
 		t.Errorf("the event must record the blindness, got %+v", ev.last().Details)
+	}
+}
+
+// An empty watch list takes the actionable path: it mails, and it emits
+// gh_intake_watch_fired, never gh_intake_watch_clean (drellem2/pogo#121 — a
+// blind scan that reported itself clean with scanned=0).
+func TestEmptyWatchListMailsAndIsNeverClean(t *testing.T) {
+	mail, ev := &mailRecorder{}, &eventRecorder{}
+	w := newWatcher(t, func() (Inventory, error) {
+		in := carriedInv(48 * time.Hour)
+		in.Issues, in.Repos = nil, nil
+		return in, nil
+	}, mail, ev, nil)
+
+	w.Check(scanTime)
+	for _, typ := range ev.types() {
+		if typ == "gh_intake_watch_clean" {
+			t.Fatalf("events = %v: an empty watch list was reported clean", ev.types())
+		}
+	}
+	if mail.count() != 1 {
+		t.Fatalf("an empty watch list must mail, got %d", mail.count())
+	}
+	if !strings.Contains(mail.subjects[0], "BLIND WATCH LIST") {
+		t.Errorf("subject = %q, want it to name the empty watch list", mail.subjects[0])
+	}
+	if d := ev.last().Details; ev.last().EventType != "gh_intake_watch_fired" || d["blind_watch_list"] != true {
+		t.Errorf("last event = %s %+v, want gh_intake_watch_fired with blind_watch_list=true",
+			ev.last().EventType, d)
+	}
+}
+
+// The fingerprint of a set WITHOUT an empty watch list is unchanged by the new
+// term, so an upgrade does not re-mail every unchanged finding set once.
+func TestBlindWatchListLeavesOtherFingerprintsAlone(t *testing.T) {
+	rep := Report{Uncarried: []Finding{{Issue: issue("drellem2/pogo", 99, time.Hour)}}}
+	before := rep.fingerprint(false)
+	rep.BlindWatchList = true
+	if rep.fingerprint(false) == before {
+		t.Error("BlindWatchList must change the print, or its arrival would not be news")
+	}
+	// The print an older build wrote for this set, reconstructed.
+	var b strings.Builder
+	fmt.Fprintf(&b, "escalated=%t blind=%t cred=%s\n", false, false, CredentialUnknown)
+	fmt.Fprintf(&b, "uncarried|%s\n", "drellem2/pogo#99")
+	sum := sha256.Sum256([]byte(b.String()))
+	if want := hex.EncodeToString(sum[:8]); before != want {
+		t.Errorf("print of a set with no empty watch list changed: %s, an older build wrote %s", before, want)
 	}
 }
 

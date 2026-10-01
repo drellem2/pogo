@@ -25,7 +25,7 @@ func Production(cfg *config.Config, home string, caches Caches, cred ghtoken.Res
 
 	// The watch list is resolved per run; a run is short-lived, so this is the
 	// "picked up at the next restart" pogod had, one fire later.
-	repos, repoSrc := ghintake.ResolveRepos(cfg.GHIntake.Repos,
+	repos, repoSrc := ghintake.ResolveRepos(nil, cfg.GHIntake.Repos,
 		filepath.Join(home, ghintake.PollerStateDirName))
 	inSrc, cdSrc := CarrierSources(cfg, caches)
 	// The credential predicate is this run's, re-evaluated on every fire —
@@ -54,9 +54,11 @@ func Production(cfg *config.Config, home string, caches Caches, cred ghtoken.Res
 			}
 			return ghintake.Reverify(inv, verify), nil
 		},
-		DriftSource:   cdSrc.Carriers,
-		DriftSnapshot: carrierdrift.RetryingSnapshot(carrierdrift.GHSnapshot),
-		DriftStatuses: cdSrc.Statuses(),
+		IntakeRepos:      repos,
+		IntakeRepoSource: repoSrc,
+		DriftSource:      cdSrc.Carriers,
+		DriftSnapshot:    carrierdrift.RetryingSnapshot(carrierdrift.GHSnapshot),
+		DriftStatuses:    cdSrc.Statuses(),
 	}, repos, repoSrc
 }
 

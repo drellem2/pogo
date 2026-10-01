@@ -60,6 +60,7 @@ const (
 	rowA13TeardownNotArmed = "ghteardown_not_armed"
 	rowA13IntakeNotArmed   = "ghintake_not_armed"
 	rowA13IntakeNoCred     = "ghintake_no_credential"
+	rowA13IntakeWatchEmpty = "ghintake_watch_empty"
 
 	rowA13GHWatchNotReporting = "ghwatch_not_reporting"
 	rowA14LogRotation         = "log_rotation_failed"
@@ -634,6 +635,48 @@ func conditionIntakeNoCredential(to, detail string) pogodCondition {
 				"  3. No restart is needed: the job reads the credential afresh on every fire.\n"+
 				"     Confirm with `pogo gh-watch --force`, which prints the credential line\n"+
 				"     (existence-only) and each detector's arming.",
+			detail),
+	}
+}
+
+// conditionIntakeWatchEmpty — A13's fifth condition (drellem2/pogo#121). The
+// intake detector ARMED — `gh` is there, the credential is there — and its
+// watch list is empty: no [gh_intake] repos and no issue-poller state (the job
+// has no --repo). Every sample then lists zero issues from zero repos.
+//
+// The detector's own report calls that a BLIND WATCH LIST and mails it, so why
+// a condition too: the same reason the not-armed rows exist beside the
+// detector's findings. It is a configuration precondition with a configuration
+// remedy, pogod sees it in the job's record on the first run after a deploy,
+// and before #121 the detector's report of it was a clean exit 0 with
+// scanned=0 — a blind detector that said "all clear".
+//
+// Routed to the intake reader, like the other intake conditions.
+func conditionIntakeWatchEmpty(to, detail string) pogodCondition {
+	return pogodCondition{
+		ID:     rowA13IntakeWatchEmpty,
+		Row:    "A13",
+		To:     to,
+		Detail: detail,
+		Subject: "[pogod] gh-issue INTAKE detector is armed and WATCHING NO REPOS — " +
+			"set [gh_intake] repos; no open issue is being reconciled",
+		Body: conditionBody("A13",
+			"The gh-issue intake detector is enabled and armed in `pogo gh-watch`, but its\n"+
+				"watch list is EMPTY: [gh_intake] repos is unset and the issue poller's state\n"+
+				"directory ($POGO_HOME/gh-issues) names no repo (pogod read this from the job's\n"+
+				"last record).",
+			"Every sample lists zero issues from zero repos, so it can never find an uncarried\n"+
+				"  one. Until drellem2/pogo#121 that sample reported itself CLEAN (exit 0,\n"+
+				"  gh_intake_watch_clean with scanned=0) — indistinguishable from a healthy tracker\n"+
+				"  with nothing open. A `[gh]` mail dropped now leaves a reporter waiting with no\n"+
+				"  record anywhere.",
+			"1. Name the repos to watch in the pogo config:\n"+
+				"       [gh_intake]\n"+
+				"       repos = [\"owner/repo\"]\n"+
+				"     `pogo gh-watch` and `pogo check-intake` both read it.\n"+
+				"  2. Or run the issue poller, whose per-repo state files the job discovers.\n"+
+				"  3. If this host should watch nothing, set [gh_intake] enabled = false.\n"+
+				"  4. Confirm with `pogo gh-watch --force` (it prints the watch list and its source).",
 			detail),
 	}
 }

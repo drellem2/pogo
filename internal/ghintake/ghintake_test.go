@@ -421,6 +421,39 @@ func TestZeroItemsScannedReportsBlindnessNotMaximalNoise(t *testing.T) {
 	}
 }
 
+// An EMPTY watch list must be a finding, not a clean scan (drellem2/pogo#121).
+// Zero repos lists zero issues, so "0 uncarried" says nothing — and before this
+// it was not actionable, so the CLI exited 0 and the watcher emitted
+// gh_intake_watch_clean with scanned=0.
+func TestEmptyWatchListIsABlindActionableScan(t *testing.T) {
+	in := inv(nil, []CarrierRef{carrier("mg-d764", "drellem2/pogo#99")})
+	in.Repos = nil
+
+	rep := Detect(in, scanTime, DefaultGrace)
+	if !rep.BlindWatchList {
+		t.Fatal("zero watched repos must set BlindWatchList")
+	}
+	if rep.BlindStore {
+		t.Error("the store was scanned (2047 items); only the watch list is blind")
+	}
+	if !rep.Actionable() {
+		t.Fatal("a detector watching nothing is itself the finding and must be actionable")
+	}
+	if subj := rep.MailSubject(); !strings.Contains(subj, "BLIND WATCH LIST") {
+		t.Errorf("mail subject = %q, want it to announce the empty watch list", subj)
+	}
+	if body := rep.Render(); !strings.Contains(body, "BLIND WATCH LIST") ||
+		!strings.Contains(body, "[gh_intake] repos") {
+		t.Errorf("render must say the watch list was empty and name the remedy; got:\n%s", body)
+	}
+
+	// Control: the same inventory with one watched repo is a clean scan.
+	in.Repos = []string{"drellem2/pogo"}
+	if rep := Detect(in, scanTime, DefaultGrace); rep.BlindWatchList || rep.Actionable() {
+		t.Errorf("one watched repo and nothing uncarried must be clean: %+v", rep)
+	}
+}
+
 // A store with items but no carriers at all IS reconciled — that is a fact about
 // the store, not about the scan, and it must not be confused with blindness.
 func TestItemsScannedWithNoCarriersStillReconciles(t *testing.T) {
