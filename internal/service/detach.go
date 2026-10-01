@@ -20,13 +20,17 @@ const DefaultDetachLogPath = "/tmp/pogo-service-install.log"
 // caller's session and survives the pogod restart that the install
 // performs, while the parent returns immediately with the child's PID.
 //
+// extraArgs are appended after `service install` — the install flags the
+// caller was given (e.g. --adopt-launcher), so the detached child installs
+// what the caller asked for.
+//
 // If logPath is empty, DefaultDetachLogPath is used. The log file is
 // opened in append mode; consecutive --detach invocations accumulate.
 //
 // This replaces the prior `nohup setsid pogo service install &` recipe,
 // which is not portable to macOS where setsid does not exist in base or
 // via Homebrew.
-func Detach(logPath string) (pid int, resolvedLog string, err error) {
+func Detach(logPath string, extraArgs ...string) (pid int, resolvedLog string, err error) {
 	if logPath == "" {
 		logPath = DefaultDetachLogPath
 	}
@@ -34,7 +38,7 @@ func Detach(logPath string) (pid int, resolvedLog string, err error) {
 	if err != nil {
 		return 0, "", fmt.Errorf("resolve own binary: %w", err)
 	}
-	return startDetached(self, []string{"service", "install"}, logPath)
+	return startDetached(self, append([]string{"service", "install"}, extraArgs...), logPath)
 }
 
 // buildDetachCmd is the testable seam for Detach: it assembles the

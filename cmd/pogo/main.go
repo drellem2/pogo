@@ -765,6 +765,7 @@ stream.`,
 	}
 
 	var serviceInstallDetach bool
+	var serviceInstallOpts service.InstallOptions
 	var cmdServiceInstall = &cobra.Command{
 		Use:   "install",
 		Short: "Install pogo as a system service",
@@ -808,11 +809,36 @@ crew agent, a refinery worker) gets SIGHUP'd when its parent dies and exits
 mid-install. --detach moves the install into a new session so it survives
 the pogod restart. The caller can then exit immediately and rely on the
 mailed report for verification. (This replaces the prior nohup+setsid
-recipe, which doesn't work on macOS where setsid is not available.)`,
+recipe, which doesn't work on macOS where setsid is not available.)
+
+Launcher. The plist's ProgramArguments[0] (systemd: ExecStart) is, in order:
+the POGOD_LAUNCHER environment variable, the [service] launcher key in
+config.toml, or pogod on PATH. Set one when the host runs pogod through a
+wrapper script (for example one that injects credentials). A named launcher
+must exist and be executable.
+
+On macOS, if the INSTALLED plist runs a program that is neither pogod on PATH
+nor the configured launcher, install refuses before stopping anything and
+names the program. Pass --adopt-launcher to keep that program, or
+--force-launcher to replace it. Every overwrite of a plist first copies the
+previous one to <plist>.bak.<timestamp>.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			if serviceInstallDetach {
-				pid, logPath, err := service.Detach("")
+				// Run the launcher guard here, in the caller's terminal: in
+				// the detached child a refusal would land only in the log
+				// and the failure mail.
+				if err := service.CheckInstallLauncher(serviceInstallOpts); err != nil {
+					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				}
+				var extra []string
+				if serviceInstallOpts.ForceLauncher {
+					extra = append(extra, "--force-launcher")
+				}
+				if serviceInstallOpts.AdoptLauncher {
+					extra = append(extra, "--adopt-launcher")
+				}
+				pid, logPath, err := service.Detach("", extra...)
 				if err != nil {
 					cli.ExitWithError(jsonOutput, "failed to detach: "+err.Error(), cli.ExitError)
 				}
@@ -827,7 +853,7 @@ recipe, which doesn't work on macOS where setsid is not available.)`,
 				}
 				return
 			}
-			if err := service.Install(); err != nil {
+			if err := service.Install(serviceInstallOpts); err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
 			// Tier-3 recovery agent (mg-f5fc / mg-6749) is intentionally
@@ -840,6 +866,9 @@ recipe, which doesn't work on macOS where setsid is not available.)`,
 		},
 	}
 	cmdServiceInstall.Flags().BoolVar(&serviceInstallDetach, "detach", false, "Run the install in a new session and exit immediately; install proceeds in background and self-reports via mail")
+	cmdServiceInstall.Flags().BoolVar(&serviceInstallOpts.AdoptLauncher, "adopt-launcher", false, "Keep the installed plist's custom launcher (ProgramArguments[0]) instead of refusing")
+	cmdServiceInstall.Flags().BoolVar(&serviceInstallOpts.ForceLauncher, "force-launcher", false, "Replace the installed plist's custom launcher with pogod / the configured launcher instead of refusing")
+	cmdServiceInstall.MarkFlagsMutuallyExclusive("adopt-launcher", "force-launcher")
 
 	var cmdServiceInstallRecovery = &cobra.Command{
 		Use:   "install-recovery",

@@ -104,6 +104,199 @@ func findPogod() (string, error) {
 	return filepath.Abs(path)
 }
 
+// LauncherEnv overrides the program the installed service execs. It outranks
+// the [service] launcher config key. See resolveLauncher.
+const LauncherEnv = "POGOD_LAUNCHER"
+
+// launcher is the program the installed launchd plist / systemd unit execs, and
+// where that choice came from. Source is printed in every message that names
+// Path, because "which knob produced this path" is the first question a reader
+// of a refusal has.
+type launcher struct {
+	Path   string
+	Source string
+}
+
+const (
+	launcherSourceEnv     = LauncherEnv
+	launcherSourceConfig  = "[service] launcher"
+	launcherSourcePath    = "pogod on PATH"
+	launcherSourceAdopted = "adopted from the installed plist (--adopt-launcher)"
+)
+
+// resolveLauncher picks the program the service execs: $POGOD_LAUNCHER, then
+// the [service] launcher config key, then pogod on PATH (drellem2/pogo#105).
+//
+// Before the override existed, the installer always wrote pogod's PATH location
+// into ProgramArguments. On a host whose plist named a credential-injecting
+// wrapper, every `pogo service install` replaced the wrapper with bare pogod and
+// agents lost their credentials with nothing reporting it. An override is
+// checked for existence and the executable bit here, at install time: launchd
+// reports a missing program only as a job that never starts.
+func resolveLauncher() (launcher, error) {
+	if p := strings.TrimSpace(os.Getenv(LauncherEnv)); p != "" {
+		return checkedLauncher(p, launcherSourceEnv)
+	}
+	if p := strings.TrimSpace(config.Load().Service.Launcher); p != "" {
+		return checkedLauncher(p, launcherSourceConfig)
+	}
+	p, err := findPogod()
+	if err != nil {
+		return launcher{}, err
+	}
+	return launcher{Path: p, Source: launcherSourcePath}, nil
+}
+
+// checkedLauncher validates an explicitly named launcher and makes it absolute.
+// A leading ~/ is expanded because config.toml values are written by hand, and
+// launchd does no expansion of its own.
+func checkedLauncher(p, source string) (launcher, error) {
+	if strings.HasPrefix(p, "~/") {
+		home, _ := os.UserHomeDir()
+		p = filepath.Join(home, p[2:])
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return launcher{}, fmt.Errorf("launcher %q (from %s): %w", p, source, err)
+	}
+	if err := checkExecutable(abs); err != nil {
+		return launcher{}, fmt.Errorf("launcher %s (from %s) %w", abs, source, err)
+	}
+	return launcher{Path: abs, Source: source}, nil
+}
+
+func checkExecutable(path string) error {
+	fi, err := os.Stat(path)
+	switch {
+	case os.IsNotExist(err):
+		return fmt.Errorf("does not exist")
+	case err != nil:
+		return fmt.Errorf("cannot be read: %w", err)
+	case fi.IsDir():
+		return fmt.Errorf("is a directory, not a program")
+	case fi.Mode().Perm()&0111 == 0:
+		return fmt.Errorf("is not executable (mode %s)", fi.Mode().Perm())
+	}
+	return nil
+}
+
+// InstallOptions are the `pogo service install` flags that decide what happens
+// to an installed plist whose program is neither pogod nor the configured
+// launcher. At most one may be set.
+type InstallOptions struct {
+	// ForceLauncher overwrites the installed program with the resolved
+	// launcher. The previous plist is still backed up.
+	ForceLauncher bool
+	// AdoptLauncher carries the installed program forward into the rendered
+	// plist instead of replacing it.
+	AdoptLauncher bool
+}
+
+// plistProgram returns ProgramArguments[0] of a plist, or "" when there is no
+// plist, it does not decode, or it names no program.
+func plistProgram(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	doc, err := decodePlistDict(data)
+	if err != nil {
+		return ""
+	}
+	args, _ := doc["ProgramArguments"].([]any)
+	if len(args) == 0 {
+		return ""
+	}
+	s, _ := args[0].(string)
+	return strings.TrimSpace(s)
+}
+
+// chooseInstallLauncher decides which program the plist about to be written
+// will exec, given the plist already installed. It is the #105 guard: when the
+// installed ProgramArguments[0] is neither the pogod on PATH nor the resolved
+// launcher, it is something a person put there — in the reported case a wrapper
+// that injects agent credentials — and rewriting it silently is the bug. So the
+// install refuses, naming the path, unless told which way to go.
+//
+// pogodPath may be "" when pogod is not on PATH (a host that runs pogod only
+// through a configured launcher).
+//
+// A pogod at a DIFFERENT path from the one on PATH (a moved binary) is refused
+// too. That is deliberate: the guard cannot tell a moved pogod from a wrapper
+// that happens to be named after it, and the refusal says how to proceed.
+func chooseInstallLauncher(installed []byte, resolved launcher, pogodPath, plistPath string, opts InstallOptions) (launcher, error) {
+	if opts.ForceLauncher && opts.AdoptLauncher {
+		return launcher{}, fmt.Errorf("--force-launcher and --adopt-launcher are mutually exclusive")
+	}
+	current := plistProgram(installed)
+	if current == "" || current == resolved.Path || (pogodPath != "" && current == pogodPath) {
+		return resolved, nil
+	}
+	switch {
+	case opts.AdoptLauncher:
+		if err := checkExecutable(current); err != nil {
+			return launcher{}, fmt.Errorf("--adopt-launcher: the installed launcher %s (ProgramArguments[0] of %s) %w", current, plistPath, err)
+		}
+		fmt.Printf("Keeping the installed launcher %s (--adopt-launcher). Set [service] launcher = %q in config.toml so later installs and `pogo doctor` agree with it.\n", current, current)
+		return launcher{Path: current, Source: launcherSourceAdopted}, nil
+	case opts.ForceLauncher:
+		fmt.Printf("Replacing the installed launcher %s with %s (%s) — --force-launcher.\n", current, resolved.Path, resolved.Source)
+		return resolved, nil
+	}
+	configured := "no launcher is configured"
+	if resolved.Source != launcherSourcePath {
+		configured = fmt.Sprintf("the configured launcher is %s (from %s)", resolved.Path, resolved.Source)
+	}
+	return launcher{}, fmt.Errorf("refusing to install: %s runs a custom launcher, %s (its ProgramArguments[0]), which is not pogod on PATH (%s), and %s. "+
+		"Installing would replace it, and anything that launcher does before starting pogod — such as injecting credentials — would silently stop. Nothing was changed. Choose one:\n"+
+		"  - keep it: set [service] launcher = %q in config.toml (or export %s), then re-run `pogo service install`\n"+
+		"  - keep it for this install only: `pogo service install --adopt-launcher`\n"+
+		"  - replace it: `pogo service install --force-launcher` (the old plist is kept as a .bak)",
+		plistPath, current, orNone(pogodPath), configured, current, LauncherEnv)
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "not found"
+	}
+	return s
+}
+
+// backupTimeLayout is the timestamp suffix on plist backups: compact ISO-8601,
+// sortable, and free of ':' (same layout as installed-prompt backups).
+const backupTimeLayout = "2006-01-02T150405Z"
+
+// backupNow is the clock for backup names; tests replace it.
+var backupNow = func() time.Time { return time.Now().UTC() }
+
+// writePlistWithBackup writes rendered to path, first copying the previous
+// contents (if any, and if different) to <path>.bak.<timestamp>. Every launchd
+// installer in this package writes through it, so no install destroys a plist
+// it cannot give back (drellem2/pogo#105). The backup keeps a timestamp rather
+// than overwriting one <path>.bak: the plist worth keeping is usually the
+// first one replaced, and a second install would otherwise overwrite it.
+//
+// The backup's name does not end in .plist, so launchd does not load it from
+// ~/Library/LaunchAgents as a second job with the same label.
+//
+// It returns the backup path, or "" when nothing was backed up.
+func writePlistWithBackup(path string, existing []byte, rendered string) (string, error) {
+	if string(existing) == rendered {
+		return "", nil
+	}
+	backup := ""
+	if len(existing) > 0 {
+		backup = path + ".bak." + backupNow().Format(backupTimeLayout)
+		if err := os.WriteFile(backup, existing, 0644); err != nil {
+			return "", fmt.Errorf("failed to back up %s to %s (nothing was overwritten): %w", path, backup, err)
+		}
+		fmt.Printf("Backed up the previous %s to %s\n", filepath.Base(path), backup)
+	}
+	if err := os.WriteFile(path, []byte(rendered), 0644); err != nil {
+		return backup, fmt.Errorf("failed to write %s: %w", path, err)
+	}
+	return backup, nil
+}
+
 func launchdPlistPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
@@ -207,10 +400,10 @@ func launchdPath() string {
 }
 
 // Install generates and installs the appropriate service file for the current OS.
-func Install() error {
+func Install(opts InstallOptions) error {
 	switch runtime.GOOS {
 	case "darwin":
-		return installLaunchd()
+		return installLaunchd(opts)
 	case "linux":
 		return installSystemd()
 	default:
@@ -273,15 +466,24 @@ func drainAddr(addr string, timeout time.Duration) error {
 // current host (binary path, $HOME, $POGO_HOME). It's the source of truth
 // for diff-aware idempotency: the on-disk plist is compared byte-for-byte
 // against this output.
+//
+// ProgramArguments[0] is the resolved launcher (see resolveLauncher), not
+// necessarily pogod.
 func renderLaunchdPlist() (string, launchdData, error) {
-	pogodPath, err := findPogod()
+	l, err := resolveLauncher()
 	if err != nil {
 		return "", launchdData{}, err
 	}
+	return renderLaunchdPlistFor(l.Path)
+}
+
+// renderLaunchdPlistFor renders the daemon plist with program as its
+// ProgramArguments[0].
+func renderLaunchdPlistFor(program string) (string, launchdData, error) {
 	home, _ := os.UserHomeDir()
 	data := launchdData{
 		Label:      launchdLabel,
-		PogodPath:  pogodPath,
+		PogodPath:  program,
 		LogDir:     logDir(),
 		Home:       home,
 		PogoHome:   pogoHome(),
@@ -390,7 +592,32 @@ func parseLaunchctlListPID(output string) (int, bool) {
 	return 0, false
 }
 
-func installLaunchd() (retErr error) {
+// CheckInstallLauncher runs the #105 launcher guard on its own, without
+// touching anything. `pogo service install --detach` calls it in the parent so
+// a refusal reaches the caller's terminal instead of only the detached log and
+// the failure mail. It is a no-op off darwin.
+func CheckInstallLauncher(opts InstallOptions) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	_, err := installLauncher(opts)
+	return err
+}
+
+// installLauncher resolves the launcher and applies the guard against the
+// installed plist.
+func installLauncher(opts InstallOptions) (launcher, error) {
+	resolved, err := resolveLauncher()
+	if err != nil {
+		return launcher{}, err
+	}
+	pogodPath, _ := findPogod()
+	plistPath := launchdPlistPath()
+	existing, _ := os.ReadFile(plistPath)
+	return chooseInstallLauncher(existing, resolved, pogodPath, plistPath, opts)
+}
+
+func installLaunchd(opts InstallOptions) (retErr error) {
 	// restore is what the orchestrated sequence did about the fleet-wide
 	// dispatch it stopped. It is captured here so the failure mail carries
 	// it: the mail is the only artifact a failed install leaves behind, and
@@ -407,7 +634,14 @@ func installLaunchd() (retErr error) {
 		}
 	}()
 
-	rendered, data, err := renderLaunchdPlist()
+	// The launcher guard runs first — before the orchestration quiesce and
+	// before anything is written — so a refusal leaves the fleet and the
+	// installed plist exactly as they were (drellem2/pogo#105).
+	l, err := installLauncher(opts)
+	if err != nil {
+		return err
+	}
+	rendered, data, err := renderLaunchdPlistFor(l.Path)
 	if err != nil {
 		return err
 	}
@@ -455,13 +689,8 @@ func installLaunchd() (retErr error) {
 		stopPogod: stopRunningPogod,
 		drainPort: func() error { return waitForPogodPortDrain(10 * time.Second) },
 		writePlist: func() error {
-			if plistMatches {
-				return nil
-			}
-			if err := os.WriteFile(plistPath, []byte(rendered), 0644); err != nil {
-				return fmt.Errorf("failed to write %s: %w", plistPath, err)
-			}
-			return nil
+			_, err := writePlistWithBackup(plistPath, existing, rendered)
+			return err
 		},
 		loadPlist: func() error {
 			if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
@@ -484,7 +713,7 @@ func installLaunchd() (retErr error) {
 		},
 	}
 
-	restore, err = runOrchestratedInstall(liveOrchestrator{}, steps)
+	restore, err = runInstallSequence(steps)
 	if err != nil {
 		return err
 	}
@@ -495,6 +724,18 @@ func installLaunchd() (retErr error) {
 	sendInstallSuccessMail(plistPath, data.LogDir, false)
 	return nil
 }
+
+// runInstallSequence runs the orchestrated install against the live pogod. It
+// is a variable so the drellem2/pogo#105 tests can drive the real installLaunchd
+// up to this point — the launcher guard, the render, the plist read — and
+// stop there, with no route to the live fleet, launchd, or :10000.
+var runInstallSequence = func(steps installSteps) (orchestrationRestore, error) {
+	return runOrchestratedInstall(liveOrchestrator{}, steps)
+}
+
+// installMailer delivers the install report. A variable for the same tests:
+// a refusal still mails, and a test must read that mail rather than send it.
+var installMailer = sendInstallMail
 
 // sendInstallMail is best-effort: if mg isn't on PATH or the coordinator's
 // inbox doesn't exist yet, the install must still succeed. The coordinator is
@@ -542,7 +783,7 @@ func sendInstallSuccessMail(plistPath, logd string, noChange bool) {
 	}
 	body := fmt.Sprintf("Plist:        %s\nLog dir:      %s\nResult:       %s\n\nlaunchctl list %s:\n%s",
 		plistPath, logd, rerun, launchdLabel, launchctlListOutput())
-	sendInstallMail("[install] com.pogo.daemon installed and running", body)
+	installMailer("[install] com.pogo.daemon installed and running", body)
 }
 
 // sendInstallFailureMail reports a failed install. The orchestration line is
@@ -554,7 +795,7 @@ func sendInstallSuccessMail(plistPath, logd string, noChange bool) {
 func sendInstallFailureMail(err error, restore orchestrationRestore) {
 	body := fmt.Sprintf("Error: %v\n\n%s\n\nlaunchctl print:\n%s\n\nLog tail (~%d bytes):\n%s",
 		err, restore.String(), launchctlPrintOutput(), logTailBytes, logTail())
-	sendInstallMail(installFailureSubject(restore), body)
+	installMailer(installFailureSubject(restore), body)
 }
 
 // installFailureSubject escalates the subject line when the install left
@@ -645,10 +886,11 @@ func verifyLaunchdRunning() error {
 }
 
 func installSystemd() error {
-	pogodPath, err := findPogod()
+	l, err := resolveLauncher()
 	if err != nil {
 		return err
 	}
+	pogodPath := l.Path
 
 	unitPath := systemdUnitPath()
 

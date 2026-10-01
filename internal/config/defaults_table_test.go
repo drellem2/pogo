@@ -80,6 +80,7 @@ var configFieldSection = map[string]string{
 	"DispatchPairing":     "dispatch_pairing",
 	"DispatchCap":         "dispatch",
 	"AuditSuccessor":      "audit_successor",
+	"Service":             "service",
 }
 
 func onOff(b bool) string {
