@@ -48,6 +48,10 @@ const (
 	EventBoot     = "pogod_boot"
 	EventShutdown = "pogod_shutdown"
 	EventLockLost = "pogod_lock_lost"
+	// EventSIGHUPIgnoredAtLaunch: pogod inherited SIGHUP as ignored (nohup, a
+	// `trap '' HUP` wrapper) and caught-and-discarded it so its children exec
+	// with SIGHUP at default (drellem2/pogo#106).
+	EventSIGHUPIgnoredAtLaunch = "pogod_sighup_ignored_at_launch"
 )
 
 // Shutdown causes.
@@ -323,6 +327,22 @@ func LockLostEvent(pid, owner int, lockPath string, readErr error, at time.Time)
 		EventType: EventLockLost,
 		Agent:     "pogod",
 		Details:   d,
+	}
+}
+
+// SIGHUPIgnoredAtLaunchEvent builds pogod_sighup_ignored_at_launch.
+func SIGHUPIgnoredAtLaunchEvent(pid int, at time.Time) events.Event {
+	return events.Event{
+		Timestamp: at.UTC().Format(time.RFC3339Nano),
+		EventType: EventSIGHUPIgnoredAtLaunch,
+		Agent:     "pogod",
+		Details: map[string]any{
+			"pid":                   pid,
+			"signal":                "SIGHUP",
+			"pogod_disposition":     "caught-and-discarded",
+			"child_disposition":     "default",
+			"inherited_disposition": "ignored",
+		},
 	}
 }
 

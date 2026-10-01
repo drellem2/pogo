@@ -1292,7 +1292,9 @@ pogod is exiting on a path it can observe. Emitted at most once per run.
 The signal handler only RECORDS: after writing the record (bounded at 2s, well
 inside `pogo server stop`'s 5s deadline) it re-delivers the signal at its
 default disposition, so pogod dies exactly as it did without a handler. A signal
-pogod inherited as ignored (nohup's SIGHUP) stays ignored. SIGPIPE is not
+pogod inherited as ignored (nohup's SIGHUP) is not recorded and does not kill
+pogod; an inherited-ignored SIGHUP is caught and discarded instead, so pogod's
+children get it at default (see `pogod_sighup_ignored_at_launch`). SIGPIPE is not
 recorded — notifying it would change how a broken stdout pipe behaves — and
 shows up as an unclean boot, as do SIGKILL, panics and host crashes.
 
@@ -1310,6 +1312,26 @@ to lost, and a log line when the file names it again.
 - **`agent`:** `"pogod"`
 - **`details` fields:** `pid`, `lockfile`, `owner_pid` (when readable),
   `error` (why it could not be read)
+
+#### `pogod_sighup_ignored_at_launch`
+
+pogod started with SIGHUP ignored — launched under `nohup`, by a wrapper with
+`trap '' HUP`, or by a parent that was itself launched that way. SIG_IGN
+survives fork and exec, so before drellem2/pogo#106 every agent pogod spawned
+inherited the ignore, survived the PTY hangup that is meant to take it down with
+pogod, and outlived pogod unreachable. pogod now catches SIGHUP and discards
+it: pogod stays exactly as immune as it was, but execve resets a caught signal
+to its default, so children start with SIGHUP at default. Emitted once at
+startup, alongside the log line
+`pogod: SIGHUP was ignored at launch (nohup?); pogod stays immune, children get default`.
+
+Nothing needs fixing when this appears; it records that pogod's launcher
+ignores SIGHUP, which is worth knowing when reading a hangup-related incident.
+
+- **`agent`:** `"pogod"`
+- **`details` fields:** `pid`, `signal` (`"SIGHUP"`), `inherited_disposition`
+  (`"ignored"`), `pogod_disposition` (`"caught-and-discarded"`),
+  `child_disposition` (`"default"`)
 
 Find the last word from every pogod run:
 

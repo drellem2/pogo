@@ -159,14 +159,26 @@ func (l *lifecycle) recordShutdown(sd daemonlife.Shutdown) {
 
 // installSignalRecorder records each of recordedSignals and then dies of it.
 // A signal pogod inherited as IGNORED (nohup's SIGHUP, a `&` job's SIGINT) is
-// left ignored: notifying it would make pogod killable by a signal it is
-// currently immune to.
+// not recorded: recording it would make pogod killable by a signal it is
+// currently immune to. An inherited-ignored SIGHUP is additionally caught and
+// discarded (catchIgnoredSIGHUP) so that pogod's children do not inherit the
+// ignore — pogod's own immunity is unchanged (drellem2/pogo#106).
 func (l *lifecycle) installSignalRecorder() {
 	var sigs []os.Signal
 	for _, s := range recordedSignals {
 		if !signal.Ignored(s) {
 			sigs = append(sigs, s)
 		}
+	}
+	// After the loop: once caught, signal.Ignored(SIGHUP) reads false, and the
+	// recorder must still leave an inherited-ignored SIGHUP unrecorded.
+	if catchIgnoredSIGHUP() {
+		pid := os.Getpid()
+		if l != nil {
+			pid = l.cur.PID
+		}
+		log.Printf("pogod: SIGHUP was ignored at launch (nohup?); pogod stays immune, children get default (pid=%d)", pid)
+		events.Emit(context.Background(), daemonlife.SIGHUPIgnoredAtLaunchEvent(pid, time.Now()))
 	}
 	if len(sigs) == 0 {
 		return
@@ -180,6 +192,33 @@ func (l *lifecycle) installSignalRecorder() {
 		l.recordShutdown(daemonlife.Shutdown{At: time.Now(), Cause: daemonlife.CauseSignal, Signal: name})
 		dieOf(sig)
 	}()
+}
+
+// catchIgnoredSIGHUP turns an inherited SIG_IGN for SIGHUP into a handler that
+// drains and discards it, and reports whether it did. pogod stays exactly as
+// immune to SIGHUP as it was; what changes is what its CHILDREN inherit.
+//
+// SIG_IGN survives fork AND execve, so a pogod launched under `nohup` (or by a
+// wrapper with `trap ” HUP`) used to hand SIG_IGN to every agent it spawned.
+// Those agents then survived the PTY hangup that is supposed to take them down
+// with pogod, and outlived it unreachable. A CAUGHT signal, by contrast, is
+// reset to SIG_DFL by execve, so catching it here is enough: every child pogod
+// execs starts with SIGHUP at its default disposition.
+//
+// There is no other in-process route. signal.Reset restores the disposition Go
+// found at startup — SIG_IGN — and a child shell's `trap - HUP` cannot undo an
+// ignore that was in place when the shell started (POSIX).
+func catchIgnoredSIGHUP() bool {
+	if !signal.Ignored(syscall.SIGHUP) {
+		return false
+	}
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGHUP)
+	go func() {
+		for range ch {
+		}
+	}()
+	return true
 }
 
 // dieOf re-delivers sig at its default disposition, so the exit status is the
