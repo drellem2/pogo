@@ -478,6 +478,11 @@ const (
 	// by staleness.DeployReferenceRepo, because a configurable path is a path
 	// somebody points at a working tree they are mid-edit in.
 	DefaultPromptStaleRef = "origin/main"
+	// DefaultLineagePromptSubtree is where drellem2/pogo keeps its shipped
+	// prompt corpus — the subtree the prompt comparisons read when no
+	// [lineage] prompt_subtree is declared. Pinned equal to
+	// staleness.DefaultPromptsSubtree by a test there.
+	DefaultLineagePromptSubtree = "internal/agent/prompts"
 
 	// DefaultAckWatchInterval is how often pogod's completion-deficit detector
 	// samples the scheduler's ack counters (mg-1935). Coarse: the condition is a
@@ -961,8 +966,12 @@ type Config struct {
 	// installed cleanly in August and untouched since reads as clean to
 	// PromptEdit and is 129 lines behind the repo.
 	PromptStale PromptStaleConfig
-	AckWatch    AckWatchConfig
-	DeafWatch   DeafWatchConfig
+	// Lineage declares where this host's configuration comes from when that is
+	// not drellem2/pogo's shipped defaults (drellem2/pogo#125, #126). See
+	// LineageConfig.
+	Lineage   LineageConfig
+	AckWatch  AckWatchConfig
+	DeafWatch DeafWatchConfig
 	// WakeWatch is the pointer-nudge waker (mg-e00c). See WakeWatchConfig.
 	WakeWatch WakeWatchConfig
 	// HeartWatch is the pogod-resident reader of the crew heartbeat (mg-d616).
@@ -1479,6 +1488,49 @@ type PromptStaleConfig struct {
 	// to say whether the reference has itself seen what shipped. For a host that
 	// must make no network calls at all.
 	SkipRemote bool
+}
+
+// LineageConfig is the host's declaration of its configuration's UPSTREAM — the
+// `[lineage]` block. Every diagnostic that compares something installed against
+// "what ships" has to know what ships FOR THIS HOST, and on an org-templated
+// host (a ~/.pogo tracking, say, payitgov/.pogo) that is not drellem2/pogo.
+//
+// Without a declaration the comparisons assume drellem2/pogo, and the
+// assumption produced confident false positives: `pogo check-staleness` called
+// an org's current prompts "superseded" because they differed from the generic
+// defaults the org had customized (drellem2/pogo#125). The fix is not to stop
+// comparing but to let the host name its upstream, and to hedge the verdict
+// where it has not.
+//
+// Keys are prefixed by the corpus they describe (`prompt_*`), so the block can
+// grow a declaration per managed artifact — drellem2/pogo#126 extends it for
+// the others — without one corpus's keys shadowing another's.
+//
+//	[lineage]
+//	prompt_repo    = "~/src/org-dotpogo"   # git repo holding the corpus upstream
+//	prompt_ref     = "origin/main"         # ref within it
+//	prompt_subtree = "agents"              # corpus root within the repo
+//
+// Read by `pogo check-staleness` (flags override it) and by pogod's prompt
+// staleness sweep (internal/promptstale).
+type LineageConfig struct {
+	// PromptRepo is the git repo the prompt corpus is judged against. Empty
+	// means the deploy checkout (~/.pogo/deploy-src), resolved by the caller.
+	// A leading ~ is expanded.
+	PromptRepo string
+	// PromptRef is the ref inside PromptRepo. After Load it is never empty: an
+	// undeclared ref falls back to [prompt_stale] ref (kept for existing
+	// configs), then to DefaultPromptStaleRef.
+	PromptRef string
+	// PromptSubtree is the corpus root inside PromptRepo. Defaults to
+	// DefaultLineagePromptSubtree.
+	PromptSubtree string
+	// PromptDeclared reports whether ANY prompt_* key was set in a config
+	// file. It is the difference between "the operator named this corpus's
+	// upstream" and "these are defaults", and only the first licenses an
+	// unhedged verdict when the installed tree carries files the reference
+	// does not ship.
+	PromptDeclared bool
 }
 
 // GHIntakeConfig configures pogod's gh-issue INTAKE detector (mg-039b): the
@@ -2540,6 +2592,11 @@ func Load() *Config {
 			RenotifyAfter: DefaultPromptStaleRenotify,
 			Ref:           DefaultPromptStaleRef,
 		},
+		// PromptRef is left empty here and resolved after the file overlay,
+		// so an explicit [prompt_stale] ref still reaches it.
+		Lineage: LineageConfig{
+			PromptSubtree: DefaultLineagePromptSubtree,
+		},
 		AckWatch: AckWatchConfig{
 			Enabled:          true,
 			Interval:         DefaultAckWatchInterval,
@@ -2805,6 +2862,18 @@ func Load() *Config {
 		}
 		if fileCfg.promptStaleSkipRemoteSet {
 			cfg.PromptStale.SkipRemote = fileCfg.PromptStale.SkipRemote
+		}
+		if fileCfg.Lineage.PromptRepo != "" {
+			cfg.Lineage.PromptRepo = fileCfg.Lineage.PromptRepo
+		}
+		if fileCfg.Lineage.PromptRef != "" {
+			cfg.Lineage.PromptRef = fileCfg.Lineage.PromptRef
+		}
+		if fileCfg.Lineage.PromptSubtree != "" {
+			cfg.Lineage.PromptSubtree = fileCfg.Lineage.PromptSubtree
+		}
+		if fileCfg.Lineage.PromptDeclared {
+			cfg.Lineage.PromptDeclared = true
 		}
 		if fileCfg.ghIntakeEnabledSet {
 			cfg.GHIntake.Enabled = fileCfg.GHIntake.Enabled
@@ -3286,6 +3355,17 @@ func Load() *Config {
 			*to = cfg.Agents.Coordinator
 		}
 	}
+	// One prompt reference, read by both of its consumers. [lineage]
+	// prompt_ref wins; an older config's [prompt_stale] ref is honoured when
+	// no lineage ref is declared; and the sweep then reads the resolved value,
+	// so `pogo check-staleness` and pogod cannot judge against different refs.
+	if cfg.Lineage.PromptRef == "" {
+		cfg.Lineage.PromptRef = cfg.PromptStale.Ref
+	}
+	if cfg.Lineage.PromptRef == "" {
+		cfg.Lineage.PromptRef = DefaultPromptStaleRef
+	}
+	cfg.PromptStale.Ref = cfg.Lineage.PromptRef
 
 	return cfg
 }
@@ -4396,6 +4476,24 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "skip_remote":
 				cfg.PromptStale.SkipRemote = val == "true"
 				cfg.promptStaleSkipRemoteSet = true
+			}
+		case "lineage":
+			switch key {
+			case "prompt_repo":
+				if unquotedVal != "" {
+					cfg.Lineage.PromptRepo = expandTildePath(unquotedVal)
+					cfg.Lineage.PromptDeclared = true
+				}
+			case "prompt_ref":
+				if unquotedVal != "" {
+					cfg.Lineage.PromptRef = unquotedVal
+					cfg.Lineage.PromptDeclared = true
+				}
+			case "prompt_subtree":
+				if unquotedVal != "" {
+					cfg.Lineage.PromptSubtree = unquotedVal
+					cfg.Lineage.PromptDeclared = true
+				}
 			}
 		case "agents":
 			switch key {

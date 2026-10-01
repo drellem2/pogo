@@ -957,8 +957,10 @@ redeploy — expectation: a successful deploy every night, settled by 05:00 loca
 prompts — installed corpus vs a git ref (never this binary's own embed)
   installed:    /Users/you/.pogo/agents
   reference:    /Users/you/.pogo/deploy-src @ origin/main = b3efaa2d2410 (committed 2026-07-31T01:55:51+01:00)
-  STALE: 8 of 9 shipped prompt(s) differ from the reference.
-    mayor.md                           differs        installed 578 lines, ref 983 — installed is behind by 405
+  subtree:      internal/agent/prompts
+  lineage:      declared — this reference was named as the corpus's upstream
+  DIFFERS from the reference: 8 of 9 prompt(s) the reference ships (/Users/you/.pogo/deploy-src @ origin/main : internal/agent/prompts).
+    mayor.md                           differs        installed 578 lines, ref 983 — 405 fewer lines than ref
     …
 ```
 
@@ -985,6 +987,15 @@ repo can.
 a staleness alarm that a stale install disables has failed at the first failure
 it exists to catch. The redeploy half reads a text file and a schedule constant;
 the prompt half reads git.
+
+**A difference is not a direction.** The hash says two files differ, never
+which is newer, so the report says "differs from the reference" and names it
+(repo, ref and subtree). On a host whose `~/.pogo` comes from an org template,
+drellem2/pogo is not the corpus's upstream; declare the real one with
+`[lineage]` in config.toml (see
+[CONFIGURATION.md](CONFIGURATION.md#lineage--naming-your-configurations-upstream)).
+Until a lineage is declared, a report whose installed tree holds files the
+reference does not ship is hedged and prescribes no install (drellem2/pogo#125).
 
 **Length is never the predicate.** The decision is a hash of the file body with
 the install stamp stripped, in both directions. The installed tree is *not*

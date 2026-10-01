@@ -1897,16 +1897,28 @@ type PromptDrift struct {
 	//   "unstamped" — the live file has no pogo-prompt stamp.
 	//   "stale"     — the embed advanced and the canonical was NOT hand-edited;
 	//                 'pogo agent prompt install' updates it cleanly.
-	//   "edited"    — the embed advanced AND the canonical was hand-edited in
-	//                 place (recorded BodyHash no longer matches the on-disk
-	//                 body). InstallPrompts will DECLINE to clobber the edit and
-	//                 only write <name>.dist, so 'pogo agent prompt install' is
-	//                 a silent no-op here (mg-04ab). The correct remedy is to
-	//                 reconcile <name> against <name>.dist by hand.
+	//   "edited"    — the canonical was hand-edited in place (recorded
+	//                 BodyHash no longer matches the on-disk body). Two shapes,
+	//                 told apart by EmbedCurrent:
+	//                   - the embed ALSO advanced: InstallPrompts will DECLINE
+	//                     to clobber the edit and only write <name>.dist, so
+	//                     'pogo agent prompt install' is a silent no-op here
+	//                     (mg-04ab). Reconcile <name> against <name>.dist.
+	//                   - the embed did NOT advance (EmbedCurrent): install
+	//                     skips the file outright and writes no .dist either.
+	//                     The body is simply not what this binary ships
+	//                     (drellem2/pogo#125).
 	//
 	// "missing"/"unstamped"/"stale" are all install-fixable; "edited" is not,
 	// and the two must never share a remedy string.
 	Reason string `json:"reason"`
+	// EmbedCurrent is set on an "edited" drift whose stamp's embed hash still
+	// matches this binary's embed — the stamp vouches for a body the file no
+	// longer has. Before drellem2/pogo#125 this case was not reported at all:
+	// the check trusted the stamp, so `pogo doctor --check` called a rewritten
+	// body "up-to-date" in the same minute `pogo check-staleness` hashed the
+	// body and called it different.
+	EmbedCurrent bool `json:"embed_current,omitempty"`
 }
 
 // DriftInstallFixable reports whether a drift Reason is resolved by re-running
@@ -1920,10 +1932,17 @@ func DriftInstallFixable(reason string) bool {
 // CheckPromptDrift compares every embedded prompt against its installed copy
 // under ~/.pogo/agents/ and returns the set that has drifted, each tagged with
 // a Reason that selects its remedy: "missing", "unstamped", "stale" (embed
-// advanced, canonical untouched — install fixes it), or "edited" (embed
-// advanced AND canonical hand-edited — install DECLINES, so the remedy is a
-// manual reconcile against <name>.dist). Returns an empty slice when every
-// embedded prompt is present and up-to-date.
+// advanced, canonical untouched — install fixes it), or "edited" (canonical
+// hand-edited — install DECLINES, so the remedy is a manual reconcile; see
+// PromptDrift.EmbedCurrent for the two shapes). Returns an empty slice when
+// every embedded prompt is present and up-to-date.
+//
+// THE BODY IS HASHED EVEN WHEN THE STAMP'S EMBED HASH MATCHES
+// (drellem2/pogo#125). The stamp is the file's own claim about itself; a body
+// rewritten under an unchanged stamp — an org template's customization, or a
+// hand-edit — kept the claim and lost the content, and trusting the claim is
+// how this check reported "all prompts match embedded source" for three files
+// `pogo check-staleness` had just hashed as different.
 //
 // Used by `pogo doctor --check` to fail loud when the binary's prompts have
 // advanced past what running agents are reading on disk — the failure mode
@@ -1983,6 +2002,12 @@ func CheckPromptDrift() ([]PromptDrift, error) {
 			} else {
 				drift = append(drift, PromptDrift{Path: rel, Reason: "stale"})
 			}
+			return nil
+		}
+		// Embed unchanged. The stamp says the body is what the embed wrote;
+		// check that rather than believe it.
+		if stamp.BodyHash != "" && currentBodyHash(destPath) != stamp.BodyHash {
+			drift = append(drift, PromptDrift{Path: rel, Reason: "edited", EmbedCurrent: true})
 		}
 		return nil
 	})

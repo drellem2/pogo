@@ -1782,6 +1782,73 @@ func TestCheckPromptDriftDetectsMissingAndUnstamped(t *testing.T) {
 	}
 }
 
+// TestCheckPromptDriftHashesBodyUnderMatchingEmbed is drellem2/pogo#125's
+// doctor half. The installed file keeps the stamp the installer wrote — so its
+// embed hash MATCHES this binary — but its body has been rewritten (an org
+// template's copy, or a hand-edit). The check used to stop at the stamp and
+// call it up-to-date while `pogo check-staleness`, hashing the body, called the
+// same file different. It must now report "edited", flagged EmbedCurrent so
+// doctor does not send the reader after a .dist install will never write.
+func TestCheckPromptDriftHashesBodyUnderMatchingEmbed(t *testing.T) {
+	tmpHome := testsandbox.Isolate(t).Home
+
+	if _, err := InstallPrompts(InstallOpts{}); err != nil {
+		t.Fatalf("InstallPrompts: %v", err)
+	}
+	// Control: a fresh install with its stamp intact is not drifted.
+	if got := driftReasonFor(t, "mayor.md"); got != "" {
+		t.Fatalf("fresh install reported mayor.md as %q — the control is broken", got)
+	}
+
+	mayorPath := filepath.Join(tmpHome, ".pogo", "agents", "mayor.md")
+	data, err := os.ReadFile(mayorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stampLine, _, ok := strings.Cut(string(data), "\n")
+	if !ok || !strings.Contains(stampLine, "embed=sha256:") {
+		t.Fatalf("installed mayor.md has no v1 stamp line: %q", stampLine)
+	}
+	if err := os.WriteFile(mayorPath, []byte(stampLine+"\n# An org's own mayor prompt, 220 lines longer\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	drift, err := CheckPromptDrift()
+	if err != nil {
+		t.Fatalf("CheckPromptDrift: %v", err)
+	}
+	var got *PromptDrift
+	for i := range drift {
+		if drift[i].Path == "mayor.md" {
+			got = &drift[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("a rewritten body under a matching embed stamp was not reported: %+v", drift)
+	}
+	if got.Reason != "edited" || !got.EmbedCurrent {
+		t.Errorf("mayor.md drift = %+v, want Reason=edited EmbedCurrent=true", *got)
+	}
+	if DriftInstallFixable(got.Reason) {
+		t.Error("an edited body was classed install-fixable; install skips a matching-embed file")
+	}
+
+	// And install really does skip it — the reason doctor must not advise it.
+	res, err := InstallPrompts(InstallOpts{})
+	if err != nil {
+		t.Fatalf("InstallPrompts: %v", err)
+	}
+	skipped := false
+	for _, s := range res.Skipped {
+		if s == "mayor.md" {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Errorf("install did not skip mayor.md (%+v) — the EmbedCurrent remedy text is wrong", res)
+	}
+}
+
 // driftReasonFor returns the Reason CheckPromptDrift reports for rel, or ""
 // if rel is not in the drift set.
 func driftReasonFor(t *testing.T, rel string) string {

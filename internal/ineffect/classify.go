@@ -67,7 +67,7 @@ const (
 var classOrder = []Class{ClassCompiled, ClassPrompt, ClassAsset, ClassUnclassified, ClassNoCarrier}
 
 // PromptsSubtree is the repo prefix of the shipped prompt corpus. It is
-// duplicated from internal/staleness.PromptsSubtree rather than imported to
+// duplicated from internal/staleness.DefaultPromptsSubtree rather than imported to
 // keep this package free of that one's git/network machinery; classify_test.go
 // asserts the two agree, so a move cannot make them differ quietly.
 const PromptsSubtree = "internal/agent/prompts/"

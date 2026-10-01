@@ -231,11 +231,15 @@ func RevisionCeilingSource(name, how, repo, rev, why string) CeilingSource {
 				}
 				return nil, "", fmt.Errorf("%s", why)
 			}
-			c, info, err := LoadShippedCorpus(ctx, repo, rev)
+			// Always drellem2/pogo's subtree, whatever the reference's: rev is
+			// a pogo build's revision, and a pogo build embeds exactly that
+			// subtree no matter where the operator's corpus upstream keeps
+			// its own.
+			c, info, err := LoadShippedCorpus(ctx, repo, rev, DefaultPromptsSubtree)
 			if err != nil {
 				return nil, "", err
 			}
-			return c, fmt.Sprintf("%s at %s, read from %s", PromptsSubtree, shortRev(info.Commit), repo), nil
+			return c, fmt.Sprintf("%s at %s, read from %s", DefaultPromptsSubtree, shortRev(info.Commit), repo), nil
 		},
 	}
 }

@@ -2,6 +2,7 @@ package promptstale
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -217,7 +218,7 @@ func TestWatcherRefAdvancingReNotifies(t *testing.T) {
 	if mail.count() != 2 {
 		t.Fatalf("the ref advancing did not re-notify: %d mails", mail.count())
 	}
-	if !strings.Contains(mail.last().body, "behind by 129") {
+	if !strings.Contains(mail.last().body, "129 fewer lines than ref") {
 		t.Errorf("the second notice does not carry the NEW gap:\n%s", mail.last().body)
 	}
 }
@@ -336,5 +337,70 @@ func TestSummaryStatesTheReferenceAndThePosture(t *testing.T) {
 	}
 	if got := (*Watcher)(nil).Summary(); got != "disabled" {
 		t.Errorf("nil Watcher Summary() = %q, want \"disabled\"", got)
+	}
+}
+
+// TestWatcherHedgedSendsNoMail is drellem2/pogo#125 delivered by the sweep: on
+// an org-templated host the installed tree carries the org's own prompts (files
+// the reference does not ship) and its current prompts differ from
+// drellem2/pogo's. With no [lineage] declared the sweep cannot know the
+// reference is the wrong upstream, so it must not mail anyone that their prompt
+// is out of date. It still emits its positive record, marked hedged, and it
+// leaves the suppression store alone. Declaring the lineage restores the mail —
+// the positive control that the silence is the hedge and not a broken sweep.
+func TestWatcherHedgedSendsNoMail(t *testing.T) {
+	repo := fixtureRepo(t, map[string][]byte{"mayor.md": lines(1006, "generic")})
+	root := installTree(t, map[string][]byte{
+		"mayor.md":         lines(1226, "org"),
+		"payit-polecat.md": lines(50, "org-only"),
+	})
+	state := filepath.Join(t.TempDir(), NoticesFile)
+	mail, rec := &mailbox{}, &recorder{}
+
+	rep := newWatcher(t, repo, root, state, mail, rec).Sample(context.Background(), time.Now())
+	if len(rep.Findings) != 1 || len(rep.Unjudged) != 1 {
+		t.Fatalf("fixture: findings=%+v unjudged=%v, want one of each", rep.Findings, rep.Unjudged)
+	}
+	if !rep.Hedged {
+		t.Fatal("undeclared lineage with unjudged files did not hedge")
+	}
+	if mail.count() != 0 {
+		t.Fatalf("a hedged sweep sent %d mail(s): %+v", mail.count(), mail.last())
+	}
+	if n := rec.countOf(ranEvent); n != 1 {
+		t.Errorf("%s emitted %d times, want 1 — a hedged sweep still ran", ranEvent, n)
+	}
+	if n := rec.countOf(firedEvent); n != 0 {
+		t.Errorf("%s emitted %d times on a hedged sweep, want 0", firedEvent, n)
+	}
+	for _, e := range rec.events {
+		if e.EventType == ranEvent && e.Details["hedged"] != true {
+			t.Errorf("%s does not record hedged=true: %+v", ranEvent, e.Details)
+		}
+	}
+	if _, err := os.Stat(state); err == nil {
+		t.Error("a hedged sweep wrote the suppression store; declaring a lineage later would inherit its silence")
+	}
+
+	// Positive control: same trees, lineage declared — the finding mails.
+	declared := New(Options{
+		Enabled: true, Repo: repo, Ref: "main", Declared: true, Root: root,
+		Coordinator: "mayor", Mail: mail.send, Emit: rec.emit,
+		SkipRemote: true, StatePath: state,
+	})
+	if rep := declared.Sample(context.Background(), time.Now()); rep.Hedged {
+		t.Fatal("a declared lineage still hedged")
+	}
+	if mail.count() != 1 {
+		t.Fatalf("declared lineage: %d mails, want 1", mail.count())
+	}
+	body := mail.last().body
+	for _, banned := range []string{"behind by", "LONGER by", "superseded"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("notice body asserts a direction (%q):\n%s", banned, body)
+		}
+	}
+	if !strings.Contains(mail.last().subject, "differs from the reference") {
+		t.Errorf("subject = %q, want the direction-free wording", mail.last().subject)
 	}
 }

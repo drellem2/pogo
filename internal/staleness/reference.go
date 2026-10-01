@@ -245,6 +245,9 @@ type RemoteState struct {
 	CorpusCommits int           `json:"corpus_commits,omitempty"`
 	Corpus        []AheadCommit `json:"corpus,omitempty"`
 	Truncated     int           `json:"truncated,omitempty"`
+	// Subtree is the corpus path CorpusCommits was counted under, so the
+	// count can be printed beside the path it is about (drellem2/pogo#125).
+	Subtree string `json:"subtree,omitempty"`
 	// Fetched records that --fetch ran, and Was is where the reference stood
 	// before it. Keeping the pre-fetch revision is what lets the report still
 	// say "the deploy left you here, and this shipped since" after the fetch
@@ -291,7 +294,7 @@ func (r RemoteState) Clean() bool {
 
 // CheckRemote judges refCommit — the resolved reference — against the branch's
 // live remote head.
-func CheckRemote(ctx context.Context, repo, ref, refCommit string, timeout time.Duration) RemoteState {
+func CheckRemote(ctx context.Context, repo, ref, subtree, refCommit string, timeout time.Duration) RemoteState {
 	t, err := ResolveRemoteTarget(ctx, repo, ref)
 	if err != nil {
 		return RemoteState{Armed: false, Err: err.Error()}
@@ -308,7 +311,7 @@ func CheckRemote(ctx context.Context, repo, ref, refCommit string, timeout time.
 		return st
 	}
 	st.Behind = true
-	countAhead(ctx, repo, refCommit, head, &st)
+	countAhead(ctx, repo, subtree, refCommit, head, &st)
 	return st
 }
 
@@ -318,7 +321,9 @@ func CheckRemote(ctx context.Context, repo, ref, refCommit string, timeout time.
 // non-zero with "bad revision", which is indistinguishable at the call site
 // from a real failure, and a swallowed error there would print "0 commits
 // since" over a reference that is arbitrarily far behind.
-func countAhead(ctx context.Context, repo, from, to string, st *RemoteState) {
+func countAhead(ctx context.Context, repo, subtree, from, to string, st *RemoteState) {
+	subtree = normalizeSubtree(subtree)
+	st.Subtree = subtree
 	if _, err := gitOut(ctx, repo, "cat-file", "-e", to+"^{commit}"); err != nil {
 		return
 	}
@@ -326,7 +331,7 @@ func countAhead(ctx context.Context, repo, from, to string, st *RemoteState) {
 	if err != nil {
 		return
 	}
-	corpus, err := revCount(ctx, repo, from, to, "--", PromptsSubtree)
+	corpus, err := revCount(ctx, repo, from, to, "--", subtree)
 	if err != nil {
 		return
 	}
@@ -336,7 +341,7 @@ func countAhead(ctx context.Context, repo, from, to string, st *RemoteState) {
 	if corpus == 0 {
 		return
 	}
-	out, err := gitOut(ctx, repo, "log", "--format=%h\x1f%s", from+".."+to, "--", PromptsSubtree)
+	out, err := gitOut(ctx, repo, "log", "--format=%h\x1f%s", from+".."+to, "--", subtree)
 	if err != nil {
 		return
 	}
@@ -421,11 +426,26 @@ func DeployReferenceRepo(pogoHome string) (string, bool) {
 	if src == "" {
 		src = filepath.Join(pogoHome, "deploy-src")
 	}
+	return src, isCheckout(src)
+}
+
+// PromptReferenceRepo resolves the prompt reference repo for an automated run:
+// the declared `[lineage] prompt_repo` when there is one, else the deploy
+// checkout (drellem2/pogo#125). Same arming contract as DeployReferenceRepo — a
+// declared path that is not a checkout disarms rather than falling back, since
+// silently judging against drellem2/pogo when the operator named another
+// upstream is exactly the verdict the declaration exists to prevent.
+func PromptReferenceRepo(pogoHome, declared string) (string, bool) {
+	if declared != "" {
+		return declared, isCheckout(declared)
+	}
+	return DeployReferenceRepo(pogoHome)
+}
+
+func isCheckout(src string) bool {
 	// A .git that is a FILE is a worktree or a submodule and is just as usable
 	// a reference as a directory; refusing it would disarm the witness on a
 	// perfectly good checkout.
-	if fi, err := os.Stat(filepath.Join(src, ".git")); err == nil && (fi.IsDir() || fi.Mode().IsRegular()) {
-		return src, true
-	}
-	return src, false
+	fi, err := os.Stat(filepath.Join(src, ".git"))
+	return err == nil && (fi.IsDir() || fi.Mode().IsRegular())
 }

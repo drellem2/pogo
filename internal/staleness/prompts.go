@@ -64,10 +64,19 @@ import (
 	"github.com/drellem2/pogo/internal/ghtoken"
 )
 
-// PromptsSubtree is where the shipped corpus lives in the repo. Its layout
+// DefaultPromptsSubtree is where drellem2/pogo ships its corpus. Its layout
 // under that root mirrors the installed layout under ~/.pogo/agents, which is
 // what makes the two comparable path-by-path.
-const PromptsSubtree = "internal/agent/prompts"
+//
+// It is a DEFAULT, not the only answer (drellem2/pogo#125). A host whose
+// ~/.pogo comes from an org template is downstream of THAT repo, which may keep
+// its corpus somewhere else entirely (payitgov/.pogo keeps it at agents/).
+// Compared against drellem2/pogo's subtree, such a host's current prompts read
+// as different — correctly — and the report used to call them superseded,
+// which nothing in a hash comparison can establish. The subtree is therefore a
+// parameter: `--subtree` on check-staleness, and `[lineage] prompt_subtree` in
+// config for the automated runs.
+const DefaultPromptsSubtree = "internal/agent/prompts"
 
 // PromptFile is one file of a corpus, reduced to what a comparison needs.
 type PromptFile struct {
@@ -99,6 +108,16 @@ func measure(data []byte) PromptFile {
 type Reference struct {
 	Repo string `json:"repo"`
 	Ref  string `json:"ref"`
+	// Subtree is the path inside Repo the corpus was read from. Named in every
+	// report because the same repo and ref with a different subtree is a
+	// different reference (drellem2/pogo#125).
+	Subtree string `json:"subtree"`
+	// Declared reports whether the reference came from a [lineage] declaration
+	// — the operator asserting "this is my corpus's upstream" — rather than
+	// from defaults. Without one, a corpus that carries files the reference
+	// does not ship may simply be downstream of something else, and the verdict
+	// is hedged (see PromptReport.Hedged).
+	Declared bool `json:"declared"`
 	// Commit and CommitTime are the resolved ref. They matter because the
 	// default repo is a local mirror (~/.pogo/deploy-src) whose origin/main is
 	// only as fresh as its last successful fetch — on 2026-08-05 that fetch
@@ -181,8 +200,11 @@ func gitNetOut(ctx context.Context, repo string, args ...string) ([]byte, error)
 // answer does not depend on what branch the reference repo happens to be on,
 // and the reference repo is never written to — a detector that mutates the tree
 // it is judging has made itself a participant.
-func LoadShippedCorpus(ctx context.Context, repo, ref string) (Corpus, Reference, error) {
-	info := Reference{Repo: repo, Ref: ref}
+//
+// subtree is the corpus root inside repo; empty means DefaultPromptsSubtree.
+func LoadShippedCorpus(ctx context.Context, repo, ref, subtree string) (Corpus, Reference, error) {
+	subtree = normalizeSubtree(subtree)
+	info := Reference{Repo: repo, Ref: ref, Subtree: subtree}
 
 	sha, err := gitOut(ctx, repo, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
 	if err != nil {
@@ -196,9 +218,9 @@ func LoadShippedCorpus(ctx context.Context, repo, ref string) (Corpus, Reference
 	}
 	info.CommitTime = strings.TrimSpace(string(when))
 
-	names, err := gitOut(ctx, repo, "ls-tree", "-r", "-z", "--name-only", info.Commit, "--", PromptsSubtree)
+	names, err := gitOut(ctx, repo, "ls-tree", "-r", "-z", "--name-only", info.Commit, "--", subtree)
 	if err != nil {
-		return nil, info, fmt.Errorf("listing %s at %s: %w", PromptsSubtree, info.Commit, err)
+		return nil, info, fmt.Errorf("listing %s at %s: %w", subtree, info.Commit, err)
 	}
 
 	corpus := Corpus{}
@@ -206,7 +228,7 @@ func LoadShippedCorpus(ctx context.Context, repo, ref string) (Corpus, Reference
 		if name == "" {
 			continue
 		}
-		rel, err := filepath.Rel(PromptsSubtree, filepath.FromSlash(name))
+		rel, err := filepath.Rel(filepath.FromSlash(subtree), filepath.FromSlash(name))
 		if err != nil {
 			continue
 		}
@@ -217,9 +239,20 @@ func LoadShippedCorpus(ctx context.Context, repo, ref string) (Corpus, Reference
 		corpus[filepath.ToSlash(rel)] = measure(data)
 	}
 	if len(corpus) == 0 {
-		return nil, info, fmt.Errorf("%s holds no files at %s (%s) — nothing to compare against", PromptsSubtree, ref, info.Commit)
+		return nil, info, fmt.Errorf("subtree %s holds no files at %s (%s) in %s — nothing to compare against", subtree, ref, info.Commit, repo)
 	}
 	return corpus, info, nil
+}
+
+// normalizeSubtree applies the default and strips the slashes a hand-typed
+// path tends to carry, so "agents/" and "agents" name the same reference in
+// git's pathspec and in the report.
+func normalizeSubtree(subtree string) string {
+	subtree = strings.Trim(strings.TrimSpace(subtree), "/")
+	if subtree == "" {
+		return DefaultPromptsSubtree
+	}
+	return subtree
 }
 
 // CorpusLayout is the shape of a shipped corpus: which directories it occupies
@@ -332,17 +365,29 @@ type PromptDelta struct {
 // case it exists to make unmissable, where the two files are the same length
 // and still different.
 func (d PromptDelta) LineNote() string {
-	switch {
-	case d.Kind != "differs":
+	if d.Kind != "differs" {
 		return fmt.Sprintf("%d lines shipped, not installed", d.ShippedLines)
-	case d.InstalledLines == d.ShippedLines:
-		return fmt.Sprintf("same length (%d lines), different content", d.ShippedLines)
-	case d.InstalledLines > d.ShippedLines:
-		return fmt.Sprintf("installed %d lines, ref %d — installed is LONGER by %d",
-			d.InstalledLines, d.ShippedLines, d.InstalledLines-d.ShippedLines)
+	}
+	return SizeNote(d.InstalledLines, d.ShippedLines)
+}
+
+// SizeNote words the line counts of a differing pair WITHOUT a direction.
+//
+// It used to say "installed is behind by N" or "installed is LONGER by N".
+// "Behind" is a claim that the reference is newer, and a sha256 comparison
+// establishes difference, never order: on an org-templated host the installed
+// copy was 220 lines longer than drellem2/pogo's because the org had ADDED
+// them, and the report's own preamble had just said the counts decided nothing
+// (drellem2/pogo#125). Shared with internal/promptstale so the CLI and the
+// mail cannot drift back apart.
+func SizeNote(installed, ref int) string {
+	switch {
+	case installed == ref:
+		return fmt.Sprintf("same length (%d lines), different content", ref)
+	case installed > ref:
+		return fmt.Sprintf("installed %d lines, ref %d — %d more lines than ref", installed, ref, installed-ref)
 	default:
-		return fmt.Sprintf("installed %d lines, ref %d — installed is behind by %d",
-			d.InstalledLines, d.ShippedLines, d.ShippedLines-d.InstalledLines)
+		return fmt.Sprintf("installed %d lines, ref %d — %d fewer lines than ref", installed, ref, ref-installed)
 	}
 }
 
@@ -414,13 +459,33 @@ func (r PromptReport) Clean() bool {
 	return r.Err == "" && len(r.Deltas) == 0 && len(r.Unreadable) == 0 && r.Remote.Clean()
 }
 
+// Hedged reports whether the verdict must be weakened because the reference
+// may not be this corpus's upstream at all (drellem2/pogo#125).
+//
+// The evidence is the census: the installed tree holds corpus-shaped files the
+// reference does not ship. On a host that tracks drellem2/pogo those are the
+// usual local stubs; on an org-templated host they are the org's own prompts —
+// and the report cannot tell which from in here. A [lineage] declaration is the
+// operator saying which, so a declared reference is never hedged. Only a report
+// with deltas is hedged: with nothing differing there is no verdict to weaken.
+func (r PromptReport) Hedged() bool {
+	return r.Err == "" && !r.Reference.Declared && len(r.Unjudged) > 0 && len(r.Deltas) > 0
+}
+
 // PromptOptions is the prompt witness's whole input, as a struct rather than a
 // widening parameter list — the two additions here are both about the
 // REFERENCE, and a positional bool named `fetch` at the end of a four-argument
 // call is how a detector quietly acquires a side effect.
 type PromptOptions struct {
-	Repo          string
-	Ref           string
+	Repo string
+	Ref  string
+	// Subtree is the corpus root inside Repo. Empty means
+	// DefaultPromptsSubtree.
+	Subtree string
+	// Declared records that Repo/Ref/Subtree came from a [lineage]
+	// declaration rather than defaults. It decides nothing about the
+	// comparison; it decides whether the verdict may be stated without a hedge.
+	Declared      bool
 	InstalledRoot string
 	// SkipRemote disarms the live-remote-head query. The corpus comparison is
 	// unaffected; what is lost is the qualifier on the reference, which the
@@ -473,8 +538,9 @@ func CheckPrompts(ctx context.Context, opts PromptOptions) PromptReport {
 		}
 	}
 
-	shipped, info, err := LoadShippedCorpus(ctx, opts.Repo, opts.Ref)
+	shipped, info, err := LoadShippedCorpus(ctx, opts.Repo, opts.Ref, opts.Subtree)
 	info.Fetch = rep.Reference.Fetch
+	info.Declared = opts.Declared
 	rep.Reference = info
 	if err != nil {
 		rep.Err = err.Error()
@@ -492,10 +558,10 @@ func CheckPrompts(ctx context.Context, opts PromptOptions) PromptReport {
 		if rep.Remote.Fetched && rep.Remote.Was != "" && rep.Remote.Was != info.Commit {
 			rep.Remote.Behind = true
 			rep.Remote.Head = info.Commit
-			countAhead(ctx, opts.Repo, rep.Remote.Was, info.Commit, &rep.Remote)
+			countAhead(ctx, opts.Repo, info.Subtree, rep.Remote.Was, info.Commit, &rep.Remote)
 		}
 	default:
-		rep.Remote = CheckRemote(ctx, opts.Repo, opts.Ref, info.Commit, opts.RemoteTimeout)
+		rep.Remote = CheckRemote(ctx, opts.Repo, opts.Ref, info.Subtree, info.Commit, opts.RemoteTimeout)
 	}
 
 	rep.Shipped = len(shipped)

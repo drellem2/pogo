@@ -390,7 +390,7 @@ false "verified". You have two safe options:
 |---|---|---|
 | `pogod-promptsync` | a **shipped update could not be applied** because of your edits — there is a `.dist` sidecar waiting | reconcile the canonical against its `.dist` |
 | `pogod-promptedit` | the edits exist and **no shipped update has collided with them yet** | keep the edit, or `pogo install` to drop it |
-| `pogod-promptstale` | the installed file **is not the version the repo ships** — see below | redeploy, or `pogo agent prompt install` |
+| `pogod-promptstale` | the installed file **differs from the reference corpus** — see below | redeploy, or `pogo agent prompt install` |
 
 Reconciling a declined sync resolves the first two together.
 
@@ -416,7 +416,18 @@ pogo check-staleness --fetch    # compare against what has shipped SINCE the dep
 ### What it compares against, and why that qualifier matters
 
 The reference is the deploy checkout (`~/.pogo/deploy-src`, or `POGO_DEPLOY_SRC`)
-at `origin/main`. **The sweep never fetches.** A detector that mutates the tree
+at `origin/main`, under `internal/agent/prompts`, unless config.toml declares
+another upstream with `[lineage] prompt_repo` / `prompt_ref` /
+`prompt_subtree` (see
+[CONFIGURATION.md](CONFIGURATION.md#lineage--naming-your-configurations-upstream)).
+An org template keeps its own corpus, so it should declare its own repo here.
+
+**Without a declaration the sweep may stay silent.** If prompts differ and the
+installed tree also has files the reference does not ship, the reference might
+not be this corpus's upstream. A hash comparison can show that the files differ
+but not which side is newer, so pogod logs the result and mails no one
+(drellem2/pogo#125). Declaring the lineage, even as the default, turns the mail
+back on. **The sweep never fetches.** A detector that mutates the tree
 it judges has made itself a participant, and a fetch would overwrite the
 `FETCH_HEAD` timestamp the reference's own age is read from.
 

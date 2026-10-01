@@ -140,20 +140,17 @@ func (f Finding) Fingerprint() string {
 // LineNote describes the size relationship in words. It is commentary on a
 // decision already made by hash — including the case worth making unmissable,
 // where the two files are the same length and still different.
+//
+// Worded through staleness.SizeNote, which states no direction: a hash says
+// the two differ, never which is newer (drellem2/pogo#125).
 func (f Finding) LineNote() string {
-	switch {
-	case f.Kind == KindUnreadable:
+	switch f.Kind {
+	case KindUnreadable:
 		return "could not be read — its content is unknown, not matching"
-	case f.Kind == KindNotInstalled:
+	case KindNotInstalled:
 		return fmt.Sprintf("%d lines shipped, nothing installed", f.ShippedLines)
-	case f.InstalledLines == f.ShippedLines:
-		return fmt.Sprintf("same length (%d lines), different content", f.ShippedLines)
-	case f.InstalledLines > f.ShippedLines:
-		return fmt.Sprintf("installed %d lines, ref %d — installed is LONGER by %d",
-			f.InstalledLines, f.ShippedLines, f.InstalledLines-f.ShippedLines)
 	default:
-		return fmt.Sprintf("installed %d lines, ref %d — installed is behind by %d",
-			f.InstalledLines, f.ShippedLines, f.ShippedLines-f.InstalledLines)
+		return staleness.SizeNote(f.InstalledLines, f.ShippedLines)
 	}
 }
 
@@ -188,6 +185,11 @@ type Report struct {
 	// Err is set when the comparison could not be made at all. Distinct from
 	// "no findings": a check that could not run has not found the fleet current.
 	Err string `json:"error,omitempty"`
+	// Hedged is staleness.PromptReport.Hedged: findings exist, but the
+	// installed tree carries files the reference does not ship and no
+	// [lineage] declares the reference to be its upstream. The runner sends
+	// NO mail on a hedged report (drellem2/pogo#125).
+	Hedged bool `json:"hedged,omitempty"`
 	// SelfCeiling is what THIS daemon's embedded corpus carries, measured
 	// against the findings above (mg-1e8e).
 	//
@@ -231,6 +233,7 @@ func FromStaleness(rep staleness.PromptReport, coordinator string) Report {
 		Shipped:   rep.Shipped,
 		Unjudged:  rep.Unjudged,
 		Err:       rep.Err,
+		Hedged:    rep.Hedged(),
 	}
 	for _, d := range rep.Deltas {
 		to, owned := agent.PromptAddressee(d.Path, coordinator)
@@ -306,15 +309,15 @@ func (rc Recipient) Subject() string {
 	if len(rc.Findings) == 1 {
 		f := rc.Findings[0]
 		if f.Owned {
-			return fmt.Sprintf("[prompt-stale] YOUR prompt %s is not the version the repo ships", f.Path)
+			return fmt.Sprintf("[prompt-stale] YOUR prompt %s differs from the reference", f.Path)
 		}
-		return fmt.Sprintf("[prompt-stale] %s is not the version the repo ships", f.Path)
+		return fmt.Sprintf("[prompt-stale] %s differs from the reference", f.Path)
 	}
 	whose := ""
 	if rc.Owned() {
 		whose = "your "
 	}
-	return fmt.Sprintf("[prompt-stale] %d %sprompts are not the version the repo ships", len(rc.Findings), whose)
+	return fmt.Sprintf("[prompt-stale] %d %sprompts differ from the reference", len(rc.Findings), whose)
 }
 
 // Body writes the notice for one recipient.
@@ -337,8 +340,12 @@ func (rc Recipient) Body(r Report) string {
 	if len(rc.Findings) > 1 {
 		subject = fmt.Sprintf("%d prompt files are", len(rc.Findings))
 	}
-	fmt.Fprintf(&b, "%s not the version the repo ships. What you are reading was installed by an\n"+
-		"earlier deploy; the corpus has moved since and nothing has installed it here.\n\n", subject)
+	// No claim about which side is newer (drellem2/pogo#125): the hash
+	// establishes difference, and the reference is named below so the reader
+	// can judge direction for themselves.
+	fmt.Fprintf(&b, "%s DIFFERENT from the copy the reference below ships. The usual cause is an\n"+
+		"earlier deploy whose corpus has since moved on; a hash comparison cannot say\n"+
+		"which side is newer, so check the reference before acting.\n\n", subject)
 
 	for _, f := range rc.Findings {
 		fmt.Fprintf(&b, "  %s\n", filepath.Join(r.Root, filepath.FromSlash(f.Path)))
@@ -354,6 +361,7 @@ func (rc Recipient) Body(r Report) string {
 		"truthfully while the fleet drifts. The reference is a git ref:\n\n")
 	fmt.Fprintf(&b, "    repo:      %s\n", r.Reference.Repo)
 	fmt.Fprintf(&b, "    ref:       %s = %s\n", r.Reference.Ref, shortSHA(r.Reference.Commit))
+	fmt.Fprintf(&b, "    subtree:   %s\n", r.Reference.Subtree)
 	if r.Reference.CommitTime != "" {
 		fmt.Fprintf(&b, "    committed: %s\n", r.Reference.CommitTime)
 	}
@@ -379,11 +387,11 @@ func (rc Recipient) Body(r Report) string {
 		"the file diverge from source with no expiry and no record: the next legitimate\n" +
 		"update is either clobbered silently or declined into a .dist sidecar that\n" +
 		"somebody discovers days later. It trades a known gap for an invisible one.\n\n" +
-		"UNTIL IT IS INSTALLED, treat the affected file as a prompt you cannot fully\n" +
+		"UNTIL IT IS RESOLVED, treat the affected file as a prompt you cannot fully\n" +
 		"trust rather than as a prompt that is fine. The costly shape of this defect is\n" +
 		"not a missing paragraph, it is a live prompt that ASSERTS something no longer\n" +
-		"true — and the agent reading it has no way to know its copy is superseded. That\n" +
-		"is what this notice is for.\n\n")
+		"true — and the agent reading it has no way to know its copy is out of date.\n" +
+		"That is what this notice is for.\n\n")
 
 	fmt.Fprintf(&b, "SCOPE OF THE SWEEP. %d shipped prompt(s) were compared against %s; %d differ or\n"+
 		"are missing. %d installed file(s) the ref does not ship were NOT judged — the\n"+

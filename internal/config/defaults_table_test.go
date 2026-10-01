@@ -61,6 +61,7 @@ var configFieldSection = map[string]string{
 	"ReviewDecl":          "review_decl",
 	"PromptEdit":          "prompt_edit",
 	"PromptStale":         "prompt_stale",
+	"Lineage":             "lineage",
 	"AckWatch":            "ack_watch",
 	"DeafWatch":           "deaf_watch",
 	"WakeWatch":           "wake_watch",

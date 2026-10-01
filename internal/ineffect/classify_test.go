@@ -103,9 +103,9 @@ func TestInstalledPromptPath(t *testing.T) {
 // silently classify prompts as documentation — a green row on the artifact
 // class with the most carriers.
 func TestPromptsSubtreeAgreesWithStaleness(t *testing.T) {
-	want := strings.TrimSuffix(staleness.PromptsSubtree, "/") + "/"
+	want := strings.TrimSuffix(staleness.DefaultPromptsSubtree, "/") + "/"
 	if PromptsSubtree != want {
-		t.Errorf("ineffect.PromptsSubtree = %q, staleness.PromptsSubtree = %q — the corpus has moved and only one copy of the path was updated", PromptsSubtree, staleness.PromptsSubtree)
+		t.Errorf("ineffect.PromptsSubtree = %q, staleness.DefaultPromptsSubtree = %q — the corpus has moved and only one copy of the path was updated", PromptsSubtree, staleness.DefaultPromptsSubtree)
 	}
 }
 

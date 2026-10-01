@@ -85,12 +85,12 @@ func fixtureRepo(t *testing.T, files map[string][]byte) string {
 func commitCorpus(t *testing.T, repo string, files map[string][]byte, msg string) {
 	t.Helper()
 	for rel, data := range files {
-		writeFile(t, filepath.Join(repo, staleness.PromptsSubtree, filepath.FromSlash(rel)), data)
+		writeFile(t, filepath.Join(repo, staleness.DefaultPromptsSubtree, filepath.FromSlash(rel)), data)
 	}
 	// Staged by PATH rather than with `git add -A`: this fixture repo is a tree
 	// the test itself also writes scratch into, and a broad stage in a tree
 	// something else writes to is how an unintended file rides into a commit.
-	git(t, repo, "add", "--", staleness.PromptsSubtree)
+	git(t, repo, "add", "--", staleness.DefaultPromptsSubtree)
 	git(t, repo, "commit", "-q", "-m", msg)
 }
 
@@ -155,7 +155,7 @@ func TestPositiveControl(t *testing.T) {
 	if f.Path != "mayor.md" || f.Kind != KindDiffers {
 		t.Errorf("finding = %+v, want mayor.md/%s", f, KindDiffers)
 	}
-	if !strings.Contains(f.LineNote(), "behind by 129") {
+	if !strings.Contains(f.LineNote(), "129 fewer lines than ref") {
 		t.Errorf("LineNote() = %q, want the 129-line gap named", f.LineNote())
 	}
 	if rep.Shipped != 2 {
@@ -361,7 +361,7 @@ func TestBodyNamesItsReferenceAndItsLimits(t *testing.T) {
 		"pogo check-staleness",    // reproducible
 		"DO NOT HAND-EDIT",        // the constraint mg-385f asked any fix to carry
 		"pogo agent prompt install",
-		"behind by 129",
+		"129 fewer lines than ref",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("notice body does not carry %q:\n%s", want, body)
