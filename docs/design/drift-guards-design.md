@@ -73,7 +73,7 @@ fifth was found while landing this doc.
 | pogod scheduler — `mail-check-*` reaped at restart, `schedule list` still looks populated because differently-named sweeps survive (mg-de08; four PMs, ~6h dark) | 1 | **Shipped** — unconditional re-assert at agent startup |
 | orchestrated HTTP mux — a route *registered* is not a route *reachable*: `/hostload` was registered on the `orchestrated` mux but never forwarded onto the listener, and 404'd from 1dd47ad until mg-c26d (drellem2/pogo#114) | 2 | **Instance fixed** — mg-c26d moved it to `/agents/hostload` and pinned reachability with `TestEveryAgentRouteIsMounted`. The *guard* — comparing registrations against mounts for every sub-mux — is still **open**, mg-08af (gated to `human`) |
 | pogod orchestration mode — transition 503s every dispatch route, unlogged | 3 | **Shipped** — mg-293c, `internal/server/modeaudit.go` |
-| `install-deploy` overwrites `~/.pogo/bin/pogo-deploy.sh` unconditionally *while comparing the plist first* — same command, two artifacts, one guarded | 2 | **Open** — mg-3bb3 (drellem2/pogo#123) |
+| `install-deploy` overwrites `~/.pogo/bin/pogo-deploy.sh` unconditionally *while comparing the plist first* — same command, two artifacts, one guarded | 2 | **Guarded** — a changed runner is kept as `.prev` (mg-3bb3, drellem2/pogo#123); across a declared foreign `[lineage]` runner the overwrite is refused without `--force` (mg-4f14a, drellem2/pogo#126). An undeclared host still overwrites |
 
 The last row is the instance table earning its keep: the asymmetry is inside a
 single command, and it is visible only once the branch rule is written down.

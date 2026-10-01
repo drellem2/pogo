@@ -336,9 +336,13 @@ func auditPayloadScript(label, name, path, source string, sourceErr error, remed
 	// prints the command as the fix hands the operator the clobber. Hosts that
 	// declare a [lineage] runner are compared against their own upstream in
 	// auditPayloadLineage instead.
-	res.Detail = fmt.Sprintf("THE FILE %s EXECUTES IS NOT THE FILE THIS BUILD SHIPS: %s (%d lines, installed %s) differs from %s (%d lines). If the installed copy is an older install, every fix merged since is INERT on this box, because a merge does not refresh a copied file. %s If it comes from another upstream, this is not drift: declare it with [lineage] runner_repo/runner_ref/runner_path (pogo-deploy.sh) so it is compared against that upstream. `%s` would replace it with this build's copy",
+	upstream := "If it comes from another upstream, this is not drift."
+	if filepath.Base(path) == "pogo-deploy.sh" {
+		upstream = "If it comes from another upstream, this is not drift: declare it with [lineage] runner_repo/runner_ref/runner_path so it is compared against that upstream."
+	}
+	res.Detail = fmt.Sprintf("THE FILE %s EXECUTES IS NOT THE FILE THIS BUILD SHIPS: %s (%d lines, installed %s) differs from %s (%d lines). If the installed copy is an older install, every fix merged since is INERT on this box, because a merge does not refresh a copied file. %s %s `%s` would replace it with this build's copy",
 		label, path, res.InstalledLines, installedAgeNote(res.InstalledMod), source, res.SourceLines,
-		missingIDsNote(res.MissingIDs), remedy)
+		missingIDsNote(res.MissingIDs), upstream, remedy)
 	return res
 }
 

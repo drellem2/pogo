@@ -5300,7 +5300,7 @@ rxsync() { "$REALGIT" -C "$RX/src" pull -q --ff-only >/dev/null 2>&1; }
 runnerstep() (
     SRC="$RX/src"
     GIT="$REALGIT"
-    POGO_CLI=""
+    POGO_CLI="${RSTEP_CLI:-}"
     DRY_RUN="${RSTEP_DRY:-false}"
     RUNNER_ENABLED=1
     RUNNER_TARGET="${RSTEP_TARGET:-$RXT}"
@@ -5327,6 +5327,30 @@ rblob() { "$REALGIT" hash-object "$1" | cut -c1-12; }
 V1B="$(rblob "$V1")"
 V2B="$(cd "$RX/origin" && "$REALGIT" rev-parse HEAD:scripts/launchd/pogo-deploy.sh | cut -c1-12)"
 V2C="$(cd "$RX/origin" && "$REALGIT" rev-parse --short=7 HEAD)"
+
+# --- 0. drellem2/pogo#126: a runner from a DECLARED FOREIGN LINEAGE is left alone
+# A fake `pogo` answers `config get lineage.runner_foreign` the way the real one
+# does for a host whose [lineage] runner_repo is another org's repo. The world is
+# stale here (v1 installed, v2 committed), so without the skip the step WOULD
+# refresh — the dry-run control below proves it.
+rxcli() {   # rxcli ANSWER — a fake pogo whose lineage.runner_foreign is ANSWER
+    printf '#!/bin/bash\ncase "$1 $2 $3" in "config get lineage.runner_foreign") echo %s ;; esac\nexit 0\n' "$1" > "$RX/pogo-$1"
+    chmod +x "$RX/pogo-$1"; printf '%s' "$RX/pogo-$1"
+}
+L="$(RSTEP_CLI="$(rxcli true)" runnerstep | rline)"
+case "$L" in *"runner: not-checked reason=lineage — [lineage] in config.toml declares"*) pass "drellem2/pogo#126: a declared foreign runner lineage is 'runner: not-checked reason=lineage'" ;;
+    *) fail "drellem2/pogo#126: lineage line: [$L]" ;; esac
+cmp -s "$RXT" "$V1" && [ ! -e "$RXT.prev" ] \
+    && pass "drellem2/pogo#126: and the foreign runner is untouched, with no .prev written" \
+    || fail "drellem2/pogo#126: the lineage skip changed the installed runner"
+L="$(RSTEP_DRY=true RSTEP_CLI="$(rxcli false)" runnerstep | rline)"
+case "$L" in *"runner: stale $V1B -> $V2B"*) pass "drellem2/pogo#126: control — lineage.runner_foreign=false leaves the step judging the runner as before (stale here)" ;;
+    *) fail "drellem2/pogo#126: control line: [$L]" ;; esac
+OUT="$(RSTEP_DRY=true runnerstep)"
+printf '%s' "$OUT" | grep -q '\] runner-lineage: could not read \[lineage\] (no pogo CLI)' \
+    && printf '%s' "$OUT" | rline | grep -q 'runner: stale ' \
+    && pass "drellem2/pogo#126: with no CLI to ask, the step says so and treats the lineage as undeclared" \
+    || fail "drellem2/pogo#126: no-CLI case: $(printf '%s' "$OUT" | grep 'runner')"
 
 # --- 1. ACCEPTANCE: a stale runner is refreshed, with a backup -------------
 INO_BEFORE="$(ls -i "$RXT" | awk '{print $1}')"

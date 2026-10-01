@@ -5020,6 +5020,10 @@ run_mg_only() {
 #     When the plist's source (the deploy.go template region and the shipped
 #     com.pogo.deploy.plist) changed between the installed runner's commit and
 #     this one, the step SAYS so on its own line and does nothing about it.
+#   NEVER CROSSES A DECLARED LINEAGE. When [lineage] runner_* in config.toml
+#     names an upstream other than drellem2/pogo (drellem2/pogo#126), the
+#     installed runner is that upstream's, and the step reports
+#     `not-checked reason=lineage` and leaves it alone.
 #   NEVER CREATES, NEVER FOLLOWS A LINK. A missing target is an uninstalled
 #     job (install-deploy's business), and a symlink points at a file something
 #     else owns; both are reported as not-checked and left alone.
@@ -5148,6 +5152,25 @@ runner_refresh_step() {
 
     if [ "$RUNNER_ENABLED" = "0" ]; then
         RUNNER_RESULT=not-checked; RUNNER_REASON=disabled; runner_report; return 0
+    fi
+    # [lineage] declares that this runner comes from another upstream
+    # (drellem2/pogo#126) — an org template's runner, say. Refreshing it from
+    # $SRC would replace that upstream's runner with drellem2/pogo's, which is
+    # the cross-lineage clobber `pogo service install-deploy` now refuses
+    # without --force. So the step does not look. Asked through `pogo config
+    # get`, as resolve_alert_recipients asks, so the layered config and the
+    # origin check are pogo's, not a second parser's. An unanswerable question
+    # (no CLI, an older CLI without the key) is logged and treated as
+    # undeclared — the default every host had before the key existed.
+    local lineage
+    if lineage="$(read_config_name lineage.runner_foreign)"; then
+        if [ "$lineage" = "true" ]; then
+            RUNNER_RESULT=not-checked; RUNNER_REASON=lineage
+            RUNNER_DETAIL="[lineage] in config.toml declares this runner's upstream as a repo other than drellem2/pogo, so it is not replaced with $RUNNER_REPO_PATH from $SRC; refreshing it is that upstream's business"
+            runner_report; return 0
+        fi
+    else
+        log "runner-lineage: could not read [lineage] ($lineage) — treating the runner's upstream as undeclared (drellem2/pogo)"
     fi
     if [ -z "$RUNNER_SYNCED_SHA" ]; then
         RUNNER_RESULT=not-checked; RUNNER_REASON=no-sync
