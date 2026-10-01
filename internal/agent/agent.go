@@ -320,6 +320,19 @@ func (a *Agent) alive() bool {
 	return pidAlive(a.PID)
 }
 
+// StopRequested reports whether this agent's exit was asked for by a Stop and,
+// if so, which stop path asked (one of the StopCause constants). It reads the
+// same two fields waitAndHandle uses to choose agent_stopped over
+// agent_crashed, so pogod's OnExit hook can tell a deliberate stop from a
+// crash when it reports on the respawn that follows. Without it every A6
+// restart_failed said CRASHED, including about an agent the operator had just
+// stopped on purpose (drellem2/pogo#159).
+func (a *Agent) StopRequested() (requested bool, cause string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.stopRequested, a.stopCause
+}
+
 // Alive reports whether the agent's OS process is still running. Exported for
 // the scheduler's stale-mail-check GC (gh drellem2/macguffin #15), which must
 // distinguish a live agent from one whose process has died.
@@ -1656,6 +1669,17 @@ var (
 	// respawn scheduled in an earlier orchestration — the stop->start
 	// round-trip that clears the latch out from under a late goroutine.
 	ErrRespawnSuperseded = errors.New("respawn abandoned")
+
+	// ErrRespawnAgentAlive is returned when the deferred respawn finds the agent
+	// already running again — something else started it inside the 2s backoff
+	// (`pogo agent start`, an external supervisor's stop+start cycle, a park
+	// then wake). It is NOT one of the guard refusals above and
+	// IsExpectedRespawnRefusal stays false for it: those say "the fleet this
+	// respawn belonged to is gone", and this says the opposite — the agent is
+	// here. It is a sentinel so that pogod's OnExit hook can read it as the
+	// strongest possible evidence AGAINST its A6 "that agent is gone" row
+	// rather than as a restart failure (drellem2/pogo#159, #217).
+	ErrRespawnAgentAlive = errors.New("is still running")
 )
 
 // IsExpectedRespawnRefusal reports whether err is one of the guards above:
@@ -1702,7 +1726,8 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	old.mu.Lock()
 	if old.Status == StatusRunning {
 		old.mu.Unlock()
-		return nil, fmt.Errorf("agent %q is still running", name)
+		// Wrapped, so the message still reads `agent "x" is still running`.
+		return nil, fmt.Errorf("agent %q %w", name, ErrRespawnAgentAlive)
 	}
 	restartCount := old.RestartCount + 1
 	old.mu.Unlock()

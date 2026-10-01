@@ -308,6 +308,47 @@ func conditionRestartFailed(to, agentName, detail string) pogodCondition {
 	}
 }
 
+// conditionRestartFailedAfterStop — A6, when the exit that scheduled the respawn
+// was a STOP someone asked for (a.StopRequested), not a crash.
+//
+// Same row, same id, same out-of-band rule: the agent is still down and
+// nothing will try again, which is what A6 exists to say. What changes is
+// every sentence that asserted a crash. restart_on_crash makes every exit a
+// restart, deliberate ones included (gh #89), so a requested stop CAN reach
+// this row when the restart that follows it genuinely fails — and the old
+// wording then told its reader the agent "CRASHED", "exited unexpectedly" and
+// "is gone" about an agent they had just stopped on purpose. Three false
+// assertions in one notice is how drellem2/pogo#159 was filed; the reader
+// cannot trust the one true claim (it is not running) when it arrives wrapped
+// in those.
+func conditionRestartFailedAfterStop(to, agentName, stopCause, detail string) pogodCondition {
+	how := "on request"
+	if stopCause != "" {
+		how = fmt.Sprintf("on request (stop_cause=%s)", stopCause)
+	}
+	return pogodCondition{
+		ID:        rowA6RestartPrefix + agentName,
+		Row:       "A6",
+		To:        to,
+		Detail:    fmt.Sprintf("respawn of %s after a requested stop failed: %s", agentName, detail),
+		OutOfBand: agentName == to,
+		Subject: fmt.Sprintf("[pogod] %s was stopped on request and its automatic restart FAILED — it is not running",
+			agentName),
+		Body: conditionBody("A6",
+			fmt.Sprintf("%s was stopped %s. It is restart_on_crash, so pogod scheduled the restart "+
+				"it makes of every exit, and that restart failed. This was not a crash.", agentName, how),
+			fmt.Sprintf("%s is not running and nothing will try again — the respawn is one-shot.\n"+
+				"  Everything that agent owns is stopped until someone starts it.", agentName),
+			fmt.Sprintf("1. `pogo agent list` first: if %s is running, something else started it\n"+
+				"     and this notice is stale.\n"+
+				"  2. Otherwise `pogo agent start %s` — the DETAIL above is why the automatic\n"+
+				"     attempt failed, and a manual start usually reproduces it.\n"+
+				"  3. To stop a restart_on_crash agent and have it STAY down, `pogo agent park`\n"+
+				"     it; a bare stop is a restart by design (drellem2/pogo#89).", agentName, agentName),
+			detail),
+	}
+}
+
 // conditionUnknownProvider — A7. The fallback keeps the daemon booting, which is
 // correct; the silence about it is not. An agent running on a different harness
 // than its config asked for produces behaviour differences that get debugged as

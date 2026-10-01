@@ -82,7 +82,14 @@ func wireRespawnSupervisor(reg *agent.Registry, conds conditionRaiser, backoff t
 			defer wg.Done()
 			time.Sleep(backoff)
 			_, rerr := reg.RespawnFromGeneration(a.Name, gen)
-			noteRespawnOutcome(conds, "mayor", a.Name, rerr, time.Now())
+			requested, cause := a.StopRequested()
+			noteRespawnOutcome(conds, "mayor", respawnOutcome{
+				Agent:         a.Name,
+				Err:           rerr,
+				StopRequested: requested,
+				StopCause:     cause,
+				AliveNow:      registryAgentAlive(reg, a.Name),
+			}, time.Now())
 		}()
 		exits <- true
 	})
@@ -217,7 +224,7 @@ func TestGenuineRespawnFailureStillRaisesRestartFailed(t *testing.T) {
 	}
 
 	conds := &recordingConditions{}
-	noteRespawnOutcome(conds, "mayor", "doomed", rerr, time.Now())
+	noteRespawnOutcome(conds, "mayor", respawnOutcome{Agent: "doomed", Err: rerr}, time.Now())
 
 	got := conds.restartFailed()
 	if len(got) != 1 || got[0] != rowA6RestartPrefix+"doomed" {
@@ -236,7 +243,7 @@ func TestGenuineRespawnFailureStillRaisesRestartFailed(t *testing.T) {
 // does not outlive its cause.
 func TestSuccessfulRespawnClearsRestartFailed(t *testing.T) {
 	conds := &recordingConditions{}
-	noteRespawnOutcome(conds, "mayor", "pa", nil, time.Now())
+	noteRespawnOutcome(conds, "mayor", respawnOutcome{Agent: "pa"}, time.Now())
 
 	if len(conds.cleared) != 1 || conds.cleared[0] != rowA6RestartPrefix+"pa" {
 		t.Fatalf("cleared = %v; want [%s]", conds.cleared, rowA6RestartPrefix+"pa")
@@ -264,7 +271,7 @@ func TestGuardRefusalLeavesAnEarlierRestartFailedStanding(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conds := &recordingConditions{}
-			noteRespawnOutcome(conds, "mayor", "architect", tc.err, time.Now())
+			noteRespawnOutcome(conds, "mayor", respawnOutcome{Agent: "architect", Err: tc.err}, time.Now())
 
 			if len(conds.raised) != 0 {
 				t.Errorf("raised %v on a guard refusal", conds.raised)

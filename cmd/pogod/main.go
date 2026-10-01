@@ -239,7 +239,15 @@ const maxHTTPConns = 256
 // What did NOT change is the reap of an agent pogod never started: it is still
 // unwitnessed, still not expected, and still reaped, which is orphan-nudge
 // prevention and is pinned by the `lurker` case in mailcheck_gc_restart_test.go.
-type registryLiveness struct{ reg *agent.Registry }
+type registryLiveness struct {
+	reg *agent.Registry
+	// holds are mail-check rows a requested stop is holding while it waits to
+	// see whether the agent is started again (drellem2/pogo#217; see
+	// mailCheckReapHolds). A held agent with no live registration is UNKNOWN,
+	// not GONE: we know it was stopped on purpose a moment ago and do not yet
+	// know whether it is coming back. nil means no holds.
+	holds *mailCheckReapHolds
+}
 
 func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState {
 	if l.reg != nil {
@@ -280,9 +288,21 @@ func (l registryLiveness) AgentState(scheduleAgent string) scheduler.AgentState 
 				//
 				// Humans and agents both reason from desired state by default —
 				// which is exactly why the code must not.
+				//
+				// The one exception is a requested stop's hold, which is not
+				// desired state but a short, bounded wait for a restart that
+				// #217's supervisors issue within ~100ms. Its own finish reaps
+				// at the end of it if the agent did not come back.
+				if l.holds.held(scheduleAgent, time.Now()) {
+					return scheduler.AgentUnknown
+				}
 				return scheduler.AgentGone
 			}
 		}
+	}
+	// Stopped on request a moment ago and not running again yet: hold, as above.
+	if l.holds.held(scheduleAgent, time.Now()) {
+		return scheduler.AgentUnknown
 	}
 	// The registry holds no entry for this agent: no evidence either way, NOT
 	// evidence of death (mg-de08). Before asking what SHOULD be running, ask
@@ -1952,6 +1972,11 @@ Flags:
 	// running (A5/A6). Without it, those rows were cleared only by the one
 	// path that raised them, and an agent brought back any other way carried
 	// a "that agent is gone" condition for as long as it ran (mg-f474).
+	// Mail-check rows a requested stop is holding (drellem2/pogo#217). Shared
+	// by the OnExit hook below, which places the holds, and the scheduler's
+	// liveness checker, which must not reap a held row from under it.
+	mailCheckHolds := newMailCheckReapHolds()
+
 	agentRegistry.SetOnStart(func(a *agent.Agent) {
 		noteAgentStarted(conditions, a.Name, time.Now())
 	})
@@ -1990,7 +2015,14 @@ Flags:
 			// Restart-on-crash agents: respawn after a short backoff so a
 			// fast crash loop doesn't peg the daemon. The agent stays in
 			// the registry and its worktree (if any) is preserved.
-			log.Printf("agent %s (%s) exited unexpectedly, scheduling restart", a.Name, a.Type)
+			if requested, cause := a.StopRequested(); requested {
+				// Not "unexpectedly": restart_on_crash makes a requested stop a
+				// restart too (gh #89), and the log should not call it a crash.
+				log.Printf("agent %s (%s) stopped on request (stop_cause=%s); restart_on_crash is set, scheduling restart",
+					a.Name, a.Type, cause)
+			} else {
+				log.Printf("agent %s (%s) exited unexpectedly, scheduling restart", a.Name, a.Type)
+			}
 			// Capture the registry generation HERE, at scheduling time, not
 			// inside the goroutine. The goroutine sleeps 2s before firing
 			// while StopAll returns synchronously, so this respawn can land
@@ -2009,8 +2041,17 @@ Flags:
 				// A refusal from the shutdown latch or the generation check is
 				// the guard working, not a restart failure — see
 				// noteRespawnOutcome for why alarming on it made A6 unreadable
-				// (mg-0208).
-				noteRespawnOutcome(conditions, coordinator, a.Name, rerr, time.Now())
+				// (mg-0208). Finding the agent already running is not one
+				// either, and liveness is re-checked before any raise
+				// (drellem2/pogo#159).
+				requested, cause := a.StopRequested()
+				noteRespawnOutcome(conditions, coordinator, respawnOutcome{
+					Agent:         a.Name,
+					Err:           rerr,
+					StopRequested: requested,
+					StopCause:     cause,
+					AliveNow:      registryAgentAlive(agentRegistry, a.Name),
+				}, time.Now())
 			})
 		} else {
 			if a.RestartOnCrash && !a.ShouldRespawn() {
@@ -2056,13 +2097,20 @@ Flags:
 			// entry — this is the branch on which the owner is not coming back,
 			// and the respawn arm above deliberately keeps it (mg-5197).
 			agentRegistry.Remove(a.Name)
-			// Eagerly reap this agent's mail-check loop so it stops firing the
-			// moment the agent is gone, rather than on the next Tick sweep
-			// (gh drellem2/macguffin #15). Match on both the bare name and the
-			// cat-/crew- event identity a schedule may be addressed by.
+			// Reap this agent's mail-check loop — eagerly, unless this was a
+			// stop someone asked for, which holds it briefly in case the agent
+			// is started straight back up: reaping it here is what left #217's
+			// supervised seats running with no mail-check (drellem2/pogo#217,
+			// branch (b); see mailCheckReapHolds).
 			if sched != nil {
-				if n := sched.RemoveMailChecksForAgent(time.Now(), a.Name, a.EventAgent()); n > 0 {
-					log.Printf("agent %s: reaped %d stale mail-check schedule(s)", a.Name, n)
+				requested, cause := a.StopRequested()
+				if finish := reapMailChecksAfterExit(sched, mailCheckHolds, a.Name, a.EventAgent(),
+					requested, cause, requestedStopReapGrace, time.Now(),
+					registryAgentAlive(agentRegistry, a.Name)); finish != nil {
+					a.GoSafe("pogod.heldMailCheckReap", func() {
+						time.Sleep(requestedStopReapGrace)
+						finish(time.Now())
+					})
 				}
 			}
 		}
@@ -2137,7 +2185,7 @@ Flags:
 			// drellem2/macguffin #15). Backed by the agent registry AND the
 			// desired state on disk: an unregistered crew agent is EXPECTED,
 			// not gone (mg-de08).
-			s.SetLiveness(registryLiveness{reg: agentRegistry})
+			s.SetLiveness(registryLiveness{reg: agentRegistry, holds: mailCheckHolds})
 			// Hold that reap until the first auto-start sweep has completed and
 			// settled. The invariant above is only as good as the data it reads,
 			// and at this point in startup the registry is empty and the crew

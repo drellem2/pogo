@@ -29,7 +29,9 @@ Agent lifecycle: a mail-check-* schedule lives only while pogod supervises its
 agent. It is NOT scoped to the seat. A supervised respawn (restart_on_crash=true)
 keeps the row, and park/wake removes it and puts it back. An exit pogod will not
 respawn removes it with reason=agent_gone. That covers restart_on_crash=false, and
-a respawn suppressed by the synthetic-failure detector. Schedules of any other
+a respawn suppressed by the synthetic-failure detector. After a requested stop
+(pogo agent stop) the removal waits 30s and is skipped if the agent is running
+again by then, so a stop followed at once by a start keeps the row. Schedules of any other
 kind are never removed by an agent's exit.
 
 The durable fix is for an agent to re-register its schedules at startup,
