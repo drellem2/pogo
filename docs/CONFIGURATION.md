@@ -84,7 +84,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[turn_watch]` | `enabled` | on | observes | Mails when agents stop completing turns (the fleet-down floor). |
 | `[wedge_watch]` | `enabled` | on | observes | Emits events for agents parked at a dead-end prompt or with a frozen work counter. It sends no mail. See [wedge-watch](#the-wedged-agent-detector-wedge-watch). |
 | `[midsession_wedge]` | `enabled` | on | ACTS | Types a bare Return into an agent whose composer holds an unsubmitted message. The attempts are bounded, and when they run out it mails the coordinator. `report_only = true` withholds the Return. See [mid-session wedge](#the-mid-session-wedge-detector-midsession_wedge). |
-| `[done_reap]` | `enabled` | on | ACTS | Stops a polecat whose work item is done, or parked at `stage: gated`, once its terminal has been quiet for `idle_grace`. See [done-reap](#the-done-item-polecat-reaper-done-reap). |
+| `[done_reap]` | `enabled` | on | ACTS | Stops a polecat whose work item is done, or parked at `stage: gated`, once its terminal has been quiet for `idle_grace` — or, for a done item, 10m after it was first seen done. See [done-reap](#the-done-item-polecat-reaper-done-reap). |
 | `[orchestration_resume]` | `enabled` | on | ACTS | Restarts the whole fleet when orchestration was stopped and nothing resumed it within `grace`, then mails the coordinator. See [Orchestration resume deadline](#orchestration-resume-deadline). |
 <!-- defaults-table:end -->
 
@@ -1208,6 +1208,18 @@ most the repo can overshoot the cap by — and only if that many gates fail
 while the replacements are still building. The default of 2 is the smallest
 that frees a slot in the measured state (three waiting, reserve making the cap
 2). A queue that cannot be read excuses nobody.
+
+### Why a finished worker is not counted (drellem2/pogo#128)
+
+A live worker whose **work item is already `done` or `archived`** has nothing
+left to build: it is waiting for the done-reaper to stop it. It is left out of
+the count and listed on a `Finished:` line in `pogo host load --repo=<path>`, and
+named in the refusal when the repo is still full without it. Finished workers
+are taken out before the merge-queue credit, so they never spend it. The status
+is read from the macguffin store. A worker whose status **cannot be read** is
+counted exactly as before — a cap fails open, and a worker nobody could classify
+might be building. `pogo agent list` shows the same status on each row, as
+`work-item=<id>(<status>)`, beside `repo=<path>`.
 
 ### Why a gh-issue build is charged two slots (mg-bf42)
 
@@ -4177,6 +4189,16 @@ finished agent looks exactly like healthy saturation. Same family as mg-18d0:
   case that motivated the question: an incoming coordinator mail is delivered as a
   PTY nudge and the answer is more output, so a polecat handling a follow-up keeps
   resetting its own clock and is reaped only once it goes quiet again.
+- **Quiet is the fast path, not the only one (drellem2/pogo#128).** A PTY
+  write measures animation, not work: a harness spinner that keeps redrawing
+  never lets the quiet window open, and two `done` workers in one evening were
+  never reaped at all while 51 others went at 2m-2m26s. So a done polecat is
+  also stopped once **10 minutes** have passed since pogod first read its item
+  as terminal, quiet or not. The stop's log line says which path fired
+  (`path=quiet` or `path=done-timer`). The review exemption is checked before
+  both, so a builder under an open review is held whichever would fire. The
+  gate reap below has no timer. The 10 minutes is fixed in
+  `cmd/pogod/donereap.go` (`doneReapMaxWait`), where the value is argued.
 - **A polecat with its item still `claimed` is untouchable, at any idle time.**
   Item state is the gate; idleness only qualifies it. That is why the healthy
   42-minute idle polecat mid-work survives structurally rather than by tuning, and
