@@ -254,6 +254,45 @@ func TestDisabledDetectorsDoNotRun(t *testing.T) {
 	}
 }
 
+// The record carries the resolved intake watch list on every run, so pogod can
+// tell an armed detector watching nothing (drellem2/pogo#121). An EMPTY list
+// must survive the round trip as empty — not as absent, which is what a record
+// from an older build reads as, and which says nothing.
+func TestRecordCarriesTheIntakeWatchList(t *testing.T) {
+	home := t.TempDir()
+	m, e := &mailRec{}, &eventRec{}
+	d := failingSources(teardownDeps(m, e))
+	d.IntakeRepoSource = "no repos configured"
+	f := Run(allEnabled(), File{}, d, time.Now(), false)
+	if f.IntakeWatch == nil || len(f.IntakeWatch.Repos) != 0 || f.IntakeWatch.Source != "no repos configured" {
+		t.Fatalf("IntakeWatch = %+v, want an empty list from \"no repos configured\"", f.IntakeWatch)
+	}
+	if err := Write(home, f); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IntakeWatch == nil || len(got.IntakeWatch.Repos) != 0 {
+		t.Errorf("an empty watch list did not round-trip as empty: %+v", got.IntakeWatch)
+	}
+
+	d.IntakeRepos, d.IntakeRepoSource = []string{"acme/widgets"}, "config"
+	if f := Run(allEnabled(), File{}, d, time.Now(), false); f.IntakeWatch == nil ||
+		len(f.IntakeWatch.Repos) != 1 || f.IntakeWatch.Source != "config" {
+		t.Errorf("IntakeWatch = %+v, want [acme/widgets] from config", f.IntakeWatch)
+	}
+
+	// A record written before the field existed reads as nil, not as empty.
+	if err := os.WriteFile(StatePath(home), []byte(`{"schema_version": 1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if old, err := Read(home); err != nil || old.IntakeWatch != nil {
+		t.Errorf("old record: IntakeWatch = %+v, err %v; want nil", old.IntakeWatch, err)
+	}
+}
+
 func TestStateFileRoundTripAndRefusals(t *testing.T) {
 	home := t.TempDir()
 	if _, err := Read(home); !errors.Is(err, os.ErrNotExist) {
@@ -414,14 +453,23 @@ func TestProductionScansThroughCarrierSources(t *testing.T) {
 		t.Fatal("production.go no longer has Production and CarrierSources")
 	}
 	prod := body[i:j]
+	// Whitespace-normalised, so gofmt re-aligning a struct literal is not a
+	// wiring change.
+	flat := strings.Join(strings.Fields(prod), " ")
 	for _, want := range []string{
 		"inSrc, cdSrc := CarrierSources(cfg, caches)",
 		"inSrc.Carriers",
-		"DriftSource:   cdSrc.Carriers",
+		"DriftSource: cdSrc.Carriers",
 		"ghintake.CredentialFor(",
 		"ghintake.Reverify(",
+		// The watch list the intake source scans is the one the record carries
+		// (drellem2/pogo#121), and the job has no --repo.
+		"ghintake.ResolveRepos(nil, cfg.GHIntake.Repos,",
+		"ghintake.Collect(repos,",
+		"IntakeRepos: repos,",
+		"IntakeRepoSource: repoSrc,",
 	} {
-		if !strings.Contains(prod, want) {
+		if !strings.Contains(flat, want) {
 			t.Errorf("Production does not contain %q", want)
 		}
 	}

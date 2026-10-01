@@ -1870,10 +1870,13 @@ pogo gh-watch --force              # one run by hand, every detector sampled now
   it armed (`armed` / `disabled` / `no_gh_binary` / `no_credential`), whether it
   sampled this run, the last sample's event details, and every issue state the
   last sample read (`lookups`), so "closed" is distinguishable from "checked
-  nothing". `pogo gh-watch --json` prints it.
+  nothing". It also carries the intake watch list this run resolved and its
+  source (`intake_watch`), every run. `pogo gh-watch --json` prints it.
 - **pogod's part** is a witness: it reads the record and raises A13 when a
   detector did not arm (`ghteardown_not_armed`, `ghintake_not_armed`,
-  `ghintake_no_credential`, routed as before) or when the job has not written a
+  `ghintake_no_credential`, routed as before), when intake armed with an empty
+  watch list (`ghintake_watch_empty`, to the intake mailbox; drellem2/pogo#121),
+  or when the job has not written a
   fresh record for an hour of pogod's own awake time (`ghwatch_not_reporting`,
   to the coordinator) — the one failure the job cannot report about itself.
   The awake-time rule is what keeps a host wake from raising it before launchd
@@ -2225,11 +2228,24 @@ scope, a question) is a judgement that stays with the coordinator.
   issue separately, so a new finding cannot reset an older one's clock.
 - **The watch list** comes from `repos` if set, else from the issue poller's own
   state directory (`$POGO_HOME/gh-issues/seen-<owner>-<repo>.json`), else it is
-  **empty** and the detector examines nothing. There is no built-in repo list:
+  **empty** and the detector examines nothing. `pogo gh-watch` and
+  `pogo check-intake` both read `repos`; `check-intake --repo` overrides it, and
+  the report names the source (`--repo`, `config`, `poller state (...)` or `no
+  repos configured`). Until drellem2/pogo#121 `check-intake` never loaded the
+  config, so `repos` had no effect on it. There is no built-in repo list:
   one used to name pogo's own upstream repos, which meant an install that
   configured neither source reconciled a stranger's issue tracker against its
-  local work items (mg-f04b). An empty watch list is reported as such, since
-  "examined nothing" and "found nothing" otherwise render identically. Reading the poller's state rather than duplicating its list is
+  local work items (mg-f04b).
+- **An empty watch list is a finding: a BLIND WATCH LIST** (drellem2/pogo#121).
+  Zero repos lists zero issues, so "0 uncarried" means nothing was looked at.
+  It used to be reported as clean — `check-intake` exited 0 and the job emitted
+  `gh_intake_watch_clean` with `scanned=0`. Now, like a blind store, it is
+  actionable: `check-intake` exits 1, the report leads with a `BLIND WATCH
+  LIST` banner, the job mails it (`blind_watch_list=true` on
+  `gh_intake_watch_fired`), and pogod raises the A13 condition
+  `ghintake_watch_empty` to the intake mailbox when the detector is armed and
+  the job's record (`intake_watch` in `state.json`) carries an empty list. If a
+  host should watch nothing, set `enabled = false`. Reading the poller's state rather than duplicating its list is
   the point: a repo added to the poller is covered on the next `pogo gh-watch`
   fire with no second edit to forget. It reads *state*, not the sent ledger — so a poller
   that is stopped, wedged, or has never delivered a mail still yields a correct
@@ -2296,13 +2312,14 @@ renotify_after = "24h"     # unchanged findings re-mail after this (default 24h)
 notify_to = "mayor"        # mailbox findings go to (default the coordinator, the ACTOR)
 escalate_after = "4h"      # one uncarried issue also copies `human` after this
                            # (default 4h; negative disables, zero means default)
-repos = ["owner/repo"]     # explicit watch list; unset falls back to poller
-                           # state, then to watching nothing
+repos = ["owner/repo"]     # explicit watch list (read by gh-watch AND check-intake);
+                           # unset falls back to poller state, then to watching
+                           # nothing, which is reported as a blind watch list
 ```
 
 Exit status of `pogo check-intake` is 0 when nothing is actionable and 1 when any
-uncarried issue, unreadable repo, or blind scan is found, so it can gate a
-schedule or CI step.
+uncarried issue, unreadable repo, blind scan, or blind watch list is found, so it
+can gate a schedule or CI step.
 
 Source of truth: `internal/ghintake/`.
 

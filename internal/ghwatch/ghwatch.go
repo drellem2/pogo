@@ -170,6 +170,18 @@ type File struct {
 	Teardown     Detector `json:"teardown"`
 	Intake       Detector `json:"intake"`
 	CarrierDrift Detector `json:"carrier_drift"`
+	// IntakeWatch is the intake watch list this run resolved, recorded every
+	// run whether or not intake sampled, so pogod can annunciate an armed
+	// detector that is watching nothing (drellem2/pogo#121). Nil in a record
+	// written before it existed — a reader must not take nil as "empty".
+	IntakeWatch *WatchList `json:"intake_watch,omitempty"`
+}
+
+// WatchList is the intake detector's resolved watch list and where it came from
+// (ghintake.ResolveRepos's two results).
+type WatchList struct {
+	Repos  []string `json:"repos"`
+	Source string   `json:"source"`
 }
 
 // Detectors returns the three records by name, in a stable order.
@@ -205,10 +217,14 @@ type Deps struct {
 	TeardownLookup ghteardown.LookupFunc
 	// IntakeSource returns the inventory to reconcile. It is handed the
 	// credential state so production can bind it into ghintake.Collect.
-	IntakeSource  func() (ghintake.Inventory, error)
-	DriftSource   carrierdrift.SourceFunc
-	DriftSnapshot carrierdrift.SnapshotFunc
-	DriftStatuses []string
+	IntakeSource func() (ghintake.Inventory, error)
+	// IntakeRepos / IntakeRepoSource are the watch list IntakeSource scans and
+	// where it came from, recorded in File.IntakeWatch.
+	IntakeRepos      []string
+	IntakeRepoSource string
+	DriftSource      carrierdrift.SourceFunc
+	DriftSnapshot    carrierdrift.SnapshotFunc
+	DriftStatuses    []string
 }
 
 // Run runs each enabled, armed watcher once — subject to its own interval
@@ -235,6 +251,10 @@ func Run(cfg *config.Config, prev File, deps Deps, now time.Time, force bool) Fi
 		PID:           os.Getpid(),
 		Credential:    deps.Credential,
 		CredentialOK:  deps.CredentialOK,
+		IntakeWatch: &WatchList{
+			Repos:  append([]string{}, deps.IntakeRepos...),
+			Source: deps.IntakeRepoSource,
+		},
 	}
 
 	// arm fills d's arming fields and, when not armed, carries the previous

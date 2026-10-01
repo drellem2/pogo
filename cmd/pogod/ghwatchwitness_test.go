@@ -144,6 +144,52 @@ func TestWitnessRaisesArmingConditionsFromTheRecord(t *testing.T) {
 	}
 }
 
+// drellem2/pogo#121: an ARMED intake detector whose record carries an empty
+// watch list raises ghintake_watch_empty to the intake reader. Not when the
+// detector did not arm (its arming row says why), not when the list names a
+// repo, and not from a record that predates the field.
+func TestWitnessRaisesWatchEmptyForAnArmedDetectorWatchingNothing(t *testing.T) {
+	t0 := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	empty := &ghwatch.WatchList{Repos: []string{}, Source: "no repos configured"}
+	for _, tc := range []struct {
+		name  string
+		in    ghwatch.Arming
+		watch *ghwatch.WatchList
+		want  bool
+	}{
+		{"armed, empty", ghwatch.Armed, empty, true},
+		{"armed, one repo", ghwatch.Armed, &ghwatch.WatchList{Repos: []string{"acme/widgets"}, Source: "config"}, false},
+		{"armed, old record", ghwatch.Armed, nil, false},
+		{"no credential, empty", ghwatch.NoCredential, empty, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := ghwatch.File{SchemaVersion: 1, FinishedAt: t0,
+				Teardown:    ghwatch.Detector{Arming: ghwatch.Armed},
+				Intake:      ghwatch.Detector{Arming: tc.in},
+				IntakeWatch: tc.watch}
+			c := newCondRec()
+			c.raised[rowA13IntakeWatchEmpty] = pogodCondition{} // stale: must clear when not wanted
+			witnessWith(f, nil).Check(c, t0.Add(time.Minute))
+			p, ok := c.raised[rowA13IntakeWatchEmpty]
+			if ok != tc.want {
+				t.Fatalf("watch-empty raised=%t, want %t (raised %v)", ok, tc.want, keys(c.raised))
+			}
+			if tc.want && (p.To != "coord" || !strings.Contains(p.Detail, "no repos configured")) {
+				t.Errorf("condition to %q detail %q, want the intake reader and the source", p.To, p.Detail)
+			}
+		})
+	}
+
+	// Every detector disabled: cleared with the rest.
+	w := &ghWatchWitness{read: func(string) (ghwatch.File, error) { return ghwatch.File{}, nil }}
+	c := newCondRec()
+	c.raised[rowA13IntakeWatchEmpty] = pogodCondition{}
+	w.Check(c, t0)
+	if _, ok := c.raised[rowA13IntakeWatchEmpty]; ok {
+		t.Error("watch-empty left raised with every detector disabled")
+	}
+}
+
 // An unreadable record says nothing about arming: leave those conditions be.
 func TestWitnessLeavesArmingAloneWhenTheRecordIsUnreadable(t *testing.T) {
 	w := witnessWith(ghwatch.File{}, errors.New("parsing: bad json"))

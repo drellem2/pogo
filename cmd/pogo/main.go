@@ -1382,7 +1382,7 @@ marker is a declaration). A ref counts only on a structural line — one that st
 with ` + "`gh:`" + `, outside blockquotes and outside fenced code blocks — so prose
 citing an issue does not make an item its carrier.
 
-Findings come in four kinds:
+Findings come in five kinds:
 
   uncarried    an open issue past the grace window with no carrier. The finding
                this exists to produce.
@@ -1398,6 +1398,8 @@ Findings come in four kinds:
                rather than as "every open issue is uncarried", which is what
                joining against an empty carrier set would produce — a wall of
                findings that is entirely an artefact of the scan.
+  blind watch  the watch list named ZERO repos, so no issue was listed and
+  list         "0 uncarried" means nothing was looked at.
   fresh        an uncarried issue still inside --grace. Listed, never alarmed: an
                issue filed 90 seconds ago is a mail in flight, not a dropped one.
 
@@ -1405,13 +1407,21 @@ REPORTS ONLY. It never files a work item and never comments on an issue — what
 issue IS (triage, duplicate, out of scope, a question) is a judgement, and that
 stays with the coordinator.
 
-The watch list comes from --repo if given, else from the issue poller's own state
-directory (` + "`$POGO_HOME/gh-issues/seen-<owner>-<repo>.json`" + `) so the two halves of
-this reconciliation cannot drift, else from a built-in default. The report says
-which.
+The watch list comes from --repo if given, else from [gh_intake] repos in the
+pogo config (the same key the scheduled ` + "`pogo gh-watch`" + ` job reads), else from the
+issue poller's own state directory
+(` + "`$POGO_HOME/gh-issues/seen-<owner>-<repo>.json`" + `) so the two halves of this
+reconciliation cannot drift. There is no built-in default. The report says which
+source was used ("--repo", "config", "poller state (...)", or "no repos
+configured").
+
+An EMPTY watch list is itself a finding — a blind watch list. A scan of zero
+repos lists zero issues and so reports zero uncarried, which used to look exactly
+like a clean scan and exit 0 (drellem2/pogo#121).
 
 Exit status is 0 when nothing is actionable, 1 when any uncarried issue,
-unreadable repo, or blind scan is found (so it can gate a schedule or CI step).`,
+unreadable repo, blind scan or blind watch list is found (so it can gate a
+schedule or CI step).`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			// Every issue list this command renders comes from a `gh` call, so an
@@ -1433,8 +1443,13 @@ unreadable repo, or blind scan is found (so it can gate a schedule or CI step).`
 				fmt.Fprintf(os.Stderr, "warning: %s\n", ghRes)
 			}
 
+			// The same config the gh-watch job reads, so [gh_intake] repos means
+			// the same thing to both. Until drellem2/pogo#121 this command never
+			// loaded it: the key was ignored here while this command's own
+			// empty-list message told the operator to set it.
+			cfg := config.Load()
 			stateDir := filepath.Join(config.PogoHome(), ghintake.PollerStateDirName)
-			repos, repoSrc := ghintake.ResolveRepos(intakeRepos, stateDir)
+			repos, repoSrc := ghintake.ResolveRepos(intakeRepos, cfg.GHIntake.Repos, stateDir)
 
 			src := ghintake.MGSource{}
 			inv, err := ghintake.Collect(repos, ghintake.GHOpenIssues, src.Carriers, src.Statuses(), cred, credSrc)
@@ -1498,15 +1513,16 @@ unreadable repo, or blind scan is found (so it can gate a schedule or CI step).`
 					"unreadable_repos": repoErrs,
 					"unreadable_items": itemErrs,
 					"blind_store":      rep.BlindStore,
+					"blind_watch_list": rep.BlindWatchList,
 					"grace_seconds":    int(grace.Seconds()),
 					"actionable":       rep.Actionable(),
 				})
 			} else {
 				fmt.Print(rep.Render())
 				if len(repos) == 0 {
-					// An empty watch list and a clean one both render zero
-					// findings. Say which this was, or a check that examined
-					// nothing reads as a check that found nothing (mg-f04b).
+					// The report already leads with the BLIND WATCH LIST banner
+					// and exits 1 (drellem2/pogo#121); this line names the
+					// source, so "no repos configured" is visible as such.
 					fmt.Printf("watch list is EMPTY (%s) — nothing was examined. "+
 						"Name repos with --repo, or in [gh_intake] repos.\n", repoSrc)
 				} else {
@@ -1520,7 +1536,7 @@ unreadable repo, or blind scan is found (so it can gate a schedule or CI step).`
 		},
 	}
 	cmdCheckIntake.Flags().StringSliceVar(&intakeRepos, "repo", nil,
-		"Watched repo as owner/name (repeatable); default is discovered from the poller's state directory")
+		"Watched repo as owner/name (repeatable); default is [gh_intake] repos, then the poller's state directory")
 	cmdCheckIntake.Flags().DurationVar(&intakeGrace, "grace", config.DefaultGHIntakeGrace,
 		"How long an open issue may go uncarried before it counts as a finding (0 or less: report immediately)")
 

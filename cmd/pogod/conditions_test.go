@@ -94,12 +94,13 @@ func enumerationDisposition() []enumerationRow {
 				"measurement, not an annunciation of a boot-time capability check."},
 
 		{row: "A13", wired: true,
-			why: "gh-issue detectors NOT armed. The one row NOT routed to the coordinator: [gh_teardown] notify_to is a deliberately-chosen mailbox for this subsystem's findings (mg-b586) and its not-armed condition belongs to the same reader. TWO conditions on the one row (mg-039b): a missing `gh` is one fault, but the teardown and intake detectors report to different mailboxes by design, so one notice would leave one reader uninformed. A THIRD (mg-fb29): the intake detector's other arming precondition is a CREDENTIAL, not just the binary — same shape (one global cause, invisible from a per-repo view) and a disjoint remedy (`gh auth login`, not a plist PATH edit), so it cannot share an id with the PATH case without one suppressing the other. Since mg-257a8 the detectors run in `pogo gh-watch` and pogod raises all of these from that job's record, plus a FOURTH: the job not reporting at all, which none of the detectors can say about themselves",
+			why: "gh-issue detectors NOT armed. The one row NOT routed to the coordinator: [gh_teardown] notify_to is a deliberately-chosen mailbox for this subsystem's findings (mg-b586) and its not-armed condition belongs to the same reader. TWO conditions on the one row (mg-039b): a missing `gh` is one fault, but the teardown and intake detectors report to different mailboxes by design, so one notice would leave one reader uninformed. A THIRD (mg-fb29): the intake detector's other arming precondition is a CREDENTIAL, not just the binary — same shape (one global cause, invisible from a per-repo view) and a disjoint remedy (`gh auth login`, not a plist PATH edit), so it cannot share an id with the PATH case without one suppressing the other. Since mg-257a8 the detectors run in `pogo gh-watch` and pogod raises all of these from that job's record, plus a FOURTH: the job not reporting at all, which none of the detectors can say about themselves. A FIFTH (drellem2/pogo#121): intake ARMED but watching no repo — a configuration precondition with a configuration remedy, which the detector's own report called clean (exit 0, scanned=0) until then",
 			conds: []pogodCondition{
 				conditionTeardownNotArmed("pm-pogo", "exec: gh not found"),
 				conditionIntakeNotArmed("mayor", "exec: gh not found"),
 				conditionIntakeNoCredential("mayor", "GH_TOKEN: ABSENT (source=none)"),
-				conditionGHWatchNotReporting("mayor", "no record")}},
+				conditionGHWatchNotReporting("mayor", "no record"),
+				conditionIntakeWatchEmpty("mayor", "watch list empty (no repos configured)")}},
 
 		{row: "A14", wired: true,
 			why:   "log rotation failed — the post-mortem log the other thirteen fall back to may be lost or unbounded",

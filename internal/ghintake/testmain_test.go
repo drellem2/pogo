@@ -67,7 +67,7 @@ func TestPollerStateDirIsSandboxed(t *testing.T) {
 	if got := DiscoverRepos(stateDir); len(got) != 0 {
 		t.Errorf("DiscoverRepos(%s) = %v, want nothing — the sandbox tree has no poller state", stateDir, got)
 	}
-	repos, src := ResolveRepos(nil, stateDir)
+	repos, src := ResolveRepos(nil, nil, stateDir)
 	if src != "no repos configured" {
 		t.Errorf("watch-list source = %q, want %q", src, "no repos configured")
 	}
