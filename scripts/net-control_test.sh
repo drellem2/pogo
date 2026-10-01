@@ -90,6 +90,9 @@ MUTE_PID=""
 netc_teardown() {
     [ -n "$BH_SINK_PID" ] && kill "$BH_SINK_PID" 2>/dev/null
     [ -n "$MUTE_PID" ] && kill "$MUTE_PID" 2>/dev/null
+    # WORK (the curl-always-* stubs and every fixture below) was removed by
+    # nothing and abandoned on every run (mg-b9621).
+    [ -n "${WORK:-}" ] && rm -rf "$WORK"
     pogo_sandbox_down
 }
 trap netc_teardown EXIT INT TERM HUP

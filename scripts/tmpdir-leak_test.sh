@@ -28,6 +28,11 @@
 # status, never the leak's) and Test 11 (a read-only Go module cache is
 # reclaimed, which is where 120 MB was sitting unremovable).
 #
+# Tests 14-15 are mg-b9621's. 14 is a positive control for a spelling none of
+# the above plant: a TEMPLATE-LESS `mktemp -d`, which on darwin ignores $TMPDIR
+# and so was invisible to the guard. 15 requires every gate row, not just the
+# Go one, to run under the guard.
+#
 # WHAT IS NOT COVERED, AND WHY IT IS NAMED HERE RATHER THAN LEFT QUIET
 #
 #   config.AgentSocketDir's fallback is FIXED, and not here. It is not in the
@@ -405,6 +410,99 @@ case "$ROW" in
     *)
         fail "test.sh's whole-tree suite does not go through tmpdir-leak-guard.sh; the guard covers nothing: $ROW" ;;
 esac
+
+echo ""
+echo "Test 14: POSITIVE CONTROL — a TEMPLATE-LESS mktemp leak is caught (mg-b9621)"
+# Every planted leak above passes an explicit "$TMPDIR/..." template, which is
+# the one spelling that was always visible. The shell suites spell it `mktemp
+# -d`, and on darwin that IGNORES $TMPDIR: the fixture lands in the per-user
+# confstr directory, outside the guard, and the guard reads clean. That is how
+# 2,910 tmp.* directories (13.4G, mg-2f3ba's figures) piled up in the real
+# $TMPDIR under a gate that never reported one.
+#
+# 14a is the control on the CONTROL: it shows the raw tool really does escape,
+# on this host, so 14b passing means the shim did something rather than that
+# mktemp happened to behave. Off darwin there is nothing to escape and 14a says
+# so instead of asserting.
+# Resolved PAST the shim: this suite itself runs under the guard in the gate,
+# which puts lib/tmpdir-mktemp first on PATH, and 14a is about the raw tool.
+# Walked by hand, not `PATH=... command -v`: bash answers that from its command
+# hash, which already maps mktemp to the shim, whatever PATH the lookup is given.
+real_mktemp=""
+IFS=: read -r -a path_dirs <<<"$PATH"
+for d in "${path_dirs[@]}"; do
+    case "$d" in */lib/tmpdir-mktemp) continue ;; esac
+    if [ -x "$d/mktemp" ]; then real_mktemp="$d/mktemp"; break; fi
+done
+escape_dir="$WORK/escape"
+mkdir -p "$escape_dir"
+escaped="$(TMPDIR="$escape_dir" "$real_mktemp" -d)"
+case "$escaped" in
+    "$escape_dir"/*)
+        if [ "$(uname -s)" = Darwin ]; then
+            fail "14a: darwin's mktemp -d honoured \$TMPDIR here ($escaped) — the premise of scripts/lib/tmpdir-mktemp has changed; re-measure before trusting 14b"
+        else
+            pass "14a: (not darwin) mktemp -d already honours \$TMPDIR; the shim is a pass-through here"
+        fi ;;
+    *)
+        pass "14a: the raw mktemp -d escaped \$TMPDIR to $(dirname "$escaped") — invisible to a guard that only pins \$TMPDIR" ;;
+esac
+# Ours, by exact path, and outside the sandbox root, so removed here.
+case "$escaped" in "$escape_dir"/*) ;; *) [ -n "$escaped" ] && rm -rf "$escaped" ;; esac
+
+guard_bare_log="$WORK/guard-bare.log"
+if bash "$HERE/tmpdir-leak-guard.sh" bash -c \
+        'mktemp -d >/dev/null; mktemp >/dev/null; mktemp -t pogo-bare-prefix >/dev/null' >"$guard_bare_log" 2>&1; then
+    fail "14b: the guard exited 0 over three template-less mktemp calls — shell fixtures are still invisible to it"
+else
+    n_named="$(grep -cE '^    (tmp|pogo-bare-prefix)\.' "$guard_bare_log" || true)"
+    if [ "$n_named" -eq 3 ]; then
+        pass "14b: bare 'mktemp -d', 'mktemp' and 'mktemp -t prefix' are all caught and named by the guard"
+    else
+        fail "14b: expected 3 named template-less entries, the guard named $n_named:"
+        sed -n '1,20p' "$guard_bare_log" >&2
+    fi
+fi
+
+# 14c: the shim must not move a call that already said where. An explicit
+# template and an explicit -p are the caller's decision.
+mkdir -p "$WORK/pdir"
+shim_rel="$(cd "$WORK" && TMPDIR="$escape_dir" PATH="$HERE/lib/tmpdir-mktemp:$PATH" mktemp rel.XXXXXX)"
+shim_p="$(TMPDIR="$escape_dir" PATH="$HERE/lib/tmpdir-mktemp:$PATH" mktemp -d -p "$WORK/pdir")"
+if [ "$shim_rel" = "${shim_rel#/}" ] && [ -f "$WORK/$shim_rel" ] && [ "${shim_p#"$WORK/pdir/"}" != "$shim_p" ]; then
+    pass "14c: an explicit template and an explicit -p pass through the shim unchanged"
+else
+    fail "14c: the shim moved a call that named its own location: template -> '$shim_rel', -p -> '$shim_p'"
+fi
+
+echo ""
+echo "Test 15: EVERY gate row runs under the guard, not only the Go row (mg-b9621)"
+# The guard was wired to one row and the leak was in the others. Asserted on
+# test.sh rather than by running the gate, like Test 13, so a NEW row that skips
+# the wrapper fails here the day it is added.
+#
+# One named exception, and it is named rather than pattern-matched so it cannot
+# quietly cover a second row: gate-profile_test.sh abandons a
+# pogo-gate-profile.* file per run, which is mg-c1a5e's defect in
+# scripts/lib/gate-profile.sh. When that lands, wrap the row and delete this.
+UNGUARDED_OK="scripts/gate-profile_test.sh"
+unguarded=""
+while IFS= read -r row; do
+    case "$row" in
+        *tmpdir-leak-guard.sh*) ;;
+        *"$UNGUARDED_OK"*) ;;
+        *) unguarded="$unguarded
+    $row" ;;
+    esac
+done < <(grep -E '^gate_step ' "$REPO_ROOT/test.sh")
+n_rows="$(grep -cE '^gate_step ' "$REPO_ROOT/test.sh")"
+if [ "$n_rows" -lt 10 ]; then
+    fail "parsed only $n_rows gate_step rows out of test.sh — the check below would be vacuous"
+elif [ -n "$unguarded" ]; then
+    fail "these gate rows run outside tmpdir-leak-guard.sh, so a fixture they abandon reaches the real \$TMPDIR unmeasured:$unguarded"
+else
+    pass "all $n_rows gate rows but the named mg-c1a5e exception run under tmpdir-leak-guard.sh"
+fi
 
 echo ""
 echo "=== $PASS passed, $FAIL failed ==="

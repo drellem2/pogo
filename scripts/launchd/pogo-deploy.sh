@@ -2139,6 +2139,14 @@ self_pid() { exec sh -c 'echo $PPID'; }
 # wants to observe a hang rather than end it says POGO_DEPLOY_GIT_TIMEOUT=0.
 BOUNDED_RC=124
 BOUNDED_TIMED_OUT=false
+# The scratch files run_bounded and git_step hold open across a call, named
+# here so on_exit can remove them (mg-b9621). Both calls are exactly where the
+# run deadline lands — a wedged git is what it exists for — and its TERM trap
+# exits from inside them, past their own `rm -f`. Every deadline-ended night
+# abandoned git_step's stderr capture in $TMPDIR; the test suite's hang arm
+# does that on every run.
+BOUNDED_MARK=""
+GIT_STEP_ERRFILE=""
 run_bounded() {
     local secs="${1:-0}"; shift
     BOUNDED_TIMED_OUT=false
@@ -2147,6 +2155,7 @@ run_bounded() {
     local mark p k rc
     mark="$(mktemp)" || { "$@"; return $?; }
     rm -f "$mark"
+    BOUNDED_MARK="$mark"
 
     "$@" &
     p=$!
@@ -2181,6 +2190,7 @@ run_bounded() {
         rc="$BOUNDED_RC"
     fi
     rm -f "$mark"
+    BOUNDED_MARK=""
     return "$rc"
 }
 
@@ -2232,10 +2242,12 @@ git_step() {
         $BOUNDED_TIMED_OUT && GIT_STEP_TIMED_OUT=true
         return "$rc"
     }
+    GIT_STEP_ERRFILE="$f"
     run_bounded "$GIT_TIMEOUT" "$@" 2>"$f"; rc=$?
     SYNC_DETAIL="$(cat "$f" 2>/dev/null)"
     [ -s "$f" ] && cat "$f" >&2
     rm -f "$f"
+    GIT_STEP_ERRFILE=""
     if $BOUNDED_TIMED_OUT; then
         GIT_STEP_TIMED_OUT=true
         SYNC_DETAIL="the step did not return within ${GIT_TIMEOUT}s and was killed: $*${SYNC_DETAIL:+
@@ -5594,6 +5606,10 @@ on_exit() {
     # line. The watchdog kills the tree leaves first, so the build it interrupts
     # still returns, and its SIGKILL backstop still bounds this function.
     trap 'err "terminated (SIGTERM) during the exit path — finishing the bookkeeping"' TERM
+
+    # Scratch a TERM interrupted mid-call (mg-b9621); empty on every other path.
+    [ -n "$GIT_STEP_ERRFILE" ] && rm -f "$GIT_STEP_ERRFILE"
+    [ -n "$BOUNDED_MARK" ] && rm -f "$BOUNDED_MARK"
 
     # The attempt record FIRST: it is pogod's outcome, and nothing the fleet-mg
     # step below does may delay, change or lose it.

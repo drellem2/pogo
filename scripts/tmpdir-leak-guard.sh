@@ -170,6 +170,16 @@ trap 'cleanup' EXIT INT TERM HUP
 
 export TMPDIR="$PRIVATE_TMPDIR"
 
+# On darwin, pinning $TMPDIR is not enough to see a SHELL fixture: a template-less
+# `mktemp -d` there ignores $TMPDIR and uses the per-user confstr directory, so
+# every such fixture landed in the developer's real $TMPDIR, invisible to this
+# guard — 2,910 `tmp.*` directories, 13.4G, while the gate read clean (mg-b9621;
+# figures from mg-2f3ba). The shim adds `-p "$TMPDIR"` to exactly those calls.
+# A suite that replaces PATH wholesale steps around it; see the shim's header.
+if [ "$(uname -s)" = Darwin ]; then
+    export PATH="$(cd "$(dirname "$0")" && pwd)/lib/tmpdir-mktemp:$PATH"
+fi
+
 "$@"
 status=$?
 

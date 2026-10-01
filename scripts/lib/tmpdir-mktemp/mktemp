@@ -1,0 +1,75 @@
+#!/bin/sh
+# mktemp that honours $TMPDIR on darwin (mg-b9621).
+#
+# darwin's /usr/bin/mktemp, called with NO template — bare `mktemp`,
+# `mktemp -d`, `mktemp -t prefix` — builds its path from
+# confstr(_CS_DARWIN_USER_TEMP_DIR) and IGNORES $TMPDIR (man mktemp: "Fallback
+# locations if _CS_DARWIN_USER_TEMP_DIR is not available are TMPDIR ...").
+# Measured on this host: `TMPDIR=/tmp/x mktemp -d` printed
+# /var/folders/.../T/tmp.XXXXXXXXXX.
+#
+# That is how 2,910 `tmp.*` fixture directories (13.4G, figures from mg-2f3ba)
+# piled up in the developer's real $TMPDIR while scripts/tmpdir-leak-guard.sh
+# reported a clean gate: the guard pins $TMPDIR to a private directory and
+# measures what is left in it, and every shell fixture was being created
+# somewhere else. A leak guard is only as good as its instrument's reach.
+#
+# tmpdir-leak-guard.sh puts this directory first on PATH (darwin only), so a
+# template-less call inside a guarded gate step lands in the private $TMPDIR,
+# where it is counted, reported by name if abandoned, and reclaimed.
+#
+# Reach: only what inherits the guard's PATH. A suite that REPLACES PATH (rather
+# than prepending to it) calls the raw mktemp again, and a template-less call
+# there escapes unmeasured. A suite that spells its root with an explicit
+# "${TMPDIR:-/tmp}/name.XXXXXX" template is visible either way, which is why
+# the fixed suites do that rather than rely on this file.
+#
+# Rule: if the caller gave a template operand or its own -p/--tmpdir, pass the
+# call through untouched — it already said where. Otherwise add -p "$TMPDIR".
+# Everywhere but darwin, mktemp already honours $TMPDIR and this is an exec.
+
+real=""
+self_dir=$(cd "$(dirname "$0")" && pwd)
+IFS_SAVE=$IFS; IFS=:
+for d in $PATH; do
+    [ -n "$d" ] || continue
+    [ "$(cd "$d" 2>/dev/null && pwd)" = "$self_dir" ] && continue
+    if [ -x "$d/mktemp" ]; then real="$d/mktemp"; break; fi
+done
+IFS=$IFS_SAVE
+[ -n "$real" ] || { echo "mktemp (tmpdir shim): no real mktemp on PATH" >&2; exit 1; }
+
+[ "$(uname -s)" = Darwin ] || exec "$real" "$@"
+[ -n "${TMPDIR:-}" ] || exec "$real" "$@"
+
+has_dir=no has_template=no takes_arg=""
+for a in "$@"; do
+    if [ -n "$takes_arg" ]; then
+        [ "$takes_arg" = p ] && has_dir=yes
+        takes_arg=""
+        continue
+    fi
+    case "$a" in
+        --tmpdir|--tmpdir=*) has_dir=yes ;;
+        --) ;;
+        --*) ;;
+        -*)
+            # Short flags may be bundled (-dt prefix). -t and -p take an
+            # argument, either attached (-tfoo) or as the next word.
+            flags=${a#-}
+            while [ -n "$flags" ]; do
+                c=${flags%"${flags#?}"}; flags=${flags#?}
+                case "$c" in
+                    p) has_dir=yes; [ -z "$flags" ] && takes_arg=p; flags="" ;;
+                    t) [ -z "$flags" ] && takes_arg=t; flags="" ;;
+                esac
+            done
+            ;;
+        *) has_template=yes ;;
+    esac
+done
+
+if [ "$has_dir" = no ] && [ "$has_template" = no ]; then
+    exec "$real" -p "$TMPDIR" "$@"
+fi
+exec "$real" "$@"

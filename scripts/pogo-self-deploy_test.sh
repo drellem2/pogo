@@ -7,8 +7,30 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ONE ROOT FOR EVERY FIXTURE, AND ONE TRAP THAT REMOVES IT (mg-b9621).
+#
+# This file used to arm its EXIT trap seven times, each re-arm naming only the
+# fixtures its author had in view — so each one DROPPED the earlier ones: the
+# trap at the drain-wait block forgot MD_TMP, the do_prove block's forgot
+# PROVE_DIR, BODY_TMP was in none of them, and three directories (origin.git,
+# wt-*, gobin/out/repo, rec.*) were abandoned on every run, passing or not.
+# Measured under scripts/tmpdir-leak-guard.sh: 482 passed, 3 leaked.
+#
+# So every `mktemp` below, and in the sourced pogo-self-deploy, lands under
+# SUITE_TMP, and the trap removes SUITE_TMP — a fixture added tomorrow is
+# covered without anyone remembering to list it. The root is made with an
+# explicit template under ${TMPDIR:-/tmp}: darwin's template-less mktemp ignores
+# $TMPDIR, so a bare one would put the root back in the user's real $TMPDIR.
+# The signals are named because a bare EXIT trap does not run on SIGTERM.
+SUITE_TMP="$(command mktemp -d "${TMPDIR:-/tmp}/pogo-self-deploy-test.XXXXXX")" \
+    || { echo "SETUP FAILURE: cannot create the suite's temp root" >&2; exit 1; }
+trap 'rm -rf "$SUITE_TMP"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+mktemp() { command mktemp -p "$SUITE_TMP" "$@"; }
+
 RESULTS_FILE=$(mktemp)
-trap 'rm -f "$RESULTS_FILE"' EXIT
 pass() { echo "PASS: $1"; echo "PASS: $1" >> "$RESULTS_FILE"; }
 fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE"; }
 
@@ -682,7 +704,6 @@ drain_probe() { printf '%s\n200' "$DW_HOLD_BODY"; }
 # green against code that could not have worked. A control that cannot fail is
 # not a control (mg-c02d), and a shell test whose state evaporates is one.
 DW_STATE="$(mktemp)"
-trap 'rm -f "$RESULTS_FILE" "$DW_STATE"' EXIT
 dw_calls() { cat "$DW_STATE" 2>/dev/null || echo 0; }
 dw_bump()  { echo $(( $(dw_calls) + 1 )) > "$DW_STATE"; }
 
@@ -766,7 +787,6 @@ source "$HERE/pogo-self-deploy"
 # deploy, so an old CLI that has never heard of this subcommand is the EXPECTED
 # case on the first night this ships, not an exotic one.
 POGO_CLI_STUB="$(mktemp)"; chmod +x "$POGO_CLI_STUB"
-trap 'rm -f "$RESULTS_FILE" "$DW_STATE" "$POGO_CLI_STUB"' EXIT
 wac() { POGO_CLI="$POGO_CLI_STUB" witness_alive_count 2>/dev/null; echo "|$?"; }
 
 printf '#!/bin/bash\necho %s\n' "'{\"witness_present\":true,\"alive_count\":0,\"alive\":[]}'" > "$POGO_CLI_STUB"
@@ -1100,7 +1120,6 @@ ERRBODY='{"draining":true,"count":0,"polecats":[],"unreachable_err":"witness: ca
 # always clears orphans every unpushed commit on the box. The `unpushed` cases
 # below are real local-only commits in real worktrees, asserted to HOLD.
 MD_TMP="$(mktemp -d)"
-trap 'rm -f "$RESULTS_FILE" "$DW_STATE"; rm -rf "$MD_TMP"' EXIT
 # -c on every call: this must not depend on the running user's git identity, and
 # a repo-local `git config` would be one more thing to get wrong per worktree.
 mdgit() { git -c user.email=t@example.invalid -c user.name=t -c commit.gpgsign=false "$@"; }
@@ -2200,7 +2219,6 @@ printf '%s\n' "$DEP_NOREPO" | grep -q '^unknown dep-local ' \
 # executed — a check shipped without a demonstrated RED, inside the mechanism
 # that exists because checks get shipped without demonstrated REDs.
 PROVE_DIR=$(mktemp -d)
-trap 'rm -f "$RESULTS_FILE"; rm -rf "$PROVE_DIR"' EXIT
 mkdir -p "$PROVE_DIR/repo/scripts" "$PROVE_DIR/gobin"
 # Stand-ins for the installed artifacts. do_prove only needs them to exist and be
 # executable; the stub control below is what "reports" on them.
@@ -3672,7 +3690,6 @@ OUT="$(bash -c 'source "'"$HERE/pogo-self-deploy"'"; ASSUME_YES=false; confirm <
 source "$HERE/pogo-self-deploy"
 E621_STUB="$(mktemp)"; chmod +x "$E621_STUB"
 E621_ERR="$(mktemp)"
-trap 'rm -f "$RESULTS_FILE" "$DW_STATE" "$POGO_CLI_STUB" "$E621_STUB" "$E621_ERR"' EXIT
 
 # --- (1) THE SENTENCE, at every clear that prints it ------------------------
 # Asserted against the source rather than through a run, because what is wrong
