@@ -8,9 +8,5 @@
   "Every agent reading these is running a superseded prompt" line is gone.
   If no lineage is declared and the installed tree has files the reference does
   not ship, the verdict is hedged ("the reference may not be this corpus's
-  upstream"), no install is suggested, and the sweep logs the result instead of
-  mailing it. Upgrade note: a host that tracks drellem2/pogo and keeps local
-  prompt files will stop getting staleness mail until it declares
-  `[lineage] prompt_subtree = "internal/agent/prompts"`. Doctor's prompt check
-  now hashes the body even when the stamp's embed hash matches, and reports a
-  mismatch as a hand-edited prompt (drellem2/pogo#125, mg-f1bb2).
+  upstream") and no install is suggested. Doctor's prompt check now hashes the
+  body even when the stamp's embed hash matches (drellem2/pogo#125, mg-f1bb2).
