@@ -1680,12 +1680,23 @@ var (
 	// strongest possible evidence AGAINST its A6 "that agent is gone" row
 	// rather than as a restart failure (drellem2/pogo#159, #217).
 	ErrRespawnAgentAlive = errors.New("is still running")
+
+	// ErrRespawnParked is the park backstop's refusal: the agent was parked
+	// (`pogo agent park`) after this respawn was scheduled and before it fired.
+	// Like the guard refusals it is a respawn declined BY DESIGN — the operator
+	// has just asked for this agent to stay down — so it is not a restart
+	// failure, and pogod's OnExit hook must not raise A6 "its restart FAILED"
+	// over it, even when the exit that scheduled the respawn was a genuine
+	// crash (mg-fcb49). It is kept out of IsExpectedRespawnRefusal because that
+	// predicate means "the FLEET is gone"; this one is about one agent.
+	ErrRespawnParked = errors.New("is parked")
 )
 
 // IsExpectedRespawnRefusal reports whether err is one of the guards above:
 // a respawn declined BY DESIGN because the fleet it was scheduled in no longer
 // exists. It is false for every other respawn error, including the parked
-// backstop and any genuine spawn failure.
+// backstop (ErrRespawnParked, which callers test for separately) and any
+// genuine spawn failure.
 //
 // Callers should use it to suppress alarms, not respawns. The suppression that
 // matters for correctness is already inside respawn(); this only separates
@@ -1715,7 +1726,8 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	// that predates the park must lose to the on-disk flag (the primary check
 	// is ShouldRespawn in the OnExit hook, before the goroutine is scheduled).
 	if IsParked(name) {
-		return nil, fmt.Errorf("agent %q is parked", name)
+		// Wrapped, so the message still reads `agent "x" is parked`.
+		return nil, fmt.Errorf("agent %q %w", name, ErrRespawnParked)
 	}
 
 	old := r.agents[name]

@@ -2092,16 +2092,19 @@ Flags:
 				SourceRepo:  a.SourceRepo,
 				WorktreeDir: a.WorktreeDir,
 			}, coordinator, client.SendMGMail)
-			a.Cleanup()
-			// Removes the spawn's expanded prompt file along with the registry
-			// entry — this is the branch on which the owner is not coming back,
-			// and the respawn arm above deliberately keeps it (mg-5197).
-			agentRegistry.Remove(a.Name)
 			// Reap this agent's mail-check loop — eagerly, unless this was a
 			// stop someone asked for, which holds it briefly in case the agent
 			// is started straight back up: reaping it here is what left #217's
 			// supervised seats running with no mail-check (drellem2/pogo#217,
 			// branch (b); see mailCheckReapHolds).
+			//
+			// BEFORE the Remove below, not after (mg-fcb49): the hold is what
+			// makes the heartbeat's GC sweep answer UNKNOWN for this agent, and
+			// Remove is what takes away the registration that otherwise answers
+			// it. Placed after, there was a window — microseconds, but a real
+			// one — in which a sweep saw an unregistered, unheld agent and reaped
+			// the very row the hold exists to keep. Pinned by
+			// TestRequestedStopHoldIsPlacedBeforeTheRegistryRemove.
 			if sched != nil {
 				requested, cause := a.StopRequested()
 				if finish := reapMailChecksAfterExit(sched, mailCheckHolds, a.Name, a.EventAgent(),
@@ -2113,6 +2116,11 @@ Flags:
 					})
 				}
 			}
+			a.Cleanup()
+			// Removes the spawn's expanded prompt file along with the registry
+			// entry — this is the branch on which the owner is not coming back,
+			// and the respawn arm above deliberately keeps it (mg-5197).
+			agentRegistry.Remove(a.Name)
 		}
 	})
 

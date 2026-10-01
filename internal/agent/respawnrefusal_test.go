@@ -2,6 +2,8 @@ package agent
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -84,11 +86,62 @@ func TestExpectedRespawnRefusalsAreDistinguishable(t *testing.T) {
 	}
 
 	// The park backstop is NOT in the expected set: parking is deliberate, but
-	// it is a different row's business and nothing here should quietly widen to
-	// cover it. Pinned so a future edit to IsExpectedRespawnRefusal has to be
-	// deliberate about the boundary.
+	// it is one agent, not the fleet, and has its own sentinel (ErrRespawnParked,
+	// mg-fcb49) that callers test for by name. Pinned so a future edit to
+	// IsExpectedRespawnRefusal has to be deliberate about the boundary.
+	if IsExpectedRespawnRefusal(fmt.Errorf("agent %q %w", "x", ErrRespawnParked)) {
+		t.Error("the park backstop was classified as a fleet guard refusal")
+	}
 	if IsExpectedRespawnRefusal(errors.New(`agent "x" is parked`)) {
 		t.Error("an unrelated error was classified as a guard refusal")
+	}
+}
+
+// TestRespawnOfAParkedAgentIsErrRespawnParked pins the park backstop's refusal
+// (mg-fcb49): a respawn scheduled before a park and firing after it returns the
+// sentinel, with the message an operator reads unchanged. Control: the same
+// crashed agent, not parked, respawns.
+func TestRespawnOfAParkedAgentIsErrRespawnParked(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("POGO_HOME", filepath.Join(home, ".pogo"))
+	if err := InitPromptDirs(); err != nil {
+		t.Fatalf("InitPromptDirs: %v", err)
+	}
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	for _, park := range []bool{false, true} {
+		name := "unparked"
+		if park {
+			name = "parked"
+		}
+		a, err := reg.Spawn(SpawnRequest{Name: name, Type: TypeCrew, Command: []string{"true"}, RestartOnCrash: true})
+		if err != nil {
+			t.Fatalf("Spawn %s: %v", name, err)
+		}
+		<-a.Done()
+		if park {
+			if _, err := reg.Park(name, 2*time.Second); err != nil {
+				t.Fatalf("Park: %v", err)
+			}
+		}
+		_, err = reg.Respawn(name)
+		if !park {
+			if err != nil {
+				t.Fatalf("control: respawn of an unparked crashed agent failed: %v", err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrRespawnParked) {
+			t.Fatalf("respawn of a parked agent returned %v, want ErrRespawnParked", err)
+		}
+		if err.Error() != `agent "parked" is parked` {
+			t.Errorf("message changed: %q", err.Error())
+		}
 	}
 }
 

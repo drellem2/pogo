@@ -1482,7 +1482,12 @@ on-demand seat lost the seat's mail-check about 2ms after the stop, and the
 restarted agent came up deaf. That outcome and the false A6 `restart_failed`
 were mutually exclusive per seat, because `restart_on_crash` picks which arm
 of the exit hook runs. Stops issued by pogod itself (reapers, a fleet drain)
-are not followed by a start, so they still reap eagerly.
+are not followed by a start, so they still reap eagerly. The hold is placed
+*before* the exit hook removes the registration, never after: the sweep reads
+the registry first and the holds second, so the reverse order left a window in
+which a tick saw an unregistered, unheld agent (mg-fcb49). Both that order and
+the production `SetLiveness(registryLiveness{..., holds: mailCheckHolds})`
+wiring are pinned by source tests in `cmd/pogod/parkbackstop_test.go`.
 
 **Do not delete the alarm.** The GC's rationale is that it keeps
 `scheduler_fire_failed` events from accumulating. For an EXPECTED agent a fire

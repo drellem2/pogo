@@ -211,7 +211,7 @@ func TestCrewResetSelfStopIsSilent(t *testing.T) {
 // inside the backoff, a refusal nobody has classified yet — clears instead of
 // raising. The control is the same error with the agent not running.
 func TestLivenessIsRecheckedBeforeRaisingA6(t *testing.T) {
-	unclassified := errors.New(`agent "architect" is parked`)
+	unclassified := errors.New(`agent "architect": a refusal nobody has classified`)
 
 	alive := &recordingConditions{}
 	noteRespawnOutcome(alive, "mayor", respawnOutcome{

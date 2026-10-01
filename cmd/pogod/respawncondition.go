@@ -82,7 +82,23 @@ func registryAgentAlive(reg *agent.Registry, name string) func() bool {
 // discriminator: a genuine respawn failure during normal operation rendered
 // identically to shutdown noise, so the only way to read A6 was to ignore it.
 //
-// The declined case deliberately leaves the row ALONE rather than clearing it.
+//   - It found the agent PARKED (agent.ErrRespawnParked): `pogo agent park`
+//     landed inside the backoff, and the park backstop in respawn() refused.
+//     That is a restart DECLINED on an operator's explicit instruction, not
+//     one that failed, so nothing is raised — even after a genuine crash
+//     (mg-fcb49). The agent did crash, and keeping the CRASHED wording was
+//     considered and rejected: A6 is not the crash channel. Its own body says
+//     "the crash itself was handled correctly; this notice is about the
+//     recovery failing", the crash is already recorded as agent_crashed in
+//     events.log, and every other sentence of the notice ("its restart
+//     FAILED", "nothing will try again", "`pogo agent start` it") is false or
+//     wrong advice about an agent its operator has just parked. `pogo agent
+//     list` reports it status=parked. Before mg-fcb49 the park refusal was an
+//     unclassified string, the liveness re-check below covered only a park
+//     followed by a WAKE, and a park left down raised A6 with CRASHED wording.
+//
+// The declined and parked cases deliberately leave the row ALONE rather than
+// clearing it.
 // A `restart_failed` raised by a real failure earlier is still true; a fleet
 // stop afterwards is not evidence against it. The already-running case clears
 // it on the opposite evidence: an agent that is running cannot still be gone.
@@ -126,6 +142,14 @@ func noteRespawnOutcome(conds conditionRaiser, coordinator string, o respawnOutc
 			"restart_failed about a live agent; clearing it", o.Agent, rerr, o.Agent)
 		conds.Clear(rowA6RestartPrefix+o.Agent, now)
 		conds.flush()
+
+	case errors.Is(rerr, agent.ErrRespawnParked):
+		// Checked AFTER liveness on purpose: a park then a wake inside the
+		// backoff leaves the agent running with the flag not yet cleared (Wake
+		// clears it last), and a running agent clears the row above.
+		log.Printf("agent %s: deferred respawn declined because %s was parked inside the backoff (%v) — "+
+			"the operator asked for it to stay down, so this is NOT a restart failure; no condition raised "+
+			"(the exit itself is in events.log)", o.Agent, o.Agent, rerr)
 
 	default:
 		log.Printf("agent %s: restart failed: %v", o.Agent, rerr)
