@@ -4453,12 +4453,99 @@ existed before the bounce are gone:
     done <<EOF
 $lost
 EOF
-    printf '%s\n' "The fleet's mail loop is degraded and WILL LOOK HEALTHY — pogod is up, the port
-answers, the agents that are still there are alive. Diagnose:
+    # No claim about liveness that was not measured (drellem2/pogo#122). This
+    # line used to close with "the agents that are still there are alive",
+    # printed unconditionally — including on the "?" path, where the registry
+    # could not even be read. What IS true either way is the warning itself: a
+    # successful redeploy and a listening port do not show a missing schedule.
+    printf '%s\n' "The fleet's mail loop is degraded and WILL LOOK HEALTHY — the redeploy
+reported success, and nothing that watches pogod's port or exit status sees a
+missing schedule. Diagnose:
 
   pogo schedule list | grep mail-check
   pogo agent list
   pogo agent diagnose <name>"
+    if [ "$states" = "?" ]; then
+        printf '\n%s\n' "UNFILTERED: the agent registry could not be read after the bounce, so no
+loss above was set aside as expected. Some of these may be polecats the
+redeploy drained, whose schedules were reaped with them — that alone is not a
+fault. 'pogo agent list' tells them apart."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 8b'. Which losses are EXPECTED? (drellem2/pogo#122)
+# ---------------------------------------------------------------------------
+# The pre-bounce snapshot is taken before the redeploy DRAINS the fleet, so a
+# night that drains N polecats loses N mail-check schedules by design: a
+# polecat's schedule is reaped with it. Until this section the post-check
+# alerted on every one of them — on 2026-08-20 it named 11 ids, all of them
+# drained polecats — and mailed mayor and human RED on a deploy that had gone
+# exactly as intended. lost_schedule_verdict already knew which class each id
+# was in; nothing subtracted the classes that are the reap working.
+#
+# Names, never tallies: each id is judged on its OWN owner and state. "N
+# polecats drained, N schedules lost" would let a crew loss hide behind a
+# polecat that took a while to exit.
+#
+# Expected, and set aside:
+#   gone   + pre-bounce type polecat — drained or finished; reaped with it.
+#   parked                           — dormant on purpose; the reap working.
+# Everything else still alerts:
+#   alive   — the agent survived and its schedule did not (polecat or crew).
+#   gone    + any other type — the 07-17 / doctor case: crew that did NOT come
+#             back. That is the loss this alert exists for.
+#   odd     — a status this check will not guess about.
+#   unknown — no owner, or no registry. Not knowing is not "expected".
+
+# lost_expected_reason ID OWNERS STATES — "drained polecat" or "parked" when the
+# loss of ID is the reap working, "" when it must alert.
+lost_expected_reason() {
+    local v verdict type
+    v="$(lost_schedule_verdict "$1" "$2" "$3")"
+    verdict="${v%% *}"
+    type="$(schedule_owner_type "$1" "$2")"
+    case "$verdict" in
+        gone)   [ "$type" = "polecat" ] && echo "drained polecat" ;;
+        parked) echo "parked" ;;
+    esac
+    return 0
+}
+
+# unexpected_lost LOST OWNERS STATES — the ids in LOST that must still alert,
+# one per line. When STATES is "?" (the registry could not be read) nothing can
+# be judged expected, so EVERY id is returned and the first line is the literal
+# token UNFILTERED — an unreadable roster is not an empty one, and the caller has
+# to be able to say which of the two it alerted on. The token cannot collide
+# with an id: every id this file handles starts with "mail-check-".
+unexpected_lost() {
+    local lost="$1" owners="$2" states="$3" id
+    [ "$states" = "?" ] && echo "UNFILTERED"
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        if [ "$states" = "?" ] || [ -z "$(lost_expected_reason "$id" "$owners" "$states")" ]; then
+            printf '%s\n' "$id"
+        fi
+    done <<EOF
+$lost
+EOF
+}
+
+# expected_lost_summary LOST OWNERS STATES — the set-aside ids, by name and with
+# the reason and owner, space-separated on one line for the log. Empty when
+# nothing was set aside (including always when STATES is "?").
+expected_lost_summary() {
+    local lost="$1" owners="$2" states="$3" id reason out=""
+    [ "$states" = "?" ] && return 0
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        reason="$(lost_expected_reason "$id" "$owners" "$states")"
+        [ -n "$reason" ] || continue
+        out="$out${out:+ }$id ($(schedule_owner "$id" "$owners"), $reason)"
+    done <<EOF
+$lost
+EOF
+    printf '%s' "$out"
 }
 
 # ---------------------------------------------------------------------------
@@ -5898,8 +5985,22 @@ $check_out"
         else
             log "post-bounce liveness: $(printf '%s' "$states" | grep -c .) agents in the registry ($(printf '%s\n' "$states" | awk '$2 == "running"' | grep -c .) running)"
         fi
-        alert "[pogo-deploy] mail-check schedules LOST across the nightly bounce" \
-            "$(lost_schedule_body "$lost" "$pre_owners" "$states" "$GRACE")"
+        # Subtract what the drain was SUPPOSED to take (drellem2/pogo#122). The
+        # set-aside ids are logged by name, so a morning reader can still see
+        # every schedule that went; only the mail is reserved for the rest.
+        local expected unexpected
+        expected="$(expected_lost_summary "$lost" "$pre_owners" "$states")"
+        unexpected="$(unexpected_lost "$lost" "$pre_owners" "$states" | sed '/^UNFILTERED$/d')"
+        if [ -n "$expected" ]; then
+            log "mail-check re-check: expected loss: $expected (drained polecats / parked agents — the reap working, not alerted)"
+        fi
+        if [ -n "$unexpected" ]; then
+            [ "$states" = "?" ] && log "mail-check re-check: UNFILTERED — the registry was unreadable, so every loss alerts"
+            alert "[pogo-deploy] mail-check schedules LOST across the nightly bounce" \
+                "$(lost_schedule_body "$unexpected" "$pre_owners" "$states" "$GRACE")"
+        else
+            log "mail-check re-check: OK — every schedule that did not come back belonged to a drained polecat or a parked agent ($(printf '%s' "$post" | grep -c . ) present)"
+        fi
     else
         log "mail-check re-check: OK — every pre-bounce schedule is back ($(printf '%s' "$post" | grep -c . ) present)"
     fi
