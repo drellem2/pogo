@@ -2592,6 +2592,10 @@ Health states:
 A cron-driven agent (e.g. a */30 mail-check) is idle by design between firings.
 While it is within one cron interval of its last scheduled firing it reports
 "idle", not "stalled", even past the threshold — see cron_covered in --json.
+Likewise an agent parked on a one-shot wake ('pogo schedule --once') that it
+scheduled just before going quiet reports "idle" until that wake is due — see
+wake_pending in --json. Wakes set inside a harness (e.g. Claude Code's
+ScheduleWakeup) are invisible to pogod and do not count.
 
 CONFIRMING A TEARDOWN. process_alive in --json is the signal to use — it is a
 kill(pid, 0) probe of the agent's pid, so it answers whether that process is
@@ -2644,6 +2648,13 @@ down. To keep it down, park it.`,
 				if diag.CronCovered {
 					fmt.Printf("\nℹ Idle past the stall threshold, but within one cron interval of\n")
 					fmt.Printf("  the last scheduled firing — this is normal between-cron idle, not a stall.\n")
+				}
+				if diag.WakePending {
+					fmt.Printf("\nℹ Wake pending at %s (scheduled %s; idle since %s).\n",
+						diag.WakeAt.UTC().Format(time.RFC3339),
+						diag.WakeCreatedAt.UTC().Format(time.RFC3339),
+						diag.LastActivity.UTC().Format(time.RFC3339))
+					fmt.Printf("  The agent is parked on its own one-shot wake, not stalled.\n")
 				}
 				if diag.MailCheckMissing {
 					fmt.Printf("\n⚠ NO MAIL LOOP: %s has no mail-check schedule. Mail sent to it\n", diag.Name)

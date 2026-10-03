@@ -262,7 +262,7 @@ func TestDiagnoseCronCoveredNotStalled(t *testing.T) {
 		Interval: 30 * time.Minute,
 	}}
 
-	diag := diagnoseAgentAt(a, now, windows, mailLoopUnknown, nil)
+	diag := diagnoseAgentAt(a, now, windows, nil, mailLoopUnknown, nil)
 	if diag.Stalled {
 		t.Error("cron-covered agent must not be flagged stalled")
 	}
@@ -280,7 +280,7 @@ func TestDiagnoseGenuineWedgeStillStalled(t *testing.T) {
 	// must still be flagged.
 	a := stalledCrewAgent(now, 25*time.Minute)
 
-	diag := diagnoseAgentAt(a, now, nil, mailLoopUnknown, nil)
+	diag := diagnoseAgentAt(a, now, nil, nil, mailLoopUnknown, nil)
 	if !diag.Stalled {
 		t.Error("agent with no cron schedule should still be flagged stalled")
 	}
@@ -304,7 +304,7 @@ func TestDiagnoseCronStaleStillStalled(t *testing.T) {
 		Interval: 30 * time.Minute,
 	}}
 
-	diag := diagnoseAgentAt(a, now, windows, mailLoopUnknown, nil)
+	diag := diagnoseAgentAt(a, now, windows, nil, mailLoopUnknown, nil)
 	if !diag.Stalled {
 		t.Error("idle beyond one cron interval of last firing should be stalled")
 	}
@@ -324,7 +324,7 @@ func TestDiagnoseCronNeverFiredAnchorsToNextFire(t *testing.T) {
 		Interval: 30 * time.Minute,
 	}}
 
-	diag := diagnoseAgentAt(a, now, windows, mailLoopUnknown, nil)
+	diag := diagnoseAgentAt(a, now, windows, nil, mailLoopUnknown, nil)
 	if diag.Stalled {
 		t.Error("never-fired schedule should still cover an in-window idle")
 	}
@@ -333,16 +333,129 @@ func TestDiagnoseCronNeverFiredAnchorsToNextFire(t *testing.T) {
 	}
 }
 
+// A crew agent parked on `pogo schedule --once`: it scheduled the wake, wrote
+// its closing output, then went quiet past the threshold. The wake is still in
+// the future and unfired, so the idle is a park, not a wedge (gh #235).
+func TestDiagnoseWakePendingNotStalled(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	a := stalledCrewAgent(now, 11*time.Minute)
+	created := now.Add(-11 * time.Minute)
+	wakes := []PendingWake{{
+		NextFire:  now.Add(9 * time.Minute),
+		CreatedAt: created,
+	}}
+
+	diag := diagnoseAgentAt(a, now, nil, wakes, mailLoopUnknown, nil)
+	if diag.Stalled {
+		t.Error("agent with a future unfired one-shot wake must not be flagged stalled")
+	}
+	if !diag.WakePending {
+		t.Error("WakePending should be true for a pending one-shot wake")
+	}
+	if diag.CronCovered {
+		t.Error("CronCovered should be false with no cron windows")
+	}
+	if diag.Health != "idle" {
+		t.Errorf("Health = %q, want %q", diag.Health, "idle")
+	}
+	if !diag.WakeAt.Equal(now.Add(9*time.Minute)) || !diag.WakeCreatedAt.Equal(created) {
+		t.Errorf("WakeAt/WakeCreatedAt = %v/%v, want %v/%v", diag.WakeAt, diag.WakeCreatedAt, now.Add(9*time.Minute), created)
+	}
+}
+
+// The ordinary park: the agent's own closing output (the schedule tool result,
+// its "parked until…" line) always lands AFTER the wake's CreatedAt. A strict
+// CreatedAt >= lastWrite bound would never suppress anything; the stall-
+// threshold slack is what makes the feature fire at all.
+func TestDiagnoseWakePendingOrdinaryPark(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	a := stalledCrewAgent(now, 15*time.Minute)
+	lastWrite := now.Add(-15 * time.Minute)
+	wakes := []PendingWake{{
+		NextFire:  now.Add(45 * time.Minute),
+		CreatedAt: lastWrite.Add(-20 * time.Second),
+	}}
+
+	diag := diagnoseAgentAt(a, now, nil, wakes, mailLoopUnknown, nil)
+	if diag.Stalled || !diag.WakePending {
+		t.Errorf("ordinary park (wake created just before closing output): Stalled=%v WakePending=%v, want false/true", diag.Stalled, diag.WakePending)
+	}
+}
+
+// A one-shot that already fired lingers in the scheduler until GC; it no
+// longer explains anything, so the agent is stalled.
+func TestDiagnoseWakeFiredStillStalled(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	a := stalledCrewAgent(now, 15*time.Minute)
+	wakes := []PendingWake{{
+		NextFire:  now.Add(5 * time.Minute),
+		CreatedAt: now.Add(-16 * time.Minute),
+		LastFire:  now.Add(-1 * time.Minute),
+	}}
+
+	diag := diagnoseAgentAt(a, now, nil, wakes, mailLoopUnknown, nil)
+	if !diag.Stalled || diag.WakePending {
+		t.Errorf("fired one-shot: Stalled=%v WakePending=%v, want true/false", diag.Stalled, diag.WakePending)
+	}
+	if diag.Health != "stalled" {
+		t.Errorf("Health = %q, want %q", diag.Health, "stalled")
+	}
+}
+
+// An unfired one-shot whose NextFire is already past is a missed wake: the
+// agent should have been woken and is still quiet, so it is stalled.
+func TestDiagnoseWakeMissedStillStalled(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	a := stalledCrewAgent(now, 15*time.Minute)
+	wakes := []PendingWake{{
+		NextFire:  now.Add(-2 * time.Minute),
+		CreatedAt: now.Add(-16 * time.Minute),
+	}}
+
+	diag := diagnoseAgentAt(a, now, nil, wakes, mailLoopUnknown, nil)
+	if !diag.Stalled || diag.WakePending {
+		t.Errorf("missed one-shot: Stalled=%v WakePending=%v, want true/false", diag.Stalled, diag.WakePending)
+	}
+}
+
+// Positive control for the CreatedAt bound: the same pending wake, created
+// more than one stall threshold before the agent's last output, says nothing
+// about why the agent went quiet, so the agent is stalled. The pair with
+// TestDiagnoseWakePendingOrdinaryPark shows the bound is what decides.
+func TestDiagnoseWakeCreatedLongBeforeQuietStillStalled(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	a := stalledCrewAgent(now, 15*time.Minute)
+	lastWrite := now.Add(-15 * time.Minute)
+	wakes := []PendingWake{{
+		NextFire:  now.Add(45 * time.Minute),
+		CreatedAt: lastWrite.Add(-StallThresholdCrew - time.Second),
+	}}
+
+	diag := diagnoseAgentAt(a, now, nil, wakes, mailLoopUnknown, nil)
+	if !diag.Stalled || diag.WakePending {
+		t.Errorf("wake created over a threshold before last output: Stalled=%v WakePending=%v, want true/false", diag.Stalled, diag.WakePending)
+	}
+	if !diag.WakeAt.IsZero() || !diag.WakeCreatedAt.IsZero() {
+		t.Errorf("WakeAt/WakeCreatedAt should be zero when no wake qualifies, got %v/%v", diag.WakeAt, diag.WakeCreatedAt)
+	}
+}
+
 // fakeScheduleProvider records the identity it was queried with and returns a
-// canned window set.
+// canned window and wake set.
 type fakeScheduleProvider struct {
 	windows []CronWindow
+	wakes   []PendingWake
 	queried string
 }
 
 func (f *fakeScheduleProvider) CronWindowsForAgent(agentIdentity string) []CronWindow {
 	f.queried = agentIdentity
 	return f.windows
+}
+
+func (f *fakeScheduleProvider) PendingWakesForAgent(agentIdentity string, now time.Time) []PendingWake {
+	f.queried = agentIdentity
+	return f.wakes
 }
 
 func TestRegistryDiagnoseUsesScheduleProvider(t *testing.T) {
@@ -370,6 +483,27 @@ func TestRegistryDiagnoseUsesScheduleProvider(t *testing.T) {
 	}
 	if !diag.CronCovered {
 		t.Error("CronCovered should be true through the registry path")
+	}
+}
+
+func TestRegistryDiagnoseUsesPendingWakes(t *testing.T) {
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	now := time.Now()
+	fake := &fakeScheduleProvider{wakes: []PendingWake{{
+		NextFire:  now.Add(30 * time.Minute),
+		CreatedAt: now.Add(-25 * time.Minute),
+	}}}
+	reg.SetStallScheduleProvider(fake)
+
+	a := stalledCrewAgent(now, 25*time.Minute)
+
+	diag := reg.diagnose(a)
+	if diag.Stalled || !diag.WakePending {
+		t.Errorf("registry diagnose: Stalled=%v WakePending=%v, want false/true", diag.Stalled, diag.WakePending)
 	}
 }
 
