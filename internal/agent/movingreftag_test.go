@@ -350,7 +350,14 @@ func TestReleaseCutBodyTagsTheMergedSha(t *testing.T) {
 		// the DRIFT check would then report as drift. That is a check whose
 		// answer depends on state its own instruction never established: this
 		// section's defect, one level down, inside the acceptance criteria.
-		`git fetch --tags origin main`,
+		`git fetch --tags origin main release/vX.Y.Z`,
+		// DANGLE is tested against the branch the tag LIVES on. Under the
+		// release-branch flow vX.Y.Z is not guaranteed to be an ancestor of
+		// origin/main: when main moved past the candidate, the back-port
+		// replays the bump under a new sha (v0.11.0), so a check against main
+		// fails a correct cut (mg-352a1). The fetch above
+		// names release/vX.Y.Z so this line never tests an unfetched ref.
+		`git merge-base --is-ancestor vX.Y.Z origin/release/vX.Y.Z`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("pm/pm-template.md: release-cut body is missing %q", want)
@@ -367,6 +374,13 @@ func TestReleaseCutBodyTagsTheMergedSha(t *testing.T) {
 	line := releaseCutPrintf(t, body)
 	if strings.Contains(line, `\"`) {
 		t.Errorf(`pm/pm-template.md: the release-cut printf format contains \" — inside a single-quoted format that escape is unnecessary, and zsh keeps it while bash removes it, so the emitted body differs by shell`)
+	}
+
+	// The DANGLE line that could never pass under the release-branch flow
+	// must not come back (mg-352a1).
+	const bannedDangle = `git merge-base --is-ancestor vX.Y.Z origin/main`
+	if strings.Contains(body, bannedDangle) {
+		t.Errorf("pm/pm-template.md: %q is back — vX.Y.Z lives on release/vX.Y.Z and the back-port gives main a new sha, so this fails a correct cut whenever main moved before the back-port", bannedDangle)
 	}
 
 	// The exact command that shipped must not come back.

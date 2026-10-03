@@ -140,8 +140,14 @@ fragments and rolls `CHANGELOG.md`. The tag and `release/vX.Y.Z` are left
 untouched, because the refinery reaps a source branch only when a PR exists
 for it.
 
-The replayed bump gets a new SHA, so the `vX.Y.Z` tag is **not** an ancestor
-of main. As a result, `git describe` on main keeps naming the previous tag
+Whether the `vX.Y.Z` tag ends up an ancestor of main depends on whether main
+moved past the candidate before the back-port landed. If it did, the bump is
+replayed under a new SHA and the tag is **not** an ancestor of main (v0.11.0).
+If it did not, the back-port fast-forwards main onto the tagged commit and the
+tag **is** an ancestor (v0.12.0, back-port `mr-db0bfbatjv1iepi8hkcg`). So the
+tag is not guaranteed to be an ancestor of main, and the dangle check tests
+`origin/release/vX.Y.Z` rather than main (mg-352a1). In the replayed case,
+`git describe` on main keeps naming the previous tag
 reachable from main, and the next cut's default coverage range starts there.
 `changelog-coverage.sh` counts the ids already shipped in vX.Y.Z as
 `released`, because the back-port put that section into `CHANGELOG.md`. The
