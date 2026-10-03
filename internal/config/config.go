@@ -527,9 +527,8 @@ const (
 	DefaultAckWatchEscalateAfter = 24 * time.Hour
 
 	// Wake-watch defaults (mg-5496 / mg-e00c). These are the design's starting
-	// values; phase 1's shadow data is what sets them. internal/wakewatch holds
-	// the same numbers as its own zero-value fallbacks, and a pogod test pins
-	// the two sets equal.
+	// values. internal/wakewatch holds the same numbers as its own zero-value
+	// fallbacks, and a pogod test pins the two sets equal.
 	DefaultWakeWatchCoalesce         = 60 * time.Second
 	DefaultWakeWatchRecoveryInterval = 5 * time.Minute
 	DefaultWakeWatchRenudgeAfter     = 15 * time.Minute
@@ -1750,9 +1749,11 @@ type AckWatchConfig struct {
 // for it, re-points work left unconsumed, reports it to the coordinator after
 // MaxRenudges tries, and bounces mail addressed to an agent that is not running.
 //
-// ACTS: it types into terminals and sends mail. Phase 1 is SHADOW — the
-// mail-check timers stay on beside it, and `pogo check-wakewatch` measures
-// whether every mail a timer found had already been pointed at.
+// ACTS: it types into terminals and sends mail. For a polecat the pointer is
+// the only wake: pogod registers no mail-check timer for it (mg-aa74). A crew
+// agent's mail-check timer, if any, is the agent's own registration, and
+// `pogo check-wakewatch` measures whether every mail such a timer found had
+// already been pointed at.
 type WakeWatchConfig struct {
 	// Enabled turns it on. Defaults to true.
 	Enabled bool

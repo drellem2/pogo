@@ -72,7 +72,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[lineage]` | — | — | plumbing | Names the upstream of this host's prompt corpus (`prompt_repo`, `prompt_ref`, `prompt_subtree`) for `pogo check-staleness` and `[prompt_stale]`, and of its deploy runner (`runner_repo`, `runner_ref`, `runner_path`) for the payload audit, `pogo service install-deploy` and the nightly's runner self-refresh. With no block they use drellem2/pogo's defaults and hedge their verdict. See [Lineage](#lineage--naming-your-configurations-upstream). |
 | `[ack_watch]` | `enabled` | on | observes | Mails when an agent completes too few of its scheduled fires. See [ack-watch](#the-scheduler-completion-deficit-detector-ack-watch). |
 | `[deaf_watch]` | `enabled` | on | observes | Mails when a running agent has no mail loop that could wake it. See [deaf-watch](#the-missing-mail-loop-announcer-deaf-watch). |
-| `[wake_watch]` | `enabled` | on | ACTS | Types a pointer of at most 100 characters into an agent's terminal when mail or an assignment arrives for it, re-points work left unconsumed and then mails `mayor`, and mails the sender and `mayor` when mail goes to an agent that is not running. Phase 1 is shadow: the mail-check timers stay on. See [wake-watch](#the-pointer-waker-wake-watch). Code: `internal/wakewatch`. |
+| `[wake_watch]` | `enabled` | on | ACTS | Types a pointer of at most 100 characters into an agent's terminal when mail or an assignment arrives for it, re-points work left unconsumed and then mails `mayor`, and mails the sender and `mayor` when mail goes to an agent that is not running. For a polecat the pointer is the only wake: pogod registers no mail-check timer for it. See [wake-watch](#the-pointer-waker-wake-watch). Code: `internal/wakewatch`. |
 | `[heart_watch]` | `enabled` | on | observes | Mails when a crew heartbeat goes stale. `restart_after` is a threshold in the notice; heart-watch restarts nothing. See [heart-watch](#who-reads-the-crew-heartbeat-when-the-coordinator-is-dark-heart-watch). |
 | `[crew_reset]` | `enabled` | on | ACTS | Mails a crew agent whose session has run 4h, asking it to write a handoff note at its next safe point and run `pogo agent stop` on itself, so restart_on_crash brings it back in a fresh session. It asks at most twice per session and stops nothing itself. See [crew-reset](#crew-context-reset-crew-reset). Code: `internal/crewreset`. |
 | `[blind_watch]` | `enabled` | on | observes | Mails when wedge-watch keeps declining to judge an agent. See [blind-watch](#who-reads-a-detector-that-says-it-cannot-answer-blind-watch). |
@@ -2726,7 +2726,8 @@ Source of truth: `internal/ackwatch/`.
 ## The pointer waker (wake-watch)
 
 An agent is woken when there is something for it to do, and only then
-(mg-5496). wake-watch is phase 1 of 4. It tails macguffin's own
+(mg-5496). wake-watch was phase 1 of that rollout's 4; since phase 2
+(mg-aa74) it is the only wake a polecat has. It tails macguffin's own
 `~/.macguffin/events.jsonl` and acts on what that log already records.
 
 - **Arrival.** A `mail.sent` to a running agent, addressed by its name or by
@@ -2781,8 +2782,14 @@ mail**: the byte offset, the file's identity, the re-nudge budget and the names
 of agents seen are kept in `$POGO_HOME/wakewatch/state.json`. With no state
 file, only events written after start are arrivals.
 
-**Phase 1 is SHADOW.** The mail-check timers and `RegisterMailCheck` stay on.
-`pogo check-wakewatch [--since 24h] [--json]` is phase 2's gate. It joins every
+**For a polecat the pointer is the wake.** pogod registers no mail-check timer
+for a polecat (mg-aa74), so a pointer that fails is caught only by
+`pogo check-strandedmail`. A crew agent's `mail-check-<name>` timer, if it has
+one, is that agent's own `pogo schedule` registration; wake-watch points at its
+mail whether or not the timer exists.
+
+`pogo check-wakewatch [--since 24h] [--json]` measures the pointer against those
+timers. It was the gate for dropping the polecat timer. It joins every
 mail a timer-driven mail-check turn read (a read in one of the fire's boxes
 within 10 minutes of a `mail-check-*` fire) against the pointers sent before it.
 It prints the misses: `MISS` (no pointer), `MISS-LATE` (the only pointers came
