@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/wakewatch"
@@ -52,5 +54,28 @@ func TestWakeWatchNudgeWithNoRegistryFails(t *testing.T) {
 	out, err := wakeWatchNudge(nil)("pe00c", "x")
 	if err == nil || out != wakewatch.OutcomeFailed {
 		t.Fatalf("out=%q err=%v", out, err)
+	}
+}
+
+// The armed banner is the first thing an operator reads to decide whether the
+// waker is live. It said "SHADOW" and "mail-check timers stay ON" long after
+// both stopped being true (mg-e7f4a); this pins the whole line so neither can
+// return without a test edit.
+func TestWakeWatchArmedBanner(t *testing.T) {
+	got := wakeWatchArmedBanner(wakewatch.Params{
+		Coalesce:     30 * time.Second,
+		RenudgeAfter: 15 * time.Minute,
+		RenudgeEvery: 10 * time.Minute,
+		MaxRenudges:  2,
+	}, "mayor")
+	want := "pogod: wake-watch armed — enabled by [wake_watch] (mg-e00c); pointers <=100 bytes on mail/assignment arrival, " +
+		"coalesce=30s, re-nudge after 15m0s every 10m0s up to 2 then mail mayor; bounces to non-running recipients"
+	if got != want {
+		t.Fatalf("banner:\n got %q\nwant %q", got, want)
+	}
+	for _, stale := range []string{"SHADOW", "shadow", "timers stay", "mail-check timer"} {
+		if strings.Contains(got, stale) {
+			t.Errorf("banner contains stale phrase %q: %q", stale, got)
+		}
 	}
 }
