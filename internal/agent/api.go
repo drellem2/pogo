@@ -307,6 +307,21 @@ type DiagnoseInfo struct {
 	// of its last scheduled firing — between-cron idle is by design for a
 	// cron-driven crew agent, not a wedge (mg-5b23).
 	CronCovered bool `json:"cron_covered,omitempty"`
+	// WakePending is true when the agent's idle would otherwise cross the stall
+	// threshold but is suppressed because the agent has an unfired one-shot
+	// wake (`pogo schedule --once`) still in the future, scheduled just before
+	// it went quiet — a parked agent waiting on its own wake, not a wedge
+	// (gh #235). The bound is WakeCreatedAt >= LastActivity - StallThreshold:
+	// the agent's closing output always lands after the wake is created, and a
+	// wake set long before the agent's last output explains nothing about the
+	// quiet since. Wakes registered inside a harness (Claude Code's
+	// ScheduleWakeup, /loop) are invisible to pogod and never count.
+	WakePending bool `json:"wake_pending,omitempty"`
+	// WakeAt is the NextFire of the pending wake that set WakePending; zero
+	// (omitted) otherwise.
+	WakeAt time.Time `json:"wake_at,omitzero"`
+	// WakeCreatedAt is when that wake was scheduled; zero (omitted) otherwise.
+	WakeCreatedAt time.Time `json:"wake_created_at,omitzero"`
 	// MailCheckMissing is true when an agent diagnose has standing to judge —
 	// one pogod EXPECTS to be running (mg-de08), or one that is CONFIGURED and
 	// actually RUNNING (mg-738f) — has no mail-check-<name> schedule: it can be
@@ -390,6 +405,22 @@ type CronWindow struct {
 // default and what unit tests use.
 type StallScheduleProvider interface {
 	CronWindowsForAgent(agentIdentity string) []CronWindow
+	// PendingWakesForAgent returns the agent's UNFIRED one-shot wakes whose
+	// NextFire is still after now (gh #235). It is a separate method rather
+	// than a CronWindow with a zero interval because a one-shot has no
+	// interval to be "within": it explains idle up to its own firing, bounded
+	// by when it was created, which is a different rule (see wakePendingAt).
+	PendingWakesForAgent(agentIdentity string, now time.Time) []PendingWake
+}
+
+// PendingWake is the minimal view of a one-shot schedule (`pogo schedule
+// --once`) that stall detection needs to decide whether an agent's idle is a
+// deliberate park on its own wake. NextFire is when the wake is due, CreatedAt
+// when it was scheduled, and LastFire its firing (zero while unfired).
+type PendingWake struct {
+	NextFire  time.Time
+	CreatedAt time.Time
+	LastFire  time.Time
 }
 
 // MailCheckProvider reports whether a mail-check-<name> schedule exists for an
@@ -448,15 +479,16 @@ func StallThresholdFor(t AgentType) time.Duration {
 // caller that has no schedule provider; production code goes through
 // Registry.diagnose, which threads the agent's cron windows.
 func diagnoseAgent(a *Agent) DiagnoseInfo {
-	return diagnoseAgentAt(a, time.Now(), nil, mailLoopUnknown, nil)
+	return diagnoseAgentAt(a, time.Now(), nil, nil, mailLoopUnknown, nil)
 }
 
 // diagnoseAgentAt builds a DiagnoseInfo as of now, suppressing the stalled
 // label when the agent's idle is explained by a recurring cron schedule (see
-// withinCronInterval and mg-5b23), and reporting RED when an expected agent has
-// no mail loop (mg-de08). now, windows and mailLoop are injected so the logic
-// is deterministically testable.
-func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mailLoopState, transcript *synthfail.Report) DiagnoseInfo {
+// withinCronInterval and mg-5b23) or by a one-shot wake it scheduled just
+// before going quiet (see wakePendingAt and gh #235), and reporting RED when an
+// expected agent has no mail loop (mg-de08). now, windows, wakes and mailLoop
+// are injected so the logic is deterministically testable.
+func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, wakes []PendingWake, mailLoop mailLoopState, transcript *synthfail.Report) DiagnoseInfo {
 	info := agentInfo(a)
 	lastWrite := a.outputBuf.LastWriteTime()
 	threshold := StallThresholdFor(a.Type)
@@ -475,7 +507,15 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mai
 	// output for the whole between-cron gap, which is by design (mg-5b23).
 	idlePastThreshold := !lastWrite.IsZero() && idleDur >= threshold
 	cronCovered := idlePastThreshold && withinCronInterval(now, windows)
-	stalled := idlePastThreshold && !cronCovered
+	// An agent parked on `pogo schedule --once` is quiet until its wake fires,
+	// also by design (gh #235). Only consulted when the cron did not already
+	// explain the idle, so the two fields never both read true.
+	var wake PendingWake
+	wakePending := false
+	if idlePastThreshold && !cronCovered {
+		wake, wakePending = wakePendingAt(now, lastWrite, threshold, wakes)
+	}
+	stalled := idlePastThreshold && !cronCovered && !wakePending
 
 	// Determine overall health. "healthy" means the agent produced output within
 	// ActiveRecencyWindow (actively working); past that window but within the
@@ -541,6 +581,9 @@ func diagnoseAgentAt(a *Agent, now time.Time, windows []CronWindow, mailLoop mai
 		StallThreshold:    threshold.String(),
 		Stalled:           stalled,
 		CronCovered:       cronCovered,
+		WakePending:       wakePending,
+		WakeAt:            wake.NextFire,
+		WakeCreatedAt:     wake.CreatedAt,
 		MailCheckMissing:  mailCheckMissing,
 		TranscriptCheck:   transcript,
 		RestartSuppressed: transcript != nil && transcript.SuppressRestart(),
@@ -572,6 +615,35 @@ func withinCronInterval(now time.Time, windows []CronWindow) bool {
 		}
 	}
 	return false
+}
+
+// wakePendingAt reports whether one of the agent's one-shot wakes explains its
+// current idle, and returns that wake (the earliest due, when several qualify).
+// A wake qualifies when it has not fired, is still due after now, and was
+// created no earlier than one stall threshold before the agent's last output.
+//
+// The slack on that bound is required, not generous: an agent that parks
+// always writes something after creating the wake (the tool result, its own
+// "parked until…" line), so a strict CreatedAt >= lastWrite would never hold
+// and the suppression would be dead on arrival. A wake created more than one
+// threshold before the last output predates whatever the agent did since and
+// says nothing about why it went quiet.
+func wakePendingAt(now, lastWrite time.Time, threshold time.Duration, wakes []PendingWake) (PendingWake, bool) {
+	floor := lastWrite.Add(-threshold)
+	var best PendingWake
+	found := false
+	for _, w := range wakes {
+		if !w.LastFire.IsZero() || !w.NextFire.After(now) {
+			continue
+		}
+		if w.CreatedAt.Before(floor) {
+			continue
+		}
+		if !found || w.NextFire.Before(best.NextFire) {
+			best, found = w, true
+		}
+	}
+	return best, found
 }
 
 // ExportInfo returns the public AgentInfo for an agent.
@@ -919,16 +991,19 @@ func (r *Registry) diagnose(a *Agent) DiagnoseInfo {
 	scanner := r.transcripts
 	r.mu.RUnlock()
 
+	now := time.Now()
 	var windows []CronWindow
+	var wakes []PendingWake
 	if provider != nil {
 		windows = provider.CronWindowsForAgent(a.EventAgent())
+		wakes = provider.PendingWakesForAgent(a.EventAgent(), now)
 	}
 	var transcript *synthfail.Report
 	if scanner != nil {
 		rep := scanner.ScanTranscript(a.Name, a.Dir)
 		transcript = &rep
 	}
-	return diagnoseAgentAt(a, time.Now(), windows, mailLoopFor(a, mailChecks), transcript)
+	return diagnoseAgentAt(a, now, windows, wakes, mailLoopFor(a, mailChecks), transcript)
 }
 
 // ShouldRespawnAgent is the registry-aware restart gate: it answers

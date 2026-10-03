@@ -34,7 +34,7 @@ func TestDiagnose_FailingTurnsCarriesItsWindow(t *testing.T) {
 	a := stalledCrewAgent(now, 25*time.Minute)
 	rep := blipReport()
 
-	diag := diagnoseAgentAt(a, now, nil, mailLoopUnknown, &rep)
+	diag := diagnoseAgentAt(a, now, nil, nil, mailLoopUnknown, &rep)
 
 	if diag.HealthDetail == "" {
 		t.Fatal("HealthDetail is empty for failing_turns — the bare token is what read as a fleet-wide capacity failure")
@@ -59,7 +59,7 @@ func TestDiagnose_HealthTokenIsUnchangedByTheDetail(t *testing.T) {
 	a := stalledCrewAgent(now, 25*time.Minute)
 	rep := blipReport()
 
-	diag := diagnoseAgentAt(a, now, nil, mailLoopUnknown, &rep)
+	diag := diagnoseAgentAt(a, now, nil, nil, mailLoopUnknown, &rep)
 	if diag.Health != "failing_turns" {
 		t.Fatalf("Health = %q, want exactly %q — folding the window into the token would break every equality consumer", diag.Health, "failing_turns")
 	}
@@ -92,7 +92,7 @@ func TestDiagnose_NonFailingHealthHasNoDetail(t *testing.T) {
 		"unavailable": {State: synthfail.StateUnavailable, Unavailable: "no transcript", WindowSeconds: 1800},
 		"no scanner":  nil,
 	} {
-		diag := diagnoseAgentAt(stalledCrewAgent(now, 25*time.Minute), now, nil, mailLoopUnknown, rep)
+		diag := diagnoseAgentAt(stalledCrewAgent(now, 25*time.Minute), now, nil, nil, mailLoopUnknown, rep)
 		if diag.HealthDetail != "" {
 			t.Errorf("%s: HealthDetail = %q, want empty", name, diag.HealthDetail)
 		}

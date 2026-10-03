@@ -496,6 +496,36 @@ func (p schedulerStallWindows) CronWindowsForAgent(agentIdentity string) []agent
 	return windows
 }
 
+// PendingWakesForAgent reports the agent's unfired one-shot wakes (`pogo
+// schedule --once`) still due after now, so diagnose can tell an agent parked
+// on its own wake from a wedge (gh #235). A fired one-shot lingers in List()
+// until GCExpiredOneShots removes it, so LastFire must be checked, not just
+// OneShot; a past-due unfired one is a missed wake and explains nothing.
+func (p schedulerStallWindows) PendingWakesForAgent(agentIdentity string, now time.Time) []agent.PendingWake {
+	if p.sched == nil {
+		return nil
+	}
+	// Same alias forms as CronWindowsForAgent.
+	aliases := []string{agentIdentity}
+	if bare := strings.TrimPrefix(strings.TrimPrefix(agentIdentity, "crew-"), "cat-"); bare != agentIdentity {
+		aliases = append(aliases, bare)
+	}
+	var wakes []agent.PendingWake
+	for _, alias := range aliases {
+		for _, e := range p.sched.List(alias) {
+			if !e.OneShot || !e.LastFire.IsZero() || !e.NextFire.After(now) {
+				continue
+			}
+			wakes = append(wakes, agent.PendingWake{
+				NextFire:  e.NextFire,
+				CreatedAt: e.CreatedAt,
+				LastFire:  e.LastFire,
+			})
+		}
+	}
+	return wakes
+}
+
 // schedulerMailChecks implements agent.MailCheckProvider against the scheduler
 // so diagnose can report an EXPECTED agent that has no mail delivery path
 // (mg-de08). It is the inverse consumer of schedulerStallWindows: that one

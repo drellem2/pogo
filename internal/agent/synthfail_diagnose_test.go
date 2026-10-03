@@ -50,7 +50,7 @@ func TestDiagnose_FailingTurnsOutranksStalled(t *testing.T) {
 	a := stalledCrewAgent(now, 25*time.Minute)
 	rep := failingReport()
 
-	diag := diagnoseAgentAt(a, now, nil, mailLoopUnknown, &rep)
+	diag := diagnoseAgentAt(a, now, nil, nil, mailLoopUnknown, &rep)
 
 	if diag.Health != "failing_turns" {
 		t.Fatalf("Health = %q, want %q — otherwise the operator sees 'stalled' and restarts, which is the one thing that cannot help", diag.Health, "failing_turns")
@@ -68,7 +68,7 @@ func TestDiagnose_QuietTranscriptLeavesStalledIntact(t *testing.T) {
 	a := stalledCrewAgent(now, 25*time.Minute)
 	rep := synthfail.Report{State: synthfail.StateQuiet, Files: 3}
 
-	diag := diagnoseAgentAt(a, now, nil, mailLoopUnknown, &rep)
+	diag := diagnoseAgentAt(a, now, nil, nil, mailLoopUnknown, &rep)
 
 	// A transcript that was read and holds no failures means this really is an
 	// ordinary wedge — and restart really is the right answer for it.
@@ -85,8 +85,8 @@ func TestDiagnose_UnavailableTranscriptChangesNothing(t *testing.T) {
 	a := stalledCrewAgent(now, 25*time.Minute)
 	unavailable := synthfail.Report{Unavailable: "this harness declares no session transcript path"}
 
-	withScan := diagnoseAgentAt(a, now, nil, mailLoopUnknown, &unavailable)
-	without := diagnoseAgentAt(a, now, nil, mailLoopUnknown, nil)
+	withScan := diagnoseAgentAt(a, now, nil, nil, mailLoopUnknown, &unavailable)
+	without := diagnoseAgentAt(a, now, nil, nil, mailLoopUnknown, nil)
 
 	// Byte-for-byte the same verdict as before the detector existed. This is
 	// the degradation contract: pogo loses a detector when the harness changes
@@ -112,7 +112,7 @@ func TestDiagnose_ExitedAndDeadStillOutrankFailingTurns(t *testing.T) {
 
 	a := stalledCrewAgent(now, 25*time.Minute)
 	a.Status = StatusExited
-	if got := diagnoseAgentAt(a, now, nil, mailLoopUnknown, &rep).Health; got != "exited" {
+	if got := diagnoseAgentAt(a, now, nil, nil, mailLoopUnknown, &rep).Health; got != "exited" {
 		t.Errorf("Health = %q for an exited agent, want %q: a process that is gone is the more immediate fact", got, "exited")
 	}
 }
