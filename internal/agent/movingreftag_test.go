@@ -376,6 +376,40 @@ func TestReleaseCutBodyTagsTheMergedSha(t *testing.T) {
 		t.Errorf(`pm/pm-template.md: the release-cut printf format contains \" — inside a single-quoted format that escape is unnecessary, and zsh keeps it while bash removes it, so the emitted body differs by shell`)
 	}
 
+	// The single-quoted format must hold exactly two single quotes: its own
+	// opening and closing ones. Any apostrophe in the prose ("main's tip")
+	// ends the format early, and the shell then parses the rest of the body as
+	// commands. That is how the first draft of mg-07ed3 broke it.
+	if n := strings.Count(line, "'"); n != 2 {
+		t.Errorf("pm/pm-template.md: the release-cut printf line holds %d single quotes, want 2 -- an apostrophe in the body terminates the single-quoted format", n)
+	}
+
+	// Steps 1-5 follow docs/release-process.md: carve the release branch at the
+	// soaked candidate, dispatch onto it with --branch, submit the bump to it
+	// with --target, back-port to main (mg-07ed3). Until then steps 1-2 described
+	// a submit to main, which contradicted the DANGLE line below them.
+	for _, want := range []string{
+		`git push origin "${CAND}:refs/heads/release/vX.Y.Z"`,
+		`--branch release/vX.Y.Z`,
+		`--target=release/vX.Y.Z --post-merge-tag=vX.Y.Z`,
+		`pogo refinery submit release/vX.Y.Z --repo=<repo> --author=<this-item> --target=main`,
+		`git fetch origin release/vX.Y.Z && git tag -a vX.Y.Z`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("pm/pm-template.md: release-cut body is missing %q (docs/release-process.md flow)", want)
+		}
+	}
+	// The main-target submit and the main fetch on the by-hand tag path must
+	// not come back.
+	for _, banned := range []string{
+		`pogo refinery submit <branch> --repo=<repo> --post-merge-tag=vX.Y.Z`,
+		`git fetch origin main && git tag`,
+	} {
+		if strings.Contains(line, banned) {
+			t.Errorf("pm/pm-template.md: %q is back -- the cut submits to release/vX.Y.Z, not main (mg-07ed3)", banned)
+		}
+	}
+
 	// The DANGLE line that could never pass under the release-branch flow
 	// must not come back (mg-352a1).
 	const bannedDangle = `git merge-base --is-ancestor vX.Y.Z origin/main`
