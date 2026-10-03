@@ -3626,8 +3626,8 @@ Flags:
 	// or an assignment arrives for it, with a pointer of at most 100 bytes;
 	// unconsumed work is re-pointed and then reported, and mail to an agent that
 	// is not running is bounced. ACTS — see docs/CONFIGURATION.md's "What runs by
-	// default" table. SHADOW: the mail-check timers stay on beside it, and
-	// `pogo check-wakewatch` measures whether they ever find mail it missed.
+	// default" table. Polecats have no mail-check timer since phase 2
+	// (mg-aa74); crew timers are the agents' own registrations (mg-a2ff).
 	startWakeWatch(hbCtx, cfg.WakeWatch, agentRegistry, coordinator, log.Printf)
 
 	// Crew context reset (mg-5b58d): a crew agent whose session has run

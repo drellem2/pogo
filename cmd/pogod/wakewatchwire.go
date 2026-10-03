@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 
 	"github.com/drellem2/pogo/internal/agent"
@@ -145,9 +146,18 @@ func startWakeWatch(ctx context.Context, cfg config.WakeWatchConfig, reg *agent.
 	}
 	w := newWakeWatcher(cfg, reg, coordinator)
 	go w.Run(ctx)
-	p := w.Params()
-	logf("pogod: wake-watch armed (SHADOW, mg-e00c) — pointers <=%d bytes on mail/assignment arrival, coalesce=%s, "+
-		"re-nudge after %s every %s up to %d then mail %s; bounces to non-running recipients; mail-check timers stay ON",
-		wakewatch.MaxPointerLen, p.Coalesce, p.RenudgeAfter, p.RenudgeEvery, p.MaxRenudges, coordinator)
+	logf("%s", wakeWatchArmedBanner(w.Params(), coordinator))
 	return w
+}
+
+// wakeWatchArmedBanner is the startup line for an armed waker. It states only
+// what pogod knows: the waker is live and these are its pointer parameters.
+// Whether an agent also keeps a mail-check timer is that agent's own
+// registration, not something pogod asserts here — the line once said
+// "SHADOW ... mail-check timers stay ON" long after phase 2 (mg-aa74) made both
+// false (mg-e7f4a).
+func wakeWatchArmedBanner(p wakewatch.Params, coordinator string) string {
+	return fmt.Sprintf("pogod: wake-watch armed — enabled by [wake_watch] (mg-e00c); pointers <=%d bytes on mail/assignment arrival, coalesce=%s, "+
+		"re-nudge after %s every %s up to %d then mail %s; bounces to non-running recipients",
+		wakewatch.MaxPointerLen, p.Coalesce, p.RenudgeAfter, p.RenudgeEvery, p.MaxRenudges, coordinator)
 }
