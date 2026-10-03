@@ -10,6 +10,674 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-03
+
+### Added
+
+- **The nightly deploy now installs the fleet's `mg` from macguffin
+  `origin/main` (mg-44ee4, pm-pogo decision (a)).** Once mg-e42de removed the
+  side-effect installs, nothing updated `~/go/bin/mg`, so merged macguffin fixes
+  were not live and nothing reported it. `pogo-deploy.sh` now builds from its
+  own clean checkout (`~/.pogo/deploy-src-macguffin`) using
+  `./build.sh --install` only, never tests. It installs to a staging dir,
+  keeps `mg.prev`, and swaps by rename. It verifies `mg version` and a
+  read-only `mg list --json` at the installed path, and restores `mg.prev` if
+  either fails. The step runs after pogod's outcome is recorded and never
+  changes the run's exit status. Every attempting fire logs
+  `mg: installed <sha> (origin/main <sha>) prev <sha> result=...`.
+  `--mg-only` runs just this step, which is useful for a rehearsal against a
+  scratch `POGO_DEPLOY_MG_GOBIN`.
+
+- `scheduler_fire_delivered` now records which channel carried the fire (drellem2/pogo#204), using the same keys as `stall_watch_fired`: `nudge_delivery` (`pty`, `pty_unconfirmed`, `mail`, or `mail_coalesced` for a fallback that rode an earlier copy and wrote nothing), `nudge_fallback_reason` (`agent_not_running`, `nudge_failed`, `wake_suppressed`) and `nudge_error` (the nudge's refusal). Before this, a PTY nudge, a mail fallback and a coalesced fallback all logged the same event. The fields describe delivery only, not whether the agent woke or did the work — the ack (`scheduler_fire_completed`) is still the completion signal. `FireResult` carries the same outcome (mg-49cac).
+
+- **Crew agents are asked to reset their context every 4 hours (`[crew_reset]`,
+  mg-5b58d). This changes crew behaviour for every operator, and it is on by
+  default.** When a crew agent's session passes `after` (4h), pogod mails it
+  once from `pogod`: at its next safe point (not mid-task, and not while it
+  holds unread or unhandled mail), write a handoff note in its own `sweep.log`
+  and memory directory, then run `pogo agent stop <itself>`. restart_on_crash
+  respawns it about 2s later into a fresh session that runs "On Startup".
+  mg-c2d5's audit estimated this saves about 22% of crew tokens.
+  - **It asks; it stops nothing.** A session gets at most two notices: the first
+    at 4h and one reminder an hour later. After that pogod is quiet for the rest
+    of the session. A respawned session is a new session with a fresh count.
+  - **Only agents whose stop is a reset are asked:** running crew with
+    restart_on_crash and auto_start, and no park flag. Parked and on-demand
+    agents are never asked, and polecats are out of scope.
+  - **A self-issued stop is safe.** The stop runs in pogod's handler, which does
+    not need the requesting `pogo` process to survive. Crew hold no claim to
+    release, and schedules survive a supervised respawn. A new test has the
+    agent stop itself from inside its own process tree and checks that it
+    comes back with a new pid and a new start time.
+  - **Default on:** it only asks, at most twice a session, and only agents
+    whose respawn the supervisor already guarantees. Turn it off with
+    `[crew_reset] enabled = false`, or leave out single agents with
+    `exclude = ["name"]`. `after`, `renotice_after` and `interval` are tunable.
+    With `[wake_watch]` on, wake-watch's pointer announces the mail. With it
+    off, crew-reset types its own pointer of at most 100 bytes. Each notice
+    emits `crew_reset_notice`.
+
+- **gitgc reclaims dead polecats' harness session temp dirs (drellem2/pogo#203,
+  mg-8c8a1).** Nothing deleted Claude Code's per-workdir scratch under
+  `${CLAUDE_CODE_TMPDIR:-/tmp}/claude-<uid>/<slug-of-workdir>`, so on a host
+  with no `/tmp` age-out that root grew without bound. A new provider field,
+  `SessionTempDir`, declares the path (Claude implements it; nil means none),
+  and gitgc deletes a polecat's dir beside its worktree or orphan dir under the
+  same verdict. A new phase deletes those whose polecat directory is already
+  gone, gated like the orphan-dir scan: never a live polecat, never an
+  unconcluded ticket. Candidates are matched by exact constructed path, so crew
+  and non-pogo session dirs are never touched and an encoding drift misses
+  rather than over-deletes. Deleted, not relocated; one log line per action;
+  `pogo gc` without `--apply` only reports. The durable transcript store is out
+  of scope, and this bounds disk, not the ripgrep OOM in the issue.
+
+- **`com.pogo.mgbackup`: hourly commit and push of `~/.macguffin` to a bare
+  repo outside it, `~/backups/macguffin.git`, plus `scripts/mg-store-restore.sh`
+  (mg-b01d).** The `.git` from `mg init --git` lives inside the store and was
+  lost with it in the 2026-09-27 `rm -rf`. `mg` never commits on its own (only
+  `mg snapshot` commits), so nothing was being snapshotted. The job only
+  appends commits: a refused push alerts `mayor` rather than being forced. The
+  restore script recreates the empty maildir and work dirs that git cannot
+  store. Each run also pushes to the private GitHub repo
+  `drellem2/macguffin-store`, and refuses to push unless `gh` reports it
+  `PRIVATE` on that run, so losing the whole disk is covered too.
+
+- **The nightly deploy now refreshes its own runner, for the next night
+  (mg-cba69).** `~/.pogo/bin/pogo-deploy.sh` was a static copy that only
+  `pogo service install-deploy` rewrote, so merged runner fixes did not run and
+  nothing reported it. At the end of every attempting fire, after pogod and mg
+  are handled, the runner compares the installed copy with
+  `scripts/launchd/pogo-deploy.sh` at the commit it just synced to. If they
+  differ, it installs the committed blob: it checks the hash and `bash -n`,
+  keeps `pogo-deploy.sh.prev`, swaps by rename, verifies the hash at the path,
+  and puts `.prev` back on a mismatch. It logs `runner: current <sha>` or
+  `runner: refreshed <old> -> <new> (effective next run)`. It never touches the
+  plist (a changed plist source gets its own `runner: plist ...` line) and never
+  changes the run's exit status. `--runner-only` runs just this step for a
+  rehearsal against a scratch `POGO_DEPLOY_RUNNER`. `install-deploy` now keeps a
+  changed runner as `.prev` and swaps by rename too (Refs drellem2/pogo#123).
+  The runner that is installed now predates this step, so it must be installed
+  by hand once.
+
+- **wake-watch: pogod now wakes an agent when there is something for it to do
+  (mg-e00c, phase 1 of mg-5496, SHADOW).** A new pogod component tails
+  `~/.macguffin/events.jsonl`. On `mail.sent` to a running agent (by its name or
+  by the work-item box of the item it holds), or on an assignment
+  (`work.edited fields=assignee`, including `blocked:<agent>`, and `work.created`
+  with an assignee, read from the item because the event does not carry it), it
+  types ONE pointer into the agent's terminal. The pointer is at most 100 bytes,
+  enforced in code, with the command last (`mail from mayor: "…" — mg mail list
+  e00c`). A recipient gets at most one pointer per 60s, which carries a count.
+  Unread mail and unclaimed assignments older than 15 min are re-pointed once per
+  15 min up to 3 times, then reported (`wake_unconsumed` plus one mail to the
+  coordinator). Mail to an agent that is not running is bounced to the sender and
+  the coordinator. The offset, re-nudge budget and seen-agent names persist in
+  `$POGO_HOME/wakewatch/state.json`, so a restart does not re-point old mail. A
+  missing `events.jsonl` is BLIND (recovery suspended), never "no mail". Events:
+  `wake_pointer_sent`, `wake_renudge`, `wake_unconsumed`, `wake_bounce`,
+  `wake_pointer_skipped`, `wake_watch_armed/blind/sighted`. Configured under
+  `[wake_watch]`; ACTS. **The mail-check timers stay on.** `pogo
+  check-wakewatch` is phase 2's gate: it joins every timer-driven mail read
+  against the pointers sent before it and lists the misses (exit 1 on a miss, 3
+  when blind).
+- **`pogo nudge` to an agent that is not running now FAILS and names its
+  mailbox (mg-e00c).** It used to fall back to `gt mail send`, a system nothing in
+  this fleet reads, and print "sent via mail". `client.NudgeOrMail` and
+  `client.SendMail` are gone; use `client.NudgeRunning`.
+
+- **`pogo agent env` lists every environment variable pogod injects into a
+  polecat, in injection order, and which shipped prompts read each (mg-fbaf).**
+  On one night `POGO_WORKER_CORES` was believed not to exist. Then a second
+  reader, who had just found that it does, believed nothing consumed it. That
+  reader was quoting the `pogo host load` line that named the consumer ("…and
+  prompt prose") while asserting the opposite. The answer was spread across
+  help text, doc comments and six templates, and no command could be asked.
+  Now each variable (`POGO_AGENT_NAME`, `POGO_AGENT_TYPE`, `POGO_PROCESS_NAME`,
+  `POGO_AGENT_PROMPT`, `POGO_SUBMIT_RECEIPT`, `POGO_WORKER_CORES`,
+  `POGO_HOST_CORES`, `POGO_ROLE`) prints with what it is for, when it is set,
+  and, on a separate `but:` line, what it does not buy. `--json` carries the
+  same data plus a `not_covered` list.
+  - **One list, not two.** `internal/agent/workerenv.go` is a single catalogue.
+    The spawn path and the restart path now assemble their env through it, so a
+    variable cannot be injected without being reported.
+  - **"read by" is computed, not stated.** It is a scan of the prompt corpus
+    embedded in the binary, so it cannot go stale against the templates. An
+    empty result prints as "no shipped prompt mentions it (this searched
+    shipped prompts only)", never "nothing".
+  - **The bounds print with the output.** The list does not cover what the worker
+    inherits from pogod's own environment, a dispatcher's
+    `spawn-polecat --env`, or consumers in Go code, in user-edited prompts or in
+    other repos. The two core-budget values come from the running daemon. With
+    no daemon they read UNKNOWN, and the rest of the report still answers.
+  - **`pogo host load`'s worker-budget footer was split up.** "Advisory, nothing
+    enforces it", "it reaches a worker as `$POGO_WORKER_CORES`" and "which
+    prompts read it: `pogo agent env`" are now three separate lines. A reader who
+    takes only the emphatic line still learns the variable exists.
+
+  This landed as a rescue commit (mg-51bf) with no changelog entry. The entry
+  was added afterwards under mg-f34e, which built the merged code and ran it
+  against the live daemon before writing this.
+
+### Changed
+
+- The gh-issue intake, teardown and carrier re-read detectors no longer run inside pogod. They run in the new `pogo gh-watch`, started every 15 minutes (and at load) by a new launchd job, `com.pogo.ghwatch` (`pogo service install-gh-watch`), whose command goes through `/bin/zsh -c -l` — so each fire uses the GitHub credential your login shell has, read afresh, instead of one pogod fetched at startup and held (a rotated token no longer needs a pogod restart to reach the detectors). Each detector keeps its own interval, renotify and escalation behaviour: their memory, and the mg-scan caches, persist in `$POGO_HOME/gh-watch/` between runs. The run's record (`state.json`, `pogo gh-watch --json`) lists each detector's arming, whether it sampled, and every issue state it read. pogod now only reads that record: it raises the existing A13 not-armed conditions from it, plus a new `ghwatch_not_reporting` condition (to the coordinator) when no fresh record has appeared in an hour of pogod's awake time. The job is in the nightly launchd audit. Events from these detectors now carry `agent: gh-watch`. pogod still fetches GH_TOKEN at startup for its merge-path `gh` calls (refinery PR-body guard and external-PR close, stranded-work PR probe); removing that is mg-37183 (mg-257a8).
+
+- pogod no longer fetches a GitHub token at startup or holds one in its own environment, and its `GH_TOKEN:` startup log line is gone. Instead, each child that talks to GitHub gets a credential fetched at the moment it is spawned, in that child's environment only: the refinery's PR-body closing-keyword guard and external-PR close, the stranded-work awaiting-review probe, and every git fetch/push/ls-remote pogod runs (an https github.com remote authenticates through `gh auth git-credential`, so without this the refinery could not push to https remotes such as onethird_program or `~/.pogo`). A rotated token now reaches the next call without a pogod restart, and agents, gates and hooks pogod spawns no longer inherit a copy. When no credential can be found pogod logs one `per-call gh/git credential UNAVAILABLE` line, and one more when it recovers. See "Per-call credentials in pogod" in docs/CONFIGURATION.md (mg-37183).
+
+- **launchd activation SCOPE: `com.pogo.configbackup` now carries a recorded
+  exclusion reason.** Its plist ships from the pogo-config repo
+  (`~/.pogo/bin/com.pogo.configbackup.plist`, mg-a48a), not from this repo, so it
+  is user config and is not audited; on the reference box the SCOPE line reads
+  `0 with NONE` instead of `1 with NONE` (mg-476b9).
+
+- **`[lineage]` covers the deploy runner: `runner_repo`, `runner_ref`,
+  `runner_path`.** A host whose `~/.pogo/bin/pogo-deploy.sh` comes from an org
+  template can now say so. The payload audit then compares the installed runner
+  against `<runner_repo>@<runner_ref>:<runner_path>` instead of drellem2/pogo's
+  copy. When the declared repo's origin is not drellem2/pogo, `pogo service
+  install-deploy` refuses to replace a differing installed runner unless given
+  `--force` (the old copy is still kept as `.prev`), and the nightly's runner
+  self-refresh logs `runner: not-checked reason=lineage` and leaves it alone.
+  `pogo config get lineage.runner_foreign` reports the answer the nightly reads.
+  Without a declaration nothing is refused. The audits no longer tell you to run
+  an installer over a difference they cannot attribute: the payload audit's
+  stale row and the plist audit's changed-`ProgramArguments` row now state what
+  differs and what `pogo service install-*` would replace, with no "run"
+  instruction. The plist audit also names the keys that differ
+  (drellem2/pogo#126, mg-4f14a).
+
+- `pogo refinery submit` refuses a `--repo` that is `$POGO_HOME` — the live checkout pogod runs from — or a worktree of it, at submit time, with nothing queued. A merge lands on the repo's origin and the live checkout never pulls, so for this one repo a merge was never live and forked a second history beside the commits made directly in the live tree. The refusal names the live-commit path instead. Paths are compared resolved (`~`, relative, trailing slash and symlinks all match); a separate repo that merely sits under `$POGO_HOME`, such as a polecat worktree of another repo, is not refused. `pogo agent spawn-polecat` refuses a worktree polecat on `$POGO_HOME` for the same reason, since its only exit would be refused; `--no-worktree` dispatches are unaffected (mg-752a3).
+
+- **launchd activation SCOPE: `com.pogo.mgbackup` (pogo-owned, hand-installed from
+  `scripts/launchd/`) and `com.pogo.vixreport` (pa-owned, mg-0f79) now carry
+  recorded exclusion reasons**, so on the reference box the SCOPE line reads
+  `0 with NONE` instead of `2 with NONE`. Neither job is audited; this records
+  why (mg-79c6a).
+
+- `pogo nudge` now tells a caller which outcome it got without matching error text (drellem2/pogo#100). Exit **4** means *not delivered* — nobody received it (the confirm escalation ran out, or it was never written because `--wait-idle` timed out or the agent exited); resend it by another channel. Exit **5** means *queued, unconfirmed* — written to an agent mid-turn, whose harness emits no receipt for that; probably fine, and a resend would deliver it twice. Everything else, including a not-running agent, stays exit 1. With `--json`, a failure prints `{"status", "agent", "error"}` (plus `mailbox` for `not_running`) with status `not_delivered`, `queued`, `not_running` or `failed`. pogod's `POST /agents/{name}/nudge` answers every outcome with a `NudgeAPIResponse` body carrying the same status and an `error` field (202 for `queued`, 500 for `not_delivered`/`failed`) instead of a bare 500 with prose; the Go client maps them to `client.ErrNudgeNotDelivered` / `client.ErrNudgeQueued` via `*client.NudgeError`. No mail fallback is added — that half of the issue is superseded (mg-9b049).
+
+- Polecats no longer get a 10-minute mail-check timer (mg-5496 phase 2). pogod stopped registering `mail-check-<id>` at spawn, and the six polecat templates no longer tell the polecat to register one. Instead they say mail arrives as a wakewatch pointer nudge, that the polecat must read both boxes, and that it must check both boxes itself before every hand-off. `pogo check-strandedmail` now also lists running polecats and reports unread mail in their boxes that is older than `--grace` (default 15m). This is a new finding kind, `unconsumed_polecat_mail`, and its recovery is a nudge, not a forced read. Without this the sweep would have silently stopped checking polecat boxes, and it is the backstop for a pointer that failed. Signals retired for polecats: the polecat `mail-check-*` ack ratios (`pogo schedule list` ACKED), polecat membership in the ack-watch `mail-check` cohort, `schedule_register_failed` events, and the mayor's "polecat reachability alert". Crew keep their timers until phase 3. To revert, re-register a polecat's timer with `pogo schedule` (mg-aa74).
+
+- **Stall-watch's dispatch notices are much quieter by default (mg-b12da,
+  Refs drellem2/pogo#211).** The priority wake and the standard
+  unclaimed-items notice were the loudest things stall-watch sent: measured on
+  the maintainer's box over 2026-09-26..28 (55h of firing), 72.7 priority-wake
+  and 66.1 unclaimed-items fires a day. Most were repeats about items the
+  coordinator was already holding, and repeats rarely led to a dispatch. A
+  named item was dispatched within 10 minutes of 18% of repeat priority-wake
+  notices and 4.7% of repeat unclaimed-items notices. For first notices the
+  rates were 44% and 20%. Default changes in `[stall_watch]`, which affect
+  every operator who has not set these keys:
+
+  | key | old default | new default |
+  |---|---|---|
+  | `high_priority_wake_cooldown` | `3m`, doubling per repeat to `repeat_backoff_cap` (4h) | `4h` (flat: named once, then at most every 4h) |
+  | `unclaimed_item_cooldown` (new) | — (the category used `nudge_cooldown`, `5m` doubling to 4h) | `4h` (flat) |
+  | `dispatch_notice_interval` (new) | — (no gap between notices) | `1h` between two notices of the same dispatch category |
+
+  An item that comes due inside `dispatch_notice_interval` is held and named
+  in the next notice. It is never dropped and never counted as told, so this
+  is not the per-category cooldown that mg-1693 removed. The cost is latency: a
+  second high-priority item within the same hour waits for the rest of it. We
+  replayed the new defaults against the same events. The model gives about 7
+  priority-wake and 11 unclaimed-items notices a day, down from 54 and 61
+  under the same model of the old defaults. The model undercounts the recorded
+  old rate by 5–25%. The hard ceiling is now 24 notices a day per category.
+  At-cap notices are unchanged and remain report-only. `nudge_cooldown` still
+  governs unread mail and the worked-but-unclaimed, preserved-worktree and
+  stranded-push alarms. To restore the old behaviour, set
+  `high_priority_wake_cooldown = "3m"`, `unclaimed_item_cooldown = "5m"` and
+  `dispatch_notice_interval = "0s"`.
+
+- **Upgrade note: a host with no gh-intake watch list now gets mail, and after 4h the notice also goes to `human` (mg-b936b).** Intake is enabled by default (`[gh_intake] enabled = true`). Since mg-41e26 (drellem2/pogo#121) an empty watch list is a finding, the BLIND WATCH LIST. On a host that never set `[gh_intake] repos`, each `pogo gh-watch` run therefore treats the empty list as actionable. Before, it reported a clean `scanned=0`. It now mails the coordinator (`mayor`, or `[gh_intake] notify_to`) from `gh-intake-watch`, re-mails daily (`renotify_after`), and pogod raises the A13 `ghintake_watch_empty` condition. After the finding has persisted 4h (`escalate_after`), each notice is also sent to `human`. This is intended: a detector that watches nothing should say so. To opt out, choose one of these. Give intake something to watch: `[gh_intake] repos = ["owner/repo", ...]`. Or switch it off: `[gh_intake] enabled = false`. If you want the coordinator mail but not the escalation, `[gh_intake] escalate_after` set to a negative duration (e.g. `"-1s"`) disables escalation only.
+
+- **Upgrade note: on a host with no `[lineage]` block, pogod's prompt-staleness
+  sweep may stop mailing, and `pogo doctor --check` warns on edited prompts.**
+  When prompts differ from the reference *and* `~/.pogo/agents` holds files the
+  reference does not ship (for example the `crew/pm-*.md` stubs), the sweep now
+  logs the result and sends no mail, because the reference may not be the
+  corpus's upstream. To keep the mail on a host that tracks drellem2/pogo, add
+  `[lineage]` with `prompt_subtree = "internal/agent/prompts"` to config.toml.
+  An org template should name its own `prompt_repo`/`prompt_subtree` instead.
+  Separately, `pogo doctor --check` now shows a WARN row, "agent prompts
+  up-to-date (body differs from stamp)", for a prompt whose body was edited in
+  place under an unchanged install stamp. It used to report these files as
+  up-to-date. The row is a warning and does not change doctor's exit status
+  (drellem2/pogo#125, mg-f1bb2).
+
+### Fixed
+
+- The `[stranded-push]` mail no longer calls LOCAL-ONLY work pushed (drellem2/pogo#137). When the branch is on no origin ref, the subject now says `left LOCAL-ONLY work behind` instead of `left pushed work behind`, and the do-not-dispatch paragraph and the still-running paragraph no longer say the work is "already pushed" while the same mail warns that it is not on origin. The `[stranded-push]` prefix and `do NOT dispatch` are unchanged. The `origin_ref` field in docs/event-log.md now says the remedy submits that branch only when it holds exactly the same commits (mg-0b2f6).
+
+- **`pogo service install` no longer overwrites a custom launcher in the
+  daemon plist.** The program the plist / systemd unit runs is now
+  `POGOD_LAUNCHER`, then `[service] launcher` in config.toml, then pogod on
+  PATH. If the installed plist runs a program that is neither, install refuses
+  before quiescing the fleet, naming the program; `--adopt-launcher` keeps it,
+  `--force-launcher` replaces it. Every plist overwrite by any
+  `pogo service install*` keeps the previous file as `<plist>.bak.<timestamp>`.
+  The doctor/nightly plist audit names a custom launcher, a missing
+  `ProcessType` and a non-true `KeepAlive` instead of printing
+  `pogo service install` as the fix; the doctor prompt and runbook now suggest
+  install only when no plist exists (drellem2/pogo#105, mg-0e3d9).
+
+- **The blocked-reminder told recipients to "say so in the item body" if they
+  were waiting on purpose, but nothing reads the body (mg-1105).** Complying
+  changed nothing, so each notice arrived unchanged and a careful agent wrote a
+  new body section for every one. The notice now says what is actually true:
+  there is nothing to acknowledge, and it stops on its own after the cap
+  (default 4) whether or not the block clears. With the cap disabled it no
+  longer says "stops after 0 reminders". It says the notice repeats until the
+  block clears.
+
+- **The nightly deploy no longer mails a RED "mail-check schedules LOST" for
+  polecats it drained.** `pogo-deploy.sh` takes its schedule snapshot before
+  the redeploy drains the fleet, so every drained polecat's reaped mail-check
+  counted as lost and mailed mayor and human (11 ids on 2026-08-20, all
+  drained polecats). The post-check now sets aside, by name, each loss whose
+  owner was a polecat that is no longer registered, or a parked agent, and logs
+  them as `expected loss: <id> (<agent>, <reason>)`. It alerts only on what is
+  left: a running agent (crew or polecat) that lost its schedule, crew gone
+  after the bounce, an unexpected status, or an unmapped id. When the agent
+  registry cannot be read nothing is subtracted, and the mail says it is
+  UNFILTERED. The mail body no longer claims "the agents that are still there
+  are alive", which was never measured (drellem2/pogo#122, mg-1233a).
+
+- Watcher `notify_to` defaults now follow the configured `[agents] coordinator` instead of the literal `mayor`: an unset `notify_to` under `[gh_teardown]`, `[gh_intake]`, `[carrier_drift]`, `[review_decl]`, `[ack_watch]`, `[deaf_watch]`, `[absent_watch]`, `[progress_watch]`, `[first_turn]` or `[midsession_wedge]` resolves to the coordinator, and a refused coordinator rename re-points them along with the stall watcher. An explicitly set `notify_to` still wins; an unrenamed install is unchanged (mg-152d1).
+
+- The tier-1 heartbeat reaper's give-up mail now goes to the configured `[agents] coordinator` instead of a hard-coded `mayor`, and the nightly deploy's alerts (`scripts/launchd/pogo-deploy.sh`) now go to `[agents] coordinator` and `[agents] escalation_box` instead of the literal `mayor` and `human`. The deploy runs out of process and bounces pogod, so it reads both through the new daemon-free `pogo config get agents.coordinator|agents.escalation_box`, and falls back to `mayor` / `human` whenever that read fails (drellem2/pogo#148) (mg-15e41).
+
+- **pogo-deploy.sh finds GH_TOKEN in `~/.zshrc` or `~/.zprofile`, not only `~/.zshenv`** — with `POGO_DEPLOY_ZSHENV` unset (the installed plist never sets it), the nightly runner now tries `~/.zshenv`, `~/.zshrc`, `~/.zprofile` in order, takes the first `export GH_TOKEN=` line, and logs which file supplied it. It aborts only after every candidate misses, and the abort alert lists every path it looked in. `POGO_DEPLOY_ZSHENV` stays an exact override. No plist or installer change; installed hosts pick it up through the runner self-refresh. Refs drellem2/pogo#124 (mg-19083)
+
+- priority-wake and stall-watch no longer say a gh-issue BUILD "can be dispatched now" when the spawn gate would refuse it. The notices classified every item by the plain worker count, ignoring the two-slot charge (builder + reviewer, mg-bf42) the gate applies to a `workflow: gh-issue`, `stage: build` item — so a cap-3 repo with one live builder whose reviewer is not yet running was offered a second build. Such an item now lands in the "at its worker cap — a LATER" group, with the held review slots named; ordinary items, review tickets and other stages in the same repo stay dispatchable. The gate and the notices now classify with one shared predicate, `workitem.Carrier.ChargedAsGHIssueBuild` (mg-1acf2).
+
+- **Work-item ids may now be 4 OR 5 hex characters everywhere pogo parses
+  `mg-<id>` — a prerequisite for macguffin widening ids from 4 to 5
+  (drellem2/macguffin#33) (mg-2f62).** Before this, the anchored patterns
+  (`^mg-([0-9a-f]{4})$`, `\bmg-[0-9a-f]{4}\b`) matched no 5-char id at all and
+  failed silently, and the unanchored ones read a 5-char id as its 4-char
+  prefix — a different item. Every site now uses a bounded `[0-9a-f]{4,5}`
+  with word boundaries, so a 40-char sha after `mg-` is still not an id:
+  verdictwatch (`shapeNames`, the probe), memcheck staleness, prtracking,
+  the installed-runner payload audit, the mg contract probe,
+  `scripts/changelog-coverage.sh`, `scripts/premise-expiry-rate.sh` and the
+  e2e fake agent. `changelog-coverage.sh`'s "is it described" lookups are now
+  word-bounded too, so `mg-2f62` is not counted as described by `mg-2f62a`.
+  gitgc's glued-name recovery now reads a bounded hex run instead of its
+  leading four characters — which had already misread live hex-prefixed
+  names such as `a2198` (letter `a` + mg-2198) as `mg-a219`, a different item;
+  a 5-hex run now offers both the bare-id and letter-plus-id readings.
+
+- wakewatch re-sends a pointer that FAILED. Before this, a failed pointer was never retried; on 2026-10-01 at 02:03Z one to `mayor` was mangled into the kickoff prompt of the just-respawned agent and was only read because mayor's mail-check timer still exists. The failed triggers now go on a per-recipient retry queue, persisted in `wakewatch/state.json`. They are re-sent once the recipient is running and at least 20s past its own start, at 20s/40s/60s backoff, at most 3 times. Only mail still unread, or an assignment still unclaimed, is re-sent. A failed trigger also rides along with the recipient's next fresh pointer. The failed `wake_pointer_sent` records `will_retry` and a re-send records `retry: <n>`. `pogo check-wakewatch` adds an explained, non-miss class, `DELIVERED-LATE`, for a read whose pointer was delivered only after it. The row shows the send-to-pointer lag and the report shows the longest. `MISS-FAILED` now means never delivered, then or later (mg-35a7e).
+
+The sandbox port allocator (`scripts/lib/sandbox-daemon.sh`) could give one port to two concurrent live controls when a dead run had left a lock behind. Reclaiming a dead claim was read-owner / rm / re-create, which is not atomic, so a late claimant deleted the claim an early one had just made. Six claimants on one stale lock got duplicate ports in 26 of 30 trials. Reaping now happens under a per-port `mkdir` mutex and re-reads the owner before removing anything. `scripts/pogo-self-deploy_live_setup_test.sh` gains a stale-lock control, which failed 3 of 3 runs against the old code. Its six-claimant check now holds claims behind a barrier instead of `sleep 3` (mg-35ad8).
+
+- `pogo agent list` now shows the real status of a work item in `pending/` or `shelved/`, where it used to show none. The per-repo cap still counts such a worker, because neither status is terminal. The done-reaper now reads an item's status from the macguffin store instead of running one `mg show` per live polecat per tick. The cap refusal and `pogo host load` now say a finished worker's item is "done or archived" instead of only "done" (mg-36096).
+
+- A requested `pogo agent stop` followed by a start inside pogod's 2s respawn backoff no longer reports "<name> CRASHED and its restart FAILED — that agent is gone" about a running agent. The deferred respawn's "agent is still running" refusal is now the sentinel `agent.ErrRespawnAgentAlive`, and it CLEARS `restart_failed:<name>`. pogod re-checks liveness before it raises A6 at all. An A6 that follows a requested stop no longer says CRASHED or "unexpected exit". Because the cycle no longer clears and then re-raises the row, it no longer mails `human` a fresh `reason=new` notice every time (drellem2/pogo#218). A requested stop of an agent pogod will not respawn (`restart_on_crash = false`) now holds the agent's `mail-check-*` rows for 30s and reaps them only if the agent has not been started again, so a supervisor's stop+start no longer leaves the seat deaf. That is #217's second, quiet branch. `restart_on_crash` was what selected between the two branches per seat (drellem2/pogo#159, drellem2/pogo#217; mg-38433).
+
+- **A pogod started with SIGINT ignored no longer passes the ignore to its
+  children either.** Starting pogod as a `&` job of a shell without job control
+  ignores SIGINT for the whole tree, and a child bash then silently refuses
+  `trap ... INT`, so a gate script's interrupt cleanup never ran. pogod now
+  catches and discards an inherited-ignored SIGINT the same way it does SIGHUP
+  (mg-fb9d4). SIGQUIT needs nothing: the Go runtime already overrides an
+  inherited ignore for it. The startup event is renamed from
+  `pogod_sighup_ignored_at_launch` to `pogod_signal_ignored_at_launch`, emitted
+  once per signal with `details.signal` (drellem2/pogo#106, mg-3b86e).
+
+- `pogo doctor "<question>"` no longer reports every failed nudge of its question as status `"error"`: the `--json` `nudge` object now carries the same status `pogo nudge --json` gives (`not_delivered`, `queued`, `not_running`, `failed`, or `delivered`) plus `error` and `message`, and the text output says "not delivered — resend" or "queued, unconfirmed — do not resend" instead of a generic warning. `pogo doctor`'s own exit code is unchanged. ARCHITECTURE.md no longer claims `pogo nudge` falls back to mail — only the scheduler's deliverer (`mailAfterNudge`) and stall-watch mail after a failed nudge — and documents the nudge statuses, their HTTP codes and exit codes 4/5 (mg-3e961).
+
+- The toolchain-stamp provenance guard (mg-8d0f) now sees a `vcs.revision` scrape written as a regex — `vcs\.revision` or `vcs[.]revision` — not only the literal token. build.sh's own `sed` extraction had been invisible to it, so its expected count and explanation were wrong, and a new unlisted scrape in that form would have passed. build_test.sh's "flagged only vcs.revision" check now fails when the verification did not run at all. (mg-41494)
+
+- The gh-issue intake detector no longer reports a clean exit 0 after examining nothing. `pogo check-intake` now loads the config and uses `[gh_intake] repos` when `--repo` is not given; before, the key had no effect on the CLI, even though the CLI's own empty-list message told you to set it. The report's watch-list source now says `--repo` for a flag list instead of `config`. An empty watch list is now a finding, a BLIND WATCH LIST, handled like a blind store. `check-intake` exits 1 with a banner and reports `blind_watch_list` in `--json`. `pogo gh-watch` mails it instead of emitting `gh_intake_watch_clean` with `scanned=0`. The job's record carries the resolved list (`intake_watch`). pogod raises a new A13 condition, `ghintake_watch_empty`, to the intake mailbox when the detector is armed and that list is empty (drellem2/pogo#121; mg-41e26).
+
+- **The payload summaries name a declared `[lineage]` reference.** When the
+  runner was compared against `<runner_repo>@<runner_ref>:<runner_path>`, the
+  `launchd payload` doctor row and the `pogo check-activation` headline no
+  longer say it matches (or differs from) "the copy this build ships"; they name
+  the declared upstream it was compared against. `check-activation --json`
+  carries it per script as `declared_upstream` (drellem2/pogo#126, mg-44001).
+
+- `gh-teardown-watch` and `pogo check-teardown` no longer report a done triage or review carrier as a teardown miss while the build that carries the fix is still being worked. The detector now follows each done carrier's `successor:` links (from `mg done --successor`) and, for a review carrier, the build on its `reviews:` line, transitively; if any item on that chain is available, claimed or pending, the carrier is listed under a new non-alerting "in flight" section (and `in_flight` in `--json`) instead, with no issue lookup spent. A chain whose items are all done, archived, shelved or unreadable is audited as before, so a build done with its issue still open remains a miss (mg-47df3).
+
+- **`pogo events list --since` read only the live `events.log`, so a window
+  crossing a rotation returned a clean-looking zero (mg-50b9).** Two
+  `investigation_search` events sat in `events.log.1`; `--since=1200h` printed
+  nothing and exited 0, the same as a real zero — the reading a gate like "run
+  `pogo events list --since=720h --type=X` and read the count" believes. The
+  command now also reads every rotated file that reaches into the window
+  (`events.ReadWindow`, built on mg-9d55's `LogFilesCovering`). When the window
+  reaches past the oldest retained record of a log that rotation has already
+  trimmed, it still prints its matches, then says `window starts before retained
+  history at <ts>` on stderr and exits 3: the result is a lower bound, not a count.
+
+- **The PM sweep's "Is CI broken RIGHT NOW?" step judged the default branch on
+  a listing that did not reach its tip (mg-62522).** `gh run list --branch
+  "$def"` is filtered server-side by GitHub, and on 2026-09-29 it returned
+  well-formed, all-`success` rows for `drellem2/pogo` `main` ending on
+  2026-09-08 (`abf1749`, 97 commits behind) while main's head `2c13a25` had a
+  run in the unfiltered listing — so a red main would have read as 09-08's
+  green. Why the filter stalls is not established and it is intermittent (the
+  same command listed the head minutes later). pm-template's step now reads the
+  tip's sha (`gh api repos/$slug/commits/$def`) and requires a listed run on
+  it: it prints `CI reaches tip`, or `CI STALE FILTER` and falls back to the
+  unfiltered listing filtered on `headBranch`, or `CI TIP NOT COVERED` (with
+  how many commits the newest listed run is behind) / `CI TIP UNKNOWN`, both
+  UNKNOWN, not green. A new test runs the shipped block under bash and zsh
+  against a fake `gh` serving the stale shape; a fresh listing is the positive
+  control, and making the tip comparison always true fails 6 of 10 subtests.
+  CONTRIBUTING.md's CI-window recipe gains the same tip check.
+
+- **A merged item left open by a dispatch gate was blamed on its missing claim,
+  and nothing merged-not-closed-shaped reached the event log (mg-6275).**
+  On 2026-09-08 mg-1530 merged while assigned `blocked:mayor`; pogod declined to
+  close it, as designed, and told the filer within two seconds — but the refusal
+  opened "is unclaimed … no worker holds it", so it was diagnosed as a stopped
+  builder releasing its claim. An unclaimed item with no gate is claimed and
+  closed at merge; the refusal now says the gate is the only reason and prints
+  the lift-and-close (`mg edit <id> --assignee="" && mg claim <id> && mg done <id>`).
+  The gated case is also recorded as `work_item_merged_not_closed_gated`, so a
+  query for `merged_not_closed` finds it; the coordinator alert
+  (`work_item_merged_not_closed`, exact type) stays suppressed for gated items.
+
+- `scheduler_fire_delivered` now labels a running agent's mail fallback (PTY refused: `nudge_failed` or `wake_suppressed`) `nudge_delivery=mail_fallback`, the value `stall_watch_fired` uses for the same situation; `mail` now means only that the PTY was never tried (agent not running, or a `delivery: mail` schedule), as in stall-watch. `scheduler_fire_failed` now keeps `nudge_fallback_reason` and `nudge_error`, so a failed fallback send no longer loses the nudge's refusal; it never names a channel, and a failed `delivery: mail` send no longer reports `mail` in `FireResult` (mg-66331).
+
+- **`scripts/signal-sender_test.sh` Test 3 could signal the wrong process and
+  fail with "no SENDER line at all" (mg-68f4d).** Its readiness check sent
+  SIGTERM once the wrapper pid had any child. But `signal-sender.sh` forks
+  before it execs into the compiled binary (`$(shasum …)`, `$(uname -m)`, the
+  self-check), so a poll that landed on one of those children signalled the
+  bash front-end, which has no handler. It died of the signal with status 143
+  and no SENDER line: the 21-passed/2-failed shape a merge gate recorded at
+  load 9 against a version-bump branch. Tests 3, 4 and 13 now wait until the
+  pid has exec'd into the binary and forked its child, which it does only after
+  `sigaction` has armed the handler. Test 3 also fails under its own name if
+  that never happens. Reproduced 5/5 by putting a `shasum` that sleeps 0.5s on
+  PATH, which widens the pre-exec window. The old test then printed the gate's
+  exact failure; the fixed one passes 23/23.
+
+- pogod's startup log rotation now rotates the file its stderr actually writes to — resolved from fd 2 with `fcntl(F_GETPATH)` on darwin and `/proc/self/fd/2` on linux — instead of `~/Library/Logs/pogo/pogod.log`, which it used to compute itself. A plist written by an older installer, or edited by hand, sends stderr elsewhere, and on such a host rotation never ran and said nothing. The installed plist's path and then the default are used only when fd 2's name cannot be read, and the same-inode guard still applies to whichever path is chosen. Every startup now logs one `pogod: log rotation: <reason> (stderr=<path>)` line with reason `rotated`, `below-threshold`, `not-redirected` or `path-missing`; a missing path is reported as the anomaly it is rather than a silent no-op. Refs drellem2/pogo#104 (mg-71e39).
+
+- **The `declares-remainder` prompt block was silent to the worker whenever pogod
+  could not read the item (mg-7231).** The declarer answered a bool, so an
+  unlocatable or unreadable macguffin store, or an id not found in it, produced
+  exactly the silence of an item without the tag — the warning appeared only where
+  nothing had gone wrong. Those cases now prepend a short *could-not-check* block
+  naming the reason and the command that performs the check (`mg show <id> | grep
+  '^Tags:'`), plus both ways out. A spawn with no `--id` still gets no block, by
+  decision: the refusal the block warns about is pogod's item-keyed close-at-merge,
+  so an item-less spawn has nothing to refuse, and `--id` stays optional (mg-2437).
+
+- `./build.sh --install` now reads back every installed binary and fails, naming the binary, the expected sha and what it found, when its ldflags Commit or Go vcs.revision differs from `git rev-parse HEAD`. A foreign vcs.revision (a worktree nested in another repo, e.g. under ~/.pogo/polecats) is what blocks the nightly redeploy. Refs drellem2/pogo#103 (mg-8075b)
+
+- **Nudges longer than ~1 KB lost their beginning on Claude Code 2.1.283,
+  while pogod logged them as confirmed (mg-8a70).** On darwin the tty input
+  queue holds 1022 bytes, so a single larger write reaches the harness as two
+  reads. Claude Code 2.1.283 treats the first read as a paste and drops it at
+  submit. The agent received only the last ~120 characters. This hit 128 of 257
+  polecat mail-check fires on 2026-09-26/27, and it also hit crew and mayor
+  notices. It was reproduced 3 of 3 against the real binary. Two changes:
+  - **Delivery.** `Agent.Nudge` now writes any body longer than the provider's
+    `InputChunkBytes` (512 for Claude) in pieces. Each piece waits until the
+    harness has read the previous one, measured with `FIONREAD` on the slave fd
+    pogod holds. Against the real binary this was intact 8 of 8, including with
+    the harness stopped mid-message.
+  - **Detection.** The `UserPromptSubmit` receipt hook now records an excerpt of
+    what the harness actually submitted. The confirm path checks it against
+    what was sent. A delivery with one end missing is now reported as
+    `nudge_unconfirmed` with `outcome: "mangled"` and returns
+    `ErrNudgeMangled`, where it used to be logged as `nudge_sent`. The scheduler
+    then falls back to mail, which carries the whole text.
+
+- **`pogo doctor` and `pogo check-oneshots` said a retired `one_shot_complete`
+  record left one-shots unmeasurable "until pogod is rebuilt" and offered
+  `curl /version` (mg-9ac7).** The running build already had the fix, and the
+  thing blocking the check was the old record still inside the 7-day window,
+  which a redeploy does not remove. A reader who redeployed would see NOT
+  MEASURABLE again the next morning and conclude the redeploy had failed. A bare
+  revision also cannot tell you whether d71e1e2 is in it. The notice now gives
+  the date the record ages out of the rolling window, says that rebuilding does
+  not bring that date forward, and gives a `git merge-base --is-ancestor` test
+  with its exit codes. It also gives the `--since` that measures only the part
+  of the window after the last retired record.
+
+- A polecat whose work item is `done` is now reaped even if its terminal never goes quiet. The done-reaper still stops it after 2 minutes of PTY quiet. It now also stops it 10 minutes after first seeing the item done, so a harness spinner that redraws forever no longer holds a slot until someone stops the worker by hand. A builder under an open review stays exempt on both paths. Each stop logs `path=quiet` or `path=done-timer`. The per-repo dispatch cap no longer counts a live worker whose item is `done`/`archived`. It lists those workers on a new `Finished:` line in `pogo host load --repo=` and in the refusal. A worker whose status cannot be read is still counted. `pogo agent list` rows now show `repo=<path>` and `work-item=<id>(<status>)`, and `/agents` carries `source_repo` and `work_item_status` (drellem2/pogo#128, mg-9f4fb).
+
+- The tier-1 heartbeat reaper's give-up mail now follows `[agents] escalation_box` too: it mails `mayor` and the escalation box (`human` by default, so an unconfigured install is unchanged; one mail only when the box is `mayor`), where it used to hard-code `human` — the sixth such sender (drellem2/pogo#148). New tests pin drift-watch's did-not-run notice to `Options.MailTo` and pogod's main-level wiring of every escalation field and call to `escalationBox` (mg-a586e).
+
+- **ackwatch and wedgewatch read only the live `events.log`, so a window
+  crossing a rotation undercounted (mg-a6c0).** Sibling of mg-50b9 / mg-9d55.
+  `pogo check-acks --populations` (default window: seven days) counted only the
+  deliveries, completions and synthetic-failure episodes after the last
+  rotation; the blackout arm's `RecentFires` and the `system_wake` suppression
+  (`LastDisruption`) had the same shape; and wedgewatch's event-log fallback
+  reported an agent whose last activity predated the rotation as having no entry
+  in the log. All four now read the rotated files too (`events.ReadWindow`;
+  wedgewatch walks newest-first and stops once every agent it needs is found,
+  so the usual pass still opens one file). A populations window reaching past
+  history rotation has discarded now says `WARNING: window starts before
+  retained history at <ts>` (and `history_truncated`/`history_floor` under
+  `--json`); the blackout arm reads such a window as blind rather than as zero
+  fires.
+
+- **The test gate no longer leaves `tmp.*` fixture directories in `$TMPDIR`.**
+  On darwin, a `mktemp -d` with no template ignores `$TMPDIR` and uses the
+  per-user temp directory. Every shell-suite fixture therefore bypassed the
+  `$TMPDIR` leak guard, which watched only the Go row. 2,910 directories (13.4G)
+  piled up while the gate read clean (figures from mg-2f3ba). The guard now puts
+  a `mktemp` shim on `PATH` (`scripts/lib/tmpdir-mktemp`) that sends template-less
+  calls into its private `$TMPDIR`, and every `test.sh` row runs under the guard.
+  The one exception is the `gate-profile_test.sh` row, whose leak belongs to
+  mg-c1a5e. Under the guard, five suites leaked, and four are fixed here:
+  - `pogo-self-deploy_test.sh` re-armed its EXIT trap seven times, and each
+    re-arm dropped the earlier fixtures. All of its fixtures now live under one
+    root with a single trap.
+  - `pogo-condition-controls.sh` abandoned every control's sandbox except the
+    last one, plus the directory it built pogod into.
+  - `net-control_test.sh` never removed its work directory.
+  - The nightly runner `pogo-deploy.sh` left a `git_step` stderr capture behind
+    whenever its run deadline killed a git step. This one is a production leak,
+    and it is not live until `pogo service install-deploy` refreshes the static
+    runner copy.
+
+  `scripts/tmpdir-leak_test.sh` now asserts that a bare `mktemp -d` leak is
+  caught and that every gate row is guarded (mg-b9621).
+
+- **pogo-deploy:** the post-bounce "mail-check schedules LOST" mail now says
+  why it may name drained polecats. When the agent registry was unreadable
+  after the bounce, the UNFILTERED marker reaches the mail body instead of
+  being stripped by its caller. When the agent list was unreadable BEFORE the
+  bounce (so no owner's type is known), the mail says "OWNER TYPES UNREADABLE",
+  and a gone agent of unknown kind gets a check-first remedy instead of the
+  crew "start it" one. The post-bounce check is now its own function and is
+  run end to end in the tests against a stubbed `pogo`. Refs drellem2/pogo#122
+
+- **A branch with no commits of its own now FAILS the merge instead of
+  resolving as "already merged".** The refinery's already-merged guard used to
+  decide on ancestry alone, so a branch pushed at the target's tip with its
+  work uncommitted read exactly like a landed one: the MR resolved as merged
+  naming someone else's commit, pogod closed the item `done` and reaped the
+  polecat (mg-3b86e). "Already merged" now requires a prior merged MR on the
+  refinery's own record, for the same branch or work item, whose merged SHA
+  contains the head. Otherwise the MR fails `class=defect` at stage
+  `empty-branch` — "branch carries no commits ahead of <target>" — with no
+  MERGED event, `merged_sha` or `already_merged`, so the item stays open and the
+  polecat stays alive to commit and resubmit. Restart recovery applies the same
+  rule, crediting a contained head to the in-flight MR only when its new
+  `target_at_start` record shows the head was ahead of the target before the
+  push. The polecat templates (`polecat.md`, `polecat-architect.md`) now run a
+  `presubmit_check` that refuses to submit a dirty worktree, a branch with
+  nothing ahead of the target, or an unpushed HEAD. Upgrade note: a legitimate
+  resubmit whose earlier MR has aged out of refinery history (100 entries / 7
+  days) is now refused too; confirm with `git log` and close the item by hand.
+
+- **The merge gate no longer leaves a `pogo-gate-profile.*` file in `$TMPDIR`
+  when it ends inside its first step.** `scripts/lib/gate-profile.sh` created
+  its `times` scratch file in `gate_profile_begin` and removed it only at the
+  bottom of `gate_profile_report`, after that function's "no steps recorded"
+  early return. So a gate killed (SIGTERM/SIGINT/SIGHUP) or exiting before its
+  first step was recorded left one file per run. 410 of them had built up by
+  2026-10-01, each holding the near-zero CPU reading taken before step one.
+  Callers with no EXIT trap, or that called `gate_profile_begin` twice, leaked
+  the same way. Now each CPU reading creates, reads and removes its own file,
+  so no exit path depends on the caller's trap. `scripts/gate-profile_test.sh`
+  Test 10 checks that the file count in a scratch `TMPDIR` is unchanged after
+  each exit path (mg-c1a5e).
+
+- A gh or git call that pogod bounds with a timeout is now bounded including its per-call GitHub credential fetch. Before, the fetch ran before the timed child started and could spend up to 15 seconds per source (the user shell, then `gh auth token`) on a host with no ambient `GH_TOKEN`, so a 300ms-bounded PR lookup took 15 seconds, and a hung `gh` held up the polecat-stop path the same way. The credential sources and their order are unchanged; when the caller's deadline ends the fetch, the child runs without a credential and fails as a timeout, and this is not logged as the credential going unavailable. Covers the stranded-work PR lookup and fetch, the refinery's PR-body lookup and PR close, freshen's git network calls, and the polecat source fetch (mg-c258b).
+
+- **The PM transcript friction scan hit every transcript, so its ranking
+  carried no information (mg-c6097).** It grepped the whole JSONL, and every
+  transcript carries the harness system prompt, which contains "frustration
+  with Claude Code" and "confuse the two" — 43 of 44 polecat transcripts hit on
+  the 2026-09-28 sweep and the ranking was session length plus boilerplate.
+  pm-template's scan now counts only in user/assistant message content, prints
+  `sessions with hits: N of M by content | raw R of M` (the raw rate is the
+  positive control and should stay ~all), warns when ~all sessions still hit
+  after exclusion, reads matches back through the same filter, and notes that
+  the `-`-leading session dir names need absolute paths or `--`. Over a 16h
+  window the polecat transcripts went 45 of 46 raw to 13 of 46 by content.
+
+- **`scripts/check-version.sh` ran nowhere, and both it and
+  `bump-version.sh` read the version with a text grep that a comment could
+  match (mg-cb8dc).** At the v0.11.0 cut a comment quoting `Version = ` made the
+  grep return three lines, and the bump aborted with "sed: unterminated
+  substitute pattern" (mg-3225). check-version.sh had the same defect, but its
+  CI job was `if: false`, so nothing ran it. Both scripts now go through
+  `scripts/lib/version.sh`, which matches only the `var Version = "..."`
+  declaration and refuses unless exactly one line matches. The bump rewrites
+  only that line. The CI job is back on. Its old rule ("no tag exists for this
+  version") failed on main between every two cuts, which is why it had been
+  switched off. The rule now checks that version.go is not behind the newest
+  release tag, which catches a release bump that never reached main. The old
+  rule is still available as `--require-untagged`.
+  `scripts/check-version_test.sh` runs in the gate and in CI. Its fixtures
+  quote the pattern in comments, and against the old scripts it reproduces the
+  v0.11.0 abort.
+
+- `com.pogo.ghwatch` and `com.pogo.reclaim` now fire on `StartCalendarInterval` (gh-watch at :00/:15/:30/:45, reclaim at :00/:30) instead of `StartInterval`. On the reference box launchd never fired their `StartInterval` timers (`runs = 1` and `runs = 0`, `pended nondemand spawn = interval`) while the calendar jobs beside them ran, so gh-issue intake, teardown and carrier re-read were dark between hand runs and the disk-reclaim sampler never sampled. gh-watch keeps `RunAtLoad`; reclaim keeps `RunAtLoad=false`. The nightly launchd audit will report both installed plists as schedule drift until `pogo service install-gh-watch` and `pogo service install-reclaim` are re-run (mg-d8160).
+
+- The `[stranded-push]` alert no longer fires on a polecat whose work is an open pull request awaiting review (drellem2/pogo#147). The release gate and the startup sweep now ask GitHub (`gh pr view`, through the refinery's PR lookup, moved to `internal/ghpr`) whether an open PR owns the branch's head; if one does, the finding is `awaiting_review`: no mail, but a `work_item_push_awaiting_review` event and a log line, and a sweep count. If the check fails (no `gh`, no auth, no network), the alert goes out as before, with the failure noted on the event and in the mail. Separately, `pushed` now means the head is on origin under any ref, not only under its own branch name. Work that was pushed under another branch's name no longer gets the LOCAL-ONLY "git-gc reaps it" warning or a `git push origin <branch> &&` remedy, and when origin holds exactly the same commits under another name, the remedy submits that name. Work that is on origin only inside a longer branch still gets push-then-submit of its own branch: submitting the container would also merge somebody else's later commits under this item's author (mg-dbb75).
+
+- **An absent witness store was reported as zero orphaned polecats
+  (drellem2/pogo#197, mg-e20c).** With no witness file on disk,
+  `OrphanedPolecats` returned no survivors and no error, so the heartbeat's
+  orphan sweep logged nothing and `/agents/drain` reported "none unreachable" —
+  the same answer as a clean fleet. `OrphanedPolecats` now returns
+  `ErrWitnessAbsent` when the store does not exist. The sweep returns -2 for
+  that state and logs it when it starts and when it ends. It does not log on
+  every heartbeat. `/agents/drain` sets `unreachable_err`, which
+  `pogo-self-deploy` already prints as "cannot tell whether any polecat
+  survived". A present but empty store still reads as zero. One limit remains:
+  the store is created by the first agent start, so once it exists, polecats
+  left by a pogod that never wrote a witness are still not visible.
+
+- `[agents] escalation_box` now also routes the five pogod senders that hard-coded `human` (drellem2/pogo#148): the synthetic-failure-turn page (synthwatch), the fleet usage-limit coordinator's episode-start and episode-cleared mails, drift-watch's notices (mirror drift, stale revision, nightly did-not-run), the credential-expiry warnings, and the consecutive-refusal alarm's mail sink. The default is still `human`, so an unconfigured install is unchanged; a deployment that re-points escalations now moves these with the rest. docs/CONFIGURATION.md now states that pogo ships no reader for `human`, so on a fresh install escalations land in a box nobody reads until `escalation_box` names one a person reads or a reader runs on `human` (mg-f0ac9).
+
+- **The emacs-test CI job failed about one attempt in six on
+  `pogo-test-a-spawned-pogod-survives-the-sighup-emacs-sends-on-exit`
+  (mg-f1853).** This was a test race, not a daemon change: the job runs a
+  shell-script stand-in and never builds pogod. The test sent its SIGHUP as
+  soon as the stand-in's path showed up in any argv. Since 76aa6cf the spawn
+  starts as `/bin/sh -c … exec "$@"` with that path in its own argv, so a slow
+  runner signalled the wrapper shell before it exec'd `nohup`, and the wrapper
+  died of it. CI measured 13 failures in 72 attempts on commits with 76aa6cf
+  and 0 in 30 without. The test now waits for the stand-in's own startup line
+  in a temporary log, which can only be written after `nohup` has set SIGHUP to
+  ignored. It still fails when the spawn is not detached. It also no longer
+  writes that line into the real `~/Library/Logs/pogo/pogod.log`.
+
+- **`pogo check-staleness` no longer calls an org template's current prompts
+  "superseded", and `pogo doctor --check` no longer calls a rewritten prompt
+  "up-to-date".** The prompt reference is now repo + ref + subtree: set it with
+  `--repo`/`--ref`/`--subtree`, or with a new `[lineage]` block in config.toml
+  (`prompt_repo`, `prompt_ref`, `prompt_subtree`). pogod's `[prompt_stale]` sweep
+  reads the same block. The report now says prompts "differ from the reference"
+  and names that reference. Line counts read "N more/fewer lines than ref". The
+  "Every agent reading these is running a superseded prompt" line is gone.
+  If no lineage is declared and the installed tree has files the reference does
+  not ship, the verdict is hedged ("the reference may not be this corpus's
+  upstream") and no install is suggested. Doctor's prompt check now hashes the
+  body even when the stamp's embed hash matches (drellem2/pogo#125, mg-f1bb2).
+
+- **Long nudges could still arrive as a paste on Linux, and public CI (ubuntu)
+  was red on main from edbdef3 (mg-f208).** The mg-8a70 drain gate trusted a
+  zero FIONREAD on the pty slave. On Linux a master write sits in the pty's
+  flip buffer until a kworker pushes it to the line discipline, so bytes in
+  flight read as "already read" and the 512-byte pieces coalesced — CI measured
+  reads of [1024, 120], the paste-then-type the pieces exist to prevent. The
+  gate now believes an empty queue only after seeing the write land or after a
+  50ms landing window; the window is zero on darwin, where the write lands
+  synchronously, so darwin behaviour is unchanged. The darwin-only red control
+  (one 1143-byte write split at 1022 bytes) is skipped elsewhere with the reason
+  stated — Linux delivers that write whole — and the mangled-confirm test makes
+  its paste-then-type with a 1000-byte piece so it runs on any kernel.
+
+- **A pogod started with SIGHUP ignored no longer passes the ignore to every
+  agent it spawns.** Under `nohup` (or a `trap '' HUP` wrapper) SIG_IGN
+  survived fork and exec, so polecats survived the PTY hangup and outlived
+  pogod, unreachable. pogod now catches and discards an inherited-ignored
+  SIGHUP: pogod itself stays immune, and its children exec with SIGHUP at
+  default. It logs `pogod: SIGHUP was ignored at launch (nohup?); pogod stays
+  immune, children get default` and emits `pogod_sighup_ignored_at_launch`
+  (drellem2/pogo#106, mg-fb9d4).
+
+- `TestShippedPromptsMatchTheCLISurface` no longer fails intermittently in the refinery gate with `fork/exec …: bad file descriptor`. The cause was a sibling test that silenced cobra with `os.NewFile(0, os.DevNull)`: that wraps fd 0 rather than opening `/dev/null`, so its GC finalizers closed stdin and then whatever the process reopened at fd 0, often the `/dev/null` or pipe that `exec.Cmd` had just opened for a child. The test now uses `io.Discard`, and a new guard test refuses `os.NewFile` with a literal fd anywhere in the module (mg-fbe7b).
+
+- Parking a `restart_on_crash` agent inside pogod's 2s respawn backoff (after it crashed, or after a requested stop) no longer raises A6 "<name> CRASHED and its restart FAILED — that agent is gone". The park backstop's refusal is now the sentinel `agent.ErrRespawnParked`, and pogod logs it instead of raising: the restart was declined on the operator's instruction, not failed. The crash itself is still `agent_crashed` in events.log, and a crash whose restart genuinely fails still raises A6 with its CRASHED wording. A requested stop's mail-check hold is now placed before the exit hook removes the registration, closing a short window in which the GC sweep could reap the held row; that order and the scheduler's `holds` wiring are now pinned by tests (mg-fcb49, follow-up to mg-38433 / PR #223 review).
+
+- **`pogo gc`'s dry run now previews the session-temp removals `--apply` makes
+  for a subdirectory session of a tree reclaimed in the same pass
+  (drellem2/pogo#203, mg-fd3e5).** A Claude session started in
+  `<polecat>/<sub>` has a temp dir spelled like a polecat named
+  `<polecat>-<sub>`, which the orphan-temp phase keeps while `<polecat>`'s
+  directory exists. `--apply` deletes that directory first and so removed the
+  temp dir, while a dry run still saw the directory and reported it kept. A dry
+  run now counts a tree it would reclaim as gone. `--apply` is unchanged.
+
+### Documentation
+
+- **gh#152's "0 `stage: review` / 188 `type: qa`" and triage's "40 / 11" are two stores, not one store measured twice (mg-03c4).**
+  `docs/investigations/gh152-store-measurements-reconciled-2026-09-27.md`: 39 of this store's
+  `stage: review` carriers were archived before the issue was filed and have not changed since. The live work items named in the
+  sibling issue gh#153 never existed here. The evidence for declining gh#152's ask #1 therefore holds for this fleet's
+  store only, and the ask becomes a per-fleet question. Refs drellem2/pogo#152.
+
+- **`POGOD_LAUNCHER` is documented as a one-off override.** `pogo doctor`
+  reads it when it renders the expected daemon plist, but the nightly audit
+  runs under launchd without it, so an exported `POGOD_LAUNCHER` makes the two
+  disagree. `[service] launcher` in config.toml is the durable setting
+  (docs/CONFIGURATION.md, `pogo service install --help`; drellem2/pogo#105,
+  mg-59c29).
+
+- **A "What runs by default" table in `docs/CONFIGURATION.md`, linked from the README (mg-6005).**
+  One row per `config.toml` section: the switch key as the parser spells it, the default when your file does not name it,
+  and whether the section only observes or ACTS, naming the action. A second list covers acting behaviours that
+  deliberately have no key. `internal/config/defaults_table_test.go` pins the table to `config.Load()` and to
+  `parseConfigFileInto`'s section and key names, so a new section cannot ship unlisted. The inline comments that
+  counted "the one" or "exactly two" acting detectors (config.go, orchresume.go, pogod main.go) now point at the
+  table instead. Refs drellem2/pogo#199.
+
+- **`pogo schedule --help` now says when an agent's exit removes a schedule (mg-868e).** A `mail-check-*` row lives
+  only while pogod supervises its agent. A supervised respawn keeps it, and park/wake removes it and puts it back. An
+  exit pogod will not respawn removes it with `reason=agent_gone`: that covers `restart_on_crash=false`, and a respawn
+  suppressed by the synthetic-failure detector. Other kinds of schedule are never removed by an agent's exit. The
+  durable fix is to re-register at startup, and `--id` makes that safe to repeat. A test pins the text. No behaviour
+  change. Refs drellem2/pogo#205.
+
+- **Why the gated-close refusal at merge covers only UNCLAIMED items (mg-cff7).** `CloseMGWorkItemAtMerge` and
+  `ErrMGWorkItemGated` now state the rationale that lived only in test comments: `human`, `parked` and
+  `blocked:<agent>` are dispatch gates, a claimed item already has a worker, and the merging branch is that worker's,
+  so its merge closes the item as an ordinary completion. No behaviour change. Refs drellem2/pogo#198.
+
+- **A release cut's polecat stops after submitting the back-port; the back-port merge closes the item (mg-f4ea0).**
+  `docs/release-process.md` step 5 and the step-2 dispatch body now say the cutting polecat submits the back-port to
+  main with `--author=<release-cut-item>` and stops without waiting and without `mg done`. When the back-port merges,
+  the refinery closes the item itself (`completed_by: refinery`), and the coordinator only archives it. In the v0.11.0
+  cut the polecat was reaped while waiting on the back-port queue, which has no bound. This supersedes the 2026-09-26
+  note on mg-8382 ("the cutting polecat runs `mg done` itself").
+
 ## [0.11.0] - 2026-09-28
 
 ### Upgrading from an older pogod
@@ -31059,7 +31727,8 @@ Early patch release.
 Initial tagged release of Pogo: multi-repo discovery, indexing, and
 cross-project zoekt search (`lsp`, `pose`, `pogo`, `pogod`).
 
-[Unreleased]: https://github.com/drellem2/pogo/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/drellem2/pogo/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/drellem2/pogo/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/drellem2/pogo/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/drellem2/pogo/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/drellem2/pogo/compare/v0.8.0...v0.9.0

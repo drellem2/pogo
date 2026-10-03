@@ -13,7 +13,7 @@ package version
 // resolve.go rather than here.
 
 // Version is set by goreleaser ldflags or bump-version.sh
-var Version = "0.11.0"
+var Version = "0.12.0"
 
 // Build is the short commit hash, set by ldflags (build.sh, pogo-self-deploy,
 // goreleaser). Empty means unstamped; resolve.go turns that into "unknown"
