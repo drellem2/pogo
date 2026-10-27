@@ -24,11 +24,13 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/hookarm"
 )
 
 // BranchPrefix is the prefix every polecat branch carries. A polecat
@@ -748,6 +750,12 @@ func (o WorktreeOwner) String() string {
 // a polecat's ./bin build output is not work, and counting it would make every
 // worktree refuse to reap.
 //
+// pogod's own untracked artefacts do not count either (gh #162, #155, #240):
+// the hook settings file and the mail-hook stamp it writes into every agent's
+// tree. A repo whose .gitignore does not list .claude/ otherwise reads every
+// such tree as dirty, so gc keeps it forever and the exit hook tells the mayor
+// it holds work. See isPogodArtefact for exactly what is excluded.
+//
 // A non-nil error means dirtiness could not be determined. That population is
 // WIDER than it looks: an absent directory and a stripped .git pointer are in
 // it, but so is any transient failure — lock contention, an I/O blip, EACCES,
@@ -783,18 +791,82 @@ func WorktreeDirty(worktreeDir string) (bool, []string, error) {
 	if _, err := os.Stat(worktreeDir); err != nil {
 		return false, nil, fmt.Errorf("stat worktree %s: %w", worktreeDir, err)
 	}
-	stdout, stderr, err := runSplit("git", "-C", worktreeDir, "status", "--porcelain")
+	lines, err := porcelainStatus(worktreeDir)
 	if err != nil {
-		return false, nil, fmt.Errorf("status %s: %w: %s",
-			worktreeDir, err, strings.TrimSpace(string(stderr)))
+		return false, nil, err
 	}
 	var files []string
-	for _, line := range strings.Split(string(stdout), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
+	for _, line := range lines {
+		// A collapsed `?? .claude/` names a directory, not its contents, and
+		// cannot be judged as pogod's own until it is opened. Only .claude/
+		// directories are opened: any other collapsed directory stays one
+		// dirty entry, which is the safe direction for a guard that destroys.
+		if dir, ok := untrackedPath(line); ok && strings.HasSuffix(dir, "/") &&
+			path.Base(dir) == ".claude" {
+			inner, err := porcelainStatus(worktreeDir,
+				"--untracked-files=all", "--", dir)
+			if err != nil {
+				return false, nil, err
+			}
+			for _, l := range inner {
+				if !isPogodArtefact(l) {
+					files = append(files, l)
+				}
+			}
+			continue
+		}
+		if !isPogodArtefact(line) {
 			files = append(files, line)
 		}
 	}
 	return len(files) > 0, files, nil
+}
+
+// porcelainStatus runs `git status --porcelain` with extra args and returns its
+// non-empty stdout lines.
+func porcelainStatus(worktreeDir string, extra ...string) ([]string, error) {
+	args := append([]string{"-C", worktreeDir, "status", "--porcelain"}, extra...)
+	stdout, stderr, err := runSplit("git", args...)
+	if err != nil {
+		return nil, fmt.Errorf("status %s: %w: %s",
+			worktreeDir, err, strings.TrimSpace(string(stderr)))
+	}
+	var lines []string
+	for _, line := range strings.Split(string(stdout), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines, nil
+}
+
+// untrackedPath returns the path of a `??` porcelain entry.
+func untrackedPath(line string) (string, bool) {
+	return strings.CutPrefix(line, "?? ")
+}
+
+// isPogodArtefact reports whether a porcelain entry is a file pogod itself
+// writes into every agent's worktree, which is therefore not work
+// (gh #162, #155, #240): the hook registration at hookarm.SettingsRelPath (at
+// the root only — pogod writes it at the spawn directory and nowhere else) and
+// the liveness stamp hookarm.StampName inside a .claude/ directory at ANY depth,
+// because the stamp follows the session's cwd.
+//
+// UNTRACKED entries only. A tracked file under .claude/ that has been modified
+// or deleted is a change git can see against HEAD and stays dirty, whatever its
+// name — and pogo itself tracks .claude/commands/, so excluding the directory
+// wholesale would let gc discard a real edit. Matching is by exact identity for
+// the same reason. A quoted porcelain path (special characters) never matches,
+// which keeps it dirty.
+func isPogodArtefact(line string) bool {
+	p, ok := untrackedPath(line)
+	if !ok {
+		return false
+	}
+	if p == filepath.ToSlash(hookarm.SettingsRelPath) {
+		return true
+	}
+	return path.Base(p) == hookarm.StampName && path.Base(path.Dir(p)) == ".claude"
 }
 
 // WorktreeBranch reports the branch checked out in worktreeDir.

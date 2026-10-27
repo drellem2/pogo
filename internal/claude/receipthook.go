@@ -22,8 +22,10 @@ import (
 
 // settingsRelPath is where the hook is registered. settings.local.json is
 // Claude Code's documented per-project, not-checked-in settings file — the
-// right shelf for a daemon's private wiring, and one this repo's .gitignore
-// (and every worktree's, via .claude/) already keeps out of a diff.
+// right shelf for a daemon's private wiring. It is NOT kept out of git
+// everywhere: this repo's .gitignore lists .claude/, but a repo whose does not
+// shows it as untracked. gitgc.WorktreeDirty recognises it at the root so it
+// alone does not make a worktree read as uncommitted work (gh #162, #155, #240).
 //
 // It is hookarm's constant rather than a local literal because pogod READS this
 // file to report which running agents are armed, and pogod cannot import this
