@@ -985,3 +985,153 @@ func TestCheckSeparatesDeliveredLateFromMisses(t *testing.T) {
 		}
 	}
 }
+
+// --- held items (macguffin#45, pogo#241) -----------------------------------
+
+func (h *harness) assignBy(actor, assignee, id string) {
+	h.append(map[string]any{"type": "work.edited", "item_id": id, "actor": actor, "fields": "assignee", "assignee_after": assignee})
+}
+
+// A shelved, snoozed or pending item is one its assignee is correctly not
+// consuming: it is neither re-pointed nor escalated, however long it is held.
+// When it is released the clock starts from then, not from the assignment.
+func TestHeldAssignmentIsNotRepointedAndClockStartsAtRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		held Item
+	}{
+		{"shelved", Item{Title: "x", Status: "shelved"}},
+		{"snoozed", Item{Title: "x", Status: "pending", Snooze: "2026-09-29T09:00:00Z"}},
+		{"pending", Item{Title: "x", Status: "pending"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			w := h.watcher()
+			w.Start()
+			h.items["mg-1234"] = tc.held
+			h.assignBy("mayor", "pm-pogo", "mg-1234")
+			w.Poll()
+			step := func(d time.Duration) { h.now = h.now.Add(d); w.Poll(); w.Recover() }
+			for i := 0; i < 12; i++ { // 3h held: far past budget and escalation
+				step(15 * time.Minute)
+			}
+			if h.count(EventRenudge) != 0 || h.count(EventUnconsumed) != 0 || len(h.mails) != 0 {
+				t.Fatalf("held item chased: renudges=%d unconsumed=%d mails=%+v",
+					h.count(EventRenudge), h.count(EventUnconsumed), h.mails)
+			}
+			// Released: promoted (or unshelved) with no event wakewatch sees.
+			h.items["mg-1234"] = Item{Title: "x", Status: "available"}
+			step(10 * time.Minute)
+			if h.count(EventRenudge) != 0 {
+				t.Fatalf("re-pointed 10m after release; the held time was counted")
+			}
+			step(6 * time.Minute)
+			if h.count(EventRenudge) != 1 || h.last(EventRenudge)["item_id"] != "mg-1234" || h.last(EventRenudge)["attempt"] != 1 {
+				t.Fatalf("want re-nudge 1 at 16m after release; events = %v", h.events)
+			}
+		})
+	}
+}
+
+// A hold drops whatever budget was spent before it, so an item re-pointed,
+// shelved and later released is chased afresh, not escalated at once.
+func TestHoldDropsSpentBudget(t *testing.T) {
+	h := newHarness(t)
+	w := h.watcher()
+	w.Start()
+	h.items["mg-1234"] = Item{Title: "x", Status: "available"}
+	h.assignBy("mayor", "pm-pogo", "mg-1234")
+	w.Poll()
+	step := func(d time.Duration) { h.now = h.now.Add(d); w.Poll(); w.Recover() }
+	step(16 * time.Minute)
+	step(15 * time.Minute)
+	step(15 * time.Minute)
+	if h.count(EventRenudge) != 3 {
+		t.Fatalf("renudges = %d, want 3", h.count(EventRenudge))
+	}
+	h.items["mg-1234"] = Item{Title: "x", Status: "shelved"}
+	step(15 * time.Minute)
+	h.items["mg-1234"] = Item{Title: "x", Status: "available"}
+	step(16 * time.Minute)
+	if h.count(EventUnconsumed) != 0 {
+		t.Fatalf("escalated on the pre-hold budget")
+	}
+	if h.count(EventRenudge) != 4 || h.last(EventRenudge)["attempt"] != 1 {
+		t.Fatalf("want a fresh re-nudge 1 after release; last = %v", h.last(EventRenudge))
+	}
+}
+
+// The restarted clock persists, so a pogod restart does not hand a
+// long-held item its original age back.
+func TestHoldClockSurvivesRestart(t *testing.T) {
+	h := newHarness(t)
+	w := h.watcher()
+	w.Start()
+	h.items["mg-1234"] = Item{Title: "x", Status: "shelved"}
+	h.assignBy("mayor", "pm-pogo", "mg-1234")
+	w.Poll()
+	for i := 0; i < 6; i++ {
+		h.now = h.now.Add(15 * time.Minute)
+		w.Poll()
+		w.Recover()
+	}
+	h.items["mg-1234"] = Item{Title: "x", Status: "available"}
+	h.now = h.now.Add(1 * time.Minute)
+	w2 := h.watcher()
+	w2.Start()
+	w2.Poll()
+	w2.Recover()
+	if h.count(EventRenudge) != 0 {
+		t.Fatalf("re-pointed right after restart; the held time came back")
+	}
+}
+
+// The control for the holds: an available, unclaimed assignment is still
+// chased all the way to the escalation, and the escalation names its state.
+func TestEscalationNamesItemState(t *testing.T) {
+	h := newHarness(t)
+	w := h.watcher()
+	w.Start()
+	h.items["mg-1234"] = Item{Title: "x", Status: "available"}
+	h.assignBy("mayor", "pm-pogo", "mg-1234")
+	w.Poll()
+	step := func(d time.Duration) { h.now = h.now.Add(d); w.Poll(); w.Recover() }
+	step(16 * time.Minute)
+	step(15 * time.Minute)
+	step(15 * time.Minute)
+	step(15 * time.Minute)
+	if h.count(EventUnconsumed) != 1 || len(h.mails) != 1 {
+		t.Fatalf("unconsumed = %d, mails = %+v", h.count(EventUnconsumed), h.mails)
+	}
+	if !strings.Contains(h.mails[0].body, "assignment mg-1234 (status available)") {
+		t.Errorf("escalation does not name the state: %q", h.mails[0].body)
+	}
+	if h.last(EventUnconsumed)["state"] != "status available" {
+		t.Errorf("unconsumed event = %v", h.last(EventUnconsumed))
+	}
+}
+
+// An item assigned to the coordinator is reported by the event alone: mailing
+// the coordinator that it has not consumed its own work is noise.
+func TestCoordinatorIsNotMailedAboutItself(t *testing.T) {
+	h := newHarness(t)
+	w := h.watcher()
+	w.Start()
+	h.items["mg-1234"] = Item{Title: "x", Status: "available"}
+	h.assignBy("pm-pogo", "mayor", "mg-1234")
+	w.Poll()
+	step := func(d time.Duration) { h.now = h.now.Add(d); w.Poll(); w.Recover() }
+	step(16 * time.Minute)
+	step(15 * time.Minute)
+	step(15 * time.Minute)
+	step(15 * time.Minute)
+	if h.count(EventUnconsumed) != 1 {
+		t.Fatalf("unconsumed = %d, want 1", h.count(EventUnconsumed))
+	}
+	if len(h.mails) != 0 {
+		t.Errorf("coordinator mailed about itself: %+v", h.mails)
+	}
+	if d := h.last(EventUnconsumed); d["recipient"] != "mayor" || d["notified"] != false || d["reason"] != "recipient_is_coordinator" {
+		t.Errorf("unconsumed event = %v", d)
+	}
+}

@@ -2796,7 +2796,18 @@ An agent is woken when there is something for it to do, and only then
   has not claimed or edited. Past `renudge_after` it re-sends the pointer
   (`still unread: …`), at most once per `renudge_every` and up to
   `max_renudges` times. After that it emits `wake_unconsumed` and mails the
-  coordinator once.
+  coordinator once. The mail names the item's status
+  (`assignment mg-1234 (status available)`). Work that belongs to the
+  coordinator itself gets the event only, with `notified=false
+  reason=recipient_is_coordinator`. Recovery does not mail the coordinator about
+  itself.
+  Before it re-points an assignment, recovery looks up the item's status. An
+  item that is **shelved**, **snoozed**, or **pending** (an unmet `depends:`) is
+  one its assignee is right not to consume. It is never re-pointed or
+  escalated. Its clock restarts on each pass that finds it held, and any budget
+  already spent is dropped, so age counts only time the item could be acted on.
+  This needs a lookup rather than an event, because macguffin emits no event
+  when it promotes a pending item to available (macguffin#45, pogo#241).
 - **Bounce.** Mail to a name that belongs to an agent that is not running gets a
   mail to the sender (if the sender is running, or is `human`) and to the
   coordinator: `recipient <x> is not running; your mail is unread in <box>`. That

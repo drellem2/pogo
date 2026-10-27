@@ -50,6 +50,27 @@ func TestWakeWatchItemReadsAssigneeAndTitle(t *testing.T) {
 	}
 }
 
+// Recovery asks the item's status before re-pointing it, so the wire must
+// reach shelved/ and carry pending/'s snooze (macguffin#45, pogo#241).
+func TestWakeWatchItemReadsStatusShelvedAndSnooze(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"shelved", "pending", "available"} {
+		os.MkdirAll(filepath.Join(root, d), 0o755)
+	}
+	os.WriteFile(filepath.Join(root, "shelved", "mg-s1.md"), []byte("---\nid: mg-s1\nassignee: mayor\n---\n# Shelved\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "pending", "mg-z1.md"), []byte("---\nid: mg-z1\nsnooze: 2026-11-01T09:00:00Z\n---\n# Snoozed\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "available", "mg-a1.md"), []byte("---\nid: mg-a1\n---\n# Ready\n"), 0o644)
+	if it, ok := wakeWatchItem(root)("mg-s1"); !ok || it.Status != "shelved" || it.Held() != "shelved" {
+		t.Errorf("shelved item = %+v ok=%v", it, ok)
+	}
+	if it, ok := wakeWatchItem(root)("mg-z1"); !ok || it.Status != "pending" || !strings.HasPrefix(it.Held(), "snoozed until 2026-11-01") {
+		t.Errorf("snoozed item = %+v ok=%v held=%q", it, ok, it.Held())
+	}
+	if it, ok := wakeWatchItem(root)("mg-a1"); !ok || it.Status != "available" || it.Held() != "" {
+		t.Errorf("available item = %+v ok=%v (the control: an available item is not held)", it, ok)
+	}
+}
+
 func TestWakeWatchNudgeWithNoRegistryFails(t *testing.T) {
 	out, err := wakeWatchNudge(nil)("pe00c", "x")
 	if err == nil || out != wakewatch.OutcomeFailed {
