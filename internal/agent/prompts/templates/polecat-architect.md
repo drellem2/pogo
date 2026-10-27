@@ -211,7 +211,7 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
      presubmit_check() {
        local target="$1" dirty ahead
        git fetch origin || { echo "REFUSING TO SUBMIT: git fetch origin failed — cannot tell what this branch carries"; return 1; }
-       dirty=$(git status --porcelain) || { echo "REFUSING TO SUBMIT: git status failed"; return 1; }
+       dirty=$(pogo worktree-dirty) || { echo "REFUSING TO SUBMIT: pogo worktree-dirty failed — cannot tell whether this worktree holds uncommitted work"; return 1; }
        if [ -n "$dirty" ]; then
          echo "REFUSING TO SUBMIT: uncommitted work in this worktree — commit and push it, or discard it deliberately:"
          echo "$dirty"; return 1
@@ -229,7 +229,7 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
      pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}} \
          --verdict-file=/tmp/{{.Id}}-verdict.json
      ```
-     The `presubmit_check` refuses a dirty worktree, a branch with nothing ahead of the target, or an unpushed HEAD — any of which would submit a branch that delivers nothing (mg-c184d). If it refuses, fix that and re-run; do not submit around it.
+     The `presubmit_check` refuses a dirty worktree, a branch with nothing ahead of the target, or an unpushed HEAD — any of which would submit a branch that delivers nothing (mg-c184d). Its dirty check is `pogo worktree-dirty`, gc's predicate, which does not count the `.claude/` files pogod itself writes into your tree (gh #240, mg-54263). If it refuses, fix that and re-run; do not submit around it.
 
      Write `/tmp/{{.Id}}-verdict.json` **before** submitting — it is the same object step 5 hands to `mg done --result`, and on a default-branch merge it is your **only** chance to record one: pogod closes your item the instant the branch merges, and `mg` refuses your later `mg done` as already-done rather than overwriting it (mg-dfea). The refinery carries it verbatim into the item's result sidecar under `verdict`.
 
