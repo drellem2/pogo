@@ -215,6 +215,39 @@ type AgentRef struct {
 type Item struct {
 	Title    string
 	Assignee string
+	// Status is the store directory the item sits in ("available", "claimed",
+	// "pending", "shelved"); empty when the lookup could not say.
+	Status string
+	// Snooze is the raw `snooze:` value of a snoozed item in pending/; empty
+	// when it is not snoozed.
+	Snooze string
+}
+
+// Held names why an assignment to this item is not consumable right now, or
+// returns "" when it is. A shelved, snoozed or pending item is one its assignee
+// is correctly NOT consuming: re-pointing it, and reporting its assignee as not
+// consuming work, punishes exactly the agent that is behaving (macguffin#45,
+// pogo#241). The question needs a status LOOKUP, not an event: macguffin
+// emits nothing when it promotes a pending item to available.
+func (it Item) Held() string {
+	switch it.Status {
+	case "shelved":
+		return "shelved"
+	case "pending":
+		if it.Snooze != "" {
+			return "snoozed until " + it.Snooze
+		}
+		return "pending (a depends gate is not yet open)"
+	}
+	return ""
+}
+
+// state names the item's status for an escalation.
+func (it Item) state() string {
+	if it.Status == "" {
+		return "status unknown"
+	}
+	return "status " + it.Status
 }
 
 // Deps are wakewatch's seams. Every one is required except Crew.
@@ -228,7 +261,7 @@ type Deps struct {
 	// Crew lists configured crew names; a configured agent that is not in the
 	// registry is still an agent, so mail to it bounces. Optional.
 	Crew func() []string
-	// Item looks up a work item's title and assignee.
+	// Item looks up a work item's title, assignee and status.
 	Item func(id string) (Item, bool)
 	// Subject reads a message's Subject: header.
 	Subject func(box, msgID string) string
@@ -279,6 +312,20 @@ type Renudge struct {
 	Count     int       `json:"count"`
 	Last      time.Time `json:"last"`
 	Escalated bool      `json:"escalated,omitempty"`
+	// Since, when set, is when the work last became actionable: the last
+	// recovery pass that found its item held (shelved, snoozed, pending). Age
+	// is counted from it rather than from the assignment, so time spent held
+	// is never read as time spent not consuming. Persisted, so a restart does
+	// not hand a long-held item its whole original age back.
+	Since time.Time `json:"since,omitempty"`
+}
+
+// last is the latest instant this bookkeeping was touched.
+func (r *Renudge) last() time.Time {
+	if r.Since.After(r.Last) {
+		return r.Since
+	}
+	return r.Last
 }
 
 // SeenAgent records an agent name a box belonged to.
@@ -1072,18 +1119,48 @@ func (w *Watcher) recoverLocked(now time.Time) {
 			oldestMail[tg.agent] = m
 		}
 	}
+	// Every unconsumed assignment's item is looked up on every pass, not only
+	// the ones already past RenudgeAfter: a held item's clock restarts at each
+	// pass that finds it held, so when it becomes available its age is counted
+	// from within one RecoveryInterval of that moment.
 	oldestAssign := map[string]*assignRec{}
+	assignSince := map[string]time.Time{}
+	items := map[string]Item{}
 	for _, a := range w.assigns {
-		if a.consumed || now.Sub(a.ts) < w.p.RenudgeAfter {
+		if a.consumed {
+			continue
+		}
+		key := "item:" + a.itemID
+		if w.d.Item != nil {
+			if it, ok := w.d.Item(a.itemID); ok {
+				items[a.itemID] = it
+				if it.Held() != "" {
+					// Not actionable: no budget is spent and the clock is
+					// restarted, so neither the held time nor any earlier
+					// re-pointing counts once it is released.
+					if w.st.Renudges == nil {
+						w.st.Renudges = map[string]*Renudge{}
+					}
+					w.st.Renudges[key] = &Renudge{Since: now}
+					continue
+				}
+			}
+		}
+		since := a.ts
+		if r := w.st.Renudges[key]; r != nil && r.Since.After(since) {
+			since = r.Since
+		}
+		if now.Sub(since) < w.p.RenudgeAfter {
 			continue
 		}
 		tg := w.resolve(a.agent)
 		if !tg.running || !running[tg.agent] || a.actor == tg.agent {
 			continue
 		}
-		if o := oldestAssign[tg.agent]; o == nil || a.ts.Before(o.ts) {
+		if o := oldestAssign[tg.agent]; o == nil || since.Before(assignSince[o.itemID]) {
 			oldestAssign[tg.agent] = a
 		}
+		assignSince[a.itemID] = since
 	}
 	agents := make([]string, 0, len(running))
 	for n := range running {
@@ -1096,21 +1173,20 @@ func (w *Watcher) recoverLocked(now time.Time) {
 			if w.d.Subject != nil {
 				t.Quoted = w.d.Subject(m.box, m.msgID)
 			}
-			w.recoverOne(now, ag, t, m.ts)
+			w.recoverOne(now, ag, t, m.ts, "")
 		}
 		if a := oldestAssign[ag]; a != nil {
 			t := Trigger{Kind: "assign", Event: a.event, ItemID: a.itemID}
-			if w.d.Item != nil {
-				if it, ok := w.d.Item(a.itemID); ok {
-					t.Quoted = it.Title
-				}
-			}
-			w.recoverOne(now, ag, t, a.ts)
+			it := items[a.itemID]
+			t.Quoted = it.Title
+			w.recoverOne(now, ag, t, assignSince[a.itemID], it.state())
 		}
 	}
 }
 
-func (w *Watcher) recoverOne(now time.Time, agent string, t Trigger, since time.Time) {
+// recoverOne re-points or escalates one piece of work. state names an
+// assignment's item status for the escalation; empty for mail.
+func (w *Watcher) recoverOne(now time.Time, agent string, t Trigger, since time.Time, state string) {
 	if w.st.Renudges == nil {
 		w.st.Renudges = map[string]*Renudge{}
 	}
@@ -1152,7 +1228,7 @@ func (w *Watcher) recoverOne(now time.Time, agent string, t Trigger, since time.
 	r.Last = now
 	what := fmt.Sprintf("mail %s in box %s from %s", t.MsgID, t.Box, t.From)
 	if t.Kind == "assign" {
-		what = "assignment " + t.ItemID
+		what = fmt.Sprintf("assignment %s (%s)", t.ItemID, state)
 	}
 	body := fmt.Sprintf("%s has unconsumed work: %s, %s old, re-pointed %d times with no read or claim.\n\n"+
 		"This is wakewatch's liveness signal (mg-5496): an agent that has work and does not consume it. "+
@@ -1165,7 +1241,16 @@ func (w *Watcher) recoverOne(now time.Time, agent string, t Trigger, since time.
 		"text_len":  len(body),
 	}
 	addIDs(d, []Trigger{t})
-	if w.d.Mail != nil && w.d.Coordinator != "" {
+	if state != "" {
+		d["state"] = state
+	}
+	if agent == w.d.Coordinator {
+		// The coordinator is the one agent this report would reach. Mailing it
+		// that it has not consumed its own work is noise in the box it already
+		// is not reading; the event stays the record.
+		d["notified"] = false
+		d["reason"] = "recipient_is_coordinator"
+	} else if w.d.Mail != nil && w.d.Coordinator != "" {
 		if err := w.d.Mail(w.d.Coordinator, Sender, "unconsumed work: "+agent, body); err != nil {
 			d["error"] = err.Error()
 		} else {
@@ -1189,7 +1274,7 @@ func (w *Watcher) pruneLocked(now time.Time) {
 		}
 	}
 	for k, r := range w.st.Renudges {
-		if now.Sub(r.Last) > w.p.Lookback {
+		if now.Sub(r.last()) > w.p.Lookback {
 			delete(w.st.Renudges, k)
 		}
 	}

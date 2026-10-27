@@ -84,11 +84,13 @@ func wakeWatchCrew(reg *agent.Registry) func() []string {
 
 func wakeWatchItem(workRoot string) func(string) (wakewatch.Item, bool) {
 	return func(id string) (wakewatch.Item, bool) {
-		it, ok, err := workitem.FindLiveFrom(workRoot, id)
+		// FindFiledFrom, not FindLiveFrom: recovery must see a shelved item
+		// as shelved, or it re-points it as if it were available.
+		it, ok, err := workitem.FindFiledFrom(workRoot, id)
 		if err != nil || !ok {
 			return wakewatch.Item{}, false
 		}
-		return wakewatch.Item{Title: it.Title, Assignee: it.Assignee}, true
+		return wakewatch.Item{Title: it.Title, Assignee: it.Assignee, Status: it.Status, Snooze: it.Snooze}, true
 	}
 }
 
