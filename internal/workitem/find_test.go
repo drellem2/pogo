@@ -187,3 +187,36 @@ assignee: bob
 		t.Errorf("item = %+v, want the available/ copy", item)
 	}
 }
+
+// TestFindFiledFromReadsShelvedAndSnooze is the lookup wakewatch makes before
+// re-pointing an assignment: it must reach shelved/, which FindLiveFrom
+// deliberately does not, and it must tell a snoozed pending item from one
+// waiting on its depends.
+func TestFindFiledFromReadsShelvedAndSnooze(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"available", "claimed", "pending", "shelved"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeItem(t, filepath.Join(root, "shelved", "mg-shlf.md"), "---\nid: mg-shlf\nassignee: pm-pogo\n---\n# Shelved\n")
+	writeItem(t, filepath.Join(root, "pending", "mg-snz.md"), "---\nid: mg-snz\nsnooze: 2026-11-01T09:00:00Z\n---\n# Snoozed\n")
+	writeItem(t, filepath.Join(root, "pending", "mg-dep.md"), "---\nid: mg-dep\ndepends: [mg-shlf]\n---\n# Pending\n")
+
+	it, found, err := FindFiledFrom(root, "mg-shlf")
+	if err != nil || !found || it.Status != "shelved" || it.Assignee != "pm-pogo" {
+		t.Errorf("FindFiledFrom(mg-shlf) = (%+v, %v, %v), want shelved", it, found, err)
+	}
+	// The control: the depends gate's lookup must still not see shelved/.
+	if _, found, err := FindLiveFrom(root, "mg-shlf"); err != nil || found {
+		t.Errorf("FindLiveFrom(mg-shlf) found = %v, err = %v; shelved/ must stay outside it", found, err)
+	}
+	it, found, _ = FindFiledFrom(root, "mg-snz")
+	if !found || it.Status != "pending" || it.Snooze != "2026-11-01T09:00:00Z" {
+		t.Errorf("FindFiledFrom(mg-snz) = %+v, want pending with snooze", it)
+	}
+	it, found, _ = FindFiledFrom(root, "mg-dep")
+	if !found || it.Status != "pending" || it.Snooze != "" {
+		t.Errorf("FindFiledFrom(mg-dep) = %+v, want pending without snooze", it)
+	}
+}
