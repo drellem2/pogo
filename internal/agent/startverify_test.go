@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -14,12 +15,25 @@ import (
 // delivers (a bare CR per renudge) with no terminal-echo ambiguity. The returned
 // read closure drains and returns everything written so far; call it after
 // verifyStartAndRenudge returns.
+//
+// The read end is pinned to the test by a Cleanup, so a caller that discards
+// the read closure (`a, _, _ :=`) still keeps it open (mg-512de). Without the
+// pin, pr is unreachable the moment this returns; a GC during the start-verify
+// wait runs its *os.File finalizer, which closes it, and the watcher's next CR
+// fails with EPIPE — verifyStartAndRenudge logs "auto-renudge failed" and
+// returns before emitting auto_renudge. That is the "events.log missing" flake
+// in TestVerifyStartAndRenudge_NoWorkItemRecoveryEmitsEvent: GC-timed, so it
+// surfaced only in a busy full-package run, and reproduced 7/300 at GOGC=1.
 func newRenudgeTestAgent(t *testing.T, workItemID string) (*Agent, func() string, chan struct{}) {
 	t.Helper()
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = pw.Close()
+		_ = pr.Close()
+	})
 	done := make(chan struct{})
 	a := &Agent{
 		Name:       "renudge-test",
@@ -37,6 +51,21 @@ func newRenudgeTestAgent(t *testing.T, workItemID string) (*Agent, func() string
 		return string(b)
 	}
 	return a, readAll, done
+}
+
+// TestNewRenudgeTestAgent_DiscardedReaderSurvivesGC pins the helper fix above:
+// with the read closure discarded and the collector forced to run (and its
+// finalizers given time to fire), the PTY write end must still accept a CR.
+// Without the Cleanup pin this fails at once with "write |1: broken pipe".
+func TestNewRenudgeTestAgent_DiscardedReaderSurvivesGC(t *testing.T) {
+	a, _, _ := newRenudgeTestAgent(t, "")
+	for i := 0; i < 20; i++ {
+		runtime.GC()
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := a.Nudge(""); err != nil {
+		t.Fatalf("a discarded read closure must not let GC close the pipe: %v", err)
+	}
 }
 
 // fastRenudgeRegistry returns a Registry wired with the given verifier and a
