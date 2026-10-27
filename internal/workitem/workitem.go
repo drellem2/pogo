@@ -35,6 +35,12 @@ type WorkItem struct {
 	// Tags is. mg writes it as an inline YAML sequence — `depends: [mg-1234]`.
 	// Use DependsList for the split form.
 	Depends string `json:"depends,omitempty"`
+	// Snooze is the raw `snooze:` frontmatter value: the wake time of an item
+	// `mg snooze` parked in pending/. macguffin keeps snooze as an attribute on
+	// pending/, not a status of its own, so this is the only thing separating a
+	// snoozed item from one waiting on its depends. Kept verbatim; empty means
+	// not snoozed.
+	Snooze string `json:"snooze,omitempty"`
 	// Workflow and Stage are the `workflow:` and `stage:` lines of the STATE
 	// CARRIER BLOCK — the run of `key: value` lines that leads a work item's
 	// BODY, immediately under its `# title` heading. They are not frontmatter:
@@ -357,10 +363,30 @@ var liveStatusDirs = []string{"available", "claimed", "pending"}
 // So absence is reported as not-found and the caller reads it as satisfied,
 // which is the fail-open direction every gate in this package takes.
 func FindLiveFrom(root, id string) (WorkItem, bool, error) {
+	return findIn(root, id, liveStatusDirs)
+}
+
+// filedStatusDirs are liveStatusDirs plus shelved/: every directory holding an
+// item that is filed and not completed, whether or not anything may act on it.
+var filedStatusDirs = []string{"available", "claimed", "pending", "shelved"}
+
+// FindFiledFrom is FindLiveFrom widened to shelved/. It answers a different
+// question from the depends gate's: not "is this parent outstanding" but "what
+// state is this not-yet-completed item in" — which wakewatch asks before
+// re-pointing an assignment, because a shelved, snoozed or pending item is one
+// its assignee is correctly NOT consuming (macguffin#45, pogo#241). Absence is
+// not-found, as in FindLiveFrom.
+func FindFiledFrom(root, id string) (WorkItem, bool, error) {
+	return findIn(root, id, filedStatusDirs)
+}
+
+// findIn looks id up in each of dirs in order; a directory's name is the
+// status it records.
+func findIn(root, id string, dirs []string) (WorkItem, bool, error) {
 	if id == "" || strings.ContainsAny(id, `/\`) || id == ".." {
 		return WorkItem{}, false, nil
 	}
-	for _, status := range liveStatusDirs {
+	for _, status := range dirs {
 		dir := filepath.Join(root, status)
 		item, err := parseWorkItem(filepath.Join(dir, id+".md"), status)
 		if err == nil {
@@ -512,6 +538,8 @@ func parseWorkItem(path, status string) (WorkItem, error) {
 			item.Branch = val
 		case "depends":
 			item.Depends = val
+		case "snooze":
+			item.Snooze = val
 		case "created":
 			// An unparseable stamp leaves Created zero rather than guessing. A
 			// consumer that scopes on it must already handle zero (see Created),
