@@ -1771,7 +1771,15 @@ Flags:
 	// mg-875d: the rows whose trigger means pogod is unhealthy or the
 	// coordinator is down are ALSO copied here, because the coordinator is an
 	// agent this daemon runs and in those states it is not there to read them.
-	conditions.setOutOfBandBox(escalationBox)
+	//
+	// drellem2/pogo#238: `[conditions] out_of_band = false` withholds that copy
+	// (no mail from this watcher to [agents] escalation_box; the coordinator and
+	// events.log are unchanged), and `[conditions] mail` / `disable` switch the
+	// mail off entirely or per condition. Neither touches the other watchers'
+	// escalation routing, which reads escalationBox directly below.
+	if line := applyConditionsConfig(conditions, cfg.Conditions, escalationBox); line != "" {
+		log.Print(line)
+	}
 
 	// A14 — log rotation. Deferred from main's first statement (see rotErr
 	// above), because rotation runs before config is even loaded.

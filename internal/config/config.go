@@ -979,6 +979,9 @@ type Config struct {
 	DeafWatch DeafWatchConfig
 	// WakeWatch is the pointer-nudge waker (mg-e00c). See WakeWatchConfig.
 	WakeWatch WakeWatchConfig
+	// Conditions configures the mail sent by pogod's condition annunciator
+	// (drellem2/pogo#238). See ConditionsConfig.
+	Conditions ConditionsConfig
 	// HeartWatch is the pogod-resident reader of the crew heartbeat (mg-d616).
 	// See HeartWatchConfig.
 	HeartWatch HeartWatchConfig
@@ -1772,6 +1775,34 @@ type WakeWatchConfig struct {
 	Lookback time.Duration
 }
 
+// ConditionsConfig configures the mail sent by pogod's condition annunciator
+// (cmd/pogod/conditionnotify.go, mg-342d): the notices for a scheduler that did
+// not load, a crew agent that failed to start or restart, an unwritable
+// heartbeat, and the rest of the conditions mg-c3f0 found with no reader.
+//
+// Every one of these can be switched off (drellem2/pogo#238: "it should be
+// possible to disable any alert"). The cost is stated rather than hidden: for
+// most conditions the coordinator's mail is the ONLY reader, so a disabled
+// condition is recorded only in events.log. A disabled send is never recorded
+// as delivered — it emits `pogod_condition` with notified=false and
+// reason=mail_disabled, and pogod logs what is disabled at startup.
+type ConditionsConfig struct {
+	// Mail turns all condition mail on or off. Defaults to true. Off, every
+	// condition is still raised, logged and recorded in events.log, and no mail
+	// or wake is sent.
+	Mail bool
+	// OutOfBand copies the conditions whose trigger means pogod is unhealthy or
+	// the coordinator is down to `[agents] escalation_box` (mg-875d). Defaults
+	// to true. Off: no mail from this watcher to [agents] escalation_box; the
+	// coordinator and events.log are unchanged.
+	OutOfBand bool
+	// Disable lists conditions whose mail is off, by condition id
+	// ("scheduler_load_failed"). A per-subject condition can be named whole by
+	// the part before its colon ("autostart_failed" disables every agent's), or
+	// for one subject ("autostart_failed:doctor").
+	Disable []string
+}
+
 // DeafWatchConfig configures pogod's missing-mail-loop ANNOUNCER (mg-032b): the
 // heartbeat-driven runner that applies `pogo agent diagnose`'s own mail-loop
 // judgement to the whole registry and mails when an agent has no way to be
@@ -2485,9 +2516,15 @@ type parsedConfig struct {
 	ackWatchEnabledSet       bool
 	deafWatchEnabledSet      bool
 	wakeWatchEnabledSet      bool
-	absentWatchEnabledSet    bool
-	heartWatchEnabledSet     bool
-	crewResetEnabledSet      bool
+	// conditionsMailSet / conditionsOutOfBandSet / conditionsDisableSet exist
+	// because both switches default to TRUE and `disable = []` must be able to
+	// clear an earlier layer's list.
+	conditionsMailSet      bool
+	conditionsOutOfBandSet bool
+	conditionsDisableSet   bool
+	absentWatchEnabledSet  bool
+	heartWatchEnabledSet   bool
+	crewResetEnabledSet    bool
 	// crewResetExcludeSet lets a later layer's `exclude = []` clear an earlier
 	// layer's list, which a length test cannot tell from an absent key.
 	crewResetExcludeSet     bool
@@ -2646,6 +2683,10 @@ func Load() *Config {
 			RenotifyAfter:    DefaultAckWatchRenotify,
 			BlackoutRenotify: DefaultAckWatchBlackoutRenotify,
 			EscalateAfter:    DefaultAckWatchEscalateAfter,
+		},
+		Conditions: ConditionsConfig{
+			Mail:      true,
+			OutOfBand: true,
 		},
 		WakeWatch: WakeWatchConfig{
 			Enabled:          true,
@@ -2977,6 +3018,15 @@ func Load() *Config {
 		}
 		if fileCfg.wakeWatchEnabledSet {
 			cfg.WakeWatch.Enabled = fileCfg.WakeWatch.Enabled
+		}
+		if fileCfg.conditionsMailSet {
+			cfg.Conditions.Mail = fileCfg.Conditions.Mail
+		}
+		if fileCfg.conditionsOutOfBandSet {
+			cfg.Conditions.OutOfBand = fileCfg.Conditions.OutOfBand
+		}
+		if fileCfg.conditionsDisableSet {
+			cfg.Conditions.Disable = fileCfg.Conditions.Disable
 		}
 		if fileCfg.WakeWatch.Coalesce > 0 {
 			cfg.WakeWatch.Coalesce = fileCfg.WakeWatch.Coalesce
@@ -4105,6 +4155,18 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.AckWatch.EscalateAfter = d
 				}
+			}
+		case "conditions":
+			switch key {
+			case "mail":
+				cfg.Conditions.Mail = val == "true"
+				cfg.conditionsMailSet = true
+			case "out_of_band":
+				cfg.Conditions.OutOfBand = val == "true"
+				cfg.conditionsOutOfBandSet = true
+			case "disable":
+				cfg.Conditions.Disable = parseStringArray(val)
+				cfg.conditionsDisableSet = true
 			}
 		case "wake_watch":
 			switch key {

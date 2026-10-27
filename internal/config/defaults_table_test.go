@@ -65,6 +65,7 @@ var configFieldSection = map[string]string{
 	"AckWatch":            "ack_watch",
 	"DeafWatch":           "deaf_watch",
 	"WakeWatch":           "wake_watch",
+	"Conditions":          "conditions",
 	"HeartWatch":          "heart_watch",
 	"CrewReset":           "crew_reset",
 	"BlindWatch":          "blind_watch",
@@ -110,6 +111,9 @@ var switchDefaults = map[string]func(*Config) string{
 	"dispatch_pairing/repos":                     func(c *Config) string { return inertIfEmpty(len(c.DispatchPairing.Repos)) },
 	"audit_successor/repos":                      func(c *Config) string { return inertIfEmpty(len(c.AuditSuccessor.Repos)) },
 	"reconcile/mirrors":                          func(c *Config) string { return inertIfEmpty(len(c.Reconcile.Mirrors)) },
+	"conditions/mail":                            func(c *Config) string { return onOff(c.Conditions.Mail) },
+	"conditions/out_of_band":                     func(c *Config) string { return onOff(c.Conditions.OutOfBand) },
+	"conditions/disable":                         func(c *Config) string { return inertIfEmpty(len(c.Conditions.Disable)) },
 }
 
 // enabledDefault reads the Enabled field of the Config section a row names.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -248,6 +249,17 @@ type conditionAnnunciator struct {
 	// at startup by setOutOfBandBox, before the first Raise.
 	outOfBandBox string
 
+	// mailOff and disabled are `[conditions] mail = false` and
+	// `[conditions] disable` (drellem2/pogo#238). Set once at startup by
+	// setMailDisabled. A disabled condition is still raised and recorded in
+	// events.log — as notified=false, reason=mail_disabled — and nothing else:
+	// no mail, no out-of-band copy, no wake, and no delivery stamp in the store.
+	mailOff  bool
+	disabled map[string]bool
+	// disabledLogged keeps the per-raise log line to once per condition per
+	// process: A11 raises on every heartbeat tick.
+	disabledLogged map[string]bool
+
 	mu    sync.Mutex
 	disk  conditionNotices
 	dirty bool
@@ -270,6 +282,7 @@ type conditionAnnunciator struct {
 	raised     int
 	suppressed int
 	failed     int
+	muted      int
 }
 
 type pendingWake struct {
@@ -283,14 +296,16 @@ type pendingWake struct {
 
 func newConditionAnnunciator(statePath string, mail conditionMailer, wake conditionWaker) *conditionAnnunciator {
 	return &conditionAnnunciator{
-		statePath:    statePath,
-		mail:         mail,
-		wake:         wake,
-		renotify:     conditionRenotifyAfter,
-		minGap:       conditionMinInterval,
-		disk:         loadConditionNotices(statePath),
-		mem:          map[string]conditionNoticeState{},
-		pendingWakes: map[string]*pendingWake{},
+		statePath:      statePath,
+		mail:           mail,
+		wake:           wake,
+		renotify:       conditionRenotifyAfter,
+		minGap:         conditionMinInterval,
+		disk:           loadConditionNotices(statePath),
+		mem:            map[string]conditionNoticeState{},
+		pendingWakes:   map[string]*pendingWake{},
+		disabled:       map[string]bool{},
+		disabledLogged: map[string]bool{},
 	}
 }
 
@@ -346,6 +361,21 @@ func conditionFingerprint(s string) string {
 // last DELIVERY rather than restarting on every occurrence.
 func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 	if a == nil {
+		return
+	}
+	if why := a.mailDisabledFor(c.ID); why != "" {
+		// Switched off by the operator. Say so on the spine as NOT delivered:
+		// recording this as mailed would be a false record, and a disabled
+		// condition's only reader is events.log.
+		a.mu.Lock()
+		a.muted++
+		first := !a.disabledLogged[c.ID]
+		a.disabledLogged[c.ID] = true
+		a.mu.Unlock()
+		if first {
+			log.Printf("pogod: condition %s (%s) raised but NOT mailed — %s: %s", c.ID, c.Row, why, c.Detail)
+		}
+		a.emit(c, c.To, false, "mail_disabled", why)
 		return
 	}
 	if c.To == "" {
@@ -499,6 +529,84 @@ func (a *conditionAnnunciator) setOutOfBandBox(box string) {
 	a.mu.Lock()
 	a.outOfBandBox = box
 	a.mu.Unlock()
+}
+
+// applyConditionsConfig arms the annunciator's routing from `[conditions]` and
+// returns the startup line naming what is switched off ("" when nothing is).
+// escalationBox is `[agents] escalation_box`; it is only READ here, so the other
+// watchers' escalation routing does not depend on this section.
+func applyConditionsConfig(a *conditionAnnunciator, cfg config.ConditionsConfig, escalationBox string) string {
+	if cfg.OutOfBand {
+		a.setOutOfBandBox(escalationBox)
+	}
+	a.setMailDisabled(!cfg.Mail, cfg.Disable)
+	return a.disabledSummary(!cfg.OutOfBand)
+}
+
+// setMailDisabled applies `[conditions] mail` (off when all is true) and
+// `[conditions] disable`. Unset, every condition mails — so a test that does
+// not care gets the default.
+func (a *conditionAnnunciator) setMailDisabled(all bool, ids []string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.mailOff = all
+	a.disabled = map[string]bool{}
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			a.disabled[id] = true
+		}
+	}
+	a.mu.Unlock()
+}
+
+// mailDisabledFor says why mail for condition id is off, or "" when it is on.
+// An entry matches the whole id, or the part before the colon of a
+// per-subject id ("autostart_failed" matches "autostart_failed:doctor").
+func (a *conditionAnnunciator) mailDisabledFor(id string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.mailOff {
+		return "[conditions] mail = false"
+	}
+	if a.disabled[id] {
+		return "[conditions] disable lists " + id
+	}
+	if i := strings.Index(id, ":"); i > 0 && a.disabled[id[:i]] {
+		return "[conditions] disable lists " + id[:i]
+	}
+	return ""
+}
+
+// disabledSummary is the startup line naming what is switched off, or "" when
+// nothing is. outOfBandOff is `[conditions] out_of_band = false`, which lives
+// on the caller's side (it decides whether setOutOfBandBox is called at all).
+func (a *conditionAnnunciator) disabledSummary(outOfBandOff bool) string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var parts []string
+	if a.mailOff {
+		parts = append(parts, "ALL condition mail is OFF ([conditions] mail = false)")
+	} else if len(a.disabled) > 0 {
+		ids := make([]string, 0, len(a.disabled))
+		for id := range a.disabled {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		parts = append(parts, fmt.Sprintf("mail is OFF for %v ([conditions] disable)", ids))
+	}
+	if outOfBandOff && !a.mailOff {
+		parts = append(parts, "no out-of-band copy to [agents] escalation_box ([conditions] out_of_band = false)")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "pogod: condition annunciator: " + strings.Join(parts, "; ") +
+		" — a disabled condition has no reader but events.log (reason=mail_disabled)"
 }
 
 // Clear forgets a condition, so a recurrence reads as a fresh transition and
@@ -661,7 +769,7 @@ func (a *conditionAnnunciator) report() {
 	}
 	a.flush()
 	a.mu.Lock()
-	raised, suppressed, failed, live := a.raised, a.suppressed, a.failed, len(a.disk.Conditions)
+	raised, suppressed, failed, muted, live := a.raised, a.suppressed, a.failed, a.muted, len(a.disk.Conditions)
 	rows := make([]string, 0, live)
 	for id, st := range a.disk.Conditions {
 		rows = append(rows, id+"("+st.Row+")")
@@ -669,13 +777,20 @@ func (a *conditionAnnunciator) report() {
 	sort.Strings(rows)
 	a.mu.Unlock()
 
+	// A raise whose mail is switched off is not "live" in the store (nothing was
+	// delivered to remember), so it is counted on its own and never folded into
+	// "mailed".
+	notMailed := ""
+	if muted > 0 {
+		notMailed = fmt.Sprintf(", %d NOT MAILED (disabled; events.log only)", muted)
+	}
 	switch {
 	case failed > 0:
-		log.Printf("pogod: ⚠ condition annunciator: %d mailed, %d suppressed, %d FAILED TO SEND, %d live [%v] — "+
-			"a failed notice means an actionable condition reached nobody", raised, suppressed, failed, live, rows)
-	case live > 0:
-		log.Printf("pogod: condition annunciator: %d mailed, %d suppressed, %d live [%v]",
-			raised, suppressed, live, rows)
+		log.Printf("pogod: ⚠ condition annunciator: %d mailed, %d suppressed, %d FAILED TO SEND%s, %d live [%v] — "+
+			"a failed notice means an actionable condition reached nobody", raised, suppressed, failed, notMailed, live, rows)
+	case live > 0 || muted > 0:
+		log.Printf("pogod: condition annunciator: %d mailed, %d suppressed%s, %d live [%v]",
+			raised, suppressed, notMailed, live, rows)
 	default:
 		log.Printf("pogod: condition annunciator: no live conditions")
 	}
@@ -687,6 +802,7 @@ func (a *conditionAnnunciator) report() {
 			"mailed":     raised,
 			"suppressed": suppressed,
 			"failed":     failed,
+			"disabled":   muted,
 			"live":       live,
 			"conditions": rows,
 		},

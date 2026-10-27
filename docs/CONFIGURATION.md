@@ -72,6 +72,9 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[lineage]` | — | — | plumbing | Names the upstream of this host's prompt corpus (`prompt_repo`, `prompt_ref`, `prompt_subtree`) for `pogo check-staleness` and `[prompt_stale]`, and of its deploy runner (`runner_repo`, `runner_ref`, `runner_path`) for the payload audit, `pogo service install-deploy` and the nightly's runner self-refresh. With no block they use drellem2/pogo's defaults and hedge their verdict. See [Lineage](#lineage--naming-your-configurations-upstream). |
 | `[ack_watch]` | `enabled` | on | observes | Mails when an agent completes too few of its scheduled fires. See [ack-watch](#the-scheduler-completion-deficit-detector-ack-watch). |
 | `[deaf_watch]` | `enabled` | on | observes | Mails when a running agent has no mail loop that could wake it. See [deaf-watch](#the-missing-mail-loop-announcer-deaf-watch). |
+| `[conditions]` | `mail` | on | observes | Mails the coordinator when one of pogod's own conditions appears, such as a scheduler that did not load, an agent that failed to start or restart, or an unwritable heartbeat. `off` stops all condition mail. The conditions are still recorded in events.log as `notified=false`, `reason=mail_disabled`, and for most of them that is then the only reader. See [pogod's own conditions](#pogods-own-conditions-conditions). |
+| `[conditions]` | `out_of_band` | on | observes | `off`: no mail from this watcher to [agents] escalation_box; the coordinator and events.log are unchanged. See [pogod's own conditions](#pogods-own-conditions-conditions). |
+| `[conditions]` | `disable` | inert | observes | Lists conditions by id whose mail is off, for example `["scheduler_load_failed", "autostart_failed"]`. A disabled condition has no reader but events.log. See [pogod's own conditions](#pogods-own-conditions-conditions). |
 | `[wake_watch]` | `enabled` | on | ACTS | Types a pointer of at most 100 characters into an agent's terminal when mail or an assignment arrives for it, re-points work left unconsumed and then mails `mayor`, and mails the sender and `mayor` when mail goes to an agent that is not running. For a polecat the pointer is the only wake: pogod registers no mail-check timer for it. See [wake-watch](#the-pointer-waker-wake-watch). Code: `internal/wakewatch`. |
 | `[heart_watch]` | `enabled` | on | observes | Mails when a crew heartbeat goes stale. `restart_after` is a threshold in the notice; heart-watch restarts nothing. See [heart-watch](#who-reads-the-crew-heartbeat-when-the-coordinator-is-dark-heart-watch). |
 | `[crew_reset]` | `enabled` | on | ACTS | Mails a crew agent whose session has run 4h, asking it to write a handoff note at its next safe point and run `pogo agent stop` on itself, so restart_on_crash brings it back in a fresh session. It asks at most twice per session and stops nothing itself. See [crew-reset](#crew-context-reset-crew-reset). Code: `internal/crewreset`. |
@@ -424,7 +427,10 @@ failed to auto-start or restart, an unwritable heartbeat, a log that is not
 being written, and orchestration left stopped; `firstturn` when the dark agent
 is its own addressee; and `midsessionwedge` when the wedged agent is. Addressed
 to the coordinator alone, each of those is a circular route. See
-`docs/investigations/alarm-routing-audit-2026-09-26.md`.
+`docs/investigations/alarm-routing-audit-2026-09-26.md`. For pogod's own
+conditions, `[conditions] out_of_band = false` withholds that copy without
+moving this box for anything else (see
+[pogod's own conditions](#pogods-own-conditions-conditions)).
 
 **When to change it: you have put a RELAY in front of `human`.** pogo supports a
 *representative* pattern (designed in mg-b17b, built in mg-65d2) in which a crew
@@ -471,6 +477,49 @@ that read falls back to `mayor` / `human`** — a missing or older `pogo` CLI
 with `config get`), a timeout, or output that is not a mailbox name — and the
 run log says which, because a nightly alert that cannot be delivered is worse
 than a mis-routed one.
+
+## pogod's own conditions (`[conditions]`)
+
+pogod mails the coordinator when it hits one of its own conditions: a
+scheduler that did not load, a crew agent that failed to auto-start or restart,
+an unwritable heartbeat, a log that is not being written, orchestration left
+stopped, a gh-issue detector that is not armed, and the rest of the conditions
+listed in `cmd/pogod/conditions.go` (mg-342d). Each condition mails when it
+first appears, again when it materially changes, and then at most once a day
+while it stays live. The conditions whose trigger means pogod is unhealthy or
+the coordinator is down are also copied to the
+[escalation box](#the-escalation-mailbox).
+
+Every part of that can be switched off (drellem2/pogo#238):
+
+```toml
+[conditions]
+mail = false          # default true: no condition mail at all
+out_of_band = false   # default true: no copy to [agents] escalation_box
+disable = ["scheduler_load_failed", "autostart_failed"]   # default []: per condition
+```
+
+| Key | Default | Effect when changed |
+|-----|---------|---------------------|
+| `mail` | `true` | `false`: no condition mail to anyone, and no wake nudge. |
+| `out_of_band` | `true` | `false`: no mail from this watcher to [agents] escalation_box; the coordinator and events.log are unchanged |
+| `disable` | `[]` | No mail for the listed conditions. An entry names a condition id. For a per-subject condition (`autostart_failed:doctor`, `restart_failed:mayor`, `unknown_provider:…`, `gitgc_sweep_failed:…`), the part before the colon disables every subject and the full id disables one. |
+
+The ids are the `condition` field of the `pogod_condition` event:
+`pogo events --type pogod_condition` lists the ones this host has raised.
+
+**What it costs.** For most of these conditions the coordinator's mail is the
+only reader. A disabled condition has no reader but events.log. With
+`out_of_band = false`, if the coordinator is itself down or pogod is unhealthy,
+nobody outside the fleet hears about it.
+
+**The record stays honest.** A disabled send is never logged as mailed and never
+recorded as delivered. Each raise still emits `pogod_condition` with
+`notified=false` and `reason=mail_disabled`, and pogod.log says once per
+condition that it was raised and not mailed. At startup pogod logs a line naming
+what is disabled, and the per-boot `pogod_condition_summary` event carries a
+`disabled` count. The escalation box itself is unchanged: ack-watch, deaf-watch,
+the reaper and every other watcher still escalate to `[agents] escalation_box`.
 
 ## Crew auto-start
 
