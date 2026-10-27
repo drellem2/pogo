@@ -51,9 +51,11 @@ var SettingsRelPath = filepath.Join(".claude", "settings.local.json")
 // looking like somebody else's.
 const MailRecipientMarker = "hook mail-recipient"
 
-// StampName is the file the hook touches on every invocation. It sits beside
-// the settings file, inside .claude/, which every worktree and this repo
-// already keep out of git — a liveness stamp must not turn up in a diff.
+// StampName is the file the hook touches on every invocation. It sits inside a
+// .claude/ directory under the session's cwd, so it can land at any depth.
+// Nothing keeps it out of git: a repo whose .gitignore lacks .claude/ shows it
+// as untracked. gitgc.WorktreeDirty recognises it by this name so a stamp alone
+// does not make a worktree read as uncommitted work (gh #162, #155, #240).
 const StampName = "pogo-mailhook.stamp"
 
 // State is how far along the chain from "merged" to "protecting this agent"
