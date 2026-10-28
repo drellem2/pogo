@@ -80,3 +80,33 @@ func TestPolecatTreeReposMissingDirIsNoTrees(t *testing.T) {
 		t.Errorf("missing dir: repos=%v skipped=%v err=%v, want all empty", repos, skipped, err)
 	}
 }
+
+// TestPolecatTreeReposDoesNotNameTheEnclosingRepository is review round 1 of
+// mg-f638f. rev-parse does discovery: a tree whose .git is a directory git will
+// not accept is passed over, and the walk goes on up to whatever repository
+// encloses the polecats dir — $POGO_HOME is a git repository on this fleet. That
+// repository must not enter the sweep set, and the tree must be reported.
+func TestPolecatTreeReposDoesNotNameTheEnclosingRepository(t *testing.T) {
+	home := newTestRepo(t) // the enclosing repository, like ~/.pogo
+	polecats := filepath.Join(home.dir, "polecats")
+	half := filepath.Join(polecats, "half")
+	if err := os.MkdirAll(filepath.Join(half, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Positive control beside it: a real linked worktree of another repo.
+	other := newTestRepo(t)
+	other.branch("polecat-a1b2")
+	addWorktree(t, other, polecats, "a1b2", "polecat-a1b2")
+
+	repos, skipped, err := PolecatTreeRepos(polecats)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(repos, []string{other.dir}) {
+		t.Errorf("repos = %v, want only [%s] — the repository ENCLOSING the polecats dir is not a "+
+			"tree's repository and must never be swept on a tree's say-so", repos, other.dir)
+	}
+	if joined := strings.Join(skipped, "\n"); !strings.Contains(joined, half) {
+		t.Errorf("the tree whose .git git would not accept must be reported, got skipped:\n%s", joined)
+	}
+}

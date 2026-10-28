@@ -58,13 +58,29 @@ func PolecatTreeRepos(polecatsDir string) (repos, skipped []string, err error) {
 		if _, serr := os.Lstat(filepath.Join(path, ".git")); serr != nil {
 			continue
 		}
-		out, gerr := git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+		out, gerr := git(path, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir")
 		if gerr != nil {
 			skipped = append(skipped, fmt.Sprintf("%s: has a .git but git would not name its repository: %v",
 				path, gerr))
 			continue
 		}
-		common := filepath.Clean(strings.TrimSpace(string(out)))
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) != 2 {
+			skipped = append(skipped, fmt.Sprintf("%s: unexpected rev-parse output %q", path, string(out)))
+			continue
+		}
+		// The tree must answer for ITSELF. rev-parse does repository
+		// discovery: a .git directory git will not accept (empty, no HEAD) is
+		// passed over and the walk continues upward, so a polecats dir that
+		// sits inside a repository — $POGO_HOME is one on this fleet — would
+		// otherwise name THAT repository, at exit 0, and put it in the sweep
+		// set. Only a top level equal to the tree itself is the tree's answer.
+		if top := strings.TrimSpace(lines[0]); !samePath(top, path) {
+			skipped = append(skipped, fmt.Sprintf("%s: git answered for %s, not for the tree itself "+
+				"(its .git is not one git accepts), so the repository could not be named", path, top))
+			continue
+		}
+		common := filepath.Clean(strings.TrimSpace(lines[1]))
 		if filepath.Base(common) != ".git" {
 			skipped = append(skipped, fmt.Sprintf("%s: git-common-dir %q is not a conventional "+
 				"<repo>/.git layout, so the repository could not be named", path, common))
@@ -92,4 +108,17 @@ func PolecatTreeRepos(polecatsDir string) (repos, skipped []string, err error) {
 func within(p, dir string) bool {
 	rel, err := filepath.Rel(dir, p)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// samePath reports whether a and b name the same directory, resolving
+// symlinks on both sides (git prints canonical paths; on macOS a temp dir
+// lives under the /var -> /private/var symlink).
+func samePath(a, b string) bool {
+	if ra, err := filepath.EvalSymlinks(a); err == nil {
+		a = ra
+	}
+	if rb, err := filepath.EvalSymlinks(b); err == nil {
+		b = rb
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }

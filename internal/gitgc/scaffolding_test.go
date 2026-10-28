@@ -58,6 +58,15 @@ func TestScanPreservedCountsScaffoldingOnlyTrees(t *testing.T) {
 	if strings.Count(out, "SCAFFOLDING ONLY:") != 1 {
 		t.Errorf("exactly the stamp-only tree's row must be marked, got:\n%s", out)
 	}
+	// The stamp-only row lists its path without the only-copy warning, which
+	// is about objects nobody else holds; the real-work row keeps it.
+	stampRow := StreamedTree(findTree(t, rep.Retained, "a1b2"))
+	if strings.Contains(stampRow, "only copy OF THE GIT OBJECTS") || !strings.Contains(stampRow, "sub/") {
+		t.Errorf("the scaffolding-only row must list its path without the only-copy warning, got:\n%s", stampRow)
+	}
+	if !strings.Contains(StreamedTree(findTree(t, rep.Retained, "c3d4")), "only copy OF THE GIT OBJECTS") {
+		t.Errorf("a tree holding real untracked work must keep the only-copy warning")
+	}
 	// The streamed listing renders the same row and the same counts.
 	if !strings.Contains(StreamedTree(findTree(t, rep.Retained, "a1b2")), "SCAFFOLDING ONLY:") {
 		t.Errorf("the streamed row must carry the marker too")

@@ -538,7 +538,12 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 					"re-read status of %s for the full file list: %v (showing the capped list)", path, ferr))
 			}
 			tree.Total, tree.Modified, tree.Untracked = dwe.Total, dwe.Modified, dwe.Untracked
-			if only, serr := scaffoldingOnly(path); serr == nil {
+			// A tracked change is never scaffolding, so a tree with one is
+			// already answered and is spared the expanded status — an
+			// --untracked-files=all walk is the cost gh #158 is about.
+			if dwe.Modified > 0 {
+				tree.ScaffoldingOnly = false
+			} else if only, serr := scaffoldingOnly(path); serr == nil {
 				tree.ScaffoldingOnly = only
 			} else {
 				rep.Errors = append(rep.Errors, fmt.Sprintf(
@@ -1033,7 +1038,15 @@ func writeTreeRow(b *strings.Builder, t PreservedTree, showRepo bool) {
 			fmt.Fprintf(b, "    gc keeps it because the removal guard reads a collapsed untracked\n")
 			fmt.Fprintf(b, "    directory as one entry unless that directory is .claude/.\n")
 		}
-		if untracked := t.UntrackedPaths(); len(untracked) > 0 {
+		if untracked := t.UntrackedPaths(); len(untracked) > 0 && t.ScaffoldingOnly {
+			// The only-copy warning is about objects nobody else holds; for a
+			// file pogod regenerates in every tree it would read at odds with
+			// the line above, so the paths are listed without it.
+			fmt.Fprintf(b, "    untracked (as git collapses them; expanded, only pogod's files):\n")
+			for _, p := range untracked {
+				fmt.Fprintf(b, "      %s\n", p)
+			}
+		} else if len(untracked) > 0 {
 			fmt.Fprintf(b, "    untracked — on no branch, in no stash, on no remote, so this tree is the\n")
 			fmt.Fprintf(b, "    only copy OF THE GIT OBJECTS. That is not a claim about the CONTENT: a file\n")
 			fmt.Fprintf(b, "    of the same path may exist upstream, identical or newer. `git show\n")
