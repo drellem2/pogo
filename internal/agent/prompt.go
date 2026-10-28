@@ -463,16 +463,7 @@ func synthesizeExtendsBytes(promptPath string) ([]byte, error) {
 	}
 	tmplArg, cfgArg := m[1], m[2]
 	root := PromptDir()
-	cfgPath := filepath.Join(root, cfgArg)
-	var tmplPath string
-	if strings.Contains(tmplArg, "/") {
-		tmplPath = filepath.Join(root, tmplArg)
-	} else {
-		tmplPath = filepath.Join(filepath.Dir(cfgPath), tmplArg)
-	}
-	if !strings.HasSuffix(tmplPath, ".md") {
-		tmplPath += ".md"
-	}
+	tmplPath, cfgPath := extendsPaths(tmplArg, cfgArg)
 	tmplData, err := os.ReadFile(tmplPath)
 	if err != nil {
 		return nil, fmt.Errorf("read extends template %s: %w", tmplPath, err)
@@ -510,6 +501,24 @@ func synthesizeExtendsBytes(promptPath string) ([]byte, error) {
 	}
 	buf.WriteString("```\n")
 	return buf.Bytes(), nil
+}
+
+// extendsPaths resolves an `extends <template> with config <config>`
+// directive's two arguments to paths, by the rules SynthesizeExtendsPrompt's
+// doc comment states. Shared so a reader of the template's frontmatter
+// (ResolveWakeMode) finds the same file synthesis does.
+func extendsPaths(tmplArg, cfgArg string) (tmplPath, cfgPath string) {
+	root := PromptDir()
+	cfgPath = filepath.Join(root, cfgArg)
+	if strings.Contains(tmplArg, "/") {
+		tmplPath = filepath.Join(root, tmplArg)
+	} else {
+		tmplPath = filepath.Join(filepath.Dir(cfgPath), tmplArg)
+	}
+	if !strings.HasSuffix(tmplPath, ".md") {
+		tmplPath += ".md"
+	}
+	return tmplPath, cfgPath
 }
 
 // DropInDir returns the directory containing user drop-in fragments for the
@@ -1015,6 +1024,7 @@ const (
 	metaFieldWorktree
 	metaFieldProvider
 	metaFieldModel
+	metaFieldWake
 )
 
 // metaFieldByKey maps a TOML key name to its bitmask flag. The second return
@@ -1034,6 +1044,8 @@ func metaFieldByKey(key string) (metaFieldFlag, bool) {
 		return metaFieldProvider, true
 	case "model":
 		return metaFieldModel, true
+	case "wake":
+		return metaFieldWake, true
 	}
 	return 0, false
 }
@@ -1057,6 +1069,11 @@ func metaFieldByKey(key string) (metaFieldFlag, bool) {
 //     every dispatch typing it. Note the chain has no third tier: an absent
 //     model: means pogo passes no model argument at all, which is deliberate.
 //     See internal/agent/model.go.
+//   - wake:             how this agent is woken to read its mail — "mail-check"
+//     (a mail-check-<name> schedule; the default) or "pointer" (wakewatch's
+//     pointer nudges, no timer). It overrides the install-wide [agents] wake
+//     default in both directions. See internal/agent/wakemode.go
+//     (drellem2/pogo#232, #236).
 //
 // provider and model are orthogonal: provider picks which harness binary runs,
 // model picks what that binary talks to.
@@ -1067,6 +1084,7 @@ type AgentMeta struct {
 	Worktree       bool   `json:"worktree,omitempty"`
 	Provider       string `json:"provider,omitempty"`
 	Model          string `json:"model,omitempty"`
+	Wake           string `json:"wake,omitempty"`
 
 	// explicit is a bitmask of recognized keys that appeared in the
 	// frontmatter. Unexported so it stays out of JSON output; uint8 so
@@ -1269,6 +1287,16 @@ func assignMetaField(meta *AgentMeta, key, raw string) error {
 		// both spawn paths, fatal in both) keeps the blast radius at exactly the
 		// field that is wrong.
 		meta.Model = s
+	case "wake":
+		s, err := parseFrontmatterString(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		// Not validated here, for model's reason above: a parse error would
+		// take the whole block down with it. ResolveWakeMode names an
+		// unrecognised value instead, and judges the agent as mail-check —
+		// the loud direction.
+		meta.Wake = s
 	}
 	meta.explicit |= flag
 	return nil

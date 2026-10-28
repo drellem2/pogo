@@ -479,6 +479,12 @@ type Registry struct {
 	// default, and what unit tests use) disables the check.
 	mailChecks MailCheckProvider
 
+	// eventContext, when set, reads the events.log context diagnose prints
+	// beside its mail-loop verdict — last mail-check removal, last
+	// wake_unconsumed (drellem2/pogo#232, #236). Context only; nil (the
+	// default, and what unit tests use) omits it.
+	eventContext DiagnoseEventContext
+
 	// transcripts, when set, reads an agent's harness session transcript so
 	// diagnose can report the synthetic-failure-turn class and ShouldRespawnAgent
 	// can withhold a restart that cannot help (mg-8cdb / mg-18d0). pogod wires
@@ -672,6 +678,14 @@ func (r *Registry) SetMailCheckProvider(p MailCheckProvider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.mailChecks = p
+}
+
+// SetDiagnoseEventContext installs the events.log reader diagnose uses for
+// its mail-loop context lines. Call once at startup.
+func (r *Registry) SetDiagnoseEventContext(c DiagnoseEventContext) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.eventContext = c
 }
 
 // SetTranscriptScanner installs the harness-transcript reader used by diagnose

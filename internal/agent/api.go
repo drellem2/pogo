@@ -338,6 +338,30 @@ type DiagnoseInfo struct {
 	// for two hours. A missing mail loop must be able to turn a health signal
 	// RED, or the next variant is just as quiet.
 	MailCheckMissing bool `json:"mail_check_missing,omitempty"`
+	// WakeMode is the agent's effective declared wake mode, and
+	// WakeModeSource where it was declared: the prompt file, config.toml
+	// [agents] wake, or "default" (drellem2/pogo#232, #236). Both are empty for
+	// a polecat, which is pointer-woken by construction (mg-aa74) and declares
+	// nothing.
+	WakeMode       WakeMode `json:"wake_mode,omitempty"`
+	WakeModeSource string   `json:"wake_mode_source,omitempty"`
+	// PointerWake is true when the mail loop was NOT judged because the agent
+	// declares pointer wake (ExclusionPointerWake). It is not "healthy": it is
+	// "not judged on a mail-check, and here is why". Health is computed exactly
+	// as for any other unjudged agent.
+	PointerWake bool `json:"pointer_wake,omitempty"`
+	// MailCheckObserved is, for a PointerWake agent, whether a mail-check
+	// schedule exists anyway — an observation with no verdict (see
+	// MailLoopExclusion.MailLoop). Empty when not reported.
+	MailCheckObserved MailLoopObservation `json:"mail_check_observed,omitempty"`
+	// LastMailCheckRemoval is, for a MailCheckMissing agent, the last
+	// schedule_removed for mail-check-<name>. CONTEXT ONLY: it never
+	// suppresses the RED — see EventContext.
+	LastMailCheckRemoval *EventContext `json:"last_mail_check_removal,omitempty"`
+	// LastWakeUnconsumed is, for a PointerWake agent, the last
+	// wake_unconsumed naming it. CONTEXT ONLY: not a Health input until
+	// mg-a2ff.
+	LastWakeUnconsumed *EventContext `json:"last_wake_unconsumed,omitempty"`
 	// TranscriptCheck is the synthetic-failure-turn verdict read from the
 	// harness's session transcript: is this agent answering every nudge locally
 	// and failing it (mg-18d0's class), merely quiet, or is there no transcript
@@ -1003,7 +1027,42 @@ func (r *Registry) diagnose(a *Agent) DiagnoseInfo {
 		rep := scanner.ScanTranscript(a.Name, a.Dir)
 		transcript = &rep
 	}
-	return diagnoseAgentAt(a, now, windows, wakes, mailLoopFor(a, mailChecks), transcript)
+	info := diagnoseAgentAt(a, now, windows, wakes, mailLoopFor(a, mailChecks), transcript)
+	r.attachWakeContext(&info, a)
+	return info
+}
+
+// attachWakeContext adds the declared wake mode and its events.log context to
+// a diagnosis (drellem2/pogo#232, #236). It reads; it never changes Health or
+// MailCheckMissing — the verdict is mailLoopFor's alone.
+func (r *Registry) attachWakeContext(info *DiagnoseInfo, a *Agent) {
+	if a.Type == TypePolecat {
+		return
+	}
+	r.mu.RLock()
+	mailChecks := r.mailChecks
+	ctx := r.eventContext
+	r.mu.RUnlock()
+
+	if decl, err := ResolveWakeMode(a.Name); err == nil {
+		info.WakeMode, info.WakeModeSource = decl.Mode, decl.Source
+	} else {
+		info.WakeModeSource = "unreadable: " + err.Error()
+	}
+	info.PointerWake = mailLoopExclusionFor(a) == ExclusionPointerWake
+	if info.PointerWake {
+		if mailChecks != nil {
+			info.MailCheckObserved = observeMailLoop(a, mailChecks)
+		}
+		if ctx != nil {
+			c := ctx.LastWakeUnconsumed(a.Name)
+			info.LastWakeUnconsumed = &c
+		}
+	}
+	if info.MailCheckMissing && ctx != nil {
+		c := ctx.LastScheduleRemoval("mail-check-" + a.Name)
+		info.LastMailCheckRemoval = &c
+	}
 }
 
 // ShouldRespawnAgent is the registry-aware restart gate: it answers
@@ -1104,6 +1163,10 @@ func mailLoopFor(a *Agent, p MailCheckProvider) mailLoopState {
 //     there" case above, and UNKNOWN is the right answer.
 //   - AN AGENT WITH AN UNREADABLE PROMPT TREE — NOT judged; we cannot classify
 //     what we cannot read, and a false RED costs more than silence.
+//   - AN AGENT THAT DECLARES POINTER WAKE (drellem2/pogo#232, #236) — NOT
+//     judged on its mail-check, because it is owed none: wakewatch's pointer
+//     nudges are its delivery path. It is LISTED as not-judged with
+//     ExclusionPointerWake, never counted healthy. See wakemode.go.
 //   - ANYTHING DIAGNOSE IS NEVER RUN AGAINST. This check is only as loud as its
 //     caller: a diagnose field helps someone already running diagnose. It is
 //     detection, not an alarm.
@@ -1137,7 +1200,7 @@ func mailLoopJudgeable(a *Agent) bool { return mailLoopExclusionFor(a) == "" }
 // to answer for nil itself.
 func mailLoopExclusionFor(a *Agent) MailLoopExclusionReason {
 	if IsExpectedAgent(a.Name) {
-		return ""
+		return pointerWakeExclusion(a.Name)
 	}
 	// A polecat can never reach the configured branch (it has no prompt), but
 	// say so explicitly rather than resting on that: the exclusion is a decision,
@@ -1159,7 +1222,10 @@ func mailLoopExclusionFor(a *Agent) MailLoopExclusionReason {
 	case !configured:
 		return ExclusionNotConfigured
 	}
-	return ""
+	// Judgeable on every count above — unless it declares pointer wake. This
+	// arm is last so a declaration never re-labels a polecat, a stopped agent
+	// or an unconfigured one: those already have their own, truer reason.
+	return pointerWakeExclusion(a.Name)
 }
 
 // Nudge outcome statuses carried by NudgeAPIResponse.Status. They are the
