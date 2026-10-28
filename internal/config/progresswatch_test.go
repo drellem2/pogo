@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -94,5 +95,28 @@ func TestProgressWatchNegativesSurvive(t *testing.T) {
 	}
 	if cfg.ProgressWatch.EscalateAfter != -time.Second {
 		t.Errorf("escalate_after = %s, want -1s to survive as the disarm", cfg.ProgressWatch.EscalateAfter)
+	}
+}
+
+// skip_dirs (drellem2/pogo#156): unset means the shipped list, an explicit list
+// replaces it, and an explicit EMPTY list means "walk everything but .git" —
+// which is why it is tracked as set rather than merged on its zero value.
+func TestProgressWatchSkipDirs(t *testing.T) {
+	layeredSandbox(t)
+	if got := Load().ProgressWatch.SkipDirs; !reflect.DeepEqual(got, []string{"node_modules", ".pnpm"}) {
+		t.Errorf("default skip_dirs = %q, want node_modules and .pnpm — skipping node_modules "+
+			"alone still walks pnpm's sibling store", got)
+	}
+
+	_, home := layeredSandbox(t)
+	write(t, home, "[progress_watch]\nskip_dirs = [\"node_modules\", \".pnpm\", \".yarn\"]\n")
+	if got := Load().ProgressWatch.SkipDirs; !reflect.DeepEqual(got, []string{"node_modules", ".pnpm", ".yarn"}) {
+		t.Errorf("skip_dirs = %q, want the configured list", got)
+	}
+
+	_, home = layeredSandbox(t)
+	write(t, home, "[progress_watch]\nskip_dirs = []\n")
+	if got := Load().ProgressWatch.SkipDirs; len(got) != 0 {
+		t.Errorf("skip_dirs = [] read back as %q; an explicit empty list must turn the skip off", got)
 	}
 }

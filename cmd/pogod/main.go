@@ -2921,7 +2921,8 @@ Flags:
 		progressWatcher = progresswatch.New(progresswatch.Options{
 			Enabled: true,
 			Source: fleetProgressSource(agentRegistry,
-				func() *refinery.Refinery { return mergeQueue }, startTime),
+				func() *refinery.Refinery { return mergeQueue }, startTime,
+				cfg.ProgressWatch.SkipDirs),
 			Mail:          client.SendMGMail,
 			Interval:      cfg.ProgressWatch.Interval,
 			HoldDown:      cfg.ProgressWatch.HoldDown,
@@ -2931,9 +2932,9 @@ Flags:
 			EscalateTo:    escalationBox,
 		})
 		fleetProgress = progressWatcher
-		log.Printf("pogod: progress-watch enabled (interval=%s hold_down=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s, report-only)",
+		log.Printf("pogod: progress-watch enabled (interval=%s hold_down=%s renotify=%s notify_to=%s escalate_after=%s escalate_to=%s skip_dirs=%q, report-only)",
 			cfg.ProgressWatch.Interval, cfg.ProgressWatch.HoldDown, cfg.ProgressWatch.RenotifyAfter,
-			cfg.ProgressWatch.NotifyTo, cfg.ProgressWatch.EscalateAfter, escalationBox)
+			cfg.ProgressWatch.NotifyTo, cfg.ProgressWatch.EscalateAfter, escalationBox, cfg.ProgressWatch.SkipDirs)
 	} else if cfg.ProgressWatch.Enabled {
 		const reason = "the agent registry did not load, so there is no worker population to measure"
 		log.Printf("pogod: progress-watch NOT armed — %s", reason)

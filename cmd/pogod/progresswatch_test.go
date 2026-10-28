@@ -38,7 +38,7 @@ func TestWorkerReadingReadsTheWorktree(t *testing.T) {
 	}
 
 	now := time.Now()
-	got := workerReading(agent.WorkerProgress{Name: "p1", WorktreeDir: dir}, now)
+	got := workerReading(context.Background(), agent.WorkerProgress{Name: "p1", WorktreeDir: dir}, now, nil)
 	if !got.WritesKnown || !got.HasWrites {
 		t.Fatalf("a written worktree read as unwritten: %+v", got)
 	}
@@ -51,7 +51,7 @@ func TestWorkerReadingReadsTheWorktree(t *testing.T) {
 // goes somewhere this detector cannot see, and counting its empty tree as
 // silence would manufacture a finding out of a design choice.
 func TestWorkerWithNoWorktreeIsUnmeasurable(t *testing.T) {
-	got := workerReading(agent.WorkerProgress{Name: "p1", Age: time.Hour}, time.Now())
+	got := workerReading(context.Background(), agent.WorkerProgress{Name: "p1", Age: time.Hour}, time.Now(), nil)
 	if got.WritesKnown {
 		t.Errorf("a worker with no worktree reported a known write state: %+v", got)
 	}
@@ -64,10 +64,10 @@ func TestWorkerWithNoWorktreeIsUnmeasurable(t *testing.T) {
 // the walk is the fleet making progress; either way it is not evidence of
 // silence.
 func TestVanishedWorktreeIsNotQuiet(t *testing.T) {
-	got := workerReading(agent.WorkerProgress{
+	got := workerReading(context.Background(), agent.WorkerProgress{
 		Name: "p1", Age: time.Hour,
 		WorktreeDir: filepath.Join(t.TempDir(), "gone"),
-	}, time.Now())
+	}, time.Now(), nil)
 	if got.WritesKnown {
 		t.Errorf("a vanished worktree reported a known write state: %+v", got)
 	}
@@ -85,9 +85,9 @@ func TestEmptyWorktreeMeasuresFromTheTreeItself(t *testing.T) {
 	if err := os.Chtimes(dir, created, created); err != nil {
 		t.Fatal(err)
 	}
-	got := workerReading(agent.WorkerProgress{
+	got := workerReading(context.Background(), agent.WorkerProgress{
 		Name: "p1", Age: time.Hour, WorktreeDir: dir,
-	}, time.Now())
+	}, time.Now(), nil)
 	if !got.WritesKnown {
 		t.Fatalf("an empty but readable worktree must be a measurement: %+v", got)
 	}
@@ -100,10 +100,10 @@ func TestEmptyWorktreeMeasuresFromTheTreeItself(t *testing.T) {
 // TestPTYFactsSurviveTheConversion, including the one that is easy to lose: a
 // worker that has never written has an UNMEASURABLE idle time, not a zero one.
 func TestPTYFactsSurviveTheConversion(t *testing.T) {
-	got := workerReading(agent.WorkerProgress{
+	got := workerReading(context.Background(), agent.WorkerProgress{
 		Name: "p1", WorkItemID: "mg-516e", Age: 20 * time.Minute,
 		PTYIdle: 90 * time.Second, HasOutput: true,
-	}, time.Now())
+	}, time.Now(), nil)
 	if got.Name != "p1" || got.WorkItemID != "mg-516e" || got.Age != 20*time.Minute {
 		t.Errorf("identity lost in conversion: %+v", got)
 	}
@@ -111,7 +111,7 @@ func TestPTYFactsSurviveTheConversion(t *testing.T) {
 		t.Errorf("pty facts lost in conversion: %+v", got)
 	}
 
-	silent := workerReading(agent.WorkerProgress{Name: "p2"}, time.Now())
+	silent := workerReading(context.Background(), agent.WorkerProgress{Name: "p2"}, time.Now(), nil)
 	if silent.HasOutput || silent.PTYIdle != 0 {
 		t.Errorf("a never-written PTY must stay unmeasurable: %+v", silent)
 	}
@@ -179,7 +179,7 @@ func TestNoteProgressKeepsTheMostRecentAndNamesIt(t *testing.T) {
 // TestSourceWithoutARegistryFailsRatherThanReportingAnIdleFleet. "Nobody is
 // working" and "I could not look" must never collapse.
 func TestSourceWithoutARegistryFails(t *testing.T) {
-	src := fleetProgressSource(nil, nil, time.Now())
+	src := fleetProgressSource(nil, nil, time.Now(), nil)
 	if _, err := src(time.Now()); err == nil {
 		t.Fatal("a source with no registry returned a snapshot")
 	}
@@ -192,9 +192,9 @@ func TestSourceWithoutARegistryFails(t *testing.T) {
 // fact can be noticed at all.
 func TestReapedWorktreeIsItsOwnState(t *testing.T) {
 	gone := filepath.Join(t.TempDir(), "reaped")
-	got := workerReading(agent.WorkerProgress{
+	got := workerReading(context.Background(), agent.WorkerProgress{
 		Name: "p1", Age: time.Hour, WorktreeDir: gone,
-	}, time.Now())
+	}, time.Now(), nil)
 
 	if !got.WorktreeGone {
 		t.Fatalf("an absent worktree was not recognised as gone: %+v", got)
@@ -210,9 +210,9 @@ func TestReapedWorktreeIsItsOwnState(t *testing.T) {
 // TestPresentWorktreeIsNotGone is the positive control for the check above: the
 // flag must discriminate, or "not gone" says nothing about any particular tree.
 func TestPresentWorktreeIsNotGone(t *testing.T) {
-	got := workerReading(agent.WorkerProgress{
+	got := workerReading(context.Background(), agent.WorkerProgress{
 		Name: "p1", Age: time.Hour, WorktreeDir: t.TempDir(),
-	}, time.Now())
+	}, time.Now(), nil)
 	if got.WorktreeGone {
 		t.Errorf("a tree that is right there read as gone: %+v", got)
 	}
@@ -241,9 +241,9 @@ func TestUnreadableWorktreeIsNotGone(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
 
-	got := workerReading(agent.WorkerProgress{
+	got := workerReading(context.Background(), agent.WorkerProgress{
 		Name: "p1", Age: time.Hour, WorktreeDir: dir,
-	}, time.Now())
+	}, time.Now(), nil)
 
 	if got.WorktreeGone {
 		t.Errorf("an unreadable-but-present tree was reported as gone: %+v", got)
@@ -258,7 +258,7 @@ func TestUnreadableWorktreeIsNotGone(t *testing.T) {
 // which is a blindness — a different answer from a tree that was there and was
 // reaped, and the remedies differ.
 func TestNoWorktreeIsNotGoneEither(t *testing.T) {
-	got := workerReading(agent.WorkerProgress{Name: "p1", Age: time.Hour}, time.Now())
+	got := workerReading(context.Background(), agent.WorkerProgress{Name: "p1", Age: time.Hour}, time.Now(), nil)
 	if got.WorktreeGone {
 		t.Errorf("a worker spawned without a worktree is not one whose worktree vanished: %+v", got)
 	}

@@ -3526,7 +3526,36 @@ renotify_after = "2h"      # an open, unchanged episode re-mails after this
 notify_to = "mayor"        # mailbox findings go to (default [agents] coordinator)
 escalate_after = "2h"      # a standing finding also copies `human` after this
                            # (default 2h; negative disables age-based escalation)
+skip_dirs = ["node_modules", ".pnpm"]
+                           # directory names the worktree walk prunes, at any
+                           # depth, besides .git (this is the default; [] walks
+                           # everything but .git)
 ```
+
+**What a sample costs, and what bounds it (gh #156).** The CPU read runs first,
+on its own 10s budget. The worktree walks run after it, under a separate 30s
+budget that every walk checks. Each worktree gets an equal share of what is
+left: the remaining budget divided by the worktrees still to walk. A tree that
+finishes early passes its unused time to the trees after it. The share is
+derived this way, not set as a per-tree constant, because walk cost per entry
+differed about 50x between two measured hosts. A constant tuned on one host
+would be wrong on the other. A walk that runs out of its share does not report
+a partial newest-write time. That worker's writes term reads as unmeasurable
+(`worktree walk over its share of the sample budget: ...`), and the CPU term
+and the other workers are unaffected. Before #156, slow walks used up the
+CPU read's time and blinded the computing term for the whole fleet.
+
+`skip_dirs` exists because a JS worktree's dependency store can hold over 99%
+of its entries, and an install writes it, not the agent's edits. Both names are
+in the default because pnpm's `.pnpm` store can sit beside `node_modules`.
+Skipping `node_modules` alone was measured to still walk 42.7% of one such
+tree. The list deliberately does not copy the search indexer's exclusions:
+those skip `build/` and `dist/` because they hold no source, but build output is
+often the newest thing an agent wrote. **`skip_dirs` applies only to this
+detector.** The gc age report (`untouched N` in `pogo gc --list-preserved` and
+on the cannot-tell refusal line) is what an operator reads before clearing a
+permanent pin. It still measures every entry except `.git`, whatever this key
+says.
 
 The four thresholds themselves are **not** config: they are
 `internal/progresswatch`'s exported defaults, each set against the 05:17Z

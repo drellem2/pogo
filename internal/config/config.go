@@ -755,6 +755,18 @@ const (
 	DefaultOrchestrationResumeRetry = time.Minute
 )
 
+// DefaultProgressWatchSkipDirs is what progress-watch's worktree walk prunes
+// when [progress_watch] skip_dirs is unset: the two directory names a JS
+// worktree's dependency store lives under (drellem2/pogo#156). Both, because
+// pnpm's content store is a SIBLING of node_modules in some layouts, and
+// skipping node_modules alone was measured to still walk 42.7% of such a tree.
+//
+// Deliberately NOT internal/search's indexer exclusions: that list skips
+// build/dist/target because they hold no SOURCE, but the detector asks whether
+// the agent WROTE anything, and a build's output is often the freshest write in
+// the tree (mg-edc2 measured dist/ newer than src/).
+var DefaultProgressWatchSkipDirs = []string{"node_modules", ".pnpm"}
+
 // DefaultFastPriorities is the set of WorkItem.Priority values that trigger the
 // priority wake. Just "high" today; extend it (e.g. add "critical") if the
 // priority vocabulary grows. Kept as a var because a slice cannot be a const;
@@ -1891,6 +1903,12 @@ type ProgressWatchConfig struct {
 	// goes to `human`. Zero falls back to DefaultProgressWatchEscalateAfter; a
 	// NEGATIVE value disables age-based escalation.
 	EscalateAfter time.Duration
+	// SkipDirs lists directory BASENAMES the worktree walk prunes at any
+	// depth, in addition to .git. Unset falls back to
+	// DefaultProgressWatchSkipDirs; an explicit empty list walks everything
+	// but .git. It applies to this detector's walk ONLY — the gc age report
+	// (`untouched N`) measures every entry but .git regardless (drellem2/pogo#156).
+	SkipDirs []string
 }
 
 // HeartWatchConfig configures pogod's CREW HEARTBEAT reader (mg-d616): the
@@ -2553,7 +2571,10 @@ type parsedConfig struct {
 	blindWatchMailSet       bool
 	blindWatchOutOfBandSet  bool
 	progressWatchEnabledSet bool
-	firstTurnEnabledSet     bool
+	// progressWatchSkipDirsSet lets `skip_dirs = []` turn the skip off rather
+	// than reading as unset.
+	progressWatchSkipDirsSet bool
+	firstTurnEnabledSet      bool
 	// synthWatchEnabledSet, refusalWatchEnabledSet and turnWatchEnabledSet exist
 	// because the shipped default is TRUE: without them a layered file that
 	// omits the key would merge its zero value and silently disarm the detector.
@@ -2765,6 +2786,7 @@ func Load() *Config {
 			HoldDown:      DefaultProgressWatchHoldDown,
 			RenotifyAfter: DefaultProgressWatchRenotify,
 			EscalateAfter: DefaultProgressWatchEscalateAfter,
+			SkipDirs:      append([]string(nil), DefaultProgressWatchSkipDirs...),
 		},
 		FirstTurn: FirstTurnConfig{
 			Enabled:  true,
@@ -3202,6 +3224,9 @@ func Load() *Config {
 		// age-based escalation off.
 		if fileCfg.ProgressWatch.EscalateAfter != 0 {
 			cfg.ProgressWatch.EscalateAfter = fileCfg.ProgressWatch.EscalateAfter
+		}
+		if fileCfg.progressWatchSkipDirsSet {
+			cfg.ProgressWatch.SkipDirs = fileCfg.ProgressWatch.SkipDirs
 		}
 		if fileCfg.firstTurnEnabledSet {
 			cfg.FirstTurn.Enabled = fileCfg.FirstTurn.Enabled
@@ -4383,6 +4408,9 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.ProgressWatch.EscalateAfter = d
 				}
+			case "skip_dirs":
+				cfg.ProgressWatch.SkipDirs = parseStringArray(val)
+				cfg.progressWatchSkipDirsSet = true
 			}
 		case "first_turn":
 			switch key {
