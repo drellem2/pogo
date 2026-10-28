@@ -94,8 +94,15 @@ go_toolchain_expose() {
     eval "set -- $prev"
     prev="$3"
   fi
+  # The caller's handler reads $? (gate_exit_report reports the gate's status
+  # from it), so the status is saved before the rm and restored before <cmd>.
+  # %q quotes the dir for re-reading, whatever $TMPDIR contains.
   # shellcheck disable=SC2064 # expand now: the trap must name this dir.
-  trap "rm -rf '$dir'${prev:+; $prev}" EXIT
+  trap "__go_toolchain_status=\$?; rm -rf $(printf %q "$dir"); (exit \$__go_toolchain_status)${prev:+; $prev}" EXIT
+  # A trapped signal is acted on only when the foreground command returns, so
+  # on this path a TERM sent to the script alone waits for a running `go test`
+  # instead of killing the script at once. A process-group signal, which is
+  # how the refinery stops a gate, still reaches the child directly.
   [ -n "$(trap -p INT)" ] || trap 'exit 130' INT
   [ -n "$(trap -p TERM)" ] || trap 'exit 143' TERM
   [ -n "$(trap -p HUP)" ] || trap 'exit 129' HUP

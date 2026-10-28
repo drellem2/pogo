@@ -122,6 +122,32 @@ else
     fail "pogo-go.* left behind with a caller trap: $(ls "$T/tmp")"
 fi
 
+# The caller's EXIT handler must see the script's own status, not the rm's:
+# test.sh's gate_exit_report reads $? to say THIS RUN FAILED. Control first:
+# with go on PATH (no chaining) the handler sees 1, so the probe arm's reading
+# is about the chaining and not about how the handler reads $?.
+for arm in path probe; do
+    if [ "$arm" = path ]; then
+        env_path="$T/fake:$STRIPPED_PATH"; probe="$T/empty1"
+    else
+        env_path="$STRIPPED_PATH"; probe="$T/fake"
+    fi
+    out="$(cd "$T/work" && env -i HOME="$T" PATH="$env_path" TMPDIR="$T/tmp" POGO_GO_PROBE="$probe" LIB="$LIB" /bin/bash -c '
+        report() { local s=$?; echo "HANDLER-SAW=$s"; }
+        trap report EXIT
+        . "$LIB"
+        go_toolchain_resolve >/dev/null || exit $?
+        false
+        exit 1
+    ' 2>&1)"
+    status=$?
+    if [ "$status" -eq 1 ] && printf '%s\n' "$out" | grep -q '^HANDLER-SAW=1$'; then
+        pass "$arm: the caller's EXIT handler sees the failing status (1), and the script exits 1"
+    else
+        fail "$arm: the caller's EXIT handler or exit status lost the failure (status $status): $out"
+    fi
+done
+
 # A TERM while the caller waits still removes the dir.
 run_clean POGO_GO_PROBE="$T/fake" LIB="$LIB" /bin/bash -c '
     . "$LIB"
