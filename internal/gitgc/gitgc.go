@@ -19,6 +19,7 @@
 package gitgc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -394,7 +395,30 @@ func (e *UndeterminedWorktreeError) Unwrap() error { return e.Err }
 // exactly the places this one is careful about — the .git skip, an unreadable
 // directory being an error rather than a smaller maximum, and a vanished entry
 // mid-walk not being either.
-func NewestWrite(worktreeDir string) (time.Time, error) { return newestWrite(worktreeDir) }
+//
+// It differs from newestWrite in two ways, both the caller's to choose
+// (drellem2/pogo#156):
+//
+//   - ctx BOUNDS it. The callback checks ctx before every entry, so a cancelled
+//     or expired context abandons the walk with an error wrapping ctx.Err() —
+//     never a partial maximum, for the reason newestWriteWithin gives. Before
+//     #156 nothing on this path observed a context, so a fleet sample's whole
+//     budget could be spent here and the terms measured after it starved.
+//
+//   - skipDirs is an OPT-IN list of directory BASENAMES pruned at any depth, in
+//     addition to .git. nil skips .git only, exactly as newestWrite does. It is
+//     a parameter and not a widened default because this walk has two classes
+//     of caller answering different questions: the detector asks "has this
+//     worker written anything recently", where a dependency store is noise; the
+//     operator age report (the cannot-tell refusal line and `pogo gc
+//     --list-preserved`) prints the `untouched N` a human clears a permanent pin
+//     on, and that number keeps its .git-only measurement — see the SCOPE and
+//     .git notes on newestWrite for why a skip there has to be argued from
+//     measurement rather than added by default. Only the first class opts in.
+func NewestWrite(ctx context.Context, worktreeDir string, skipDirs []string) (time.Time, error) {
+	newest, _, err := newestWriteWalk(ctx, worktreeDir, 0, skipDirs)
+	return newest, err
+}
 
 // newestWrite reports the modification time of the most recently written thing
 // inside worktreeDir, and an error when the tree cannot be ENUMERATED — which
@@ -521,13 +545,13 @@ var ErrWalkBudget = errors.New("age walk abandoned after the budget")
 // (drellem2/pogo#158): one node_modules worktree was measured at 21.6-28.1s in
 // drellem2/pogo#168, and #162 reports a host holding 196 retained trees. It is
 // ALSO the second conjunct of cmd/pogod's progresswatch, which calls the
-// exported NewestWrite and is explicitly not this ticket's to change.
+// exported NewestWrite.
 //
 // So the bound is opt-in per caller. ScanPreserved passes one because it is
-// answering a human who is watching an empty terminal; progresswatch passes
-// none and behaves exactly as it did. Making the walk CHEAP — rather than
-// merely interruptible — belongs to #156/#168, which own that walk's cost for
-// their own consumer and want different acceptance for it.
+// answering a human who is watching an empty terminal. progresswatch bounds its
+// walk with a context instead, and is the only caller that also opts into a
+// skip list (drellem2/pogo#156); this function passes none, so the operator age
+// report still measures every entry but .git.
 //
 // An abandoned walk NEVER returns a partial maximum. The rule newestWrite
 // already applies to an unreadable directory applies here for the same reason:
@@ -535,15 +559,37 @@ var ErrWalkBudget = errors.New("age walk abandoned after the budget")
 // 30 days" about a tree whose recently written half was never visited, and this
 // number is what a human clears a permanent pin on.
 func newestWriteWithin(worktreeDir string, budget time.Duration) (time.Time, error) {
+	newest, _, err := newestWriteWalk(context.Background(), worktreeDir, budget, nil)
+	return newest, err
+}
+
+// newestWriteWalk is the one implementation of the walk. budget and ctx are two
+// independent bounds — the first this package's own (ErrWalkBudget), the second
+// the caller's — and skipDirs is NewestWrite's opt-in list. The int is the
+// number of entries the walk visited, returned so a test can measure what a
+// skip saves as entries rather than assert it (drellem2/pogo#178).
+func newestWriteWalk(ctx context.Context, worktreeDir string, budget time.Duration, skipDirs []string) (time.Time, int, error) {
 	var deadline time.Time
 	if budget > 0 {
 		deadline = time.Now().Add(budget)
 	}
+	var skip map[string]bool
+	if len(skipDirs) > 0 {
+		skip = make(map[string]bool, len(skipDirs))
+		for _, name := range skipDirs {
+			skip[name] = true
+		}
+	}
 	var newest time.Time
+	visited := 0
 	err := filepath.WalkDir(worktreeDir, func(path string, d fs.DirEntry, err error) error {
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return fmt.Errorf("%s: %w of %s (reached %s)", worktreeDir, ErrWalkBudget, budget, path)
 		}
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("%s: age walk abandoned: %w (reached %s after %d entries)", worktreeDir, cerr, path, visited)
+		}
+		visited++
 		if err != nil {
 			// A directory we cannot read. Report no age at all rather than a
 			// maximum over the part we happened to see — a partial walk would
@@ -560,6 +606,13 @@ func newestWriteWithin(worktreeDir string, budget time.Duration) (time.Time, err
 			}
 			return nil
 		}
+		if skip != nil && d.IsDir() && path != worktreeDir && skip[d.Name()] {
+			// The caller's opt-in list (NewestWrite). Pruned whole: its own
+			// mtime and everything under it are discarded, which is the point —
+			// a dependency store is written by an install, not by the agent's
+			// edits, and is where nearly all of a JS worktree's entries live.
+			return fs.SkipDir
+		}
 		info, ierr := d.Info()
 		if ierr != nil {
 			// One entry that vanished or cannot be stat'ed mid-walk is not an
@@ -574,9 +627,9 @@ func newestWriteWithin(worktreeDir string, budget time.Duration) (time.Time, err
 		return nil
 	})
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, visited, err
 	}
-	return newest, nil
+	return newest, visited, nil
 }
 
 // worktreeRemovalCheck is the decision RemoveWorktree makes, computed WITHOUT
