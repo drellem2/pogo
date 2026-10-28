@@ -62,8 +62,41 @@ Three keys worth knowing:
 | `restart_on_crash` | bool | pogod restarts the agent if it exits unexpectedly | `true` for crew, `false` for polecats |
 | `nudge_on_start` | string | Message sent to the agent's PTY immediately after spawn | empty |
 
-There are three more — `worktree` for polecat templates, and `provider` /
-`model`, both covered below — but those three carry the day.
+There are four more — `worktree` for polecat templates, `provider` /
+`model`, both covered below, and `wake` (next section) — but those three carry
+the day.
+
+### Declare how an agent is woken (`wake`)
+
+An agent reads its mail when something wakes it. By default that is a
+`mail-check-<name>` schedule firing on a timer, and `pogo agent diagnose`,
+deaf-watch and `pogo check-mailloops` report an agent with no such schedule as
+`no_mail_loop` (it can be mailed, and nothing will wake it). An agent woken
+instead by wake-watch's **pointer nudges** — sent when mail lands — declares
+that, and is then not judged on having a mail-check at all:
+
+```toml
++++
+auto_start = true
+wake = "pointer"     # or "mail-check", the default
++++
+```
+
+For the whole install, set the default in config.toml; a prompt's own `wake`
+overrides it in **both** directions:
+
+```toml
+[agents]
+wake = "pointer"     # default "mail-check"
+```
+
+A declared agent is still listed — under "not judged", reason `pointer_wake` —
+and never counted healthy. `diagnose` names where the declaration came from
+(`prompt frontmatter <path>` or `config.toml [agents] wake`) and shows the last
+`wake_unconsumed` as context. An unrecognised value is named in that source and
+the agent stays judged. Removing a mail-check by hand (`pogo schedule rm`) is
+**not** a declaration, and diagnose keeps warning until you add one
+(drellem2/pogo#232, #236).
 
 Frontmatter is parsed at spawn time. Edit a file, restart the agent, the new
 settings apply. There's no live reload — pogod won't notice that you flipped

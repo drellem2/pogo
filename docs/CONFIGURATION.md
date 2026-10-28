@@ -540,6 +540,26 @@ command override) without putting a crew fleet on the machine. Per-agent
 opt-out stays in prompt frontmatter — see
 [docs/customizing.md](customizing.md) §"Opt out of auto-start".
 
+## Wake mode default (`[agents] wake`)
+
+How agents are woken to read their mail, for every agent whose prompt does not
+say (drellem2/pogo#232, #236):
+
+```toml
+[agents]
+wake = "pointer"   # default "mail-check"
+```
+
+`"mail-check"` means a `mail-check-<name>` schedule wakes the agent, and an
+agent without one is `no_mail_loop` to diagnose, deaf-watch and
+`pogo check-mailloops`. `"pointer"` means wake-watch's pointer nudges wake it,
+and it is owed no mail-check: it is listed as not judged (`pointer_wake`) rather
+than as missing. A prompt's frontmatter `wake` overrides this default in both
+directions — see [docs/customizing.md](customizing.md) §"Declare how an agent
+is woken". pogod logs the value at startup, and logs an unrecognised value as an
+error; agents are then judged as `mail-check`. This is the one switch wakewatch
+phase 3 (mg-a2ff) uses to take crew off their timers.
+
 ## Agent PATH (extra_path)
 
 Under launchd/systemd pogod inherits a minimal PATH, so spawned harnesses must
@@ -2901,6 +2921,12 @@ are **report-only**.
   not running ("not there" is not a fault); an agent whose prompt tree cannot be
   read. That last one is the cry-wolf guard mg-738f argued for: a wrong "yes"
   costs a false RED, and a health signal that cries wolf gets ignored.
+  And an agent that **declares pointer wake** (`wake = "pointer"` in its
+  frontmatter, or the `[agents] wake` default — see
+  [Wake mode default](#wake-mode-default-agents-wake)): it is owed no
+  mail-check, so it is listed as not judged with reason `pointer_wake`. A
+  removal event is never read as that declaration: `explicit_rm` is also what
+  `pogo agent park` and any `pogo schedule rm` emit.
 - **A hold-down, not an instant alarm.** A missing loop must persist unbroken for
   `hold_down` (15m) before it is announced. Spawn and schedule registration are
   not simultaneous, and a nightly redeploy (mg-42ac) re-runs that gap for the
