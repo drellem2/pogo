@@ -79,6 +79,8 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[heart_watch]` | `enabled` | on | observes | Mails when a crew heartbeat goes stale. `restart_after` is a threshold in the notice; heart-watch restarts nothing. See [heart-watch](#who-reads-the-crew-heartbeat-when-the-coordinator-is-dark-heart-watch). |
 | `[crew_reset]` | `enabled` | on | ACTS | Mails a crew agent whose session has run 4h, asking it to write a handoff note at its next safe point and run `pogo agent stop` on itself, so restart_on_crash brings it back in a fresh session. It asks at most twice per session and stops nothing itself. See [crew-reset](#crew-context-reset-crew-reset). Code: `internal/crewreset`. |
 | `[blind_watch]` | `enabled` | on | observes | Mails when wedge-watch keeps declining to judge an agent. See [blind-watch](#who-reads-a-detector-that-says-it-cannot-answer-blind-watch). |
+| `[blind_watch]` | `mail` | on | observes | `off` stops all blind-watch mail. Sampling continues, and the findings are still recorded in events.log as `notified=false`, `reason=mail_disabled`, which is then their only reader. See [blind-watch](#who-reads-a-detector-that-says-it-cannot-answer-blind-watch). |
+| `[blind_watch]` | `out_of_band` | on | observes | `off`: no mail from this watcher to [agents] escalation_box; the coordinator and events.log are unchanged. See [blind-watch](#who-reads-a-detector-that-says-it-cannot-answer-blind-watch). |
 | `[absent_watch]` | `enabled` | on | observes | Mails when a configured agent is missing from the registry. It never starts the agent. See [absent-watch](#the-absent-agent-announcer-absent-watch). |
 | `[progress_watch]` | `enabled` | on | observes | Mails when the fleet is landing no work. See [progress-watch](#is-the-fleet-getting-anything-done-progress-watch). |
 | `[first_turn]` | `enabled` | on | observes | Mails when an agent never completes its first turn. See [first-turn](#the-first-completed-turn-floor-first-turn). |
@@ -3401,7 +3403,34 @@ stale_after = "1h"         # the detector may go this long without completing a
 renotify_after = "24h"     # an unchanged finding re-mails after this (default
                            # 24h). 2609 notices is the failure mode on the other
                            # side.
+mail = true                # default true: false sends no blind-watch mail at all
+out_of_band = true         # default true: false sends no copy to
+                           # [agents] escalation_box
 ```
+
+**Its mail can be switched off without switching off the watcher**
+(drellem2/pogo#244). `enabled = false` stops the sampling too, and with it every
+`blind_watch_*` event. These two keys keep the runner and the events, and use
+the same names and meaning as [`[conditions]`](#pogods-own-conditions-conditions):
+
+| Key | Default | Effect when changed |
+|-----|---------|---------------------|
+| `mail` | `true` | `false`: no mail from this watcher to anyone. Every `blind_watch_finding` and `blind_watch_clear` is still emitted, with `notified=false` and `reason=mail_disabled`. |
+| `out_of_band` | `true` | `false`: no mail from this watcher to [agents] escalation_box; the coordinator and events.log are unchanged |
+
+**What it costs.** The findings about the detector itself (`stopped`, `empty`),
+and any naming the coordinator, go to the escalation box ALONE. With
+`out_of_band = false` those are mailed to nobody and become event-only, so a
+stopped or empty wedge-watch is back in a channel with no reader, which is the
+condition mg-d616 built this watcher to end. Findings routed to the coordinator
+still mail.
+
+**The record stays honest.** A withheld send is never logged as mailed. Each
+event carries `mail_suppressed` and, when a box was withheld, `suppressed` with
+its name; `notified` lists the boxes actually mailed, or is `false` with
+`reason=mail_disabled` when none was. At startup pogod logs whether blind-watch
+is armed and which of its mail is off; with `enabled = false` it logs
+`blind-watch NOT armed (disabled by config)`.
 
 **It is REPORT-ONLY and it does NOT route wedge-watch's findings.** Escalating a
 confirmed fleet-level wedge outside the wedged party is mg-fc8d item (3), an

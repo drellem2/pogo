@@ -89,6 +89,17 @@ type Options struct {
 	// StartedAt suppresses reporting for one StaleAfter after pogod starts: a
 	// freshly armed detector has legitimately completed no sample yet.
 	StartedAt time.Time
+
+	// MailOff is `[blind_watch] mail = false` (drellem2/pogo#244): no mail
+	// from this watcher to anyone. Sampling continues and every finding and
+	// clear is still emitted, with notified=false and reason=mail_disabled.
+	// Inverted so the zero value is the shipped default (mail on). Mail stays
+	// required even when this is set: the sends are gated, never nil'd.
+	MailOff bool
+	// OutOfBandOff is `[blind_watch] out_of_band = false`: no mail from this
+	// watcher to HumanBox; the coordinator and events.log are unchanged. A
+	// finding routed only to HumanBox becomes event-only.
+	OutOfBandOff bool
 }
 
 // Watcher rides pogod's heartbeat and reads a detector's own judgement state.
@@ -101,6 +112,8 @@ type Watcher struct {
 	coordinator   string
 	humanBox      string
 	startedAt     time.Time
+	mailOff       bool
+	outOfBandOff  bool
 
 	source SourceFunc
 	mail   MailFunc
@@ -158,6 +171,8 @@ func New(opts Options) *Watcher {
 		coordinator:   opts.Coordinator,
 		humanBox:      humanBox,
 		startedAt:     opts.StartedAt,
+		mailOff:       opts.MailOff,
+		outOfBandOff:  opts.OutOfBandOff,
 		source:        opts.Source,
 		mail:          opts.Mail,
 		emit:          emit,
@@ -348,10 +363,13 @@ func (w *Watcher) clear(snap Snapshot, now time.Time) {
 	if !had {
 		return
 	}
+	to, suppressed := w.deliverable(w.clearRecipients(told))
+	details := map[string]any{"detector": snap.Detector, "examined": snap.Examined}
+	markDelivery(details, to, suppressed)
 	w.emit(events.Event{
 		EventType: EventClear,
 		Agent:     "pogod",
-		Details:   map[string]any{"detector": snap.Detector, "examined": snap.Examined},
+		Details:   details,
 	})
 	subject := fmt.Sprintf("blind-watch: %s can judge the fleet again", snap.Detector)
 	body := fmt.Sprintf(
@@ -359,12 +377,12 @@ func (w *Watcher) clear(snap Snapshot, now time.Time) {
 			"This clears the condition blind-watch reported. Nothing about the fleet's HEALTH is\n"+
 			"asserted here — only that the instrument is answering.\n",
 		snap.Detector, snap.SampledAt.UTC().Format(time.RFC3339), snap.Examined)
-	for _, to := range w.clearRecipients(told) {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+	for _, box := range to {
+		if err := w.mail(box, mailFrom, subject, body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",
-				Details:   map[string]any{"error": err.Error(), "to": to, "phase": "clear"},
+				Details:   map[string]any{"error": err.Error(), "to": box, "phase": "clear"},
 			})
 		}
 	}
@@ -385,7 +403,7 @@ func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
 	}
 
 	escalate := aboutTheDetector(confirmed) || namesCoordinator(confirmed, w.coordinator)
-	to := w.recipients(escalate)
+	to, suppressed := w.deliverable(w.recipients(escalate))
 	body := renderNotice(snap, confirmed, w.coordinator, escalate, now)
 	subj := subject(snap, confirmed)
 	for _, box := range to {
@@ -397,7 +415,9 @@ func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
 			})
 		}
 	}
-	if escalate {
+	// toldHuman means the human box was MAILED, not that it was meant to be:
+	// a clear must not reach a box that never heard the finding.
+	if escalate && contains(to, w.humanBox) {
 		w.mu.Lock()
 		w.toldHuman = true
 		w.mu.Unlock()
@@ -411,19 +431,63 @@ func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
 			names = append(names, t.Name)
 		}
 	}
+	details := map[string]any{
+		"detector":        snap.Detector,
+		"kinds":           kinds,
+		"targets":         names,
+		"examined":        snap.Examined,
+		"escalated":       escalate,
+		"reader_is_pogod": true,
+	}
+	markDelivery(details, to, suppressed)
 	w.emit(events.Event{
 		EventType: EventFinding,
 		Agent:     "pogod",
-		Details: map[string]any{
-			"detector":        snap.Detector,
-			"kinds":           kinds,
-			"targets":         names,
-			"examined":        snap.Examined,
-			"notified":        to,
-			"escalated":       escalate,
-			"reader_is_pogod": true,
-		},
+		Details:   details,
 	})
+}
+
+// deliverable applies `[blind_watch] mail` and `out_of_band` to the routed
+// recipients (drellem2/pogo#244): to is who is actually mailed, suppressed who
+// the config withheld. With out_of_band off only the human box is dropped, so a
+// finding routed to it alone is mailed to nobody and becomes event-only.
+func (w *Watcher) deliverable(wanted []string) (to, suppressed []string) {
+	for _, box := range wanted {
+		switch {
+		case w.mailOff:
+			suppressed = append(suppressed, box)
+		case w.outOfBandOff && box == w.humanBox && box != w.coordinator:
+			suppressed = append(suppressed, box)
+		default:
+			to = append(to, box)
+		}
+	}
+	return to, suppressed
+}
+
+// markDelivery records on an event who was mailed, so a withheld send is never
+// logged as delivered. Mailed to nobody, it carries the same contract as
+// `[conditions]`: notified=false, reason=mail_disabled.
+func markDelivery(details map[string]any, to, suppressed []string) {
+	details["mail_suppressed"] = len(suppressed) > 0
+	if len(suppressed) > 0 {
+		details["suppressed"] = suppressed
+	}
+	if len(to) == 0 && len(suppressed) > 0 {
+		details["notified"] = false
+		details["reason"] = "mail_disabled"
+		return
+	}
+	details["notified"] = to
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // recipients applies the routing rule. Same shape as internal/turnwatch and
