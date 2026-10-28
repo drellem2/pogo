@@ -349,11 +349,23 @@ cross-tool contract):
 
 | Identifier | Value | Why frozen |
 |---|---|---|
-| Branch prefix (`gitgc.BranchPrefix`) | `polecat-` | orphan-sweep reads live branches back by this prefix |
+| Branch prefix (`gitgc.BranchPrefix`) | `polecat-` | GC, stranded-work, the live-owner gate, the dispatch cap and verdictwatch all match branches by this prefix |
 | Polecats dir (`gitgc.DefaultPolecatsDir`) | `~/.pogo/polecats` | orphan-sweep reads the dir back from disk |
 | Agent-type key (`agent.TypePolecat`) | `polecat` | written to `POGO_AGENT_TYPE`; matched by reap/park/gitgc/config lookups |
 | Event-log actor prefix | `cat-<name>` | persisted actor identity; `classify.go` parses it back |
 | Role env var | `POGO_ROLE=polecat` | cross-tool contract consumed by `mg prime` / role detection |
+
+**The `polecat-` branch prefix is frozen on purpose, not left over.** It is the
+one identifier every reader of a polecat's work agrees on: the gc sweep, the
+stranded-work guards, the live-owner gate, the per-repo dispatch cap and
+verdictwatch each find a polecat's branch by this prefix. A configurable prefix
+would have to reach every one of them, and a reader that is missed does not
+fail loudly — it stops seeing the branch, which silently orphans the work or
+lets gc delete it. Renaming `worker` therefore never changes branch names.
+
+For a role-neutral spelling at the CLI, `pogo agent spawn-worker` is an alias
+for `pogo agent spawn-polecat`. The alias is static — it does not follow the
+`worker` name — and `spawn-polecat` remains the primary name.
 
 The `[agents.polecat]` config sub-table key (for per-worker provider overrides)
 is likewise a frozen identifier, not a display name — it stays `polecat` even if

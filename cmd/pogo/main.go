@@ -2894,8 +2894,12 @@ Example:
 	var spawnPolecatPreservedOverride string
 	var spawnPolecatMergedOverride string
 	var cmdAgentSpawnPolecat = &cobra.Command{
-		Use:   "spawn-polecat <name>",
-		Short: "Spawn a polecat from a prompt template",
+		Use: "spawn-polecat <name>",
+		// spawn-worker is the role-neutral spelling (drellem2/pogo#243). It is
+		// static on purpose: the cobra tree is built before config loads, so it
+		// cannot follow [agents] worker, and spawn-polecat stays the primary name.
+		Aliases: []string{"spawn-worker"},
+		Short:   "Spawn a polecat from a prompt template",
 		Long: `Spawn an ephemeral polecat (a disposable worker agent) using a prompt template from ~/.pogo/agents/templates/.
 The template is expanded with the provided variables and used as the agent's prompt file.
 
