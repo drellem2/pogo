@@ -114,6 +114,8 @@ var switchDefaults = map[string]func(*Config) string{
 	"conditions/mail":                            func(c *Config) string { return onOff(c.Conditions.Mail) },
 	"conditions/out_of_band":                     func(c *Config) string { return onOff(c.Conditions.OutOfBand) },
 	"conditions/disable":                         func(c *Config) string { return inertIfEmpty(len(c.Conditions.Disable)) },
+	"blind_watch/mail":                           func(c *Config) string { return onOff(c.BlindWatch.Mail) },
+	"blind_watch/out_of_band":                    func(c *Config) string { return onOff(c.BlindWatch.OutOfBand) },
 }
 
 // enabledDefault reads the Enabled field of the Config section a row names.

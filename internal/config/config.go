@@ -1993,6 +1993,17 @@ type BlindWatchConfig struct {
 	// RenotifyAfter is how long an unchanged finding stays quiet. Zero falls
 	// back to DefaultBlindWatchRenotify.
 	RenotifyAfter time.Duration
+	// Mail turns all blind-watch mail on or off (drellem2/pogo#244). Defaults
+	// to true. Off, the runner still samples and every finding and clear is
+	// recorded in events.log as notified=false, reason=mail_disabled; no mail
+	// is sent. Same contract as `[conditions] mail`.
+	Mail bool
+	// OutOfBand mails findings about the detector, or naming the coordinator,
+	// to `[agents] escalation_box`. Defaults to true. Off: no mail from this
+	// watcher to [agents] escalation_box; the coordinator and events.log are
+	// unchanged. A finding routed only to the escalation box becomes
+	// event-only.
+	OutOfBand bool
 }
 
 // AbsentWatchConfig configures pogod's ABSENT-AGENT announcer (mg-7d20): the
@@ -2535,8 +2546,12 @@ type parsedConfig struct {
 	crewResetEnabledSet    bool
 	// crewResetExcludeSet lets a later layer's `exclude = []` clear an earlier
 	// layer's list, which a length test cannot tell from an absent key.
-	crewResetExcludeSet     bool
-	blindWatchEnabledSet    bool
+	crewResetExcludeSet  bool
+	blindWatchEnabledSet bool
+	// blindWatchMailSet / blindWatchOutOfBandSet exist because both default
+	// to TRUE (drellem2/pogo#244).
+	blindWatchMailSet       bool
+	blindWatchOutOfBandSet  bool
 	progressWatchEnabledSet bool
 	firstTurnEnabledSet     bool
 	// synthWatchEnabledSet, refusalWatchEnabledSet and turnWatchEnabledSet exist
@@ -2733,6 +2748,8 @@ func Load() *Config {
 			HoldDown:      DefaultBlindWatchHoldDown,
 			StaleAfter:    DefaultBlindWatchStaleAfter,
 			RenotifyAfter: DefaultBlindWatchRenotify,
+			Mail:          true,
+			OutOfBand:     true,
 		},
 		AbsentWatch: AbsentWatchConfig{
 			Enabled:       true,
@@ -3131,6 +3148,12 @@ func Load() *Config {
 		}
 		if fileCfg.BlindWatch.RenotifyAfter > 0 {
 			cfg.BlindWatch.RenotifyAfter = fileCfg.BlindWatch.RenotifyAfter
+		}
+		if fileCfg.blindWatchMailSet {
+			cfg.BlindWatch.Mail = fileCfg.BlindWatch.Mail
+		}
+		if fileCfg.blindWatchOutOfBandSet {
+			cfg.BlindWatch.OutOfBand = fileCfg.BlindWatch.OutOfBand
 		}
 		if fileCfg.absentWatchEnabledSet {
 			cfg.AbsentWatch.Enabled = fileCfg.AbsentWatch.Enabled
@@ -4302,6 +4325,12 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.BlindWatch.RenotifyAfter = d
 				}
+			case "mail":
+				cfg.BlindWatch.Mail = val == "true"
+				cfg.blindWatchMailSet = true
+			case "out_of_band":
+				cfg.BlindWatch.OutOfBand = val == "true"
+				cfg.blindWatchOutOfBandSet = true
 			}
 		case "absent_watch":
 			switch key {

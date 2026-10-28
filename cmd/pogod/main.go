@@ -3328,13 +3328,13 @@ Flags:
 			Coordinator:   coordinator,
 			HumanBox:      escalationBox,
 			StartedAt:     time.Now(),
+			// drellem2/pogo#244: the sends are gated inside the watcher, never
+			// by passing a nil Mail — Check refuses to run without one.
+			MailOff:      !cfg.BlindWatch.Mail,
+			OutOfBandOff: !cfg.BlindWatch.OutOfBand,
 		})
-		log.Printf("pogod: blind-watch enabled (interval=%s hold_down=%s stale_after=%s renotify=%s) — "+
-			"wedge_watch_error finally has a consumer (mg-d616); a finding about the DETECTOR routes to %s, "+
-			"report-only, and wedge-watch's own findings stay unrouted (mg-fc8d item 3)",
-			cfg.BlindWatch.Interval, cfg.BlindWatch.HoldDown, cfg.BlindWatch.StaleAfter,
-			cfg.BlindWatch.RenotifyAfter, escalationBox)
 	}
+	log.Print(blindWatchStartupLine(cfg.BlindWatch, escalationBox))
 
 	// The done-item polecat reaper (mg-56d1): completion frees a slot, however
 	// completion happened. The merge hook above covers polecats whose deliverable
