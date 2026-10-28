@@ -26,6 +26,15 @@ TEST_SH_DIR="$(cd "$(dirname "$0")" && pwd)"
 gate_profile_begin "test.sh"
 trap 'gate_exit_report' EXIT
 
+# Find go even when it is not on PATH, e.g. under the refinery gate, whose PATH
+# is pogod's (gh#234). Called after the trap above so the cleanup of any private
+# go directory chains onto gate_exit_report instead of replacing it.
+# Checked before sourcing: bash 3.2 under set -e and an EXIT trap exits 0 when
+# a sourced file is missing, so a lost library would read as a green run.
+[ -r "$TEST_SH_DIR/scripts/lib/go-toolchain.sh" ] || { echo "test.sh: missing scripts/lib/go-toolchain.sh" >&2; exit 1; }
+. "$TEST_SH_DIR/scripts/lib/go-toolchain.sh"
+go_toolchain_resolve || exit $?
+
 echo "Step 2: Testing..."
 echo "Making test directories"
 mkdir -p _testdata/a-service/.git
@@ -387,6 +396,13 @@ gate_step "Testing the fleet-liveness probe's launchd arming" bash scripts/tmpdi
 gate_step "Testing the gate's per-step profile" bash scripts/gate-profile_test.sh
 
 gate_step "Testing build.sh" bash scripts/tmpdir-leak-guard.sh bash build_test.sh
+
+# How build.sh/fmt.sh/test.sh find go off PATH (gh#234, mg-bc32b). PATH is
+# stripped and the probe list points at fake dirs, so the result does not depend
+# on where this host installed go. The load-bearing case is (a)'s control: a
+# bare `go` must FAIL under the stripped PATH before the library's success is
+# credited to the library. (c) pins that a bad POGO_GO is refused, not skipped.
+gate_step "Testing the go toolchain lookup" bash scripts/tmpdir-leak-guard.sh bash scripts/go-toolchain_test.sh
 
 gate_step "Testing changelog fragment assembler" bash scripts/tmpdir-leak-guard.sh bash scripts/assemble-changelog_test.sh
 

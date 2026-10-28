@@ -27,6 +27,14 @@ gate, where a `go install` would overwrite the machine's installed `pogod` with
 an unreviewed branch build. Pass `--install` when you actually want the binaries
 on your `PATH`, or set `POGO_BUILD_DIR` to redirect the output directory.
 
+The three scripts use `go` from `PATH` when it is there. When it is not (the
+refinery gate runs with pogod's `PATH`), they look in `$GOROOT/bin`,
+`/usr/local/go/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/lib/go/bin`
+and the newest `~/sdk/go*/bin`. Set `POGO_GO=/path/to/go` to choose one
+yourself; it is checked before `PATH`, and a `POGO_GO` that is not an executable
+file is an error. Each run prints which go it chose. See
+`scripts/lib/go-toolchain.sh`.
+
 ### Adding a suite to `test.sh`: wrap it in `gate_step` (`mg-eed9`)
 
 Every suite `test.sh` runs is merge-gate cost, and the gate is what sets the

@@ -201,6 +201,16 @@ BUILD_SH_DIR="$(cd "$(dirname "$0")" && pwd)"
 gate_profile_begin "build.sh"
 trap 'gate_profile_report' EXIT
 
+# Find go even when it is not on PATH, e.g. under the refinery gate, whose PATH
+# is pogod's (gh#234). A go found by probing is exported to fmt.sh and test.sh
+# through a private symlink directory; see scripts/lib/go-toolchain.sh. Called
+# after the trap above so its cleanup chains onto gate_profile_report.
+# Checked before sourcing: bash 3.2 under set -e and an EXIT trap exits 0 when
+# a sourced file is missing, so a lost library would read as a green run.
+[ -r "$BUILD_SH_DIR/scripts/lib/go-toolchain.sh" ] || { echo "build.sh: missing scripts/lib/go-toolchain.sh" >&2; exit 1; }
+. "$BUILD_SH_DIR/scripts/lib/go-toolchain.sh"
+go_toolchain_resolve || exit $?
+
 # The step labels below are the profile's row names, and fmt.sh/test.sh print
 # their own "Step N:" banners — so these are named for what the row IS rather
 # than restating a banner the reader is about to see anyway.

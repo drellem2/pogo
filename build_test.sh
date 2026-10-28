@@ -50,6 +50,8 @@ chmod +x "${fixture}/build.sh" "${fixture}/fmt.sh" "${fixture}/test.sh"
 # one it ships with.
 mkdir -p "${fixture}/scripts/lib"
 cp "${SCRIPT_DIR}/scripts/lib/gate-profile.sh" "${fixture}/scripts/lib/gate-profile.sh"
+# And scripts/lib/go-toolchain.sh, which build.sh sources to find go (gh#234).
+cp "${SCRIPT_DIR}/scripts/lib/go-toolchain.sh" "${fixture}/scripts/lib/go-toolchain.sh"
 
 printf 'module example.com/hello\n\ngo 1.25.0\n' > "${fixture}/go.mod"
 good_main='package main
@@ -324,6 +326,7 @@ make_src() {
   printf '#!/bin/bash\ntrue\n' > "$d/test.sh"
   chmod +x "$d/build.sh" "$d/fmt.sh" "$d/test.sh"
   cp "${SCRIPT_DIR}/scripts/lib/gate-profile.sh" "$d/scripts/lib/gate-profile.sh"
+  cp "${SCRIPT_DIR}/scripts/lib/go-toolchain.sh" "$d/scripts/lib/go-toolchain.sh"
   printf 'module example.com/hello\n\ngo 1.25.0\n' > "$d/go.mod"
   printf '%s' "$good_main" > "$d/cmd/hello/main.go"
   printf 'bin/\n' > "$d/.gitignore"
