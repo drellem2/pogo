@@ -63,5 +63,13 @@ func pinAndResolveRoles(cfg *config.Config) (*config.Config, error) {
 	agent.SetCoordinatorName(cfg.Agents.Coordinator)
 	agent.SetWorkerName(cfg.Agents.Worker)
 	agent.SetSMEName(cfg.Agents.SME)
+	// The install-wide wake-mode default ([agents] wake) is read by diagnose,
+	// deafwatch and check-mailloops through mailLoopExclusionFor, so it must be
+	// set before any of them runs (drellem2/pogo#232, #236).
+	if err := agent.SetDefaultWakeMode(cfg.Agents.Wake); err != nil {
+		log.Printf("pogod: %v", err)
+	} else if cfg.Agents.Wake != "" {
+		log.Printf("pogod: [agents] wake = %q — the install default for agents whose prompt does not declare one", cfg.Agents.Wake)
+	}
 	return cfg, pinErr
 }

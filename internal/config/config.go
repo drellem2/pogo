@@ -2348,6 +2348,14 @@ type AgentsConfig struct {
 	// zero value is false — read this via a Load()ed Config, not a
 	// hand-built AgentsConfig.
 	AutoStart bool
+	// Wake is the install-wide default wake mode ([agents] wake): "mail-check"
+	// (a mail-check-<name> schedule wakes each agent; the built-in default) or
+	// "pointer" (wakewatch's pointer nudges do, and agents are owed no
+	// mail-check schedule). An agent's prompt frontmatter `wake` overrides it in
+	// both directions. Empty means unset. Validated by agent.SetDefaultWakeMode,
+	// which pogod calls at startup; see internal/agent/wakemode.go
+	// (drellem2/pogo#232, #236).
+	Wake string
 	// Command is the default command template for all agent types. When empty,
 	// the active provider's CommandTemplate is used instead.
 	// Supports Go template variables: {{.PromptFile}}, {{.AgentName}}, {{.AgentType}}, {{.WorkDir}}
@@ -4644,6 +4652,8 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				cfg.Agents.Worker = unquotedVal
 			case "sme":
 				cfg.Agents.SME = unquotedVal
+			case "wake":
+				cfg.Agents.Wake = unquotedVal
 			case "extra_path":
 				cfg.Agents.ExtraPath = parseStringArray(val)
 			}

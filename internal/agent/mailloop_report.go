@@ -71,6 +71,13 @@ const (
 	// the instrument is broken, and an operator should act on that even though
 	// Actionable deliberately does not (see its doc comment).
 	ExclusionUnreadablePrompts MailLoopExclusionReason = "unreadable_prompts"
+	// ExclusionPointerWake: the agent DECLARES pointer wake — wake = "pointer"
+	// in its prompt frontmatter or the [agents] wake install default
+	// (drellem2/pogo#232, #236). It is woken by wakewatch's pointer nudges and
+	// owed no mail-check schedule, so having none is not a fault. Listed, never
+	// counted healthy: what such an agent IS judged on (unconsumed work) is
+	// wakewatch phase 3's job (mg-a2ff), not this report's.
+	ExclusionPointerWake MailLoopExclusionReason = "pointer_wake"
 )
 
 // Describe renders the reason as the phrase an operator reads. An unrecognised
@@ -86,6 +93,8 @@ func (r MailLoopExclusionReason) Describe() string {
 		return "not configured — no prompt on this machine"
 	case ExclusionUnreadablePrompts:
 		return "UNREADABLE prompt tree — could not be classified at all"
+	case ExclusionPointerWake:
+		return "pointer wake declared — owed no mail-check schedule"
 	case "":
 		return "reason not reported"
 	}
@@ -297,8 +306,9 @@ func (rep MailLoopReport) Render() string {
 	if len(rep.Missing) == 0 {
 		if rep.Judged == 0 {
 			fmt.Fprintf(&b, "NOTHING JUDGED: %d agent(s) in the registry, none of them judgeable.\n", rep.Scanned)
-			b.WriteString("This is not an all-clear. Polecats, configured-but-stopped agents, and\n")
-			b.WriteString("agents whose prompt tree could not be read are deliberately not judged.\n")
+			b.WriteString("This is not an all-clear. Polecats, configured-but-stopped agents,\n")
+			b.WriteString("agents whose prompt tree could not be read, and agents that declare\n")
+			b.WriteString("pointer wake are deliberately not judged.\n")
 			rep.renderCoverage(&b)
 			return b.String()
 		}
@@ -328,6 +338,7 @@ func (rep MailLoopReport) Render() string {
 			"      --replay once --message \"Check your mail with mg mail list %s.\"\n",
 			m.Name, m.Name, m.Name)
 	}
+	fmt.Fprintf(&b, "\nIf an absence is deliberate, declare pointer wake (%s)\ninstead of restoring it.\n", WakeModeHow)
 	return b.String()
 }
 

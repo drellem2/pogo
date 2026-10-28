@@ -2248,6 +2248,11 @@ Flags:
 			// desired-state predicate as the reap above — one source of truth,
 			// two directions.
 			agentRegistry.SetMailCheckProvider(schedulerMailChecks{sched: s})
+			// The context diagnose prints beside that verdict: the last
+			// mail-check removal and the last wake_unconsumed (drellem2/pogo#232,
+			// #236). The scheduler's own-root log is where schedule_removed
+			// lands; wakewatch writes the same POGO_HOME log in production.
+			agentRegistry.SetDiagnoseEventContext(agent.EventLogContext{Path: scheduler.EventLogPath(schedPath)})
 			// Let park/wake pause and restore an agent's schedules (mg-41e1).
 			agentRegistry.SetSchedulePauser(schedulePauser{sched: s})
 			log.Printf("pogod: scheduler loaded from %s", schedPath)
