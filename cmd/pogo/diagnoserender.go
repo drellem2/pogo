@@ -67,3 +67,47 @@ func diagnoseHealthSection(w io.Writer, diag *agent.DiagnoseInfo) {
 		writeFailingTurns(w, diag.Name, diag.TranscriptCheck)
 	}
 }
+
+// writeMailLoop renders the mail-loop verdict and its context
+// (drellem2/pogo#232, #236). Three cases:
+//
+//   - DECLARED pointer wake: one informational line naming the declaration's
+//     source, no warning and no recipe — the absence is what was declared.
+//     The last wake_unconsumed rides beside it as context; it is not a verdict
+//     (that is wakewatch phase 3, mg-a2ff).
+//   - UNDECLARED and missing: the warning and the restore recipe stay, plus
+//     how to declare the absence instead, and the last removal of the row as
+//     CONTEXT. The removal never softens the warning: explicit_rm is also what
+//     park and any `schedule rm` emit, so it is not evidence of intent.
+//   - anything else: nothing, as before.
+func writeMailLoop(w io.Writer, diag *agent.DiagnoseInfo) {
+	if diag.PointerWake {
+		if diag.MailCheckObserved == agent.MailLoopObservedPresent {
+			fmt.Fprintf(w, "\nMail loop:      not judged — pointer wake declared (%s);\n", diag.WakeModeSource)
+			fmt.Fprintf(w, "                a mail-check-%s schedule is still registered anyway\n", diag.Name)
+		} else {
+			fmt.Fprintf(w, "\nMail loop:      none — pointer wake declared (%s)\n", diag.WakeModeSource)
+		}
+		if diag.LastWakeUnconsumed != nil {
+			fmt.Fprintf(w, "                last wake_unconsumed: %s\n", diag.LastWakeUnconsumed.Describe())
+			fmt.Fprintf(w, "                (context only — not part of the health verdict)\n")
+		}
+		return
+	}
+	if !diag.MailCheckMissing {
+		return
+	}
+	fmt.Fprintf(w, "\n⚠ NO MAIL LOOP: %s has no mail-check schedule. Mail sent to it\n", diag.Name)
+	fmt.Fprintf(w, "  will sit unread until something nudges it by hand — the agent looks fine\n")
+	fmt.Fprintf(w, "  and is unreachable (mg-de08). An agent that is running but not\n")
+	fmt.Fprintf(w, "  auto_start is reported too: turning one on does not give it a mail\n")
+	fmt.Fprintf(w, "  loop, and nothing else will flag that it cannot hear (mg-738f).\n")
+	fmt.Fprintf(w, "  Restore it:\n")
+	fmt.Fprintf(w, "    pogo schedule %s --cron \"*/10 * * * *\" --id mail-check-%s --replay once \\\n", diag.Name, diag.Name)
+	fmt.Fprintf(w, "        --message \"Check your mail with mg mail list %s and handle any unread messages.\"\n", diag.Name)
+	fmt.Fprintf(w, "  If this absence is deliberate, declare pointer wake (%s) instead of restoring it.\n", agent.WakeModeHow)
+	if diag.LastMailCheckRemoval != nil {
+		fmt.Fprintf(w, "  Last removal of mail-check-%s: %s\n", diag.Name, diag.LastMailCheckRemoval.Describe())
+		fmt.Fprintf(w, "  (context only — a removal is not a declaration, and does not change the verdict)\n")
+	}
+}

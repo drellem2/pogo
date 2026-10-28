@@ -2585,7 +2585,14 @@ Health states:
                  to be running (mg-de08) and for any configured agent that IS
                  running, including an auto_start=false one someone turned on —
                  a running agent nothing can wake is a fault whatever its
-                 frontmatter wants (mg-738f)
+                 frontmatter wants (mg-738f). NOT reported for an agent that
+                 declares pointer wake — wake = "pointer" in its prompt
+                 frontmatter, or [agents] wake = "pointer" in config.toml,
+                 which frontmatter overrides either way. Such an agent is
+                 woken by wakewatch's pointer nudges and owed no mail-check;
+                 diagnose prints "Mail loop: none — pointer wake declared
+                 (<source>)" and the last wake_unconsumed as context, and its
+                 health is whatever else is true of it (drellem2/pogo#232)
   exited       — process has exited
   dead         — registered as running but OS process is gone
 
@@ -2656,16 +2663,7 @@ down. To keep it down, park it.`,
 						diag.LastActivity.UTC().Format(time.RFC3339))
 					fmt.Printf("  The agent is parked on its own one-shot wake, not stalled.\n")
 				}
-				if diag.MailCheckMissing {
-					fmt.Printf("\n⚠ NO MAIL LOOP: %s has no mail-check schedule. Mail sent to it\n", diag.Name)
-					fmt.Printf("  will sit unread until something nudges it by hand — the agent looks fine\n")
-					fmt.Printf("  and is unreachable (mg-de08). An agent that is running but not\n")
-					fmt.Printf("  auto_start is reported too: turning one on does not give it a mail\n")
-					fmt.Printf("  loop, and nothing else will flag that it cannot hear (mg-738f).\n")
-					fmt.Printf("  Restore it:\n")
-					fmt.Printf("    pogo schedule %s --cron \"*/10 * * * *\" --id mail-check-%s --replay once \\\n", diag.Name, diag.Name)
-					fmt.Printf("        --message \"Check your mail with mg mail list %s and handle any unread messages.\"\n", diag.Name)
-				}
+				writeMailLoop(os.Stdout, diag)
 				if diag.Stalled {
 					fmt.Printf("\n⚠ Agent appears stalled. Consider nudging or restarting:\n")
 					fmt.Printf("  pogo nudge %s \"status check\"\n", diag.Name)

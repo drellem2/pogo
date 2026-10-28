@@ -83,6 +83,13 @@ WHO IS NOT JUDGED, deliberately:
                       be classified, and a false RED costs more than silence.
                       This one is not a clean exclusion — it is a fault in the
                       instrument, and the report says so in those words.
+  pointer wake        the agent DECLARES that wakewatch's pointer nudges wake
+                      it — wake = "pointer" in its prompt frontmatter, or
+                      [agents] wake = "pointer" in config.toml, which
+                      frontmatter overrides either way (drellem2/pogo#232,
+                      #236). It is owed no mail-check, so having none is not a
+                      fault. It is LISTED here, never counted healthy; judging
+                      it on unconsumed work is wakewatch phase 3's job.
 
 Those exclusions mean a small "judged" count is normal. Every report NAMES the
 agents it did not judge, whatever the verdict — a clean bill of health over 2 of
@@ -102,7 +109,7 @@ with no "mail_loop" came from a pogod older than the observation and means NOT
 REPORTED, never "absent".
 
 The machine-readable reason in --json is one of "polecat", "not_running",
-"not_configured", "unreadable_prompts" — one per category above. Until mg-7b3f
+"not_configured", "unreadable_prompts", "pointer_wake" — one per category above. Until mg-7b3f
 the last two were a single value, because agent.IsConfiguredAgent returned false
 for both and the reason set was deliberately kept no more precise than the code
 could back; this text named a distinction the code could not compute, which was

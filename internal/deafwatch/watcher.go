@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/events"
 )
 
@@ -438,8 +439,8 @@ func renderBody(snap Snapshot, confirmed []Finding, since map[string]time.Time, 
 	b.WriteString("through mail, so they are unreachable while looking perfectly healthy.\n\n")
 	b.WriteString(renderFindings(confirmed, since, now))
 	fmt.Fprintf(&b, "\nJudged %d of %d agents in the registry. Polecats, configured-but-stopped\n"+
-		"agents, and agents whose prompt tree could not be read are NOT judged — see\n"+
-		"agent.mailLoopJudgeable.\n\n", snap.Judged, snap.Scanned)
+		"agents, agents whose prompt tree could not be read, and agents that declare\n"+
+		"pointer wake are NOT judged — see agent.mailLoopJudgeable.\n\n", snap.Judged, snap.Scanned)
 	b.WriteString("Confirm one:\n")
 	for _, f := range confirmed {
 		fmt.Fprintf(&b, "  pogo agent diagnose %s        # expect health=no_mail_loop\n", f.Name)
@@ -450,6 +451,7 @@ func renderBody(snap Snapshot, confirmed []Finding, since map[string]time.Time, 
 			"      --replay once --message \"Check your mail with mg mail list %s.\"\n",
 			f.Name, f.Name, f.Name)
 	}
+	fmt.Fprintf(&b, "\nIf an absence is deliberate, declare pointer wake (%s)\ninstead of restoring it.\n", agent.WakeModeHow)
 	b.WriteString("\nList what the scheduler currently holds:\n  pogo schedule list\n")
 	b.WriteString("\nThis is REPORT-ONLY — pogod did NOT register a schedule, nudge, or restart\n" +
 		"anything. Registering the loop back on the agent's behalf would hide WHY it\n" +
