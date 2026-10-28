@@ -122,10 +122,12 @@ else
     fail "pogo-go.* left behind with a caller trap: $(ls "$T/tmp")"
 fi
 
-# The caller's EXIT handler must see the script's own status, not the rm's:
-# test.sh's gate_exit_report reads $? to say THIS RUN FAILED. Control first:
-# with go on PATH (no chaining) the handler sees 1, so the probe arm's reading
-# is about the chaining and not about how the handler reads $?.
+# The caller's EXIT handler must run, and must see the script's own status,
+# not the rm's: test.sh's gate_exit_report reads $? to say THIS RUN FAILED.
+# The callers run under set -e, as build.sh and test.sh do, because errexit
+# inside the trap is what can skip the handler. Control first: with go on PATH
+# (no chaining) the handler sees 1, so the probe arm's reading is about the
+# chaining and not about how the handler reads $?.
 for arm in path probe; do
     if [ "$arm" = path ]; then
         env_path="$T/fake:$STRIPPED_PATH"; probe="$T/empty1"
@@ -133,6 +135,7 @@ for arm in path probe; do
         env_path="$STRIPPED_PATH"; probe="$T/fake"
     fi
     out="$(cd "$T/work" && env -i HOME="$T" PATH="$env_path" TMPDIR="$T/tmp" POGO_GO_PROBE="$probe" LIB="$LIB" /bin/bash -c '
+        set -e
         report() { local s=$?; echo "HANDLER-SAW=$s"; }
         trap report EXIT
         . "$LIB"
@@ -145,6 +148,33 @@ for arm in path probe; do
         pass "$arm: the caller's EXIT handler sees the failing status (1), and the script exits 1"
     else
         fail "$arm: the caller's EXIT handler or exit status lost the failure (status $status): $out"
+    fi
+done
+
+# The same through the real handler test.sh arms: a failing gate whose go was
+# probed must still print the profile and the THIS RUN FAILED notice.
+for arm in path probe; do
+    if [ "$arm" = path ]; then
+        env_path="$T/fake:$STRIPPED_PATH"; probe="$T/empty1"
+    else
+        env_path="$STRIPPED_PATH"; probe="$T/fake"
+    fi
+    out="$(cd "$REPO_ROOT" && env -i HOME="$T" PATH="$env_path" TMPDIR="$T/tmp" POGO_GO_PROBE="$probe" LIB="$LIB" /bin/bash -c '
+        set -e
+        . scripts/lib/gate-profile.sh
+        . scripts/lib/gate-exit.sh
+        gate_profile_begin "mini-test.sh"
+        trap "gate_exit_report" EXIT
+        . "$LIB"
+        go_toolchain_resolve >/dev/null || exit $?
+        gate_step "a failing step" false
+    ' 2>&1)"
+    status=$?
+    if [ "$status" -eq 1 ] && printf '%s\n' "$out" | grep -q 'THIS RUN FAILED (exit 1)' &&
+        printf '%s\n' "$out" | grep -q 'GATE STEP PROFILE'; then
+        pass "$arm: gate_exit_report under set -e prints the profile and THIS RUN FAILED (exit 1)"
+    else
+        fail "$arm: gate_exit_report under set -e lost the profile or the failure notice (status $status): $out"
     fi
 done
 

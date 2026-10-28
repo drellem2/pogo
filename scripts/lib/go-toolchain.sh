@@ -96,9 +96,11 @@ go_toolchain_expose() {
   fi
   # The caller's handler reads $? (gate_exit_report reports the gate's status
   # from it), so the status is saved before the rm and restored before <cmd>.
-  # %q quotes the dir for re-reading, whatever $TMPDIR contains.
+  # build.sh and test.sh run under set -e, which would abort the trap at a
+  # non-zero restore and skip <cmd> entirely, so errexit is turned off first;
+  # the shell is already exiting. %q quotes the dir whatever $TMPDIR contains.
   # shellcheck disable=SC2064 # expand now: the trap must name this dir.
-  trap "__go_toolchain_status=\$?; rm -rf $(printf %q "$dir"); (exit \$__go_toolchain_status)${prev:+; $prev}" EXIT
+  trap "__go_toolchain_status=\$?; rm -rf $(printf %q "$dir"); set +e; (exit \$__go_toolchain_status)${prev:+; $prev}" EXIT
   # A trapped signal is acted on only when the foreground command returns, so
   # on this path a TERM sent to the script alone waits for a running `go test`
   # instead of killing the script at once. A process-group signal, which is
