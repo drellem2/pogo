@@ -869,6 +869,29 @@ func isPogodArtefact(line string) bool {
 	return path.Base(p) == hookarm.StampName && path.Base(path.Dir(p)) == ".claude"
 }
 
+// scaffoldingOnly reports whether a tree holds uncommitted paths and every one
+// of them, with untracked directories expanded to their files, is one of
+// pogod's own artefacts (isPogodArtefact). A clean tree answers false.
+//
+// It exists for `pogo gc --list-preserved` (drellem2/pogo#162): a tree kept for
+// a stamp pogod wrote must read apart from a tree kept for work. WorktreeDirty
+// opens only a collapsed `?? .claude/`, so a stamp under a wholly untracked
+// directory — `?? sub/` holding sub/.claude/pogo-mailhook.stamp — still keeps
+// the tree, and this is what names it. It is a READER, not the guard: it
+// decides nothing, and the guard keeps its narrower, conservative expansion.
+func scaffoldingOnly(worktreeDir string) (bool, error) {
+	lines, err := porcelainStatus(worktreeDir, "--untracked-files=all")
+	if err != nil {
+		return false, err
+	}
+	for _, l := range lines {
+		if !isPogodArtefact(l) {
+			return false, nil
+		}
+	}
+	return len(lines) > 0, nil
+}
+
 // WorktreeBranch reports the branch checked out in worktreeDir.
 //
 // It exists for the preservation record (mg-d45b): a retained worktree keeps

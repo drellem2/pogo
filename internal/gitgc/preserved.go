@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/drellem2/pogo/internal/hookarm"
 )
 
 // PreservedTree is one worktree that HOLDS WORK THE FLEET CANNOT REACH FROM
@@ -97,6 +99,13 @@ type PreservedTree struct {
 	// belongs to the renderer; a capped record is a record that reproduces this
 	// ticket's own defect — a partial read presented as a whole one.
 	Files []string `json:"files,omitempty"`
+	// ScaffoldingOnly is true when every uncommitted path in the tree, with
+	// untracked directories expanded, is a file pogod itself writes into every
+	// agent's tree — the hook settings and the mail-hook stamp (isPogodArtefact)
+	// — and nothing else (drellem2/pogo#162). It is an IDENTITY fact about the
+	// paths, like the untracked split, not a verdict on the tree: it says the
+	// tree is kept for files pogod wrote, and the reader still decides.
+	ScaffoldingOnly bool `json:"scaffolding_only,omitempty"`
 
 	// StatusError is the `git status` failure on the "undetermined" outcome.
 	StatusError string `json:"status_error,omitempty"`
@@ -344,7 +353,12 @@ type PreservedReport struct {
 	// headline is "how many of these am I one `rm -rf` away from losing", and
 	// that is a question about trees.
 	RetainedUntracked int `json:"retained_untracked"`
-	InUseCount        int `json:"in_use_count"`
+	// RetainedScaffoldingOnly is how many retained trees are kept ONLY for
+	// pogod's own .claude scaffolding (PreservedTree.ScaffoldingOnly) — the
+	// count drellem2/pogo#162 asks for, so "kept for a stamp pogod wrote" reads
+	// apart from "kept for real work" without opening every tree.
+	RetainedScaffoldingOnly int `json:"retained_scaffolding_only"`
+	InUseCount              int `json:"in_use_count"`
 	// CleanCount and NotWorktreeCount account for everything else under
 	// PolecatsDir, so the listing is a partition of the directory rather than
 	// a selection out of it.
@@ -524,6 +538,12 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 					"re-read status of %s for the full file list: %v (showing the capped list)", path, ferr))
 			}
 			tree.Total, tree.Modified, tree.Untracked = dwe.Total, dwe.Modified, dwe.Untracked
+			if only, serr := scaffoldingOnly(path); serr == nil {
+				tree.ScaffoldingOnly = only
+			} else {
+				rep.Errors = append(rep.Errors, fmt.Sprintf(
+					"expand status of %s to check for pogod's own scaffolding: %v", path, serr))
+			}
 			// The age is measured here for dirty trees; the guard only computes
 			// it on the cannot-read path, where the refusal line needs it.
 			setTreeAge(&tree, path, ageBudget)
@@ -764,6 +784,7 @@ func (r *PreservedReport) applyCounts() {
 	r.RetainedCount = len(r.Retained)
 	r.InUseCount = len(r.InUse)
 	r.RetainedUncommitted, r.RetainedUndetermined, r.RetainedUnpushed, r.RetainedUntracked = 0, 0, 0, 0
+	r.RetainedScaffoldingOnly = 0
 	for _, t := range r.Retained {
 		// Three counts, not two. "unpushed" trees hold no uncommitted work and
 		// are perfectly readable, so folding them into either existing bucket
@@ -779,6 +800,9 @@ func (r *PreservedReport) applyCounts() {
 		}
 		if t.Untracked > 0 {
 			r.RetainedUntracked++
+		}
+		if t.ScaffoldingOnly {
+			r.RetainedScaffoldingOnly++
 		}
 	}
 }
@@ -857,6 +881,12 @@ func writeCounts(b *strings.Builder, r PreservedReport) {
 	// day, four of seven when re-derived on 2026-09-07 (mg-e621).
 	fmt.Fprintf(b, "  of those, %d hold UNTRACKED files — on no branch, in no stash, on no remote,\n"+
 		"  so the tree is the only copy of those git objects\n", r.RetainedUntracked)
+	// Its own line for the same reason (drellem2/pogo#162): the reporter's
+	// population was 196 of 218 trees kept for pogod's own files, and nothing
+	// in the listing could say so short of opening all of them.
+	fmt.Fprintf(b, "  of those, %d hold ONLY pogod's own scaffolding — every uncommitted path is a\n"+
+		"  file pogod writes into every agent tree (%s, %s), nothing else\n",
+		r.RetainedScaffoldingOnly, filepath.ToSlash(hookarm.SettingsRelPath), hookarm.StampName)
 	fmt.Fprintf(b, "  %d dirty tree(s) in use by a live polecat — not retained, listed at the end\n",
 		r.InUseCount)
 	fmt.Fprintf(b, "  %d clean, %d not linked worktrees (no .git — see `pogo gc` orphan dirs)\n",
@@ -996,6 +1026,13 @@ func writeTreeRow(b *strings.Builder, t PreservedTree, showRepo bool) {
 	if t.Outcome == "preserved" {
 		fmt.Fprintf(b, "    %d uncommitted: %d modified, %d UNTRACKED   `--force` reclaims it: %s\n",
 			t.Total, t.Modified, t.Untracked, t.ForceReclaims)
+		if t.ScaffoldingOnly {
+			fmt.Fprintf(b, "    SCAFFOLDING ONLY: expanded, every uncommitted path here is a file pogod\n")
+			fmt.Fprintf(b, "    itself writes (%s at the root, %s under any .claude/).\n",
+				filepath.ToSlash(hookarm.SettingsRelPath), hookarm.StampName)
+			fmt.Fprintf(b, "    gc keeps it because the removal guard reads a collapsed untracked\n")
+			fmt.Fprintf(b, "    directory as one entry unless that directory is .claude/.\n")
+		}
 		if untracked := t.UntrackedPaths(); len(untracked) > 0 {
 			fmt.Fprintf(b, "    untracked — on no branch, in no stash, on no remote, so this tree is the\n")
 			fmt.Fprintf(b, "    only copy OF THE GIT OBJECTS. That is not a claim about the CONTENT: a file\n")

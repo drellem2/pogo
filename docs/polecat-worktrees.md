@@ -308,6 +308,16 @@ that must see it, and `spawn-polecat` plus the stall-watch surfaces do
 (`internal/gitgc.PreservedForItems`). Widening this listing is a separate
 decision about what `--list-preserved` means.
 
+**It counts the trees kept only for pogod's own scaffolding (drellem2/pogo#162).**
+pogod writes `.claude/settings.local.json` and `.claude/pogo-mailhook.stamp` into
+every agent's tree. The removal guard ignores both when they are untracked, but it
+only opens a collapsed `?? .claude/`, so a stamp under a wholly untracked
+directory (`?? sub/` holding `sub/.claude/pogo-mailhook.stamp`) still keeps the
+tree. The listing expands every such tree with `--untracked-files=all` and marks
+it `SCAFFOLDING ONLY` when every path is one of those two files; the headline
+counts them (`retained_scaffolding_only` in `--json`). That is a fact about the
+paths' identity, not a verdict, in keeping with the rest of the listing.
+
 **Untracked paths are never truncated in the listing; modified entries are
 capped and the cap announces itself.** A modified tracked file has a committed
 version in the object store. An untracked path is on no branch, in no stash and

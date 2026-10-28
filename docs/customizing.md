@@ -680,8 +680,10 @@ enabled = true
 interval = "1h"
 
 # Extra repositories to sweep. pogod already sweeps the source repo of
-# every registered agent; list a repo here so the startup sweep can reach
-# it even after a pogod crash that left no live agents behind.
+# every registered agent, and the repository of every worktree still under
+# $POGO_HOME/polecats (read off the tree with `git rev-parse
+# --git-common-dir`), so a repo stays swept after its last polecat exits.
+# List a repo here only to sweep one that has no polecat tree on disk.
 repos = ["/Users/you/dev/pogo"]
 ```
 

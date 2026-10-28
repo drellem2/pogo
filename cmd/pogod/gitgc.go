@@ -62,11 +62,13 @@ func startGitGC(ctx context.Context, reg *agent.Registry, cfg config.GitGCConfig
 var loadTicketIndexFn = gitgc.LoadTicketIndex
 
 // runGitGCSweep performs one GC pass over every repo known to pogod:
-// repos listed in config plus the source repo of every registered agent.
+// repos listed in config, the source repo of every registered agent, and the
+// repo of every polecat tree still on disk (see gitGCRepos).
 // The live-polecat set is passed as the do-not-touch exclusion so a sweep
 // can never disturb a running polecat's branch or worktree.
 func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig, notify string) {
-	repos := gitGCRepos(reg, cfg)
+	polecatsDir, pdErr := gitgc.DefaultPolecatsDir()
+	repos := gitGCRepos(reg, cfg, polecatsDir)
 	if len(repos) == 0 {
 		return
 	}
@@ -88,10 +90,9 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig, notify string) {
 	// that once stripped a live polecat's registration was deleted (gh #88),
 	// so new orphans of that shape no longer accrue; the scan stays for the
 	// legacy dirs it left behind and the pogod-died-mid-polecat case.
-	polecatsDir, err := gitgc.DefaultPolecatsDir()
-	if err != nil {
-		log.Printf("pogod: git GC orphan-dir scan disabled: %v", err)
-		conditions.Raise(conditionGitGCOrphanScan(notify, err.Error()), time.Now())
+	if pdErr != nil {
+		log.Printf("pogod: git GC orphan-dir scan disabled: %v", pdErr)
+		conditions.Raise(conditionGitGCOrphanScan(notify, pdErr.Error()), time.Now())
 	} else {
 		conditions.Clear(rowA9OrphanScan, time.Now())
 	}
@@ -169,8 +170,17 @@ func gitGCLogf(repo string) func(string, ...any) {
 }
 
 // gitGCRepos returns the deduplicated set of repositories to sweep:
-// configured repos unioned with the source repo of every registered agent.
-func gitGCRepos(reg *agent.Registry, cfg config.GitGCConfig) []string {
+// configured repos, the source repo of every registered agent, and the repo of
+// every linked worktree under polecatsDir.
+//
+// The third source is drellem2/pogo#162's second cause. Registered means
+// RUNNING, and with no [gitgc] section cfg.Repos is empty, so the first two
+// alone drop a repository from the sweep the moment its last polecat exits —
+// and every tree that polecat left behind is then swept by nothing, however
+// clean it is. Triage counted 18 of 42 trees in that state (mg-b292). Each
+// tree names its own repository (gitgc.PolecatTreeRepos), so a repository stays
+// in the set for as long as a tree of it does.
+func gitGCRepos(reg *agent.Registry, cfg config.GitGCConfig, polecatsDir string) []string {
 	seen := map[string]bool{}
 	var repos []string
 	add := func(p string) {
@@ -184,6 +194,16 @@ func gitGCRepos(reg *agent.Registry, cfg config.GitGCConfig) []string {
 	}
 	for _, a := range reg.List() {
 		add(a.SourceRepo)
+	}
+	treeRepos, skipped, err := gitgc.PolecatTreeRepos(polecatsDir)
+	if err != nil {
+		log.Printf("pogod: git GC cannot derive repos from polecat trees: %v", err)
+	}
+	for _, s := range skipped {
+		log.Printf("pogod: git GC sweep set: %s", s)
+	}
+	for _, r := range treeRepos {
+		add(r)
 	}
 	return repos
 }

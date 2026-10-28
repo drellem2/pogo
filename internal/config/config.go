@@ -1196,9 +1196,9 @@ type GitGCConfig struct {
 	// DefaultGitGCInterval.
 	Interval time.Duration
 	// Repos lists git repositories to sweep. pogod also sweeps the source
-	// repo of every registered agent, so this is mainly needed so the
-	// startup sweep can reach a repo after a pogod crash that left no live
-	// agents behind.
+	// repo of every registered agent and the repository of every worktree
+	// under $POGO_HOME/polecats (gitgc.PolecatTreeRepos, drellem2/pogo#162),
+	// so this is only needed for a repo with no polecat tree on disk.
 	Repos []string
 }
 
