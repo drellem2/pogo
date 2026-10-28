@@ -1,7 +1,9 @@
 package project
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -38,10 +40,39 @@ func TestMain(m *testing.M) {
 	sb, down := testsandbox.Main("project")
 	sandbox = sb
 
+	if err := provisionTestdataRepos(); err != nil {
+		down()
+		fmt.Fprintf(os.Stderr, "project: %v\n", err)
+		os.Exit(1)
+	}
+
 	code := m.Run()
 
 	down()
 	os.Exit(code)
+}
+
+// testdataRepos are the fixture repos whose .git marker git itself cannot
+// track. test.sh and ci.yml mkdir them before running the suite, but a bare
+// `go test -run TestFileInNewProjectAddsProject ./internal/project` never ran
+// either, so the visit found no repo root and 404'd (gh#239).
+var testdataRepos = []string{"_testdata/a-service", "_testdata/b-service"}
+
+// provisionTestdataRepos creates <repo>/.git for each fixture repo if it is
+// missing. It is idempotent and creates nothing else: the fixture
+// directories are tracked and must already exist, so a missing one is an
+// error rather than something to invent. The cwd is the repo root, set by
+// init() in project_test.go, which runs before TestMain.
+func provisionTestdataRepos() error {
+	for _, repo := range testdataRepos {
+		if info, err := os.Stat(repo); err != nil || !info.IsDir() {
+			return fmt.Errorf("fixture repo %s is missing (cwd should be the repo root): %v", repo, err)
+		}
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+			return fmt.Errorf("creating %s/.git: %w", repo, err)
+		}
+	}
+	return nil
 }
 
 // TestStateRootIsSandboxed is the positive control for the isolation above: it

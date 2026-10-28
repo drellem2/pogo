@@ -322,6 +322,12 @@ func TestPMFrictionScanSurfacesAWorkerSessionTheMergedRankingBuries(t *testing.T
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("no bash: %v", err)
 	}
+	// The scan ranks sessions with jq and, without it, prints a WARNING and
+	// ranks nothing; the assertions below would then fail on the host, not
+	// the prompt. Skip like the other jq-driven tests do (gh#239).
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("no jq: %v", err)
+	}
 	home := writeCorpus(t)
 	shipped := frictionScanBlock(t)
 
