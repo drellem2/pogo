@@ -79,7 +79,21 @@ import "strings"
 //	                   live store, both filed before the depends chaining was
 //	                   written into the playbook.
 //
-// Either marker alone excludes. That direction is chosen deliberately, against
+// # The title veto
+//
+// A title whose first word is `review` vetoes MarkerSuccessor — the `depends:`
+// edge AND the `predecessor:` tag alike — so the item is audited as a review
+// ticket. It is the mirror of MarkerTitlePrefix: the same cheap prose witness,
+// read in the other direction, and it only ever moves an item INTO the audit,
+// never out of it. Covering both shapes of the successor marker is a decision
+// (gh#152): the playbook gives a review ticket neither, the two shapes state the
+// same edge, and a veto that honoured one and not the other would leave mg-3c19's
+// shape set aside for no reason the report could state. Measured store-wide by
+// the gh#152 triage (2026-09-07): exactly two review-titled items wore a
+// successor marker — mg-0218 (tag) and mg-3c19 (edge) — and both are review
+// tickets; zero build tickets are review-titled.
+//
+// Either marker alone excludes, unless the title veto overrides it. That direction is chosen deliberately, against
 // the cost asymmetry this detector was priced with: a false POSITIVE fires once
 // per issue forever and costs the detector its reader, while a false NEGATIVE
 // costs one recoverable round (the reviewer notices its counterparty is gone and
@@ -88,11 +102,13 @@ import "strings"
 //
 // # What either marker costs, stated rather than buried
 //
-// A REVIEW ticket that carries a depends edge is excluded and its missing
-// declaration is not reported. One exists on the live store — mg-3c19, "review:
-// reap-after-merge fix", `depends: [mg-a58e]` — filed in the older style before
-// the playbook forbade the edge, and archived and pre-convention besides. That is
-// the whole known population of the false-negative case, and the report LISTS
+// A REVIEW ticket that carries a successor marker AND a title that does not
+// begin `review` is excluded and its missing declaration is not reported. Before
+// the title veto, the two known review tickets wearing a successor marker —
+// mg-3c19, "review: reap-after-merge fix", `depends: [mg-a58e]`, and mg-0218,
+// "review the reporter's PR…", tag `predecessor:mg-d8a1` — were both set aside
+// this way; the veto recovers both. What remains is a review ticket titled in
+// prose that does not lead with `review`, and none is known. The report LISTS
 // every excluded item with the marker that excluded it, so a reader can check
 // this rather than trust it. An exclusion nobody can see is the defect this
 // detector is a member of the family of.
@@ -124,6 +140,15 @@ const predecessorTagPrefix = "predecessor:"
 // The detail string names the value that was read, not merely the marker, so the
 // report can show a reader the exact fact the exclusion rests on.
 func classifyBuild(it Item) (BuildMarker, string) {
+	// The title veto, symmetric with MarkerTitlePrefix: a title whose first
+	// word is `review` overrides a predecessor marker of EITHER shape. mg-0218
+	// (a `predecessor:` tag) set aside the live store's only review ticket and
+	// drove Scanned to 0 (gh#152); mg-3c19 is the `depends:` instance. No build
+	// ticket carries such a title — mayor.md transition 3 files them as
+	// `build: …` — so the veto has no measured false positive.
+	if firstWord(it.Title) == "review" {
+		return MarkerNone, ""
+	}
 	for _, d := range it.Depends {
 		if d = strings.TrimSpace(d); d != "" {
 			return MarkerSuccessor, "depends: " + d

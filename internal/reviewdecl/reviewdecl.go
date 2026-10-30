@@ -103,11 +103,21 @@
 // # What this detector cannot see, stated here and not in a footnote
 //
 //	D-1  ARCHIVED AND SHELVED items are not scanned. workitem.ListAllFrom walks
-//	     available/, claimed/, done/ and pending/ only. Measured on the live
-//	     store when this landed: 31 of the 34 `stage: review` carriers are in
-//	     archive/, and every one of them predates ConventionLandedAt — so the
-//	     gap costs nothing today, and the report states the statuses it covered
-//	     rather than implying it saw the store.
+//	     available/, claimed/, done/ and pending/ only. Re-measured on the live
+//	     store 2026-10-30 (gh#152; leading carrier block read, .bodybak
+//	     excluded): 55 items carry `stage: review` — 53 in archive/ (1 in
+//	     2026-08, 32 in 2026-09, 20 in 2026-10), 0 in shelved/, 2 live. All 53
+//	     archived carriers POST-date ConventionLandedAt, and 51 of them declare
+//	     `reviews:`. The figure this paragraph used to carry — "31 of 34 in
+//	     archive/, every one pre-convention" — is withdrawn: it was true when
+//	     this landed and stopped being true as post-convention review tickets
+//	     were archived. The pre-convention carriers it counted no longer show:
+//	     their bodies were lost and the items reconstructed metadata-only on
+//	     2026-09-27 (mg-3c19 is one), so their `stage:` line is gone. The gap
+//	     still costs the GUARD nothing — an archived review ticket has no live
+//	     builder for the exemption to protect — but it does mean this report
+//	     is not an audit of the store's history, and it states the statuses it
+//	     covered rather than implying it saw the store.
 //	D-2  A carrier block the parser cannot reach is reported as OPAQUE, never as
 //	     missing and never as declared. Its stage cannot be read, so whether it
 //	     is even a review ticket is unknown. It is not counted as actionable:
@@ -123,6 +133,8 @@
 //	D-4  A REVIEW ticket wearing a build ticket's markers — a `depends:` edge, a
 //	     `predecessor:` tag, or a title whose first word is `build` — is set
 //	     aside as the build half and its missing declaration is NOT reported.
+//	     A title whose first word is `review` vetoes the first two (gh#152), so
+//	     what remains is a review ticket whose title does not say so.
 //	     That is the cost of classifying non-circularly (mg-2829), it is priced
 //	     against a false-positive rate of one per issue, and every set-aside item
 //	     is listed with the marker that set it aside so the reader can check it.

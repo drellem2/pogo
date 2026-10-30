@@ -120,6 +120,8 @@ func TestSuccessorEdgeIsReadFromEitherPlace(t *testing.T) {
 // report a structural zero.
 func TestEmptyDependsListIsNotAnEdge(t *testing.T) {
 	it := review("mg-0001", after, "")
+	// A neutral title, so the `review` title veto cannot be what keeps it audited.
+	it.Title = "the deploy drain must track holders ACROSS polls"
 	it.Depends = []string{"", "  "}
 	it.Tags = []string{"gh-issue", "pogo"}
 	rep := Detect([]Item{it}, ConventionLandedAt)
@@ -196,30 +198,51 @@ func TestEitherMarkerAloneExcludes(t *testing.T) {
 	}
 }
 
-// TestAReviewTicketWithAnEdgeIsExcluded is the KNOWN COST of classifying
-// non-circularly, pinned as a deliberate choice rather than left to be discovered
-// as a surprise. mg-3c19 on the live store — "review: reap-after-merge fix",
-// `depends: [mg-a58e]` — is a review ticket filed in the older style, before the
-// playbook forbade the edge, and it is the whole known population of this case.
+// TestAReviewTitleVetoesTheSuccessorMarker is gh#152. Both review tickets known
+// to wear a successor marker are pinned in the shape they were found:
 //
-// If this test ever starts failing because a real review ticket needs auditing
-// despite an edge, the repair is a stronger marker (resolve the edge and check
-// whether the predecessor is a triage ticket), not a quiet widening of the OR.
-// D-4 in the package doc is the same statement for a reader who never runs tests.
-func TestAReviewTicketWithAnEdgeIsExcluded(t *testing.T) {
-	it := Item{ID: "mg-3c19", Title: "review: reap-after-merge fix (drellem2/pogo#48)",
-		Status: "archive", Stage: "review", Created: after, Depends: []string{"mg-a58e"}}
-	rep := Detect([]Item{it}, ConventionLandedAt)
-	if len(rep.Missing) != 0 {
-		t.Fatalf("Missing = %+v, want empty: the edge excludes, and that cost is documented", rep.Missing)
+//	mg-0218  tag `predecessor:mg-d8a1`, empty depends — the live store's only
+//	         review ticket, and its set-aside drove Scanned to 0
+//	mg-3c19  `depends: [mg-a58e]`, filed before the playbook forbade the edge
+//
+// The veto covers BOTH shapes of MarkerSuccessor, by decision: they state the
+// same edge, and the playbook gives a review ticket neither. This used to be
+// TestAReviewTicketWithAnEdgeIsExcluded, pinning mg-3c19's exclusion as the known
+// cost; the title veto is the "stronger marker" that test said the repair would be.
+func TestAReviewTitleVetoesTheSuccessorMarker(t *testing.T) {
+	for _, it := range []Item{
+		{ID: "mg-0218", Title: "review the reporter's PR for drellem2/pogo#130 when it arrives",
+			Status: "available", Stage: "review", Created: after,
+			Tags: []string{"gh-issue", "predecessor:mg-d8a1"}},
+		{ID: "mg-3c19", Title: "review: reap-after-merge fix (drellem2/pogo#48)",
+			Status: "archive", Stage: "review", Created: after, Depends: []string{"mg-a58e"}},
+	} {
+		t.Run(it.ID, func(t *testing.T) {
+			rep := Detect([]Item{it}, ConventionLandedAt)
+			if len(rep.BuildTickets) != 0 {
+				t.Fatalf("BuildTickets = %+v, want empty — a title whose first word is `review` "+
+					"vetoes the successor marker", rep.BuildTickets)
+			}
+			if rep.Scanned != 1 {
+				t.Errorf("Scanned = %d, want 1 — the review ticket is audited", rep.Scanned)
+			}
+			if len(rep.Missing) != 1 || rep.Missing[0].Item.ID != it.ID {
+				t.Errorf("Missing = %+v, want %s reported — it carries no `reviews:` line", rep.Missing, it.ID)
+			}
+		})
 	}
-	if len(rep.BuildTickets) != 1 {
-		t.Fatalf("BuildTickets = %+v, want the item LISTED so the cost is visible rather than silent", rep.BuildTickets)
-	}
-	// It must be listed with the exact fact, because "check it" is the only
-	// recourse a reader has against this exclusion.
-	if rep.BuildTickets[0].Detail != "depends: mg-a58e" {
-		t.Errorf("Detail = %q, want the edge named verbatim", rep.BuildTickets[0].Detail)
+}
+
+// TestTheTitleVetoDoesNotWidenPastAWord. The veto is the same word test as the
+// build marker, so a build ticket titled "reviewer tooling…" keeps its edge, and
+// an untitled-as-review item with an edge is still set aside.
+func TestTheTitleVetoDoesNotWidenPastAWord(t *testing.T) {
+	for _, title := range []string{"reviewer tooling cleanup", "build: review queue (drellem2/pogo#9)", "b"} {
+		it := Item{ID: "mg-0001", Title: title, Stage: "review", Created: after, Depends: []string{"mg-1087"}}
+		rep := Detect([]Item{it}, ConventionLandedAt)
+		if len(rep.BuildTickets) != 1 {
+			t.Errorf("title %q: BuildTickets = %+v, want the edge to still set it aside", title, rep.BuildTickets)
+		}
 	}
 }
 
