@@ -19,23 +19,7 @@ You are an ephemeral triage {{.Worker}} (a disposable worker agent). Your job is
 ### Details
 
 {{.Body}}
-{{if .RecentCommits}}
-## Recent activity in `{{.Repo}}`
 
-This is FYI context — not a step, not a checklist. It is here so you can see what recently landed in the repo you are triaging against, without re-deriving it. Skim, ignore, or `git show <hash>` / `mg show mg-XXXX` whatever looks relevant. Commit subjects often carry the originating work-item ID in parentheses.
-
-Last commits on the checked-out branch:
-
-```
-{{.RecentCommits}}
-```
-{{if .RecentFiles}}
-Files touched by those commits:
-
-```
-{{.RecentFiles}}
-```
-{{end}}{{end}}
 ## Working in your worktree
 
 Your worktree at `{{.WorktreeDir}}` is a git worktree that **shares the

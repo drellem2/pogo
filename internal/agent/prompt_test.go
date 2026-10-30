@@ -156,27 +156,25 @@ func TestExpandTemplateToFile(t *testing.T) {
 	}
 }
 
-// TestShippedTemplatesSurfaceRecentActivity guards the embedded polecat
-// templates against silent removal of the recent-activity context block —
-// the lever introduced for mg-b372. If the conditional ever needs to change
-// shape, update this test deliberately rather than letting the section
-// disappear on a stray edit.
-func TestShippedTemplatesSurfaceRecentActivity(t *testing.T) {
+// TestShippedTemplatesOmitRecentActivity pins the removal of the
+// recent-activity context block (gh #157, mg-08ff3; it was added by mg-b372).
+// Spawn no longer captures git log for the prompt — an agent that wants it
+// runs git — so a template that re-gains the section would render nothing
+// but its gate. Re-adding it is a deliberate decision, not a stray edit.
+func TestShippedTemplatesOmitRecentActivity(t *testing.T) {
 	for _, name := range []string{"prompts/templates/polecat.md", "prompts/templates/polecat-qa.md", "prompts/templates/polecat-build-pr.md", "prompts/templates/polecat-triage.md", "prompts/templates/polecat-review.md", "prompts/templates/polecat-architect.md"} {
 		data, err := defaultPrompts.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read embedded %s: %v", name, err)
 		}
 		body := string(data)
-		for _, want := range []string{
-			"{{if .RecentCommits}}",
-			"{{.RecentCommits}}",
-			"{{if .RecentFiles}}",
-			"{{.RecentFiles}}",
+		for _, banned := range []string{
+			".RecentCommits",
+			".RecentFiles",
 			"## Recent activity",
 		} {
-			if !strings.Contains(body, want) {
-				t.Errorf("%s: expected %q in template body", name, want)
+			if strings.Contains(body, banned) {
+				t.Errorf("%s: %q must not appear in template body", name, banned)
 			}
 		}
 	}
@@ -862,12 +860,15 @@ func TestExpandTemplateProviderDefault(t *testing.T) {
 	}
 }
 
-func TestExpandTemplateRecentActivity(t *testing.T) {
+// TestExpandTemplateLegacyRecentActivity pins the compatibility contract for
+// templates written before the recent-activity section was removed (mg-08ff3):
+// a deployed or user-overridden copy that still carries the old gated block
+// must keep executing — text/template refuses an unknown field — and, because
+// spawn leaves RecentCommits/RecentFiles empty, render the block as nothing.
+func TestExpandTemplateLegacyRecentActivity(t *testing.T) {
 	dir := t.TempDir()
 	tmplPath := filepath.Join(dir, "polecat.md")
-	// Mirror the conditional surfaced in the shipped polecat.md so the test
-	// pins the contract: `{{if .RecentCommits}}` must gate the section, and
-	// the inner `{{if .RecentFiles}}` must gate the files block.
+	// The block exactly as the shipped templates carried it before mg-08ff3.
 	content := `Task: {{.Task}}
 {{if .RecentCommits}}
 ## Recent activity in ` + "`{{.Repo}}`" + `
@@ -887,47 +888,23 @@ done.`
 		t.Fatal(err)
 	}
 
-	t.Run("populated includes section", func(t *testing.T) {
-		vars := TemplateVars{
-			Task:          "T",
-			Repo:          "/r",
-			RecentCommits: "abc1234 first (mg-1111)\ndef5678 second (mg-2222)",
-			RecentFiles:   "internal/agent/api.go\ninternal/agent/prompt.go",
-		}
-		got, err := ExpandTemplate(tmplPath, vars)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, want := range []string{"Recent activity", "abc1234", "mg-1111", "internal/agent/api.go"} {
-			if !strings.Contains(got, want) {
-				t.Errorf("expected %q in output:\n%s", want, got)
+	for name, vars := range map[string]TemplateVars{
+		"spawn shape":   {Task: "T", Repo: "/r"},
+		"preview shape": PreviewTemplateVars(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := ExpandTemplate(tmplPath, vars)
+			if err != nil {
+				t.Fatalf("legacy template must still execute: %v", err)
 			}
-		}
-	})
-
-	t.Run("empty RecentCommits omits section entirely", func(t *testing.T) {
-		got, err := ExpandTemplate(tmplPath, TemplateVars{Task: "T", Repo: "/r"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(got, "Recent activity") {
-			t.Errorf("section must be gated when RecentCommits is empty:\n%s", got)
-		}
-	})
-
-	t.Run("commits without files still renders commits", func(t *testing.T) {
-		vars := TemplateVars{Task: "T", Repo: "/r", RecentCommits: "abc1234 only commit"}
-		got, err := ExpandTemplate(tmplPath, vars)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(got, "abc1234 only commit") {
-			t.Errorf("expected commits even without files:\n%s", got)
-		}
-		if strings.Contains(got, "Files:") {
-			t.Errorf("files block must be gated when RecentFiles is empty:\n%s", got)
-		}
-	})
+			if strings.Contains(got, "Recent activity") || strings.Contains(got, "Files:") {
+				t.Errorf("legacy section must render as nothing:\n%s", got)
+			}
+			if !strings.Contains(got, "done.") {
+				t.Errorf("text after the legacy block must survive:\n%s", got)
+			}
+		})
+	}
 }
 
 func TestExpandTemplateNotFound(t *testing.T) {

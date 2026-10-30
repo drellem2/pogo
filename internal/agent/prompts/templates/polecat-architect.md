@@ -109,23 +109,7 @@ Read the body and decide which of three shapes you are in — it determines your
 Shapes A/B are the common case: your worktree is a **read-only vantage point** — you never commit, push, or submit. Only shape D commits.
 
 *(There is no shape C. A design-correctness gate on an existing PR is a `polecat-review` dispatch — see "What you are NOT" above.)*
-{{if .RecentCommits}}
-## Recent activity in `{{.Repo}}`
 
-This is FYI context — not a step, not a checklist. It is here so that if the design question you were dispatched on sits downstream of work that already landed, you can see what was actually shipped without re-deriving it — and so your judgment is checked against this repo's recent history rather than your priors. Skim, ignore, or `git show <hash>` / `mg show mg-XXXX` whatever looks relevant. Commit subjects often carry the originating work-item ID in parentheses.
-
-Last commits on the checked-out branch:
-
-```
-{{.RecentCommits}}
-```
-{{if .RecentFiles}}
-Files touched by those commits:
-
-```
-{{.RecentFiles}}
-```
-{{end}}{{end}}
 ## Working in your worktree
 
 Your worktree at `{{.WorktreeDir}}` is a git worktree that **shares the `.git` infrastructure with the source repo at `{{.Repo}}`**. That means:

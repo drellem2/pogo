@@ -2227,14 +2227,6 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		workDir = agentDir
 	}
 
-	// Capture recent activity in the source repo as best-effort FYI
-	// context for the polecat. The helpers return "" on any failure; the
-	// template gates the section behind `{{if .RecentCommits}}` so a repo
-	// without commits or `.git` simply produces no extra prompt content.
-	// See polecat_context.go for the rationale (mg-b372).
-	recentCommits := captureRecentCommits(spawnReq.Repo, defaultRecentCommits)
-	recentFiles := captureRecentFiles(spawnReq.Repo, defaultRecentCommits, defaultRecentFiles)
-
 	// The resolved provider's id gates harness-specific template blocks
 	// ({{if eq .Provider "claude"}}). resolveProvider returns (nil, nil) for a
 	// bare registry with no providers registered; fall back to the built-in
@@ -2285,19 +2277,17 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 
 	// Expand template to a temp file
 	vars := TemplateVars{
-		Task:          spawnReq.Task,
-		Body:          spawnReq.Body,
-		Prelude:       prelude,
-		Id:            spawnReq.Id,
-		Repo:          spawnReq.Repo,
-		Branch:        spawnReq.Branch,
-		WorktreeDir:   workDir,
-		NoWorktree:    spawnReq.NoWorktree,
-		RecentCommits: recentCommits,
-		RecentFiles:   recentFiles,
-		Provider:      providerID,
-		WorkerCores:   budget.Cores,
-		HostCores:     budget.HostCores,
+		Task:        spawnReq.Task,
+		Body:        spawnReq.Body,
+		Prelude:     prelude,
+		Id:          spawnReq.Id,
+		Repo:        spawnReq.Repo,
+		Branch:      spawnReq.Branch,
+		WorktreeDir: workDir,
+		NoWorktree:  spawnReq.NoWorktree,
+		Provider:    providerID,
+		WorkerCores: budget.Cores,
+		HostCores:   budget.HostCores,
 	}
 	promptFile, err := ExpandTemplateToFile(tmplPath, spawnReq.Name, vars)
 	if err != nil {

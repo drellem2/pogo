@@ -401,7 +401,6 @@ func TestTreeAndControlRulesSurviveTemplateRendering(t *testing.T) {
 		"core budget, claude harness, integration branch": {
 			Id: "mg-0000", Repo: "/repo", WorktreeDir: "/wt", Provider: "claude",
 			Branch: "feature", WorkerCores: 3, HostCores: 10,
-			RecentCommits: "abc1234 something", RecentFiles: "a.go",
 		},
 		"no worktree": {
 			Id: "mg-0000", Repo: "/repo", WorktreeDir: "/home", NoWorktree: true,

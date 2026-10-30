@@ -225,16 +225,15 @@ type TemplateVars struct {
 	// rendered prompt is byte-identical to what the template produced.
 	Prelude string
 
-	// RecentCommits is `git log --oneline -n` output for the source repo's
-	// checked-out branch, surfaced as FYI context so a polecat picking up
-	// the Nth ticket of a multi-ticket feature can see the prior N-1
-	// commits (each carrying its mg-XXXX in the subject) without being
-	// told to look. Empty string means "no context available" — templates
-	// should gate the section behind `{{if .RecentCommits}}`.
+	// RecentCommits and RecentFiles are always empty. They once carried
+	// `git log` context for a "Recent activity" prompt section (mg-b372); that
+	// section was removed (gh #157, mg-08ff3) because an agent can run git
+	// itself. The fields stay so a template still referencing them — a
+	// deployed copy under ~/.pogo/agents/templates, or a user override —
+	// keeps executing: text/template fails on an unknown field, and the old
+	// `{{if .RecentCommits}}` gate renders an empty field as nothing.
 	RecentCommits string
-	// RecentFiles is the unique set of files touched by RecentCommits,
-	// sorted and newline-joined. Same FYI framing as RecentCommits.
-	RecentFiles string
+	RecentFiles   string
 
 	// Coordinator is the coordinator agent's name ([agents] coordinator,
 	// default "mayor"). Templates reference it as {{.Coordinator}} for mail
@@ -690,19 +689,18 @@ func synthesizePolecatTemplate(path, basename string, vars TemplateVars) (string
 // PreviewTemplateVars returns stub TemplateVars used by `pogo agent prompt
 // show` when rendering polecat templates. The user is verifying composition,
 // not running the prompt, so vars carry obvious "preview" sentinels rather
-// than realistic values. RecentCommits/RecentFiles stay empty so conditional
-// sections gated by `{{if .RecentCommits}}` show their no-context shape.
-// Provider is the default ("claude") so the preview matches what a real
-// Claude polecat receives, including `{{if eq .Provider "claude"}}` blocks.
+// than realistic values. Provider is the default ("claude") so the preview
+// matches what a real Claude polecat receives, including
+// `{{if eq .Provider "claude"}}` blocks.
 //
-// Branch stays empty for the same reason RecentCommits does: it is the field
-// that selects between two different post-merge protocols, and an unset Branch
-// is the shape the overwhelming majority of dispatches get. It used to be
-// "main", which rendered `--target=main` correctly but made `{{if .Branch}}`
-// true — so once the PR-flow branch existed (mg-78d2) the preview would have
-// told every reader their target was an integration branch when it was the repo
-// default. To preview the PR-flow shape, spawn with `--branch` and read the
-// rendered prompt.
+// Branch stays empty: it is the field that selects between two different
+// post-merge protocols, and an unset Branch is the shape the overwhelming
+// majority of dispatches get. It used to be "main", which rendered
+// `--target=main` correctly but made `{{if .Branch}}` true — so once the
+// PR-flow branch existed (mg-78d2) the preview would have told every reader
+// their target was an integration branch when it was the repo default. To
+// preview the PR-flow shape, spawn with `--branch` and read the rendered
+// prompt.
 func PreviewTemplateVars() TemplateVars {
 	return TemplateVars{
 		Task:        "(preview) example task title",
