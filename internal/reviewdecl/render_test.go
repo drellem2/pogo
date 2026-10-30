@@ -89,9 +89,46 @@ func TestRenderZeroScannedIsQualified(t *testing.T) {
 	}
 }
 
+// TestRenderZeroScannedOverANonEmptyStoreIsNotAPass is gh#152. A run that read
+// work items but evaluated none of them as a review ticket printed "no missing
+// review declarations." above "scanned 0" — a pass, headline-first. Over a
+// non-empty store the headline must say nothing was audited. Actionable() and so
+// the exit status are deliberately unchanged: the runner's event already carries
+// scanned and population, and only the human-facing headline conflated them.
+func TestRenderZeroScannedOverANonEmptyStoreIsNotAPass(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		items []Item
+	}{
+		{"no review-stage items", []Item{{ID: "mg-0001", Stage: "build"}}},
+		{"every review-stage item set aside", []Item{buildTicket("mg-c18d", "mg-1087")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := Detect(tc.items, ConventionLandedAt)
+			out := rep.Render()
+			if strings.Contains(out, "no missing review declarations") {
+				t.Errorf("a run that audited nothing reports a pass:\n%s", out)
+			}
+			if !strings.Contains(out, "NOTHING WAS AUDITED") {
+				t.Errorf("a run that audited nothing does not say so:\n%s", out)
+			}
+			if rep.Actionable() {
+				t.Errorf("Actionable() = true; the exit status and the runner's mail gate must not change")
+			}
+		})
+	}
+
+	// An empty store is the case where the clean headline is true.
+	if out := Detect(nil, ConventionLandedAt).Render(); !strings.Contains(out, "no missing review declarations") ||
+		strings.Contains(out, "NOTHING WAS AUDITED") {
+		t.Errorf("an empty store should keep the clean headline:\n%s", out)
+	}
+}
+
 // TestRenderStatesItsCoverage. Archived and shelved items are outside the scan
 // (D-1). A report that did not name the statuses it walked would imply it saw
-// the store — 31 of the 34 `stage: review` carriers on this box are in archive/.
+// the store — 53 of the 55 `stage: review` carriers on this box are in archive/
+// (re-measured 2026-10-30, gh#152).
 func TestRenderStatesItsCoverage(t *testing.T) {
 	rep := Detect(nil, ConventionLandedAt)
 	rep.Statuses = []string{"available", "claimed", "done", "pending"}

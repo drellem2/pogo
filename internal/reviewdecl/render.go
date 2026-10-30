@@ -104,7 +104,8 @@ func (r Report) Render() string {
 			"4). So the stage line collects this population and cannot classify it, and a\n" +
 			"detector keyed on stage alone reports the builder once PER ISSUE, every time the\n" +
 			"track runs correctly (mg-2829). These are set aside on a marker that does not read\n" +
-			"`reviews:` — a declared predecessor, or a title whose first word is `build`.\n\n" +
+			"`reviews:` — a declared predecessor, or a title whose first word is `build`;\n" +
+			"a title whose first word is `review` overrides a declared predecessor.\n\n" +
 			"THE COST IS LISTED HERE RATHER THAN ASSUMED AWAY: if one of the items above is\n" +
 			"really a review ticket, its missing `reviews:` line is NOT in the report above.\n" +
 			"The marker in parentheses is the exact fact each exclusion rests on — check it.\n\n")
@@ -126,7 +127,16 @@ func (r Report) Render() string {
 // so that no future branch of Render can return without one.
 func (r Report) coverage() string {
 	var b strings.Builder
-	if !r.Actionable() {
+	switch {
+	case r.Scanned == 0 && r.Population > 0:
+		// Not "no missing review declarations": over a non-empty store that
+		// sentence is what a scan that collected nothing prints, and it reads as
+		// a pass (gh#152). The exit status is deliberately unchanged — the
+		// runner's review_decl_watch_ran event already carries scanned and
+		// population — so only this headline stops conflating the two.
+		fmt.Fprintf(&b, "NOTHING WAS AUDITED — none of the %d work item(s) read was evaluated as a\n"+
+			"review ticket, so this run cannot say whether any declaration is missing.\n\n", r.Population)
+	case !r.Actionable():
 		b.WriteString("no missing review declarations.\n\n")
 	}
 	fmt.Fprintf(&b, "scanned %d review ticket(s) out of %d work item(s) read", r.Scanned, r.Population)

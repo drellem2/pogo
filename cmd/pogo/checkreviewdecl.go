@@ -71,8 +71,9 @@ transition 4). A detector keyed on stage alone therefore reports the BUILDER onc
 per issue, every time the track runs correctly — which is what it did before
 mg-2829. The build half is set aside on a marker that does not read ` + "`reviews:`" + `
 (that would be circular): a declared predecessor — a ` + "`depends:`" + ` edge or a
-` + "`predecessor:<id>`" + ` tag — or a title whose first word is ` + "`build`" + `. Every item
-set aside is listed with the marker it was set aside on, because if one of them
+` + "`predecessor:<id>`" + ` tag — or a title whose first word is ` + "`build`" + `. A title whose
+first word is ` + "`review`" + ` overrides a declared predecessor, so such an item is
+always audited (gh#152). Every item set aside is listed with the marker it was set aside on, because if one of them
 is really a review ticket then its missing line is NOT in the report.
 
 IT PARSES WITH THE ENFORCER'S PARSER, not a grep. A ` + "`reviews:`" + ` line outside the
@@ -86,6 +87,10 @@ measures cannot be trusted to measure it.
 Scans available/, claimed/, done/ and pending/. Archived and shelved items are
 NOT scanned, and the report states the statuses it covered rather than implying
 it saw the whole store.
+
+A run that read work items but evaluated none of them as a review ticket says
+NOTHING WAS AUDITED instead of "no missing review declarations" — a zero over a
+non-empty store is not a pass. It still exits 0: nothing was found.
 
 Exit status is 0 when nothing is actionable and 1 when anything is found.`,
 		Args: cobra.NoArgs,
