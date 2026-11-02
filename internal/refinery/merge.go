@@ -15,6 +15,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/ghpr"
 	"github.com/drellem2/pogo/internal/ghtoken"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // defaultMaxAttempts is the fallback retry budget when no per-repo
@@ -646,59 +647,16 @@ func shortSHA(sha string) string {
 // a later attempt that rebases to the SAME tree replays it instead of spending
 // another gate run. See gateHold.
 func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, skipGates, prMode bool, hold *gateHold) (output string, stage string, sha string, gatesReached bool, err error) {
-	// Fetch latest from origin
-	log.Printf("refinery: MR %s step=fetch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
-	if out, gerr := gitCmdOutput(wtDir, "fetch", "origin"); gerr != nil {
-		// This is the step that failed all thirty-one merges on 2026-08-05, and
-		// the one whose error was returned unclassified and unretried. It reaches
-		// the network before it reaches the tree, so it establishes nothing about
-		// the branch — the classifier decides from git's verbatim output, which
-		// gitStepFail keeps.
-		return "", "fetch", "", false, gitStepFail("fetch", fmt.Sprintf("fetch: %s: %v", out, gerr),
-			[]string{"fetch", "origin"}, out, gerr)
-	}
-
-	// Clear anything a previous attempt's gate (or a previous MR's, this clone
-	// is reused) left modified in the tracked tree. Without this the checkout
-	// and rebase below fail on writes the author never made — see gatedirt.go.
-	r.discardGateSideEffectsAt(wtDir, mr, attempt, "attempt-entry")
-
-	// Checkout the branch fresh from origin
-	log.Printf("refinery: MR %s step=checkout-branch branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
-	if out, gerr := gitCmdOutput(wtDir, "checkout", "-B", mr.Branch, "origin/"+mr.Branch); gerr != nil {
-		if dirtErr := r.classifyGateDirt(wtDir, mr, "checkout branch", out); dirtErr != nil {
-			return "", "fetch", "", false, dirtErr
-		}
-		return "", "fetch", "", false, gitStepFail("checkout-branch", fmt.Sprintf("checkout branch: %s: %v", out, gerr),
-			[]string{"checkout", "-B", mr.Branch, "origin/" + mr.Branch}, out, gerr)
-	}
-
-	// Rebase onto latest target so the branch is a direct descendant of main.
-	// Polecat branches fork from main at spawn time and may be behind by the
-	// time they reach the refinery.
-	log.Printf("refinery: MR %s step=rebase target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
-	if out, gerr := gitCmdOutput(wtDir, "rebase", "origin/"+mr.TargetRef); gerr != nil {
-		// A dirty tree is the one rebase failure that is never the author's
-		// doing: this clone is private to the refinery, so whatever is modified
-		// in it was written by a gate. Say that, instead of relaying git's
-		// "commit or stash them" at someone who has nothing to commit.
-		// Classified BEFORE the abort, because the abort's own reset erases the
-		// evidence the message is built from. (mg-393f)
-		dirtErr := r.classifyGateDirt(wtDir, mr, "rebase onto "+mr.TargetRef, out)
-		// Abort the failed rebase to leave worktree in a clean state
-		gitCmdOutput(wtDir, "rebase", "--abort")
-		if dirtErr != nil {
-			return "", "rebase", "", false, dirtErr
-		}
-		rebaseErr := gitStepFail("rebase", fmt.Sprintf("rebase onto %s: %s: %v", mr.TargetRef, out, gerr),
-			[]string{"rebase", "origin/" + mr.TargetRef}, out, gerr)
-		// "invalid upstream" can be transient — e.g. the target branch
-		// hasn't been fetched yet or the ref is missing from the clone.
-		// Treat it as retryable so a fresh fetch gets another chance.
-		if strings.Contains(out, "invalid upstream") {
-			return "", "rebase", "", false, &retryableError{rebaseErr}
-		}
-		return "", "rebase", "", false, rebaseErr
+	// Fetch, check out the branch fresh from origin, and rebase it onto the
+	// latest target so it is a direct descendant of main: polecat branches fork
+	// from main at spawn time and may be behind by the time they reach the
+	// refinery. The git steps are the backend's (vcs.Lander.Prepare); the
+	// hooks put the refinery's own work between them. See landMR.
+	lander := backendFor(mr.RepoPath)
+	vmr := r.landMR(wtDir, mr, attempt)
+	if _, perr := lander.Prepare(context.Background(), vmr); perr != nil {
+		stage, err := prepareFailure(mr, perr)
+		return "", stage, "", false, err
 	}
 
 	// Reject commit messages that would close a GitHub issue by keyword
@@ -785,53 +743,15 @@ func (r *Refinery) attemptMerge(wtDir string, mr *MergeRequest, attempt int, ski
 	// the top of this attempt (checkout -B origin/<branch>, above). `-B` forces
 	// the local target ref to the fetched origin tip regardless of prior local
 	// state, so a poisoned/ahead target self-heals instead of aborting. (mg-f1db)
-	log.Printf("refinery: MR %s step=fetch-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
-	if out, gerr := gitCmdOutput(wtDir, "fetch", "origin", mr.TargetRef); gerr != nil {
-		return gateOutput, "fetch", "", true, &retryableError{gitStepFail("fetch-target",
-			fmt.Sprintf("fetch target %s: %s: %v", mr.TargetRef, out, gerr),
-			[]string{"fetch", "origin", mr.TargetRef}, out, gerr)}
-	}
-	log.Printf("refinery: MR %s step=reset-target target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
-	if out, gerr := gitCmdOutput(wtDir, "checkout", "-B", mr.TargetRef, "origin/"+mr.TargetRef); gerr != nil {
-		if dirtErr := r.classifyGateDirt(wtDir, mr, "checkout target "+mr.TargetRef, out); dirtErr != nil {
-			return gateOutput, "fetch", "", true, dirtErr
-		}
-		return gateOutput, "fetch", "", true, &retryableError{gitStepFail("reset-target",
-			fmt.Sprintf("reset target %s to origin: %s: %v", mr.TargetRef, out, gerr),
-			[]string{"checkout", "-B", mr.TargetRef, "origin/" + mr.TargetRef}, out, gerr)}
+	landed, lerr := lander.Land(context.Background(), vcs.Prepared{MR: vmr, GateDir: wtDir})
+	if lerr != nil {
+		stage, err := landFailure(mr, lerr)
+		return gateOutput, stage, "", true, err
 	}
 
-	// Fast-forward merge — guaranteed to work if target hasn't moved since fetch
-	log.Printf("refinery: MR %s step=merge branch=%s attempt=%d", mr.ID, mr.Branch, attempt)
-	if out, gerr := gitCmdOutput(wtDir, "merge", "--ff-only", mr.Branch); gerr != nil {
-		if dirtErr := r.classifyGateDirt(wtDir, mr, "merge --ff-only "+mr.Branch, out); dirtErr != nil {
-			return gateOutput, "merge", "", true, dirtErr
-		}
-		return gateOutput, "rebase", "", true, &retryableError{gitStepFail("merge-ff-only",
-			fmt.Sprintf("merge (ff-only): %s: %v", out, gerr),
-			[]string{"merge", "--ff-only", mr.Branch}, out, gerr)}
-	}
-
-	// Push to origin
-	log.Printf("refinery: MR %s step=push target=%s attempt=%d", mr.ID, mr.TargetRef, attempt)
-	if out, gerr := gitCmdOutput(wtDir, "push", "origin", mr.TargetRef); gerr != nil {
-		// Auth failures don't recover on retry — surface the actionable
-		// error immediately rather than burning attempts.
-		if isAuthFailure(out) {
-			return gateOutput, "push", "", true, gitStepFail("push", formatPushAuthError(out).Error(),
-				[]string{"push", "origin", mr.TargetRef}, out, gerr)
-		}
-		return gateOutput, "push", "", true, &retryableError{gitStepFail("push",
-			fmt.Sprintf("push: %s: %v", out, gerr),
-			[]string{"push", "origin", mr.TargetRef}, out, gerr)}
-	}
-
-	// Capture the merge commit SHA (HEAD on target after fast-forward).
-	// Best-effort: if rev-parse fails, return empty SHA — the merge already
-	// pushed successfully.
-	headSHA, _ := gitCmdOutput(wtDir, "rev-parse", "HEAD")
-
-	return gateOutput, "push", headSHA, true, nil
+	// The merge commit SHA (HEAD on target after fast-forward). Best-effort:
+	// the merge already pushed successfully.
+	return gateOutput, "push", landed.SHA, true, nil
 }
 
 // prLookupTimeout bounds the gh CLI call in openPRNumber so a hung network
@@ -925,7 +845,12 @@ func (r *Refinery) closePRAndReap(wtDir string, mr *MergeRequest, sha string) {
 	// Deleting the head branch is what GitHub's own auto-delete does after a
 	// merge; do it after the close so the delete can't race the close.
 	log.Printf("refinery: MR %s step=branch-reap branch=%s", mr.ID, mr.Branch)
-	if out, gerr := gitCmdOutput(wtDir, "push", "origin", "--delete", mr.Branch); gerr != nil {
+	if gerr := backendFor(mr.RepoPath).Cleanup(context.Background(), vcs.MR{ID: mr.ID, Repo: vcs.Repo{Path: mr.RepoPath}, Dir: wtDir, Branch: mr.Branch, Target: mr.TargetRef}); gerr != nil {
+		var out string
+		var se *vcs.StepError
+		if errors.As(gerr, &se) {
+			out = se.Output
+		}
 		log.Printf("refinery: MR %s step=branch-reap failed (%s) — origin/%s may linger; merge already landed", mr.ID, strings.TrimSpace(out), mr.Branch)
 	}
 }
@@ -1460,110 +1385,6 @@ func hasAlternates(dir string) bool {
 		return false
 	}
 	return info.Size() > 0
-}
-
-// refineryCommitterName / refineryCommitterEmail is the identity git uses to
-// author and commit the commits the refinery creates during a rebase replay
-// (attemptMerge's `git rebase origin/<target>`). The refinery's worktree
-// clones (created by ensureWorktree) have no local user.name/user.email, and
-// pogod runs under launchd/systemd — often with no global/system git config
-// and a username git can't auto-derive into a valid ident
-// ("fatal: empty ident name (for <runner@host>) not allowed"). Supplying an
-// explicit identity via the environment makes the refinery self-contained:
-// rebase replays no longer depend on ambient git config (ia-1428, gh #7).
-const (
-	refineryCommitterName  = "pogo refinery"
-	refineryCommitterEmail = "refinery@pogo.local"
-)
-
-// gitIdentityEnv returns GIT_AUTHOR_*/GIT_COMMITTER_* environment entries that
-// fall back to the refinery identity for any that aren't already set in the
-// process environment. A pre-existing non-empty value (a developer's shell
-// identity, or a test's seeded identity) takes precedence; an unset or empty
-// value gets the refinery default. Appended after os.Environ(), these entries
-// win over any empty same-key values inherited from the environment (Go's
-// exec uses the last value for duplicate keys).
-func gitIdentityEnv() []string {
-	defaults := map[string]string{
-		"GIT_AUTHOR_NAME":     refineryCommitterName,
-		"GIT_AUTHOR_EMAIL":    refineryCommitterEmail,
-		"GIT_COMMITTER_NAME":  refineryCommitterName,
-		"GIT_COMMITTER_EMAIL": refineryCommitterEmail,
-	}
-	var env []string
-	for k, def := range defaults {
-		if os.Getenv(k) == "" {
-			env = append(env, k+"="+def)
-		}
-	}
-	return env
-}
-
-// gitCmdOutput runs a git command in the given directory and captures
-// combined stdout/stderr output. Returns the output and any error.
-// This ensures git error messages (e.g. push rejection reasons) are
-// available for logging and stored in MergeRequest.Error, rather than
-// being lost to pogod's stdout/stderr.
-func gitCmdOutput(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	// pogod runs under launchd/systemd with no TTY. Without disabling
-	// interactive prompts, an HTTPS remote with no credentials makes git
-	// hang forever waiting for a username on stdin. Force prompts off so
-	// auth failures fail fast and we can detect them via isAuthFailure.
-	//
-	// Also supply a committer/author identity so rebase replays don't fail
-	// with "Committer identity unknown" when no ambient git config is
-	// available (ia-1428, gh #7).
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	cmd.Env = append(cmd.Env, gitIdentityEnv()...)
-	// A network op against an https github.com remote authenticates through
-	// `gh auth git-credential`, which reads GH_TOKEN from THIS child's env;
-	// pogod no longer carries one of its own (mg-37183).
-	if ghtoken.GitNeedsCredential(args) {
-		cmd.Env = ghtoken.ChildEnv(cmd.Env)
-	}
-	output, err := cmd.CombinedOutput()
-	out := strings.TrimSpace(string(output))
-	if err != nil {
-		if note, benign := benignGitOutcome(out); benign {
-			log.Printf("refinery: git %v: %s (expected outcome)", args, note)
-		} else {
-			log.Printf("refinery: git %v failed: %s: %v", args, out, err)
-		}
-	}
-	return out, err
-}
-
-// benignGitOutcomes maps a git failure's COMPLETE output text to a plain-words
-// description of the expected outcome it represents. The key is matched by
-// exact string equality against gitCmdOutput's trimmed combined output — not
-// against the command, and not against a prefix.
-//
-// That distinction is the whole point, not a detail (mg-5d3f). The refinery
-// calls `git rebase --abort` unconditionally to clear crash debris, so the
-// abort fails on every clean clone: 245 of these landed in one 50,603-line log,
-// all of them reading `git [rebase --abort] failed`, none of them an error.
-// Benign lines at error level teach a reader to skip error lines.
-//
-// Suppressing by COMMAND would silence the whole class, so a genuinely new
-// `rebase --abort` failure — a concurrent git process holding .git/index.lock
-// is a real one the refinery can hit, since gitgc and agents touch the same
-// worktrees — would be swallowed on the day it first appeared. Matching the
-// full text silences only the outcome measured to be benign; any other wording
-// fails the equality test and still logs as a failure, which is where a new
-// variant belongs. The safe form self-invalidates when the world changes.
-//
-// Add an entry only for an outcome measured to be benign in every occurrence.
-var benignGitOutcomes = map[string]string{
-	"fatal: no rebase in progress": "no rebase in progress, nothing to abort",
-}
-
-// benignGitOutcome reports whether git output is a known expected outcome
-// rather than a failure, returning the description to log in its place.
-func benignGitOutcome(out string) (string, bool) {
-	note, ok := benignGitOutcomes[out]
-	return note, ok
 }
 
 // authFailurePatterns match git stderr emitted when a remote requires

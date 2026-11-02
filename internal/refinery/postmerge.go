@@ -1,9 +1,12 @@
 package refinery
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
+
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // mergeResult is everything processMerge learned about a merge it attempted.
@@ -89,7 +92,8 @@ func (r *Refinery) runPostMergeSteps(wtDir string, mr *MergeRequest, sha string)
 	return ""
 }
 
-// tagMergedSHA creates the declared tag on sha and pushes it to origin.
+// tagMergedSHA creates the declared tag on sha and pushes it to origin,
+// through the backend's Refs.Tag.
 //
 // It is idempotent in the only direction that is safe to be: a tag that
 // already exists on origin pointing at sha is treated as success, so a
@@ -97,85 +101,21 @@ func (r *Refinery) runPostMergeSteps(wtDir string, mr *MergeRequest, sha string)
 // its own prior work. A tag that exists pointing SOMEWHERE ELSE is a hard
 // error and is never moved — a published release tag that silently relocates
 // is worse than a missing one, and the disagreement means a human needs to
-// look. The local clone's copy of the tag is fair game either way; it is
-// private to the refinery and gets realigned from origin.
+// look. See gitvcs.Refs.Tag.
 func (r *Refinery) tagMergedSHA(wtDir string, mr *MergeRequest, sha string) error {
 	tag := mr.PostMergeTag
-	ref := "refs/tags/" + tag
-
-	// Ask origin, not the local clone: the clone can hold a stale tag from an
-	// earlier attempt, and origin is what "the tag exists" has to mean.
-	existing, err := remoteTagSHA(wtDir, tag)
-	if err != nil {
-		return fmt.Errorf("look up tag %s on origin: %w", tag, err)
-	}
-	if existing != "" {
-		if existing == sha {
-			log.Printf("refinery: MR %s step=post-merge-tag tag=%s already on origin at %s — nothing to do", mr.ID, tag, sha)
-			return nil
-		}
-		return fmt.Errorf("tag %s already exists on origin at %s but this merge landed as %s — refusing to move a published tag; "+
-			"resolve by hand (inspect both commits, then delete and re-push the tag if the existing one is wrong)",
-			tag, existing, sha)
-	}
-
-	// Drop any local copy so the create below cannot fail on debris from a
-	// previous attempt. Errors are ignored: the common case is no such tag.
-	gitCmdOutput(wtDir, "tag", "-d", tag)
-
-	// Annotated, not lightweight: `git describe` prefers annotated tags, which
-	// is how a release tag is normally read back, and it records who made it
-	// and when.
 	msg := fmt.Sprintf("%s\n\nTagged by the pogo refinery on merge of %s (MR %s) into %s.", tag, mr.Branch, mr.ID, mr.TargetRef)
-	if out, gerr := gitCmdOutput(wtDir, "tag", "-a", tag, "-m", msg, sha); gerr != nil {
-		return fmt.Errorf("create tag %s at %s: %s: %w", tag, sha, out, gerr)
+	res, err := backendFor(mr.RepoPath).Tag(context.Background(), vcs.Repo{Path: wtDir}, tag, sha, msg)
+	if err != nil {
+		return err
 	}
-
-	if out, gerr := gitCmdOutput(wtDir, "push", "origin", ref); gerr != nil {
-		// Someone may have pushed the same tag between the lookup above and
-		// this push. Re-read origin: if it now agrees with us the race was
-		// benign, and reporting a failure would block a correct release.
-		if raced, rerr := remoteTagSHA(wtDir, tag); rerr == nil && raced == sha {
-			log.Printf("refinery: MR %s step=post-merge-tag push of %s was rejected but origin already has it at %s — treating as success", mr.ID, tag, sha)
-			return nil
-		}
-		return fmt.Errorf("push tag %s to origin: %s: %w", tag, out, gerr)
+	switch res {
+	case vcs.TagAlreadyPresent:
+		log.Printf("refinery: MR %s step=post-merge-tag tag=%s already on origin at %s — nothing to do", mr.ID, tag, sha)
+	case vcs.TagRacedPresent:
+		log.Printf("refinery: MR %s step=post-merge-tag push of %s was rejected but origin already has it at %s — treating as success", mr.ID, tag, sha)
 	}
 	return nil
-}
-
-// remoteTagSHA returns the commit origin's copy of tag points at, or "" when
-// origin has no such tag. An annotated tag is resolved through to its commit
-// via the ^{} peeled ref, so the answer is comparable with a merge SHA.
-//
-// ls-remote is used rather than a fetch-then-rev-parse so the check cannot be
-// answered from a stale local ref, and so it stays read-only.
-func remoteTagSHA(wtDir, tag string) (string, error) {
-	ref := "refs/tags/" + tag
-	out, err := gitCmdOutput(wtDir, "ls-remote", "origin", ref, ref+"^{}")
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", out, err)
-	}
-	var direct, peeled string
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) != 2 {
-			continue
-		}
-		switch fields[1] {
-		case ref:
-			direct = fields[0]
-		case ref + "^{}":
-			peeled = fields[0]
-		}
-	}
-	// The peeled value is the commit an annotated tag points at; prefer it.
-	// For a lightweight tag there is no peeled line and the direct value
-	// already is the commit.
-	if peeled != "" {
-		return peeled, nil
-	}
-	return direct, nil
 }
 
 // validTagName reports whether name is usable as a git tag, with a reason when
