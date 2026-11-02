@@ -1,8 +1,10 @@
 package gitgc
 
 import (
+	"context"
 	"fmt"
-	"strings"
+
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // WorktreeCommitFinding is the answer to one question about a polecat's
@@ -160,18 +162,14 @@ func WorktreeCommitsAtRisk(worktreeDir, repo, target string) (WorktreeCommitFind
 // would answer a SHA question next to a patch question and disagree with itself
 // on precisely the rebase case both exist to survive.
 func cherryAheadCommits(repo, upstream, head string) ([]string, error) {
-	out, err := runOutput("git", "-C", repo, "cherry", "-v", upstream, head)
+	st, err := work.State(context.Background(), vcs.Repo{Path: repo}, vcs.Submission{Ref: head}, upstream)
 	if err != nil {
 		return nil, fmt.Errorf("cherry -v %s %s: %w", upstream, head, err)
 	}
 	var commits []string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "+") {
-			continue
-		}
-		if rest := strings.TrimSpace(strings.TrimPrefix(line, "+")); rest != "" {
-			commits = append(commits, rest)
+	for _, c := range st.Ahead {
+		if c.Summary != "" {
+			commits = append(commits, c.Summary)
 		}
 	}
 	return commits, nil

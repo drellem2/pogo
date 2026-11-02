@@ -10,17 +10,23 @@
 //
 // The four groups are declared here as the design sketches them. Lander and
 // Refs have an implementation, the git backend in internal/vcs/gitvcs, and
-// only the refinery calls it. Work (slice 3) is declared with placeholder
-// types: its slice fixes the signatures, as §3 says ("Signatures are sketches.
-// The build slices fix them."). Selection by repo (slice 4) does not exist
-// yet, so nothing returns a Backend.
+// only the refinery calls it. Selection by repo (slice 4) does not exist yet,
+// so nothing returns a Backend.
 //
 // # Slice 2 (mg-cc7ae)
 //
 // Workspaces has its signatures fixed and a git implementation
 // (gitvcs.Workspaces), called by internal/agent's polecat spawn, its rollback
 // and leftover-branch reclaim, the injected-persona exclude, and the crew
-// workspace refresh. Remove, Dirty and Describe stay slice 3's.
+// workspace refresh. Remove, Dirty and Describe are still placeholders
+// (gitvcs/workspaces_pending.go): slice 3 did not take them, so gitgc's
+// worktree removal and dirty check still run git through gitvcs's runners.
+//
+// # Slice 3 (mg-d72cb)
+//
+// Work has its signatures fixed and a git implementation, gitvcs.Work.
+// internal/strandedwork and internal/gitgc read branches, cherry-judge them,
+// and read commit bodies, paths and blobs through it.
 package vcs
 
 import (
@@ -247,36 +253,87 @@ func behindText(n int) string {
 
 // ---- Work (slice 3) ----
 
-// WorkQuery, Submission, WorkState, Message and Diff are placeholders until
-// slice 3 fixes them.
+// The Work types below were fixed by slice 3 (mg-d72cb) to fit the questions
+// that internal/strandedwork and internal/gitgc already ask of git. Slice 6
+// (enth work) may widen them. It must not change what the git backend answers.
+
+// WorkQuery selects submissions. An empty query is every worker's work.
 type WorkQuery struct {
-	Item   string
+	// Item selects by work item. The git backend has no item index (a git
+	// branch is named for its worker, not its item), so it answers
+	// ErrUnsupported. Callers attribute by commit subject themselves
+	// (strandedwork.ItemCandidates).
+	Item string
+	// Worker selects one worker's submission by agent name. For git that is
+	// the branch polecat-<Worker>.
 	Worker string
 }
 
+// Submission names one worker's output, or specific revisions of it.
 type Submission struct {
+	// Branch is the worker's branch name (git: polecat-<name>).
 	Branch string
+	// Ref is where the backend read the submission from. For git it is a full
+	// refname (refs/heads/<Branch> or refs/remotes/origin/<Branch>). When it is
+	// set, State reads Ref rather than Branch.
+	Ref string
+	// Revs names specific commits, for Messages and Diff.
+	Revs []string
 }
 
+// Commit is one commit of a submission as State reports it.
+type Commit struct {
+	Rev     string
+	Subject string
+	// Summary is the commit's one-line form exactly as the backend printed
+	// it, untrimmed inside (git: `<sha> <subject>` from `git cherry -v`).
+	// gitgc reports this string, and rebuilding it from Rev and Subject would
+	// collapse a subject's leading whitespace.
+	Summary string
+}
+
+// WorkState is a submission judged against a target.
 type WorkState struct {
+	// Ahead lists the submission's commits with no equivalent on the target,
+	// oldest first. For git these are `git cherry -v`'s "+" lines.
+	Ahead []Commit
+	// Equivalent counts the submission's commits the target already has under
+	// a different identity (git: `git cherry`'s "-" lines).
+	Equivalent int
+	// Landed reports that nothing in the submission is missing from the target.
 	Landed bool
 }
 
+// Message is one commit's message body (git: %b, without the subject).
 type Message struct {
 	Rev  string
 	Body string
 }
 
+// Diff is what a submission's revisions touched.
 type Diff struct {
 	Paths []string
 }
 
 // Work finds and judges a worker's output: W1, W5, P2, P5, R1, R9, R12, S2–S9, C4.
+//
+// The git backend returns the runner's error UNWRAPPED, so the caller wraps it
+// in its own words. That is how strandedwork and gitgc kept their error texts
+// byte for byte when they moved onto this interface.
 type Work interface {
+	// Find lists submissions, in the backend's stable order. git lists both the
+	// local head and origin's copy of a branch, so a Branch can appear twice
+	// with different Refs.
 	Find(ctx context.Context, repo Repo, q WorkQuery) ([]Submission, error)
+	// State judges the submission against target, which for git is any
+	// revision (a full ref or a SHA).
 	State(ctx context.Context, repo Repo, s Submission, target string) (WorkState, error)
+	// Messages returns the bodies of s.Revs. On error it also returns the
+	// messages it read before the failure.
 	Messages(ctx context.Context, repo Repo, s Submission) ([]Message, error)
+	// Diff returns the paths s.Revs touched.
 	Diff(ctx context.Context, repo Repo, s Submission) (Diff, error)
+	// Cat returns path's content at rev.
 	Cat(ctx context.Context, repo Repo, rev, path string) ([]byte, error)
 }
 

@@ -1,9 +1,12 @@
 package gitgc
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // DurabilityVerdict answers ONE question about a local branch ref: would
@@ -285,15 +288,9 @@ func originRefContaining(repo, commit string) (string, error) {
 // the question" produce, and collapsing that pair is the mistake mg-65b2
 // records one subsystem over.
 func cherryAhead(repo, upstream, head string) (int, error) {
-	out, err := runOutput("git", "-C", repo, "cherry", upstream, head)
+	st, err := work.State(context.Background(), vcs.Repo{Path: repo}, vcs.Submission{Ref: head}, upstream)
 	if err != nil {
 		return 0, fmt.Errorf("cherry %s %s: %w", upstream, head, err)
 	}
-	n := 0
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "+") {
-			n++
-		}
-	}
-	return n, nil
+	return len(st.Ahead), nil
 }

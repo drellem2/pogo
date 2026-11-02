@@ -1,8 +1,11 @@
 package strandedwork
 
 import (
+	"context"
 	"fmt"
 	"strings"
+
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // This file is the SECOND OPINION on `git cherry`, and it exists because the
@@ -309,11 +312,11 @@ func MeasurePresence(repo string, f Finding) (Presence, error) {
 	for path := range paths {
 		// A path absent from the target is not an error: the branch created it,
 		// and every line in it is correctly counted as missing.
-		blob, err := git(repo, "show", f.Target+":"+path)
+		blob, err := work.Cat(context.Background(), vcs.Repo{Path: repo}, f.Target, path)
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(blob, "\n") {
+		for _, line := range strings.Split(string(blob), "\n") {
 			if t := strings.TrimSpace(line); len(t) >= ContentMinLine {
 				haystack[t] = true
 			}
@@ -334,17 +337,11 @@ func MeasurePresence(repo string, f Finding) (Presence, error) {
 // handed back to `git show <ref>:<path>` resolves to nothing. The NUL-delimited
 // form is never quoted.
 func commitPaths(repo, sha string) ([]string, error) {
-	out, err := git(repo, "show", "--pretty=format:", "--name-only", "-z", sha)
+	d, err := work.Diff(context.Background(), vcs.Repo{Path: repo}, vcs.Submission{Revs: []string{sha}})
 	if err != nil {
 		return nil, fmt.Errorf("paths of %s in %s: %w", shortSHA(sha), repo, err)
 	}
-	var paths []string
-	for _, p := range strings.Split(out, "\x00") {
-		if p = strings.TrimSpace(p); p != "" {
-			paths = append(paths, p)
-		}
-	}
-	return paths, nil
+	return d.Paths, nil
 }
 
 // commitAddedLines returns the substantive lines one commit adds.
