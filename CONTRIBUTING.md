@@ -634,9 +634,8 @@ switched off, which is worse than one that fires narrowly.
 
 ## Project Structure
 
-- `cmd/` - CLI entry points (`pogo`, `lsp`, `pose`, `pogod`)
+- `cmd/` - CLI entry points (`pogo`, `lsp`, `pogod`)
 - `internal/` - Internal packages
-- `pkg/` - Public packages
 - `emacs/`, `nvim/`, `vscode/` - Editor integrations
 - `shell/` - Shell integrations (zsh, bash, fish)
 - `tmux/` - tmux integration
@@ -645,7 +644,7 @@ switched off, which is worse than one that fires narrowly.
 
 Releases are cut by tag-trigger: pushing a `vX.Y.Z` tag to `origin` triggers
 `.github/workflows/release.yml`, which runs `goreleaser` and publishes the
-GitHub release with all four binaries (`pogo`, `pogod`, `lsp`, `pose` for
+GitHub release with all three binaries (`pogo`, `pogod`, `lsp` for
 linux/darwin × amd64/arm64). `install.sh`'s `releases/latest` resolver picks
 up the new release within minutes.
 

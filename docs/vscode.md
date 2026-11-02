@@ -1,14 +1,12 @@
 # VS Code Integration
 
-A VS Code extension that integrates with the pogo daemon for project discovery and code search.
+A VS Code extension that integrates with the pogo daemon for project discovery.
 
 ## Features
 
 - **Command palette** project switcher (`Pogo: Switch Project`)
-- **File finder** across pogo-indexed projects (`Pogo: Find File in Project`)
-- **Code search** using zoekt syntax (`Pogo: Search Project`)
-- **Tree view** listing all known projects with indexing status
-- **Status bar** indicator showing current project and indexing state
+- **Tree view** listing all known projects
+- **Status bar** indicator showing the current project
 - **Auto-register** workspace folders with pogo on open
 
 ## Requirements
@@ -46,14 +44,11 @@ Or use VS Code's "Developer: Install Extension from Location" command.
 | Command | Description |
 |---------|-------------|
 | `Pogo: Switch Project` | Pick a project from pogo's index and open it |
-| `Pogo: Find File in Project` | Find and open a file in the current project |
-| `Pogo: Search Project` | Search code with zoekt syntax, jump to results |
-| `Pogo: Show Project Status` | Refresh tree view and show indexing status |
+| `Pogo: Show Registered Projects` | Refresh the tree view and list registered project paths |
 
 ## Status Bar
 
 The status bar shows:
-- `$(check) pogo[name]` — project indexed and ready
-- `$(sync~spin) pogo[name]` — currently indexing
-- `$(warning) pogo[name]` — index is stale
+- `$(repo) pogo[name]` — current project
+- `$(repo) pogo` — daemon running, no current project
 - `$(circle-slash) pogo` — daemon not running

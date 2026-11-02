@@ -27,7 +27,6 @@ Or add the following to your `config.fish`:
 set -gx POGO_BINARY_PATH (realpath ~/dev/pogo/bin 2>/dev/null; or echo ~/dev/pogo/bin)
 mkdir -p ~/.pogo
 set -gx POGO_HOME (realpath ~/.pogo 2>/dev/null; or echo ~/.pogo)
-set -gx POGO_PLUGIN_PATH "$POGO_BINARY_PATH/plugin"
 fish_add_path --prepend $POGO_BINARY_PATH
 
 # Auto-register projects on directory change
@@ -46,7 +45,6 @@ abbr -a sp 'cd (lsp | fzf)'
 | Auto-discovery | Projects are registered with pogo as you `cd` into directories |
 | `sp` | Fuzzy project switcher — lists known projects via `fzf` and `cd`s to your selection |
 | `lsp` | List all known projects |
-| `pose QUERY` | Search code across all indexed projects |
 
 ## Configuration
 
@@ -54,7 +52,6 @@ abbr -a sp 'cd (lsp | fzf)'
 |----------|-------------|---------|
 | `POGO_BINARY_PATH` | Directory containing pogo binaries | `~/dev/pogo/bin` |
 | `POGO_HOME` | Directory for pogo data files (state, recovery, projects.json) | `~/.pogo` |
-| `POGO_PLUGIN_PATH` | Plugin discovery directory | `$POGO_BINARY_PATH/plugin` |
 
 ## Requirements
 
@@ -63,7 +60,7 @@ abbr -a sp 'cd (lsp | fzf)'
 
 ## How It Works
 
-The integration uses fish's `--on-variable PWD` event handler to detect directory changes. When `$PWD` changes, `pogo visit` is called to register the directory's git repository with the pogo daemon for indexing.
+The integration uses fish's `--on-variable PWD` event handler to detect directory changes. When `$PWD` changes, `pogo visit` is called to register the directory's git repository with the pogo daemon.
 
 ## Troubleshooting
 

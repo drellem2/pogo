@@ -310,7 +310,7 @@ if [ -x "$ST_BS_DIR/pogo" ] && [ -x "$ST_BS_DIR/pogod" ]; then
     # — and before mg-3141 neither could: pogo printed a bare semver, pogod did
     # not define the flag at all. A documented remedy that cannot do what it says
     # is worse than none, so it is asserted here rather than left as prose.
-    for st_name in pogo pogod lsp pose; do
+    for st_name in pogo pogod lsp; do
         [ -x "$ST_BS_DIR/$st_name" ] || continue
         case "$("$ST_BS_DIR/$st_name" --version 2>/dev/null)" in
             "$st_name "*"source=ldflags"*)

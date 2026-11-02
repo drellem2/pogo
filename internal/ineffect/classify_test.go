@@ -17,7 +17,7 @@ func TestClassifyPaths(t *testing.T) {
 	}{
 		{"internal/agent/api.go", ClassCompiled, "shipped Go reaches a runtime only through a binary"},
 		{"cmd/pogod/main.go", ClassCompiled, ""},
-		{"pkg/plugin/plugin.go", ClassCompiled, ""},
+		{"internal/project/project.go", ClassCompiled, ""},
 		{"go.mod", ClassCompiled, "a module change alters what a rebuild produces"},
 		{"go.sum", ClassCompiled, ""},
 

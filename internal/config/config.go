@@ -98,29 +98,12 @@ const DefaultEscalationBox = "human"
 // "worker" config key, and Load() defaulting — references it. See mg-ccec
 // (design mg-6a24 §1.4).
 
-// DefaultMaxFilesPerTree is the default per-tree file-count ceiling. A tree
-// with more files than this is registered but marked skipped-too-large: it is
-// not deep-walked. This bounds index cost (building the search index is
-// O(files)) and catches pathological generated-data directories that no
-// exclude list anticipated. See mg-d205.
-const DefaultMaxFilesPerTree = 25000
-
-// DefaultIndexInterval is how often the timer-driven incremental indexer
-// re-walks every registered project. The re-index is incremental — a
-// no-change tick costs one Lstat per file — so the interval only bounds how
-// long a file change can take to surface in search results. Two minutes is a
-// comfortable default given every index consumer is request-driven. See
-// docs/design/indexing-strategy.md and mg-5b0d.
+// DefaultIndexInterval is how often pogod scans the configured index_roots for
+// newly created git repos to register. The scan reads one directory per root,
+// so the interval only bounds how long a new repo takes to appear in `lsp`.
+// It was the file-search re-index cadence until that indexer was deleted
+// (mg-14647). See mg-5b0d.
 const DefaultIndexInterval = 2 * time.Minute
-
-// SearchDisabledMessage is what every search entry point — pogod's /plugin
-// and /projects/{id} handlers, `pose`, `pogo refs`, `pogo deps` — reports when
-// the built-in file-search indexer is off. Search indexing is off by default
-// (mg-cabf4): over three weeks of request logs and transcripts nobody called a
-// search endpoint, while the indexer kept re-walking and rebuilding a zoekt
-// index under every registered repo every two minutes. One string so the
-// clients and the daemon cannot drift apart on how to turn it back on.
-const SearchDisabledMessage = "search indexing is disabled; enable with `[search] enabled = true` in config.toml (or POGO_SEARCH_ENABLED=true) and restart pogod"
 
 // DefaultGitGCInterval is how often pogod runs the polecat git garbage
 // collector (stale `polecat-*` branch + leaked worktree cleanup). Hourly is
@@ -949,36 +932,26 @@ func IsDispatchGated(assignee string, gates []string) bool {
 
 // Config holds pogo daemon configuration.
 type Config struct {
-	Port            int
-	Bind            string
-	MaxFilesPerTree int
-	// IndexInterval is how often the timer-driven incremental indexer
-	// re-walks every registered project. Zero falls back to
-	// DefaultIndexInterval. See docs/design/indexing-strategy.md.
+	Port int
+	Bind string
+	// IndexInterval is how often pogod scans IndexRoots for new git repos.
+	// Zero falls back to DefaultIndexInterval.
 	IndexInterval time.Duration
 	// IndexRoots, when non-empty, restricts auto-registration to git repos
 	// under one of these paths (opt-in strict mode). Empty means the default
-	// zero-config behavior: any visited git repo may be auto-registered,
-	// bounded by MaxFilesPerTree and the default-exclude patterns.
+	// zero-config behavior: any visited git repo may be auto-registered.
 	IndexRoots []string
-	// SearchEnabled turns on the built-in file-search indexer
-	// (pogo-plugin-search): the startup index pass, the periodic re-index of
-	// every registered project, and the zoekt index under <repo>/.pogo/search.
-	// Off by default ([search] enabled, POGO_SEARCH_ENABLED) — see
-	// SearchDisabledMessage. The project index (`pogo visit`, `lsp`,
-	// /projects, /file) and index_roots discovery do not depend on it.
-	SearchEnabled bool
-	Refinery      RefineryConfig
-	Agents        AgentsConfig
-	Heartbeat     HeartbeatConfig
-	GitGC         GitGCConfig
-	StallWatch    StallWatchConfig
-	Reaper        ReaperConfig
-	Reconcile     ReconcileConfig
-	DriftWatch    DriftWatchConfig
-	CredExpiry    CredExpiryConfig
-	GHTeardown    GHTeardownConfig
-	GHIntake      GHIntakeConfig
+	Refinery   RefineryConfig
+	Agents     AgentsConfig
+	Heartbeat  HeartbeatConfig
+	GitGC      GitGCConfig
+	StallWatch StallWatchConfig
+	Reaper     ReaperConfig
+	Reconcile  ReconcileConfig
+	DriftWatch DriftWatchConfig
+	CredExpiry CredExpiryConfig
+	GHTeardown GHTeardownConfig
+	GHIntake   GHIntakeConfig
 	// CarrierDrift is the gh-issue carrier RE-READ (mg-5d9d), the third member
 	// of the triple whose other two are GHIntake (an open issue with no carrier)
 	// and GHTeardown (a done carrier whose issue stayed open). This one covers
@@ -2629,10 +2602,9 @@ type parsedConfig struct {
 // footgun (mg-cf9e).
 func Load() *Config {
 	cfg := &Config{
-		Port:            DefaultPort,
-		Bind:            DefaultBind,
-		MaxFilesPerTree: DefaultMaxFilesPerTree,
-		IndexInterval:   DefaultIndexInterval,
+		Port:          DefaultPort,
+		Bind:          DefaultBind,
+		IndexInterval: DefaultIndexInterval,
 		Agents: AgentsConfig{
 			AutoStart: true,
 		},
@@ -2847,19 +2819,12 @@ func Load() *Config {
 		if fileCfg.Bind != "" {
 			cfg.Bind = fileCfg.Bind
 		}
-		if fileCfg.MaxFilesPerTree > 0 {
-			cfg.MaxFilesPerTree = fileCfg.MaxFilesPerTree
-		}
 		if fileCfg.IndexInterval > 0 {
 			cfg.IndexInterval = fileCfg.IndexInterval
 		}
 		if len(fileCfg.IndexRoots) > 0 {
 			cfg.IndexRoots = fileCfg.IndexRoots
 		}
-		// Default false, so the layered value can be copied as-is: a later
-		// file that sets `enabled = false` overrides an earlier `true`, and a
-		// file that leaves the key out keeps whatever the earlier layer said.
-		cfg.SearchEnabled = fileCfg.SearchEnabled
 		cfg.Agents = fileCfg.Agents
 		if !fileCfg.agentsAutoStartSet {
 			// The wholesale Agents copy above clobbers the default; restore
@@ -3474,11 +3439,6 @@ func Load() *Config {
 	if bind := os.Getenv("POGO_BIND"); bind != "" {
 		cfg.Bind = bind
 	}
-	if mfStr := os.Getenv("POGO_MAX_FILES_PER_TREE"); mfStr != "" {
-		if mf, err := strconv.Atoi(mfStr); err == nil && mf > 0 {
-			cfg.MaxFilesPerTree = mf
-		}
-	}
 
 	// POGO_AGENT_COMMAND overrides the default agent command from config file
 	if agentCmd := os.Getenv("POGO_AGENT_COMMAND"); agentCmd != "" {
@@ -3493,13 +3453,6 @@ func Load() *Config {
 	// POGO_EXTRA_PATH overrides [agents] extra_path from the config file.
 	if extra := os.Getenv("POGO_EXTRA_PATH"); extra != "" {
 		cfg.Agents.ExtraPath = filepath.SplitList(extra)
-	}
-
-	// POGO_SEARCH_ENABLED overrides [search] enabled from the config file.
-	if v := os.Getenv("POGO_SEARCH_ENABLED"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.SearchEnabled = b
-		}
 	}
 
 	// POGO_AGENT_AUTOSTART overrides [agents] autostart from the config file.
@@ -3983,13 +3936,10 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				}
 			}
 		case "search":
+			// The section name predates mg-14647, which deleted file search;
+			// `enabled` and `max_files_per_tree` were its keys and are now
+			// ignored like any unknown key. Only the project-index keys remain.
 			switch key {
-			case "enabled":
-				cfg.SearchEnabled = val == "true"
-			case "max_files_per_tree":
-				if mf, err := strconv.Atoi(val); err == nil && mf > 0 {
-					cfg.MaxFilesPerTree = mf
-				}
 			case "index_interval":
 				if d, err := time.ParseDuration(unquotedVal); err == nil {
 					cfg.IndexInterval = d

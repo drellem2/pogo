@@ -1,7 +1,7 @@
 {
   "name": "pogo",
   "displayName": "Pogo",
-  "description": "Cross-repo project discovery and code search via pogo daemon",
+  "description": "Cross-repo project discovery via pogo daemon",
   "version": "0.1.0",
   "publisher": "pogo",
   "engines": {
@@ -21,16 +21,8 @@
         "title": "Pogo: Switch Project"
       },
       {
-        "command": "pogo.findFile",
-        "title": "Pogo: Find File in Project"
-      },
-      {
-        "command": "pogo.search",
-        "title": "Pogo: Search Project"
-      },
-      {
         "command": "pogo.status",
-        "title": "Pogo: Show Project Status"
+        "title": "Pogo: Show Registered Projects"
       }
     ],
     "configuration": {
@@ -53,7 +45,7 @@
         {
           "id": "pogo",
           "title": "Pogo",
-          "icon": "$(search)"
+          "icon": "$(repo)"
         }
       ]
     },

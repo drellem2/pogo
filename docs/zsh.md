@@ -27,7 +27,6 @@ dir_resolve() {
 export POGO_BINARY_PATH=$(dir_resolve ~/dev/pogo/bin)
 mkdir -p ~/.pogo
 export POGO_HOME=$(dir_resolve ~/.pogo)
-export POGO_PLUGIN_PATH="$POGO_BINARY_PATH/plugin"
 export PATH="$POGO_BINARY_PATH:$PATH"
 
 # Auto-register projects on directory change
@@ -46,7 +45,6 @@ alias sp="cd \"\$(lsp | fzf)\""
 | Auto-discovery | Projects are registered with pogo as you `cd` into directories |
 | `sp` | Fuzzy project switcher — lists known projects via `fzf` and `cd`s to your selection |
 | `lsp` | List all known projects |
-| `pose QUERY` | Search code across all indexed projects |
 
 ## Configuration
 
@@ -54,7 +52,6 @@ alias sp="cd \"\$(lsp | fzf)\""
 |----------|-------------|---------|
 | `POGO_BINARY_PATH` | Directory containing pogo binaries | `~/dev/pogo/bin` |
 | `POGO_HOME` | Directory for pogo data files (state, recovery, projects.json) | `~/.pogo` |
-| `POGO_PLUGIN_PATH` | Plugin discovery directory | `$POGO_BINARY_PATH/plugin` |
 
 ## Requirements
 
@@ -63,7 +60,7 @@ alias sp="cd \"\$(lsp | fzf)\""
 
 ## How It Works
 
-The integration uses zsh's native `chpwd` hook, which fires every time the working directory changes. This calls `pogo visit` to register the directory's git repository with the pogo daemon for indexing.
+The integration uses zsh's native `chpwd` hook, which fires every time the working directory changes. This calls `pogo visit` to register the directory's git repository with the pogo daemon.
 
 ## Troubleshooting
 

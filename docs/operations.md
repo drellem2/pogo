@@ -512,7 +512,7 @@ Every path in this repo that execs pogod:
 | Spawner | Who reaches it | stdio |
 |---|---|---|
 | launchd `com.pogo.daemon` | boot, `KeepAlive`, `launchctl kickstart` (tier 2, the recovery job, the nightly deploy) | `~/Library/Logs/pogo/pogod.log` (plist `StandardOutPath`/`StandardErrorPath`) |
-| `internal/client.StartServer` | `pogo server start`, `pogo init` with no service installed, and **every `lsp`, `pose`, `pogo visit`** when pogod is down (`RunWithHealthCheck`). The zsh/bash integration runs `pogo visit` on every `cd` | `~/Library/Logs/pogo/pogod.log`, stdin `/dev/null`. **Before mg-a7a1 it was a pipe read by the CLI, which exits the moment pogod answers `/health`.** |
+| `internal/client.StartServer` | `pogo server start`, `pogo init` with no service installed, and **every `lsp`, `pogo visit`** when pogod is down (`RunWithHealthCheck`). The zsh/bash integration runs `pogo visit` on every `cd` | `~/Library/Logs/pogo/pogod.log`, stdin `/dev/null`. **Before mg-a7a1 it was a pipe read by the CLI, which exits the moment pogod answers `/health`.** |
 | Emacs `pogo-start` (`emacs/pogo.el`) | `pogo-mode` when no daemon answers | `pogo-server-log-file` (default the same log). Before mg-a7a1 it was a pipe Emacs read until Emacs exited. |
 
 No launchd job, recovery script or reminder script on this box execs pogod
@@ -546,7 +546,6 @@ Most "pogod is misbehaving" situations are better solved by **filing an mg (a wo
 **Symptoms that do NOT warrant a restart** (file an mg or fix in place):
 
 - A single handler returns wrong results or panics. → File an mg with the panic trace; the bug fix lands without restarting pogod.
-- A plugin behaves stalely after you edited its source. → Most plugins reload on file change; if not, fix the plugin's reload path rather than bouncing the daemon.
 - A polecat hangs or misbehaves. → Stop that polecat (`pogo agent stop <name>`); pogod itself is fine.
 - Refinery is slow or backed up. → Inspect with `pogo refinery list`; queue throughput is not a daemon-restart problem.
 - **Merge requests are queued and nothing seems to be moving for MY repo.** →
@@ -639,7 +638,7 @@ Most "pogod is misbehaving" situations are better solved by **filing an mg (a wo
   pogo refinery history --since=6h --json |
     jq -r '.[].attempts[] | "\(.transport)\t\(.raw_error)"' | sort -u
   ```
-- Logs look noisy. → Filter the file the installed job's `StandardErrorPath` names (`~/Library/Logs/pogo/pogod.log` on a current install; an older or hand-edited plist can name another — `pogo service log` says which). pogod appends across restarts (crash evidence survives) and rotates the file itself at startup once it exceeds 10 MiB. The file rotated is whatever fd 2 actually writes to, i.e. whatever the job's `StandardErrorPath` names, not a path pogod computes (drellem2/pogo#104) — the prior chunk is `<that file>.1` (up to `.3`). Every startup logs one `pogod: log rotation: <reason> (stderr=<path>)` line, where the reason is `rotated`, `below-threshold`, `not-redirected` (stderr is a tty or pipe), `path-missing` — fd 2 is a file no path names, which is an anomaly worth chasing, not a no-op — or `rotate-failed`, beside a `log rotation failed` line naming the error. No manual rotation needed; never truncate the live file mid-run. The indexer's per-tick narration is at debug and off by default (gh #111); set `POGO_LOG_LEVEL=debug` when you need it, or `warn` to quiet the daemon further. **On the launchd deployment that variable must go in `~/Library/LaunchAgents/com.pogo.daemon.plist`** — `POGO_LOG_LEVEL=debug pogo server start` cannot reach a launchd-managed pogod, since launchd does not pass the invoking shell's environment to a job — and the job must be unloaded and loaded again. Note that `pogo service install` regenerates that plist from its own template and drops the key, so re-add it after any re-install — the previous plist is kept beside it as `com.pogo.daemon.plist.bak.<timestamp>`, so the key can be copied back from there. (A custom launcher in `ProgramArguments` is the one thing install will not drop silently: it refuses, and `[service] launcher` in config.toml carries it — see [CONFIGURATION.md](CONFIGURATION.md#service-launcher).) See [customizing.md](customizing.md#turning-the-log-volume-up-or-down).
+- Logs look noisy. → Filter the file the installed job's `StandardErrorPath` names (`~/Library/Logs/pogo/pogod.log` on a current install; an older or hand-edited plist can name another — `pogo service log` says which). pogod appends across restarts (crash evidence survives) and rotates the file itself at startup once it exceeds 10 MiB. The file rotated is whatever fd 2 actually writes to, i.e. whatever the job's `StandardErrorPath` names, not a path pogod computes (drellem2/pogo#104) — the prior chunk is `<that file>.1` (up to `.3`). Every startup logs one `pogod: log rotation: <reason> (stderr=<path>)` line, where the reason is `rotated`, `below-threshold`, `not-redirected` (stderr is a tty or pipe), `path-missing` — fd 2 is a file no path names, which is an anomaly worth chasing, not a no-op — or `rotate-failed`, beside a `log rotation failed` line naming the error. No manual rotation needed; never truncate the live file mid-run. `POGO_LOG_LEVEL` sets the project logger's level (the file-search indexer whose per-tick narration prompted it, gh #111, was deleted in mg-14647); set `debug` when you need more, or `warn` to quiet it. **On the launchd deployment that variable must go in `~/Library/LaunchAgents/com.pogo.daemon.plist`** — `POGO_LOG_LEVEL=debug pogo server start` cannot reach a launchd-managed pogod, since launchd does not pass the invoking shell's environment to a job — and the job must be unloaded and loaded again. Note that `pogo service install` regenerates that plist from its own template and drops the key, so re-add it after any re-install — the previous plist is kept beside it as `com.pogo.daemon.plist.bak.<timestamp>`, so the key can be copied back from there. (A custom launcher in `ProgramArguments` is the one thing install will not drop silently: it refuses, and `[service] launcher` in config.toml carries it — see [CONFIGURATION.md](CONFIGURATION.md#service-launcher).) See [customizing.md](customizing.md#turning-the-log-volume-up-or-down).
 - An mg you expected to appear didn't. → It's almost certainly an mg routing/visibility issue, not a pogod liveness issue.
 
 **Symptoms that DO warrant escalation** (continue to tier 2):
@@ -808,9 +807,10 @@ symlink — this is the fix) or carries the same revision. It is a **hazard**
 when it is a different build, or when it carries no vcs stamp at all: unknown
 provenance is not a reason to stop looking at it.
 
-The scan covers `install.sh`'s whole `BINARIES` list — `pogo pogod lsp pose` —
-which is wider than the two binaries the axes compare, because `lsp` and `pose`
-are exactly the copies the two answers differ on. `TestInstallSetMatchesInstallScript`
+The scan covers `install.sh`'s whole `BINARIES` list — `pogo pogod lsp` —
+which is wider than the two binaries the axes compare, because `lsp` (and, until
+mg-14647 deleted it, `pose`) is exactly the kind of copy the two answers differ
+on. `TestInstallSetMatchesInstallScript`
 holds the two lists together.
 
 **The fix is one symlink**, and it is PATH-order-independent in a way that

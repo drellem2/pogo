@@ -10,41 +10,6 @@ export interface VisitResponse {
   project: Project;
 }
 
-export interface ProjectStatus {
-  id: number;
-  path: string;
-  indexing_status: string;
-  file_count: number;
-}
-
-export interface IndexedProject {
-  root: string;
-  paths: string[];
-  indexing_status: string;
-}
-
-export interface SearchMatch {
-  line: number;
-  content: string;
-}
-
-export interface SearchFile {
-  path: string;
-  matches: SearchMatch[];
-}
-
-export interface SearchResponse {
-  index: {
-    root: string;
-    paths: string[];
-    indexing_status: string;
-  };
-  results: {
-    files: SearchFile[];
-  };
-  error: string;
-}
-
 function getBaseUrl(): string {
   const defaultUrl = process.env.POGO_PORT
     ? `http://localhost:${process.env.POGO_PORT}`
@@ -116,84 +81,6 @@ export async function visit(path: string): Promise<VisitResponse | null> {
       "/file",
       JSON.stringify({ path })
     );
-  } catch {
-    return null;
-  }
-}
-
-export async function getProjectFiles(path: string): Promise<string[]> {
-  try {
-    const encoded = encodeURIComponent(path);
-    const resp = await jsonRequest<IndexedProject>(
-      "GET",
-      `/projects/file?path=${encoded}`
-    );
-    return resp.paths || [];
-  } catch {
-    return [];
-  }
-}
-
-export async function getStatus(): Promise<ProjectStatus[]> {
-  try {
-    return await jsonRequest<ProjectStatus[]>("GET", "/status");
-  } catch {
-    return [];
-  }
-}
-
-let searchPluginCache: string | null = null;
-
-/** Shown when pogod lists no search plugin: search indexing is off by default (mg-cabf4). */
-export const SEARCH_DISABLED_MESSAGE =
-  "search indexing is disabled; enable with `[search] enabled = true` in config.toml (or POGO_SEARCH_ENABLED=true) and restart pogod";
-
-async function getSearchPlugin(): Promise<string | null> {
-  if (searchPluginCache) {
-    return searchPluginCache;
-  }
-  try {
-    const plugins = await jsonRequest<string[]>("GET", "/plugins");
-    const found = plugins.find((p) => p.includes("pogo-plugin-search"));
-    if (found) {
-      searchPluginCache = found;
-      return found;
-    }
-    vscode.window.showErrorMessage(`pogo: ${SEARCH_DISABLED_MESSAGE}`);
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-export async function search(
-  projectRoot: string,
-  query: string
-): Promise<SearchResponse | null> {
-  const pluginPath = await getSearchPlugin();
-  if (!pluginPath) {
-    return null;
-  }
-
-  const searchRequest = JSON.stringify({
-    type: "search",
-    projectRoot,
-    string: "10s",
-    data: query,
-  });
-
-  const body = JSON.stringify({
-    plugin: pluginPath,
-    value: encodeURIComponent(searchRequest),
-  });
-
-  try {
-    const resp = await jsonRequest<{ value: string }>("POST", "/plugin", body);
-    if (resp.value) {
-      const decoded = decodeURIComponent(resp.value);
-      return JSON.parse(decoded) as SearchResponse;
-    }
-    return null;
   } catch {
     return null;
   }

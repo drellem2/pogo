@@ -1,3 +1,10 @@
+> **Historical (mg-14647).** The file-content search indexer this note
+> designs — `internal/search`, its periodic re-indexer and per-project backoff —
+> was deleted in mg-14647. Only the `index_roots` discovery half remains:
+> `project.StartRepoDiscovery` scans each configured root every
+> `index_interval` for new git repos to register. The rest of this note is kept
+> as the record of the decision.
+
 # Architect design note (mg-d826) — 2026-05-21
 
 **Recommendation: SWITCH** — replace event-based file-watching with a

@@ -8,7 +8,6 @@ under different terms:
 Apache License 2.0 (see LICENSE-APACHE):
   - cmd/pogo/       CLI tool
   - cmd/lsp/        Project listing tool
-  - cmd/pose/       Code search tool
   - emacs/          Emacs integration
   - nvim/           Neovim integration
   - vscode/         VS Code extension

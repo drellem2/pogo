@@ -5,11 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/drellem2/pogo/internal/config"
-	"github.com/drellem2/pogo/internal/driver"
-	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
@@ -22,7 +19,7 @@ import (
 // config.PogoHome()/ProjectFileName, then MkdirAll's that home and Create's the
 // file; Add/Visit/SaveProjects WriteFile it and RemoveSaveFile deletes it. Every
 // unisolated caller — setUp in project_test.go, and the Init() calls in
-// evict_test.go, indexer_test.go and registry_test.go — therefore created
+// indexer_test.go and registry_test.go — therefore created
 // directories and files inside the real ~/.pogo of whoever ran `go test`. The
 // only reason the operator's projects.json survived is that those tests each
 // assign ProjectFileName a "projects-…-test.json" name first; a test that calls
@@ -40,11 +37,6 @@ var sandbox *testsandbox.Sandbox
 func TestMain(m *testing.M) {
 	sb, down := testsandbox.Main("project")
 	sandbox = sb
-
-	// Search indexing is off by default in pogod (mg-cabf4), but most tests
-	// here exercise the search plugin through Init/Add/Visit. Opt them in;
-	// the tests of the off default turn it back off for themselves.
-	driver.SetSearchEnabled(true)
 
 	if err := provisionTestdataRepos(); err != nil {
 		down()
@@ -104,26 +96,4 @@ func TestStateRootIsSandboxed(t *testing.T) {
 		t.Errorf("projectFile = %s, want a path under the sandbox root %s; Init() would "+
 			"write the registry into the real ~/.pogo", projectFile, sandbox.Root)
 	}
-}
-
-// drainSearch waits, at test teardown, for the search plugin to finish the
-// index passes this test kicked off.
-//
-// Registering a project — via Add, Visit or discoverNewRepos — hands it to the
-// search plugin, whose ProcessProject spawns `go Index`. That goroutine
-// creates <repo>/.pogo/search and writes the index there, long after the
-// registering call returned. For a repo under t.TempDir() the test's RemoveAll
-// then races those writes and fails with "TempDir RemoveAll cleanup: directory
-// not empty" (mg-36d9, seen on main under full-suite load).
-//
-// Call this after the last t.TempDir() in the test: cleanups run LIFO, so a
-// drain registered later runs before the removals.
-func drainSearch(t *testing.T) {
-	t.Helper()
-	t.Cleanup(func() {
-		if !search.SearchService.Quiesce(30 * time.Second) {
-			t.Error("search plugin still had index work in flight 30s after the " +
-				"test ended; its writes race t.TempDir cleanup")
-		}
-	})
 }

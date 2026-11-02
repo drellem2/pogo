@@ -16,13 +16,12 @@ import (
 
 func TestLaunchdPlistTemplate(t *testing.T) {
 	data := launchdData{
-		Label:      "com.pogo.daemon",
-		PogodPath:  "/Users/test/go/bin/pogod",
-		LogDir:     "/Users/test/Library/Logs/pogo",
-		Home:       "/Users/test",
-		PogoHome:   "/Users/test/.pogo",
-		PluginPath: "/Users/test/.pogo/plugin",
-		Path:       "/Users/test/.local/bin:/usr/local/bin:/usr/bin:/bin",
+		Label:     "com.pogo.daemon",
+		PogodPath: "/Users/test/go/bin/pogod",
+		LogDir:    "/Users/test/Library/Logs/pogo",
+		Home:      "/Users/test",
+		PogoHome:  "/Users/test/.pogo",
+		Path:      "/Users/test/.local/bin:/usr/local/bin:/usr/bin:/bin",
 	}
 
 	tmpl, err := template.New("plist").Parse(launchdPlistTemplate)
@@ -54,7 +53,6 @@ func TestLaunchdPlistTemplate(t *testing.T) {
 		{"PATH env", "<key>PATH</key>", false},
 		{"HOME env", "<key>HOME</key>\n        <string>/Users/test</string>", false},
 		{"POGO_HOME env", "<key>POGO_HOME</key>\n        <string>/Users/test/.pogo</string>", false},
-		{"POGO_PLUGIN_PATH env", "<key>POGO_PLUGIN_PATH</key>\n        <string>/Users/test/.pogo/plugin</string>", false},
 	}
 	for _, c := range checks {
 		if !strings.Contains(result, c.want) {

@@ -62,24 +62,6 @@ builds:
       - -X github.com/drellem2/pogo/internal/version.Commit={{.Commit}}
       - -X github.com/drellem2/pogo/internal/version.Branch={{.Branch}}
 
-  - id: pose
-    main: ./cmd/pose
-    binary: pose
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    ldflags:
-      - -s -w
-      - -X github.com/drellem2/pogo/internal/version.Version={{.Version}}
-      - -X github.com/drellem2/pogo/internal/version.Build={{.ShortCommit}}
-      - -X github.com/drellem2/pogo/internal/version.Commit={{.Commit}}
-      - -X github.com/drellem2/pogo/internal/version.Branch={{.Branch}}
-
 archives:
   - id: pogo-archive
     formats: [tar.gz]

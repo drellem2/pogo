@@ -2,10 +2,10 @@
 -- Run with: nvim --headless --noplugin -u NONE -l nvim/test_nvim.lua
 --
 -- Tests:
---   1. Client module: url_encode/decode, project_root, get_projects, get_status, search
---   2. Init module: project picker lists projects, search populates quickfix,
---      auto-visit on BufEnter, statusline shows indexing status
---   3. Telescope module: entry_maker functions produce correct entries
+--   1. Client module: health_check, project_root, visit, get_projects, get_status
+--   2. Init module: user commands, project picker lists projects, auto-visit on BufEnter
+--   3. Statusline shows the current project name
+--   4. Status display lists project paths
 
 local pass_count = 0
 local fail_count = 0
@@ -78,8 +78,6 @@ local mock_state = {
   autocmds = {},
   augroups = {},
   user_commands = {},
-  qflist = {},
-  qflist_props = {},
   deferred = {},
   jobstarts = {},
   ui_select_calls = {},
@@ -101,8 +99,6 @@ local function clear_mocks()
     autocmds = {},
     augroups = {},
     user_commands = {},
-    qflist = {},
-    qflist_props = {},
     deferred = {},
     jobstarts = {},
     ui_select_calls = {},
@@ -222,14 +218,6 @@ vim.fn.jobstart = vim.fn.jobstart or function(cmd, opts)
   table.insert(mock_state.jobstarts, { cmd = cmd, opts = opts })
   return 1
 end
-vim.fn.setqflist = vim.fn.setqflist or function(items, action, props)
-  if action == "r" then
-    mock_state.qflist = items
-  elseif action == "a" then
-    mock_state.qflist_props = props or {}
-  end
-end
-
 vim.cmd = vim.cmd or function(cmd_str)
   table.insert(mock_state.cmds, cmd_str)
 end
@@ -341,33 +329,19 @@ assert_nil(no_root, "project_root returns nil when visit fails")
 clear_mocks()
 set_mock_response("/status", {
   stdout = {
-    { id = 1, path = "/home/user/proj", indexing_status = "ready", file_count = 42 },
-    { id = 2, path = "/home/user/proj2", indexing_status = "indexing", file_count = 10 },
+    { id = 1, path = "/home/user/proj" },
+    { id = 2, path = "/home/user/proj2" },
   }
 })
 local statuses = client.get_status()
 assert_table_len(2, statuses, "get_status returns 2 statuses")
-assert_eq("ready", statuses[1].indexing_status, "get_status first project is ready")
-assert_eq("indexing", statuses[2].indexing_status, "get_status second project is indexing")
+assert_eq("/home/user/proj", statuses[1].path, "get_status first project path")
+assert_eq(2, statuses[2].id, "get_status second project id")
 
 -- Test: get_status returns empty on error
 clear_mocks()
 local empty_status = client.get_status()
 assert_table_len(0, empty_status, "get_status returns empty on error")
-
--- Test: get_project_files returns file list
-clear_mocks()
-set_mock_response("/projects/file", {
-  stdout = { paths = { "/src/main.go", "/src/util.go", "/README.md" } }
-})
-local files = client.get_project_files("/home/user/proj")
-assert_table_len(3, files, "get_project_files returns 3 files")
-assert_eq("/src/main.go", files[1], "get_project_files first file")
-
--- Test: get_project_files returns empty on error
-clear_mocks()
-local empty_files = client.get_project_files("/nowhere")
-assert_table_len(0, empty_files, "get_project_files returns empty on error")
 
 -- Test: ensure_server returns true when healthy
 clear_mocks()
@@ -375,47 +349,10 @@ set_mock_response("/health", { stdout = "ok" })
 local ensured = client.ensure_server()
 assert_truthy(ensured, "ensure_server returns true when server is healthy")
 
--- Test: search returns decoded results
-clear_mocks()
-client._search_plugin = nil
-set_mock_response("/plugins", {
-  stdout = { "pogo-plugin-search" }
-})
--- URL-encode a search response for the mock
-local search_result = {
-  results = {
-    files = {
-      { path = "/src/main.go", matches = { { line = 10, content = "func main()" } } }
-    }
-  }
-}
--- The search endpoint returns {value: url_encoded_json}
-local encoded_value = vim.json.encode(search_result)
--- Simple URL encoding for test
-encoded_value = encoded_value:gsub("([^%w%-%.%_%~])", function(c)
-  return string.format("%%%02X", string.byte(c))
-end)
-set_mock_response("/plugin", {
-  stdout = { value = encoded_value }
-})
-local search_resp = client.search("/home/user/proj", "main")
-assert_truthy(search_resp, "search returns response")
-assert_truthy(search_resp.results, "search response has results")
-assert_truthy(search_resp.results.files, "search results have files")
-assert_table_len(1, search_resp.results.files, "search returns 1 file")
-assert_eq("/src/main.go", search_resp.results.files[1].path, "search result file path")
-
--- Test: search returns nil when plugin not found
-clear_mocks()
-client._search_plugin = nil
-set_mock_response("/plugins", { stdout = { "some-other-plugin" } })
-local no_search = client.search("/proj", "query")
-assert_nil(no_search, "search returns nil when search plugin not found")
-
 print("")
 
 -------------------------------------------------------------------------------
--- Test Suite 2: Init module (project picker, search, auto-visit, statusline)
+-- Test Suite 2: Init module (user commands, project picker, auto-visit)
 -------------------------------------------------------------------------------
 
 print("--- Init module ---")
@@ -429,7 +366,6 @@ package.loaded["pogo"] = nil
 package.loaded["telescope"] = nil
 package.preload["telescope"] = function() error("telescope not available") end
 
-local pogo_client = require("pogo.client")
 local pogo = require("pogo")
 
 -- Test: setup creates user commands
@@ -437,9 +373,9 @@ clear_mocks()
 set_mock_response("/health", { stdout = "ok" })
 pogo.setup({})
 assert_truthy(mock_state.user_commands["PogoProjects"], "setup creates PogoProjects command")
-assert_truthy(mock_state.user_commands["PogoFindFile"], "setup creates PogoFindFile command")
-assert_truthy(mock_state.user_commands["PogoSearch"], "setup creates PogoSearch command")
 assert_truthy(mock_state.user_commands["PogoStatus"], "setup creates PogoStatus command")
+assert_nil(mock_state.user_commands["PogoFindFile"], "setup no longer creates PogoFindFile command")
+assert_nil(mock_state.user_commands["PogoSearch"], "setup no longer creates PogoSearch command")
 
 -- Test: setup creates BufEnter autocmd when auto_register is true
 local found_bufenter = false
@@ -515,103 +451,6 @@ for _, n in ipairs(mock_state.notifications) do
 end
 assert_truthy(found_no_projects, "switch_project notifies when no projects found")
 
--- Test: search populates quickfix list (non-telescope path)
-clear_mocks()
-pogo_client._search_plugin = nil
-set_mock_response("/health", { stdout = "ok" })
-set_mock_response("/file", {
-  stdout = { project = { id = 1, path = "/test/project" } }
-})
-set_mock_response("/plugins", { stdout = { "pogo-plugin-search" } })
-local search_result_for_qf = {
-  results = {
-    files = {
-      {
-        path = "/src/main.go",
-        matches = {
-          { line = 10, content = "func main() {" },
-          { line = 20, content = "  main()" },
-        }
-      },
-      {
-        path = "/src/util.go",
-        matches = {
-          { line = 5, content = "// used by main" },
-        }
-      },
-    }
-  }
-}
-local enc_val = vim.json.encode(search_result_for_qf)
-enc_val = enc_val:gsub("([^%w%-%.%_%~])", function(c)
-  return string.format("%%%02X", string.byte(c))
-end)
-set_mock_response("/plugin", { stdout = { value = enc_val } })
-pogo.search("main")
-assert_table_len(3, mock_state.qflist, "search populates quickfix with 3 entries")
-assert_eq(10, mock_state.qflist[1].lnum, "search quickfix first entry line number")
-assert_eq("/test/project/src/main.go", mock_state.qflist[1].filename, "search quickfix first entry filename")
-assert_eq(5, mock_state.qflist[3].lnum, "search quickfix third entry line number")
--- Verify copen was called
-local found_copen = false
-for _, cmd in ipairs(mock_state.cmds) do
-  if cmd == "copen" then
-    found_copen = true
-    break
-  end
-end
-assert_truthy(found_copen, "search opens quickfix window")
-
--- Test: search notifies on no results
-clear_mocks()
-pogo_client._search_plugin = "pogo-plugin-search"
-set_mock_response("/health", { stdout = "ok" })
-set_mock_response("/file", {
-  stdout = { project = { id = 1, path = "/test/project" } }
-})
-local empty_result = { results = { files = {} } }
-local enc_empty = vim.json.encode(empty_result)
-enc_empty = enc_empty:gsub("([^%w%-%.%_%~])", function(c)
-  return string.format("%%%02X", string.byte(c))
-end)
-set_mock_response("/plugin", { stdout = { value = enc_empty } })
-pogo.search("nonexistent")
-local found_no_results = false
-for _, n in ipairs(mock_state.notifications) do
-  if n.msg:find("no results") then
-    found_no_results = true
-    break
-  end
-end
-assert_truthy(found_no_results, "search notifies when no results found")
-
--- Test: find_file calls vim.ui.select with file list (non-telescope path)
-clear_mocks()
-set_mock_response("/health", { stdout = "ok" })
-set_mock_response("/file", {
-  stdout = { project = { id = 1, path = "/test/project" } }
-})
-set_mock_response("/projects/file", {
-  stdout = { paths = { "/src/main.go", "/src/util.go" } }
-})
-pogo.find_file()
-assert_table_len(1, mock_state.ui_select_calls, "find_file calls vim.ui.select")
-assert_table_len(2, mock_state.ui_select_calls[1].items, "find_file offers 2 files")
-
--- Test: find_file notifies when not in a project
-clear_mocks()
-set_mock_response("/health", { stdout = "ok" })
--- No /file response = visit returns nil
-pogo.find_file()
-local found_not_in_project = false
-for _, n in ipairs(mock_state.notifications) do
-  if n.msg:find("not in a project") then
-    found_not_in_project = true
-    break
-  end
-end
-assert_truthy(found_not_in_project, "find_file notifies when not in a project")
-
 print("")
 
 -------------------------------------------------------------------------------
@@ -620,16 +459,11 @@ print("")
 
 print("--- Statusline ---")
 
--- Test: statusline returns project name with ready icon
+-- Test: statusline returns project name
 clear_mocks()
 set_mock_response("/health", { stdout = "ok" })
 set_mock_response("/file", {
   stdout = { project = { id = 1, path = "/test/project" } }
-})
-set_mock_response("/status", {
-  stdout = {
-    { id = 1, path = "/test/project", indexing_status = "ready", file_count = 42 },
-  }
 })
 -- Force cache expiry: return a time far in the future so (now - cache.time) > ttl
 local old_time = os.time
@@ -637,55 +471,17 @@ local fake_time = 999999
 os.time = function() return fake_time end
 local sl = pogo.statusline()
 os.time = old_time
-assert_eq("pogo[project ✓]", sl, "statusline shows project name with ready checkmark")
+assert_eq("pogo[project]", sl, "statusline shows project name")
 
--- Test: statusline shows indexing icon
-clear_mocks()
-set_mock_response("/file", {
-  stdout = { project = { id = 1, path = "/test/project" } }
-})
-set_mock_response("/status", {
-  stdout = {
-    { id = 1, path = "/test/project", indexing_status = "indexing", file_count = 10 },
-  }
-})
-fake_time = fake_time + 999999
-os.time = function() return fake_time end
-sl = pogo.statusline()
-os.time = old_time
-assert_eq("pogo[project ⟳]", sl, "statusline shows indexing spinner icon")
-
--- Test: statusline shows stale icon
-clear_mocks()
-set_mock_response("/file", {
-  stdout = { project = { id = 1, path = "/test/project" } }
-})
-set_mock_response("/status", {
-  stdout = {
-    { id = 1, path = "/test/project", indexing_status = "stale", file_count = 30 },
-  }
-})
-fake_time = fake_time + 999999
-os.time = function() return fake_time end
-sl = pogo.statusline()
-os.time = old_time
-assert_eq("pogo[project !]", sl, "statusline shows stale bang icon")
-
--- Test: statusline shows unindexed icon
-clear_mocks()
-set_mock_response("/file", {
-  stdout = { project = { id = 1, path = "/test/project" } }
-})
-set_mock_response("/status", {
-  stdout = {
-    { id = 1, path = "/test/project", indexing_status = "unindexed", file_count = 0 },
-  }
-})
-fake_time = fake_time + 999999
-os.time = function() return fake_time end
-sl = pogo.statusline()
-os.time = old_time
-assert_eq("pogo[project ?]", sl, "statusline shows unindexed question mark icon")
+-- Test: statusline does not query /status
+local queried_status = false
+for _, c in ipairs(mock_state.system_calls) do
+  if c[#c]:find("/status", 1, true) then
+    queried_status = true
+    break
+  end
+end
+assert_eq(false, queried_status, "statusline does not call /status")
 
 -- Test: statusline returns empty when not in a project
 clear_mocks()
@@ -705,34 +501,6 @@ vim.fn.expand = orig_expand
 vim.fn.getcwd = function() return "/test/project" end
 assert_eq("", sl, "statusline returns empty when not in a project")
 
--- Test: statusline shows bare name when project not in status output
-clear_mocks()
-set_mock_response("/file", {
-  stdout = { project = { id = 1, path = "/test/project" } }
-})
-set_mock_response("/status", {
-  stdout = {
-    { id = 2, path = "/other/project", indexing_status = "ready", file_count = 10 },
-  }
-})
-fake_time = fake_time + 999999
-os.time = function() return fake_time end
-sl = pogo.statusline()
-os.time = old_time
-assert_eq("pogo[project]", sl, "statusline shows bare name when project not in status list")
-
--- Test: statusline shows bare name when status endpoint fails
-clear_mocks()
-set_mock_response("/file", {
-  stdout = { project = { id = 1, path = "/test/project" } }
-})
--- No /status response = returns empty
-fake_time = fake_time + 999999
-os.time = function() return fake_time end
-sl = pogo.statusline()
-os.time = old_time
-assert_eq("pogo[project]", sl, "statusline shows bare name when status endpoint fails")
-
 print("")
 
 -------------------------------------------------------------------------------
@@ -746,17 +514,15 @@ clear_mocks()
 set_mock_response("/health", { stdout = "ok" })
 set_mock_response("/status", {
   stdout = {
-    { id = 1, path = "/proj-a", indexing_status = "ready", file_count = 42 },
-    { id = 2, path = "/proj-b", indexing_status = "indexing", file_count = 10 },
+    { id = 1, path = "/proj-a" },
+    { id = 2, path = "/proj-b" },
   }
 })
 pogo.status()
 assert_truthy(#mock_state.notifications > 0, "status() sends notification")
 local status_msg = mock_state.notifications[#mock_state.notifications].msg
-assert_truthy(status_msg:find("✓"), "status notification contains ready icon")
-assert_truthy(status_msg:find("⟳"), "status notification contains indexing icon")
 assert_truthy(status_msg:find("/proj%-a"), "status notification contains project-a path")
-assert_truthy(status_msg:find("42 files"), "status notification contains file count")
+assert_truthy(status_msg:find("/proj%-b"), "status notification contains project-b path")
 
 -- Test: status() notifies when no statuses available
 clear_mocks()

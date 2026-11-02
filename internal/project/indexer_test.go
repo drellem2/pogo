@@ -6,94 +6,43 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/drellem2/pogo/internal/driver"
-	"github.com/drellem2/pogo/internal/search"
 )
 
-// waitForStatus polls the search service until projectRoot reaches want, or
-// the timeout elapses.
-func waitForStatus(root string, want search.IndexingStatus, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if s := search.SearchService.GetStatus(root); s != nil && s.Status == want {
-			return true
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return false
-}
-
-// indexedFileCount returns the number of files in projectRoot's index, or -1
-// if the project is unknown to the search service.
-func indexedFileCount(root string) int {
-	s := search.SearchService.GetStatus(root)
-	if s == nil {
-		return -1
-	}
-	return s.FileCount
-}
-
-// TestPeriodicReindexPicksUpNewFile is the acceptance-bar-2 regression guard:
-// a file created after the initial index must be reflected within one
-// index_interval of the timer-driven re-indexer.
-func TestPeriodicReindexPicksUpNewFile(t *testing.T) {
-	ProjectFileName = "projects-indexer-reindex-test.json"
-	driver.Init()
-	defer driver.Kill()
+// TestRepoDiscoveryTickRegistersNewRepo is the end-to-end guard for the
+// timer-driven loop: a git repo created under a configured index_root after
+// StartRepoDiscovery is running is registered within a few ticks.
+func TestRepoDiscoveryTickRegistersNewRepo(t *testing.T) {
+	ProjectFileName = "projects-indexer-tick-test.json"
 	Init()
 	defer RemoveSaveFile()
 
-	repo := t.TempDir()
-	drainSearch(t)
-	if resolved, err := filepath.EvalSymlinks(repo); err == nil {
-		repo = resolved
-	}
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0755); err != nil {
-		t.Fatalf("failed to create .git: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "first.go"), []byte("package x\n"), 0644); err != nil {
-		t.Fatalf("failed to write fixture file: %v", err)
-	}
-	root := addSlashToPath(repo)
+	parentDir := t.TempDir()
+	SetIndexRoots([]string{parentDir})
+	defer SetIndexRoots(nil)
 
-	// Register the repo and wait for the initial index to settle.
-	Add(&Project{Id: 0, Path: root})
-	if !waitForStatus(root, search.StatusReady, 15*time.Second) {
-		t.Fatalf("initial index did not become ready")
-	}
-	before := indexedFileCount(root)
-	if before < 1 {
-		t.Fatalf("expected the initial index to contain at least the seed file, got %d", before)
-	}
-
-	// A new file appears after the project has been indexed.
-	if err := os.WriteFile(filepath.Join(repo, "second.go"), []byte("package x\n"), 0644); err != nil {
-		t.Fatalf("failed to write new file: %v", err)
-	}
-
-	// Start the periodic indexer with a short interval so the test is fast.
-	// Wait for the indexer goroutine to fully exit on teardown: a mid-tick
-	// goroutine surviving into the next test races with its Init() /
-	// SetIndexRoots() writes to package globals.
+	// Wait for the goroutine to fully exit on teardown: a mid-tick goroutine
+	// surviving into the next test races with its Init() / SetIndexRoots()
+	// writes to package globals.
 	ctx, cancel := context.WithCancel(context.Background())
-	done := StartPeriodicIndexer(ctx, 100*time.Millisecond)
+	done := StartRepoDiscovery(ctx, 50*time.Millisecond)
 	defer func() {
 		cancel()
 		<-done
 	}()
 
-	// Within a few ticks the new file must be reflected in the index.
+	newRepo := filepath.Join(parentDir, "late-repo")
+	if err := os.MkdirAll(filepath.Join(newRepo, ".git"), 0755); err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if indexedFileCount(root) > before {
-			break
+		if GetProjectByPath(addSlashToPath(newRepo)) != nil {
+			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
-	if got := indexedFileCount(root); got <= before {
-		t.Errorf("periodic re-index did not pick up the new file: file count stayed at %d", got)
-	}
+	t.Fatalf("repo created under index_root was not registered by the discovery tick: %s", newRepo)
 }
 
 // TestDiscoverNewReposScansIndexRoots verifies the index_roots scan that
@@ -101,13 +50,10 @@ func TestPeriodicReindexPicksUpNewFile(t *testing.T) {
 // index_root is auto-registered on the next tick.
 func TestDiscoverNewReposScansIndexRoots(t *testing.T) {
 	ProjectFileName = "projects-indexer-discover-test.json"
-	driver.Init()
-	defer driver.Kill()
 	Init()
 	defer RemoveSaveFile()
 
 	parentDir := t.TempDir()
-	drainSearch(t)
 	SetIndexRoots([]string{parentDir})
 	defer SetIndexRoots(nil)
 
@@ -115,15 +61,6 @@ func TestDiscoverNewReposScansIndexRoots(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(newRepo, ".git"), 0755); err != nil {
 		t.Fatalf("failed to create new repo: %v", err)
 	}
-
-	// Registration kicks off an async index pass that writes .pogo/search
-	// inside the repo, racing t.TempDir's RemoveAll if the test returns
-	// first (mg-6929). onIndexed fires only after every index write has
-	// finished — GetStatus reports StatusReady before the zoekt file is
-	// written, so waiting on status alone would leave the window open.
-	indexed := make(chan string, 4)
-	search.SearchService.SetOnIndexed(func(root string, _ bool) { indexed <- root })
-	defer search.SearchService.SetOnIndexed(nil)
 
 	numBefore := len(projects)
 	discoverNewRepos()
@@ -141,27 +78,12 @@ func TestDiscoverNewReposScansIndexRoots(t *testing.T) {
 		t.Errorf("discovery re-registered an already-known repo: %d projects", len(projects))
 	}
 
-	// Wait for the discovered repo's index pass to settle before returning.
-	newRoot := addSlashToPath(newRepo)
-	timeout := time.After(15 * time.Second)
-	for {
-		select {
-		case root := <-indexed:
-			if root == newRoot {
-				return
-			}
-		case <-timeout:
-			t.Fatalf("index pass for discovered repo did not settle: %s", newRoot)
-		}
-	}
 }
 
 // TestDiscoverNewReposRespectsPogoStop verifies a repo carrying a .pogo_stop
 // marker is left unregistered by the index_roots scan.
 func TestDiscoverNewReposRespectsPogoStop(t *testing.T) {
 	ProjectFileName = "projects-indexer-pogostop-test.json"
-	driver.Init()
-	defer driver.Kill()
 	Init()
 	defer RemoveSaveFile()
 
@@ -189,8 +111,6 @@ func TestDiscoverNewReposRespectsPogoStop(t *testing.T) {
 // configured — the zero-config default — discovery registers nothing.
 func TestDiscoverNewReposNoIndexRootsIsNoop(t *testing.T) {
 	ProjectFileName = "projects-indexer-noroots-test.json"
-	driver.Init()
-	defer driver.Kill()
 	Init()
 	defer RemoveSaveFile()
 	SetIndexRoots(nil)

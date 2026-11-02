@@ -61,8 +61,6 @@ const launchdPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
         <string>{{.Home}}</string>
         <key>POGO_HOME</key>
         <string>{{.PogoHome}}</string>
-        <key>POGO_PLUGIN_PATH</key>
-        <string>{{.PluginPath}}</string>
     </dict>
 </dict>
 </plist>
@@ -83,13 +81,12 @@ WantedBy=default.target
 `
 
 type launchdData struct {
-	Label      string
-	PogodPath  string
-	LogDir     string
-	Home       string
-	PogoHome   string
-	PluginPath string
-	Path       string
+	Label     string
+	PogodPath string
+	LogDir    string
+	Home      string
+	PogoHome  string
+	Path      string
 }
 
 type systemdData struct {
@@ -482,13 +479,12 @@ func renderLaunchdPlist() (string, launchdData, error) {
 func renderLaunchdPlistFor(program string) (string, launchdData, error) {
 	home, _ := os.UserHomeDir()
 	data := launchdData{
-		Label:      launchdLabel,
-		PogodPath:  program,
-		LogDir:     logDir(),
-		Home:       home,
-		PogoHome:   pogoHome(),
-		PluginPath: filepath.Join(pogoHome(), "plugin"),
-		Path:       launchdPath(),
+		Label:     launchdLabel,
+		PogodPath: program,
+		LogDir:    logDir(),
+		Home:      home,
+		PogoHome:  pogoHome(),
+		Path:      launchdPath(),
 	}
 	tmpl, err := template.New("plist").Parse(launchdPlistTemplate)
 	if err != nil {

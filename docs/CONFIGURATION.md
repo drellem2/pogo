@@ -44,8 +44,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | Section | Key | Default | Kind | What it does when it fires |
 |---|---|---|---|---|
 | `[server]` | — | — | plumbing | Sets pogod's listen port and bind address. |
-| `[search]` | `enabled` | off | ACTS | File-search indexing for `pose`, `pogo refs`, `pogo deps` and editor search. When on, it walks every registered repo at startup and again every `index_interval`, and writes a zoekt index into each repo's `.pogo/search` plus a matching `.git/info/exclude` line. When off, those commands report that search is disabled. The project index (`lsp`, `pogo visit`) and `index_roots` discovery work either way. Code: `internal/search`, gated in `internal/driver`. |
-| `[search]` | — | — | plumbing | Sets the indexer's limits and roots. The indexer reads your repos and writes only its own index. |
+| `[search]` | — | — | plumbing | Sets `index_roots` (directories whose new git repos are registered automatically) and `index_interval` (how often they are scanned). Project index only; file search was removed (mg-14647). |
 | `[service]` | — | — | plumbing | Sets which program `pogo service install` writes into the launchd plist or systemd unit (`launcher`; default: pogod on PATH). Read only by the installer and the plist audit, never by pogod. See [Service launcher](#service-launcher). |
 | `[heartbeat]` | — | — | plumbing | Sets the tick that drives every watcher below, and the clock-jump threshold. |
 | `[agents]` | `autostart` | on | ACTS | Starts every configured crew agent (the coordinator and the PMs) when pogod boots, and again when an orchestration restart runs. Needs a config file. See [Crew auto-start](#crew-auto-start). |
@@ -3550,9 +3549,10 @@ CPU read's time and blinded the computing term for the whole fleet.
 of its entries, and an install writes it, not the agent's edits. Both names are
 in the default because pnpm's `.pnpm` store can sit beside `node_modules`.
 Skipping `node_modules` alone was measured to still walk 42.7% of one such
-tree. The list deliberately does not copy the search indexer's exclusions:
-those skip `build/` and `dist/` because they hold no source, but build output is
-often the newest thing an agent wrote. **`skip_dirs` applies only to this
+tree. The list deliberately did not copy the search indexer's exclusions (that
+indexer was deleted in mg-14647): those skipped `build/` and `dist/` because
+they hold no source, but build output is often the newest thing an agent
+wrote. **`skip_dirs` applies only to this
 detector.** The gc age report (`untouched N` in `pogo gc --list-preserved` and
 on the cannot-tell refusal line) is what an operator reads before clearing a
 permanent pin. It still measures every entry except `.git`, whatever this key
@@ -4673,7 +4673,7 @@ Every pogo state path derives from a single root: `$POGO_HOME`, or `~/.pogo`
 when the variable is unset (`PogoHome()` in `internal/config/config.go`). That
 one function seeds `refinery-state.json`, `schedules.json`, `agents/` (including
 the `agents/sockets/` attach sockets), `polecats/`, `events.log`, `recovery/`,
-`projects.json`, and `plugin/` — so the root you pick determines where *all*
+and `projects.json` — so the root you pick determines where *all*
 daemon state lives.
 
 **Running N pogo instances requires a distinct `POGO_HOME` per instance.**

@@ -128,12 +128,12 @@ if echo "$OUTPUT" | grep -q "Error: failed to download"; then
 fi
 rm -rf "$TMPDIR_INSTALL"
 
-# --- Test 8: All four binaries are attempted ---
+# --- Test 8: All three binaries are attempted ---
 echo ""
 echo "Test 8: All binaries are attempted for download"
 TMPDIR_INSTALL=$(mktemp -d)
 OUTPUT=$(POGO_VERSION="v0.0.0-test" POGO_INSTALL_DIR="$TMPDIR_INSTALL" sh "$INSTALL_SCRIPT" 2>&1) || true
-EXPECTED_BINS="pogo pogod lsp pose"
+EXPECTED_BINS="pogo pogod lsp"
 ALL_FOUND=true
 for bin in $EXPECTED_BINS; do
   if echo "$OUTPUT" | grep -q "Downloading ${bin}"; then
@@ -144,7 +144,7 @@ for bin in $EXPECTED_BINS; do
   fi
 done
 if [ "$ALL_FOUND" = true ]; then
-  pass "All 4 binaries (pogo pogod lsp pose) attempted"
+  pass "All 3 binaries (pogo pogod lsp) attempted"
 fi
 rm -rf "$TMPDIR_INSTALL"
 

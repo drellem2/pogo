@@ -10,7 +10,6 @@ mkdir -p ~/.pogo
 set -gx POGO_HOME (realpath ~/.pogo 2>/dev/null; or echo ~/.pogo)
 
 ## These shouldn't require modification
-set -gx POGO_PLUGIN_PATH "$POGO_BINARY_PATH/plugin"
 fish_add_path --prepend $POGO_BINARY_PATH
 
 ## Auto-register projects on directory change

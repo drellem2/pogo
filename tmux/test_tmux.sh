@@ -115,115 +115,23 @@ exit 1
     assert_empty "$out" "no output when pogo visit returns empty"
 }
 
-test_status_ready() {
-    echo "Test: status shows checkmark for ready projects"
+test_status_shows_project_name() {
+    echo "Test: status shows the project name and does not call pogo status"
+    local log="$MOCK_DIR/pogo_calls.log"
     create_mock "pogo" '
+echo "$@" >> '"$log"'
 if [ "$1" = "visit" ]; then
     echo "/home/user/my-project"
     exit 0
-elif [ "$1" = "status" ]; then
-    echo "ready        /home/user/my-project (42 files)"
-    exit 0
 fi
+exit 1
 '
     local out
     out="$(bash "$SCRIPT_DIR/pogo-status.sh" "/home/user/my-project/src")"
-    assert_eq "my-project ✓" "$out" "ready status shows checkmark"
-}
-
-test_status_indexing() {
-    echo "Test: status shows spinner for indexing projects"
-    create_mock "pogo" '
-if [ "$1" = "visit" ]; then
-    echo "/home/user/my-project"
-    exit 0
-elif [ "$1" = "status" ]; then
-    echo "indexing     /home/user/my-project (42 files)"
-    exit 0
-fi
-'
-    local out
-    out="$(bash "$SCRIPT_DIR/pogo-status.sh" "/home/user/my-project/src")"
-    assert_eq "my-project ⟳" "$out" "indexing status shows spinner"
-}
-
-test_status_stale() {
-    echo "Test: status shows bang for stale projects"
-    create_mock "pogo" '
-if [ "$1" = "visit" ]; then
-    echo "/home/user/my-project"
-    exit 0
-elif [ "$1" = "status" ]; then
-    echo "stale        /home/user/my-project (42 files)"
-    exit 0
-fi
-'
-    local out
-    out="$(bash "$SCRIPT_DIR/pogo-status.sh" "/home/user/my-project/src")"
-    assert_eq "my-project !" "$out" "stale status shows bang"
-}
-
-test_status_unindexed() {
-    echo "Test: status shows question mark for unindexed projects"
-    create_mock "pogo" '
-if [ "$1" = "visit" ]; then
-    echo "/home/user/my-project"
-    exit 0
-elif [ "$1" = "status" ]; then
-    echo "unindexed    /home/user/my-project (0 files)"
-    exit 0
-fi
-'
-    local out
-    out="$(bash "$SCRIPT_DIR/pogo-status.sh" "/home/user/my-project/src")"
-    assert_eq "my-project ?" "$out" "unindexed status shows question mark"
-}
-
-test_status_unknown() {
-    echo "Test: status shows bare name for unknown status"
-    create_mock "pogo" '
-if [ "$1" = "visit" ]; then
-    echo "/home/user/my-project"
-    exit 0
-elif [ "$1" = "status" ]; then
-    echo "somethingelse /home/user/my-project (42 files)"
-    exit 0
-fi
-'
-    local out
-    out="$(bash "$SCRIPT_DIR/pogo-status.sh" "/home/user/my-project/src")"
-    assert_eq "my-project" "$out" "unknown status shows bare name"
-}
-
-test_status_no_status_output() {
-    echo "Test: status shows bare name when pogo status has no matching line"
-    create_mock "pogo" '
-if [ "$1" = "visit" ]; then
-    echo "/home/user/my-project"
-    exit 0
-elif [ "$1" = "status" ]; then
-    echo "ready        /home/user/other-project (10 files)"
-    exit 0
-fi
-'
-    local out
-    out="$(bash "$SCRIPT_DIR/pogo-status.sh" "/home/user/my-project/src")"
-    assert_eq "my-project" "$out" "bare name when project not in status output"
-}
-
-test_status_pogo_status_fails() {
-    echo "Test: status shows bare name when pogo status command fails"
-    create_mock "pogo" '
-if [ "$1" = "visit" ]; then
-    echo "/home/user/my-project"
-    exit 0
-elif [ "$1" = "status" ]; then
-    exit 1
-fi
-'
-    local out
-    out="$(bash "$SCRIPT_DIR/pogo-status.sh" "/home/user/my-project/src")"
-    assert_eq "my-project" "$out" "bare name when pogo status fails (daemon down)"
+    assert_eq "my-project" "$out" "status segment is the bare project name"
+    local status_calls
+    status_calls="$(grep "^status" "$log" 2>/dev/null || true)"
+    assert_empty "$status_calls" "pogo status is not called (no indexing status since mg-14647)"
 }
 
 # ============================================================
@@ -251,11 +159,11 @@ echo "$@" >> '"$log"'
     assert_contains "$bind_p" "lsp" "prefix+P invokes lsp"
     assert_contains "$bind_p" "fzf" "prefix+P pipes to fzf"
 
-    # Verify prefix+S keybinding (search)
+    # prefix+S (cross-project search via pose) was removed with file search
+    # (mg-14647): no binding may be registered for it.
     local bind_s
     bind_s="$(grep "bind-key S" "$log" 2>/dev/null || true)"
-    assert_contains "$bind_s" "display-popup" "prefix+S uses display-popup"
-    assert_contains "$bind_s" "pose" "prefix+S invokes pose"
+    assert_empty "$bind_s" "prefix+S is not bound (pose was removed)"
 }
 
 test_tmux_popup_dimensions() {
@@ -266,17 +174,12 @@ echo "$@" >> '"$log"'
 '
     bash "$SCRIPT_DIR/pogo.tmux"
 
-    local bind_p bind_s
+    local bind_p
     bind_p="$(grep "bind-key P" "$log" 2>/dev/null || true)"
-    bind_s="$(grep "bind-key S" "$log" 2>/dev/null || true)"
 
     # Project switcher: 80% x 60%
     assert_contains "$bind_p" "80%" "project switcher width is 80%"
     assert_contains "$bind_p" "60%" "project switcher height is 60%"
-
-    # Search: 90% x 80%
-    assert_contains "$bind_s" "90%" "search popup width is 90%"
-    assert_contains "$bind_s" "80%" "search popup height is 80%"
 }
 
 test_tmux_popup_exit_flag() {
@@ -287,12 +190,10 @@ echo "$@" >> '"$log"'
 '
     bash "$SCRIPT_DIR/pogo.tmux"
 
-    local bind_p bind_s
+    local bind_p
     bind_p="$(grep "bind-key P" "$log" 2>/dev/null || true)"
-    bind_s="$(grep "bind-key S" "$log" 2>/dev/null || true)"
 
     assert_contains "$bind_p" "-E" "project switcher uses -E flag"
-    assert_contains "$bind_s" "-E" "search popup uses -E flag"
 }
 
 test_tmux_hook_runs_in_background() {
@@ -341,24 +242,6 @@ fi
     assert_empty "$out" "no output for unregistered project"
 }
 
-test_health_multiple_projects_in_status() {
-    echo "Test: status script picks correct project from multi-project status output"
-    create_mock "pogo" '
-if [ "$1" = "visit" ]; then
-    echo "/home/user/project-b"
-    exit 0
-elif [ "$1" = "status" ]; then
-    echo "ready        /home/user/project-a (10 files)"
-    echo "indexing     /home/user/project-b (5 files)"
-    echo "stale        /home/user/project-c (20 files)"
-    exit 0
-fi
-'
-    local out
-    out="$(bash "$SCRIPT_DIR/pogo-status.sh" "/home/user/project-b/src")"
-    assert_eq "project-b ⟳" "$out" "picks correct project from multi-project status"
-}
-
 # ============================================================
 # Run all tests
 # ============================================================
@@ -374,13 +257,7 @@ main() {
     test_status_empty_path
     test_status_visit_fails
     test_status_visit_returns_empty
-    test_status_ready
-    test_status_indexing
-    test_status_stale
-    test_status_unindexed
-    test_status_unknown
-    test_status_no_status_output
-    test_status_pogo_status_fails
+    test_status_shows_project_name
     echo ""
 
     echo "--- Keybinding & hook registration ---"
@@ -393,7 +270,6 @@ main() {
     echo "--- Daemon health check ---"
     test_health_daemon_not_running
     test_health_project_not_registered
-    test_health_multiple_projects_in_status
     echo ""
 
     teardown

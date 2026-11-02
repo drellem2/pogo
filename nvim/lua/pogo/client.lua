@@ -5,7 +5,6 @@ M.base_url = (function()
   local port = vim.env.POGO_PORT or "10000"
   return "http://localhost:" .. port
 end)()
-M._search_plugin = nil
 M._server_started = false
 
 --- Make an HTTP request to pogod using curl
@@ -39,27 +38,6 @@ local function request(method, path, body)
     return result.stdout, nil
   end
   return decoded, nil
-end
-
---- URL-encode a string (percent encoding)
----@param str string
----@return string
-local function url_encode(str)
-  str = str:gsub("([^%w%-%.%_%~])", function(c)
-    return string.format("%%%02X", string.byte(c))
-  end)
-  return str
-end
-
---- URL-decode a string
----@param str string
----@return string
-local function url_decode(str)
-  str = str:gsub("%%(%x%x)", function(hex)
-    return string.char(tonumber(hex, 16))
-  end)
-  str = str:gsub("+", " ")
-  return str
 end
 
 --- Check if pogod is running
@@ -128,80 +106,8 @@ function M.project_root(path)
   return nil
 end
 
---- Get project files by path lookup
----@param path string Project root path
----@return string[] paths List of file paths relative to project root
-function M.get_project_files(path)
-  local encoded = url_encode(path)
-  local resp, err = request("GET", "/projects/file?path=" .. encoded)
-  if err then return {} end
-  if resp and resp.paths then
-    return resp.paths
-  end
-  return {}
-end
-
---- Shown when pogod lists no search plugin: search indexing is off by
---- default (mg-cabf4).
-M.SEARCH_DISABLED_MESSAGE = "search indexing is disabled; enable with `[search] enabled = true` in config.toml (or POGO_SEARCH_ENABLED=true) and restart pogod"
-
---- Get the search plugin path (cached)
----@return string|nil plugin_path
-function M.get_search_plugin()
-  if M._search_plugin then
-    return M._search_plugin
-  end
-  local resp, err = request("GET", "/plugins")
-  if err or not resp then return nil end
-  for _, plugin in ipairs(resp) do
-    if plugin:find("pogo%-plugin%-search") then
-      M._search_plugin = plugin
-      return plugin
-    end
-  end
-  return nil
-end
-
---- Search a project for a query
----@param project_root string Project root path
----@param query string Search query (zoekt syntax)
----@return table|nil results {index={...}, results={files={...}}, error=string}
-function M.search(project_root, query)
-  local plugin_path = M.get_search_plugin()
-  if not plugin_path then
-    vim.notify("[pogo] " .. M.SEARCH_DISABLED_MESSAGE, vim.log.levels.ERROR)
-    return nil
-  end
-
-  local search_request = vim.json.encode({
-    type = "search",
-    projectRoot = project_root,
-    string = "10s",
-    data = query,
-  })
-  local encoded_request = url_encode(search_request)
-
-  local body = vim.json.encode({
-    plugin = plugin_path,
-    value = encoded_request,
-  })
-
-  local resp, err = request("POST", "/plugin", body)
-  if err then return nil end
-
-  -- The response value is URL-encoded JSON
-  if resp and resp.value then
-    local decoded_value = url_decode(resp.value)
-    local ok, search_resp = pcall(vim.json.decode, decoded_value)
-    if ok then
-      return search_resp
-    end
-  end
-  return nil
-end
-
---- Get indexing status of all projects
----@return table[] statuses Array of {id, path, indexing_status, file_count}
+--- Get the status of all known projects
+---@return table[] statuses Array of {id=number, path=string}
 function M.get_status()
   local resp, err = request("GET", "/status")
   if err then return {} end

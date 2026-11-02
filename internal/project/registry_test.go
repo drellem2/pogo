@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/drellem2/pogo/internal/driver"
 )
 
 // TestPruneRegistryRemovesStaleEntries verifies the mg-d205 registry GC:
@@ -131,8 +129,6 @@ func TestWithinIndexRoots(t *testing.T) {
 // re-accumulating polecat-worktree / temp entries (mg-d205).
 func TestVisitRefusesEphemeralRepo(t *testing.T) {
 	ProjectFileName = "projects-visit-ephemeral-test.json"
-	driver.Init()
-	defer driver.Kill()
 	Init()
 	defer RemoveSaveFile()
 

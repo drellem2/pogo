@@ -5,7 +5,6 @@
 #   - Auto-registers projects when switching panes/windows (via pogo visit)
 #   - Shows current project name + indexing status in the status bar
 #   - prefix + P: fuzzy project switcher (lsp | fzf in a popup)
-#   - prefix + S: cross-project code search (pose in a popup)
 #
 # Installation:
 #   Option A (TPM):
@@ -28,7 +27,3 @@ tmux set-hook -g pane-focus-in \
 # prefix + P — fuzzy project switcher popup
 tmux bind-key P display-popup -E -w 80% -h 60% \
     "lsp | fzf --prompt='project> ' | xargs -I{} tmux send-keys 'cd {}' Enter"
-
-# prefix + S — cross-project search popup
-tmux bind-key S display-popup -E -w 90% -h 80% \
-    "read -p 'search> ' q && pose \"\$q\" | less -R"

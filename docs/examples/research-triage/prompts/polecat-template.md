@@ -84,8 +84,8 @@ mg claim {{.Id}} || mg mail send mayor --from={{.Id}} --subject="conflict: {{.Id
 
 Use whatever tools fit:
 - **Web research:** WebSearch / WebFetch for papers, blog posts, docs.
-- **Local code search:** `pose <query>` searches every repo pogo has indexed
-  on this machine; `pose <query> /path/to/repo` scopes a single repo.
+- **Local code search:** `rg <query> $(lsp)` searches every repo pogo knows
+  about on this machine; `rg <query> /path/to/repo` scopes a single repo.
 - **Repo discovery:** `lsp` lists local repos pogo knows about — useful when
   the body mentions a project by name and you need its path.
 - **File reads:** read any local files referenced in the body.

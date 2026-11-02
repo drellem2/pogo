@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
@@ -15,16 +14,10 @@ import (
 // permission popup on every tick — while a repo under a normal dev path is.
 func TestDiscoverNewReposSkipsProtectedHomeDir(t *testing.T) {
 	ProjectFileName = "projects-protected-home-test.json"
-	driver.Init()
-	defer driver.Kill()
 	Init()
 	defer RemoveSaveFile()
 
 	home := testsandbox.Isolate(t).Home
-	// discoverNewRepos registers the ~/dev repo, and the search plugin then
-	// indexes it from a background goroutine that writes <repo>/.pogo/search.
-	// Drain that before home is torn down (mg-36d9).
-	drainSearch(t)
 
 	// A repo under ~/Documents (protected) and one under ~/dev (normal).
 	protectedRepo := filepath.Join(home, "Documents", "secret-repo")
@@ -58,8 +51,6 @@ func TestDiscoverNewReposSkipsProtectedHomeDir(t *testing.T) {
 // a protected home subtree (mg-5cd6).
 func TestSearchAndCreateRefusesProtectedHomeDir(t *testing.T) {
 	ProjectFileName = "projects-protected-visit-test.json"
-	driver.Init()
-	defer driver.Kill()
 	Init()
 	defer RemoveSaveFile()
 

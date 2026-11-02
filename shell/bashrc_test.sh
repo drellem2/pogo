@@ -12,7 +12,7 @@ fail() { echo "FAIL: $1"; echo "FAIL: $1" >> "$RESULTS_FILE"; }
 TEST_DIR=$(mktemp -d)
 
 MOCK_BIN="$TEST_DIR/bin"
-mkdir -p "$MOCK_BIN" "$MOCK_BIN/plugin"
+mkdir -p "$MOCK_BIN"
 
 cat > "$MOCK_BIN/pogo" << 'MOCK'
 #!/usr/bin/env bash
@@ -36,7 +36,7 @@ SOURCE_FILE="$(cd "$(dirname "$0")" && pwd -P)/.bashrc"
 # Helper: source .bashrc with a fake HOME that has the expected directory layout
 source_bashrc() {
     export HOME="$TEST_DIR"
-    mkdir -p "$TEST_DIR/dev/pogo/bin/plugin"
+    mkdir -p "$TEST_DIR/dev/pogo/bin"
     source "$SOURCE_FILE" 2>/dev/null || true
 }
 
@@ -85,12 +85,6 @@ echo "--- Environment Variables ---"
         pass "POGO_HOME is set"
     else
         fail "POGO_HOME is not set"
-    fi
-
-    if [ "${POGO_PLUGIN_PATH:-}" = "${POGO_BINARY_PATH}/plugin" ]; then
-        pass "POGO_PLUGIN_PATH equals POGO_BINARY_PATH/plugin"
-    else
-        fail "POGO_PLUGIN_PATH='${POGO_PLUGIN_PATH:-}' (expected '${POGO_BINARY_PATH:-}/plugin')"
     fi
 
     if echo "$PATH" | tr ':' '\n' | grep -qF "$POGO_BINARY_PATH"; then

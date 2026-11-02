@@ -104,7 +104,6 @@ func inertIfEmpty(n int) string {
 // Config field (see enabledDefault), so only these need spelling out.
 var switchDefaults = map[string]func(*Config) string{
 	"agents/autostart":                           func(c *Config) string { return onOff(c.Agents.AutoStart) },
-	"search/enabled":                             func(c *Config) string { return onOff(c.SearchEnabled) },
 	"stall_watch/priority_wake_enabled":          func(c *Config) string { return onOff(c.StallWatch.PriorityWakeEnabled) },
 	"stall_watch/blocked_reminder_enabled":       func(c *Config) string { return onOff(c.StallWatch.BlockedReminderEnabled) },
 	"stall_watch/indefinite_hold_report_enabled": func(c *Config) string { return onOff(c.StallWatch.IndefiniteHoldReportEnabled) },
@@ -391,7 +390,7 @@ func TestDefaultsTableMatchesLoad(t *testing.T) {
 		case r.key == "—":
 			want = "—"
 		case r.key == "enabled" && switchDefaults[r.section+"/enabled"] != nil:
-			// A top-level switch such as [search] enabled (Config.SearchEnabled)
+			// A top-level switch with no section struct (e.g. [agents] autostart)
 			// has no section struct for enabledDefault to reflect on.
 			want = switchDefaults[r.section+"/enabled"](cfg)
 		case r.key == "enabled":

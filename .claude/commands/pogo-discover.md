@@ -1,6 +1,6 @@
 ---
 description: Discover repos related to your current work using pogo
-allowed-tools: Bash(lsp:*), Bash(pose:*), Bash(pogo visit:*), Bash(git remote:*), Bash(git rev-parse:*), Bash(pwd:*)
+allowed-tools: Bash(lsp:*), Bash(rg:*), Bash(pogo visit:*), Bash(git remote:*), Bash(git rev-parse:*), Bash(pwd:*)
 argument-hint: [query]
 ---
 
@@ -31,10 +31,13 @@ Report the total count and list repo names/paths.
 
 ### Step 3: Search for related code
 
+pogo does not search file contents (its search indexer was removed in
+mg-14647); search the repos `lsp` lists with `rg`.
+
 If the user provided a query argument, search across all repos for it:
 
 ```bash
-pose --json "$ARGUMENTS"
+lsp | xargs rg --count-matches --fixed-strings -- "$ARGUMENTS"
 ```
 
 If no query was provided, infer a useful search from context:
@@ -43,7 +46,7 @@ If no query was provided, infer a useful search from context:
 
 ```bash
 REPO_NAME=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
-pose --json "$REPO_NAME"
+lsp | xargs rg --count-matches --fixed-strings -- "$REPO_NAME"
 ```
 
 ### Step 4: Report results

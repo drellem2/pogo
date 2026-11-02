@@ -23,9 +23,13 @@ suite("Pogo Extension", () => {
     test("registers all commands", async () => {
       const commands = await vscode.commands.getCommands(true);
       assert.ok(commands.includes("pogo.switchProject"), "switchProject command registered");
-      assert.ok(commands.includes("pogo.findFile"), "findFile command registered");
-      assert.ok(commands.includes("pogo.search"), "search command registered");
       assert.ok(commands.includes("pogo.status"), "status command registered");
+    });
+
+    test("does not register removed search/find-file commands", async () => {
+      const commands = await vscode.commands.getCommands(true);
+      assert.ok(!commands.includes("pogo.search"), "search command removed");
+      assert.ok(!commands.includes("pogo.findFile"), "findFile command removed");
     });
   });
 
@@ -107,103 +111,6 @@ suite("Pogo Extension", () => {
     });
   });
 
-  suite("Search Command (pogo.search)", () => {
-    test("shows warning when daemon is not running", async () => {
-      sandbox.stub(client, "healthCheck").resolves(false);
-      const warnStub = sandbox.stub(vscode.window, "showWarningMessage");
-
-      await vscode.commands.executeCommand("pogo.search");
-
-      assert.ok(warnStub.calledOnce, "Should warn when daemon offline");
-    });
-
-    test("shows no-results message for empty search", async () => {
-      sandbox.stub(client, "healthCheck").resolves(true);
-      sandbox.stub(client, "visit").resolves({
-        project: { id: 1, path: "/home/user/myproject" },
-      });
-      sandbox.stub(vscode.window, "showInputBox").resolves("nonexistent_query");
-      sandbox.stub(client, "search").resolves({
-        index: { root: "/home/user/myproject", paths: [], indexing_status: "ready" },
-        results: { files: [] },
-        error: "",
-      });
-      const infoStub = sandbox.stub(vscode.window, "showInformationMessage");
-
-      // Need a workspace folder for getProjectRoot
-      sandbox.stub(vscode.workspace, "workspaceFolders" as any).value([
-        { uri: vscode.Uri.file("/home/user/myproject"), name: "myproject", index: 0 },
-      ]);
-
-      await vscode.commands.executeCommand("pogo.search");
-
-      assert.ok(infoStub.calledOnce, "Should show no results message");
-      assert.ok(
-        infoStub.firstCall.args[0].includes("No results"),
-        "Message should indicate no results"
-      );
-    });
-
-    test("displays search results with file and line info", async () => {
-      sandbox.stub(client, "healthCheck").resolves(true);
-      sandbox.stub(client, "visit").resolves({
-        project: { id: 1, path: "/home/user/myproject" },
-      });
-      sandbox.stub(vscode.window, "showInputBox").resolves("func main");
-      sandbox.stub(client, "search").resolves({
-        index: { root: "/home/user/myproject", paths: [], indexing_status: "ready" },
-        results: {
-          files: [
-            {
-              path: "cmd/main.go",
-              matches: [
-                { line: 10, content: "func main() {" },
-                { line: 25, content: "func mainLoop() {" },
-              ],
-            },
-          ],
-        },
-        error: "",
-      });
-      const quickPickStub = sandbox
-        .stub(vscode.window, "showQuickPick")
-        .resolves(undefined);
-
-      sandbox.stub(vscode.workspace, "workspaceFolders" as any).value([
-        { uri: vscode.Uri.file("/home/user/myproject"), name: "myproject", index: 0 },
-      ]);
-
-      await vscode.commands.executeCommand("pogo.search");
-
-      assert.ok(quickPickStub.calledOnce, "Should show quick pick with results");
-      const items = quickPickStub.firstCall.args[0] as Array<{
-        label: string;
-        detail: string;
-      }>;
-      assert.strictEqual(items.length, 2, "Should show 2 matches");
-      assert.strictEqual(items[0].label, "main.go:10");
-      assert.strictEqual(items[1].label, "main.go:25");
-      assert.strictEqual(items[0].detail, "func main() {");
-    });
-
-    test("does nothing when user cancels input box", async () => {
-      sandbox.stub(client, "healthCheck").resolves(true);
-      sandbox.stub(client, "visit").resolves({
-        project: { id: 1, path: "/home/user/myproject" },
-      });
-      sandbox.stub(vscode.window, "showInputBox").resolves(undefined);
-      const searchStub = sandbox.stub(client, "search");
-
-      sandbox.stub(vscode.workspace, "workspaceFolders" as any).value([
-        { uri: vscode.Uri.file("/home/user/myproject"), name: "myproject", index: 0 },
-      ]);
-
-      await vscode.commands.executeCommand("pogo.search");
-
-      assert.ok(searchStub.notCalled, "Should not call search when input cancelled");
-    });
-  });
-
   suite("Auto-Visit on Workspace Folder Change", () => {
     test("calls visit for workspace folders on activation", async () => {
       const visitStub = sandbox.stub(client, "visit").resolves({
@@ -237,21 +144,7 @@ suite("Pogo Extension", () => {
     });
   });
 
-  suite("Status Bar Indexing Indicator", () => {
-    test("getStatus returns project statuses", async () => {
-      sandbox.stub(client, "getStatus").resolves([
-        { id: 1, path: "/home/user/project-a", indexing_status: "ready", file_count: 42 },
-        { id: 2, path: "/home/user/project-b", indexing_status: "indexing", file_count: 100 },
-      ]);
-
-      const statuses = await client.getStatus();
-
-      assert.strictEqual(statuses.length, 2);
-      assert.strictEqual(statuses[0].indexing_status, "ready");
-      assert.strictEqual(statuses[0].file_count, 42);
-      assert.strictEqual(statuses[1].indexing_status, "indexing");
-    });
-
+  suite("Status Command (pogo.status)", () => {
     test("healthCheck returns false when daemon is down", async () => {
       sandbox.stub(client, "healthCheck").resolves(false);
       const result = await client.healthCheck();
@@ -264,10 +157,11 @@ suite("Pogo Extension", () => {
       assert.strictEqual(result, true);
     });
 
-    test("status command refreshes tree view and shows modal", async () => {
+    test("status command refreshes tree view and lists registered projects", async () => {
       sandbox.stub(client, "healthCheck").resolves(true);
-      sandbox.stub(client, "getStatus").resolves([
-        { id: 1, path: "/home/user/project-a", indexing_status: "ready", file_count: 42 },
+      sandbox.stub(client, "getProjects").resolves([
+        { id: 1, path: "/home/user/project-a" },
+        { id: 2, path: "/home/user/project-b" },
       ]);
       const infoStub = sandbox.stub(vscode.window, "showInformationMessage");
 
@@ -275,13 +169,14 @@ suite("Pogo Extension", () => {
 
       assert.ok(infoStub.calledOnce, "Should show status information");
       const msg = infoStub.firstCall.args[0] as string;
+      assert.ok(msg.includes("2 projects"), "Should include project count");
       assert.ok(msg.includes("/home/user/project-a"), "Should include project path");
-      assert.ok(msg.includes("42 files"), "Should include file count");
+      assert.ok(msg.includes("/home/user/project-b"), "Should include project path");
     });
 
     test("status command shows message when no projects registered", async () => {
       sandbox.stub(client, "healthCheck").resolves(true);
-      sandbox.stub(client, "getStatus").resolves([]);
+      sandbox.stub(client, "getProjects").resolves([]);
       const infoStub = sandbox.stub(vscode.window, "showInformationMessage");
 
       await vscode.commands.executeCommand("pogo.status");
@@ -291,6 +186,15 @@ suite("Pogo Extension", () => {
         infoStub.firstCall.args[0].includes("No projects"),
         "Should indicate no projects registered"
       );
+    });
+
+    test("status command warns when daemon is not running", async () => {
+      sandbox.stub(client, "healthCheck").resolves(false);
+      const warnStub = sandbox.stub(vscode.window, "showWarningMessage");
+
+      await vscode.commands.executeCommand("pogo.status");
+
+      assert.ok(warnStub.calledOnce, "Should warn when daemon offline");
     });
   });
 });

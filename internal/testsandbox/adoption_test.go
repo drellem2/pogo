@@ -257,7 +257,7 @@ func howToAdopt(k suiteKind) string {
 			`first command that can reach $HOME — see scripts/pogo-self-deploy_sigint_test.sh.`
 	}
 	return "add a TestMain calling testsandbox.Main(\"<pkg>\"), and one test calling " +
-		"testsandbox.Verify — see internal/driver/testmain_test.go."
+		"testsandbox.Verify — see internal/project/testmain_test.go."
 }
 
 // repoRoot walks up from the working directory to the module root. The test

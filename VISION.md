@@ -11,7 +11,7 @@ Pogo is the center of the next-generation development experience. It takes the a
 
 # pogod
 
-The pogo daemon is like `projectile.el`: it tracks projects and files. It also does zoekt indexing for code search. This is the first step to 
+The pogo daemon is like `projectile.el`: it tracks projects. (It also did zoekt indexing for code search until mg-14647 removed it; use other tools for search.) This is the first step to 
 
 # Next Steps
 

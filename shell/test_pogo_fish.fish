@@ -99,10 +99,6 @@ echo "# --- Environment Variables ---"
 
 assert_defined POGO_BINARY_PATH "POGO_BINARY_PATH is set"
 assert_defined POGO_HOME "POGO_HOME is set"
-assert_defined POGO_PLUGIN_PATH "POGO_PLUGIN_PATH is set"
-
-assert_equal "$POGO_PLUGIN_PATH" "$POGO_BINARY_PATH/plugin" \
-    "POGO_PLUGIN_PATH is POGO_BINARY_PATH/plugin"
 
 assert_contains "$PATH" "$POGO_BINARY_PATH" \
     "PATH contains POGO_BINARY_PATH"

@@ -132,8 +132,8 @@ Within a coordination cycle (30–60s), the mayor:
 2. Spawns a polecat with `pogo agent spawn-polecat <short-id> ... --env
    NOTES_DIR=$HOME/research-notes` — note the absence of `--repo`, so no
    git worktree is created.
-3. The polecat claims the item, does the research (web + `pose` + `lsp`
-   for local code, if relevant), writes
+3. The polecat claims the item, does the research (web + `lsp` and
+   `rg` for local code, if relevant), writes
    `~/research-notes/research-notes-<id>.md`, mails the mayor with subject
    `note-filed: <id>`, and calls `mg done`.
 4. The mayor reads the mail, opens the note, and either:

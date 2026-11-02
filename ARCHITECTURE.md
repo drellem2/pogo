@@ -1,16 +1,16 @@
 # Pogo Architecture
 
-Pogo is an operating system for agent-first development. It combines project discovery, code search, and agent orchestration into a cohesive set of UNIX tools.
+Pogo is an operating system for agent-first development. It combines project discovery and agent orchestration into a cohesive set of UNIX tools.
 
 ## System Model
 
 ```
 ┌─────────────────────────────────────────────────┐
 │                    pogod                         │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │ Projects │  │  Search  │  │    Agents     │  │
-│  │ Scanner  │  │  (zoekt) │  │  Supervisor   │  │
-│  └──────────┘  └──────────┘  └───────────────┘  │
+│  ┌──────────────────┐  ┌───────────────────┐    │
+│  │     Projects     │  │      Agents       │    │
+│  │      index       │  │    Supervisor     │    │
+│  └──────────────────┘  └───────────────────┘    │
 │  ┌──────────────────────────────────────────┐   │
 │  │              Refinery                     │   │
 │  │  (merge queue loop)                       │   │
@@ -26,7 +26,7 @@ Pogo is an operating system for agent-first development. It combines project dis
 ┌──────────────┐     ┌─────────────────┐
 │  CLI tools   │     │     Agents      │
 │  pogo, lsp,  │     │ ┌─────────────┐ │
-│  pose, mg    │     │ │ crew-arch   │ │
+│  mg          │     │ │ crew-arch   │ │
 │              │     │ │ crew-ops    │ │
 │              │     │ │ cat-a3f     │ │
 │              │     │ │ mayor       │ │
@@ -71,7 +71,7 @@ The coordinator (default: mayor; configurable via `[agents] coordinator`, as wor
 
 All coordination state lives in a single global macguffin tree (`~/.macguffin/`). Work items are markdown files. Mail is Maildir. Claims are atomic renames. No database, no server, no schema.
 
-macguffin is global, not per-project. A work item references a repo path in its body; pogo resolves it. This keeps the coordination layer simple — agents check one place for work, not N project directories. Pogo already provides the project-awareness layer via `lsp` and `pose`.
+macguffin is global, not per-project. A work item references a repo path in its body; pogo resolves it. This keeps the coordination layer simple — agents check one place for work, not N project directories. Pogo already provides the project-awareness layer via `lsp`.
 
 Agents interact with state through the `mg` CLI, the same way a human would. There is no internal API for state changes — an agent runs `mg claim <id>`, `mg done <id>` and the rest like anyone else.
 
@@ -1895,7 +1895,7 @@ For level 2, [libghostty](https://ghostty.org) (Ghostty's embeddable terminal li
 
 These questions came up during design and have been answered. Recorded here so they don't resurface.
 
-1. **macguffin scope: global.** One macguffin tree at `~/.macguffin/`, not per-project. Work items reference repo paths as metadata. Pogo provides project awareness via `lsp` and `pose` — macguffin doesn't need to duplicate it. Agents check one place for work.
+1. **macguffin scope: global.** One macguffin tree at `~/.macguffin/`, not per-project. Work items reference repo paths as metadata. Pogo provides project awareness via `lsp` — macguffin doesn't need to duplicate it. Agents check one place for work.
 
 2. **Polecat concurrency: no limit in pogod.** The daemon doesn't enforce concurrency limits. The coordinator (or human) decides how many polecats to spawn. pogod is substrate, not policy.
 

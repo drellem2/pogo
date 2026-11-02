@@ -41,54 +41,6 @@
 
 ;;; Utility function tests
 
-(ert-deftest pogo-test-nil-or-empty-nil ()
-  "Test pogo-nil-or-empty with nil."
-  (should (pogo-nil-or-empty nil)))
-
-(ert-deftest pogo-test-nil-or-empty-empty-string ()
-  "Test pogo-nil-or-empty with empty string."
-  (should (pogo-nil-or-empty "")))
-
-(ert-deftest pogo-test-nil-or-empty-non-empty ()
-  "Test pogo-nil-or-empty with non-empty string."
-  (should-not (pogo-nil-or-empty "hello")))
-
-(ert-deftest pogo-test-nil-or-empty-whitespace ()
-  "Test pogo-nil-or-empty with whitespace (not empty)."
-  (should-not (pogo-nil-or-empty " ")))
-
-;;; pogo--to-list
-
-(ert-deftest pogo-test-to-list-vector ()
-  "Test pogo--to-list converts a vector to a list."
-  (should (equal (pogo--to-list [1 2 3]) '(1 2 3))))
-
-(ert-deftest pogo-test-to-list-empty-vector ()
-  "Test pogo--to-list with empty vector."
-  (should (equal (pogo--to-list []) nil)))
-
-(ert-deftest pogo-test-to-list-list ()
-  "Test pogo--to-list with a list (identity)."
-  (should (equal (pogo--to-list '(a b c)) '(a b c))))
-
-;;; pogo--fix-spaces
-
-(ert-deftest pogo-test-fix-spaces-plus ()
-  "Test pogo--fix-spaces replaces + with %20."
-  (should (equal (pogo--fix-spaces "hello+world") "hello%20world")))
-
-(ert-deftest pogo-test-fix-spaces-no-plus ()
-  "Test pogo--fix-spaces with no plus signs."
-  (should (equal (pogo--fix-spaces "hello") "hello")))
-
-(ert-deftest pogo-test-fix-spaces-multiple ()
-  "Test pogo--fix-spaces with multiple plus signs."
-  (should (equal (pogo--fix-spaces "a+b+c") "a%20b%20c")))
-
-(ert-deftest pogo-test-fix-spaces-empty ()
-  "Test pogo--fix-spaces with empty string."
-  (should (equal (pogo--fix-spaces "") "")))
-
 ;;; pogo-difference
 
 (ert-deftest pogo-test-difference-basic ()
@@ -110,24 +62,6 @@
 (ert-deftest pogo-test-difference-empty-list2 ()
   "Test pogo-difference with empty second list."
   (should (equal (pogo-difference '(1 2 3) '()) '(1 2 3))))
-
-;;; pogo--delimit
-
-(ert-deftest pogo-test-delimit-basic ()
-  "Test pogo--delimit intersperses element."
-  (should (equal (pogo--delimit "," '("a" "b" "c")) '("a" "," "b" "," "c"))))
-
-(ert-deftest pogo-test-delimit-single ()
-  "Test pogo--delimit with single element list."
-  (should (equal (pogo--delimit "," '("a")) '("a"))))
-
-(ert-deftest pogo-test-delimit-empty ()
-  "Test pogo--delimit with empty list."
-  (should (equal (pogo--delimit "," nil) nil)))
-
-(ert-deftest pogo-test-delimit-two ()
-  "Test pogo--delimit with two elements."
-  (should (equal (pogo--delimit "-" '(1 2)) '(1 "-" 2))))
 
 ;;; pogo-default-project-name
 
@@ -162,36 +96,6 @@
 (ert-deftest pogo-test-url-unhex-multiple ()
   "Test pogo-url-unhex-string with multiple encoded characters."
   (should (equal (pogo-url-unhex-string "a%20b%20c") "a b c")))
-
-;;; pogo--format-chunk
-
-(ert-deftest pogo-test-format-chunk ()
-  "Test pogo--format-chunk formats a match chunk."
-  (let ((chunk '((line . 42) (content . "foo bar"))))
-    (should (equal (pogo--format-chunk chunk) "42: ~foo bar~"))))
-
-;;; pogo--format-file-match
-
-(ert-deftest pogo-test-format-file-match ()
-  "Test pogo--format-file-match formats file match as org heading."
-  (let ((file-match '((path . "src/main.go")
-                      (matches . (((line . 10) (content . "func main")))))))
-    (should (string-prefix-p "* [[./src/main.go]"
-                             (pogo--format-file-match file-match)))))
-
-;;; pogo--search-compare
-
-(ert-deftest pogo-test-search-compare-more-matches ()
-  "Test pogo--search-compare returns t when first has more matches."
-  (let ((a `((,#'matches . (1 2 3))))
-        (b `((,#'matches . (1)))))
-    (should (pogo--search-compare a b))))
-
-(ert-deftest pogo-test-search-compare-fewer-matches ()
-  "Test pogo--search-compare returns nil when first has fewer matches."
-  (let ((a `((,#'matches . (1))))
-        (b `((,#'matches . (1 2 3)))))
-    (should-not (pogo--search-compare a b))))
 
 ;;; pogo-log
 
@@ -266,35 +170,6 @@
     (puthash "project" project resp)
     (should (equal (pogo-parse-visit-call resp) "/home/user/proj"))))
 
-;;; pogo-parse-result
-
-(ert-deftest pogo-test-parse-result-alist ()
-  "Test pogo-parse-result with alist response (json-read parser)."
-  (let ((pogo-json-parser 'json-read)
-        (resp '((index . ((error . nil) (paths . ("/a" "/b"))))
-                (results . (1 2 3)))))
-    (let ((result (pogo-parse-result resp)))
-      (should (equal (cdr (assoc 'paths result)) '("/a" "/b")))
-      (should (equal (cdr (assoc 'results result)) '(1 2 3))))))
-
-(ert-deftest pogo-test-parse-result-alist-error ()
-  "Test pogo-parse-result with alist response containing error."
-  (let ((pogo-json-parser 'json-read)
-        (resp '((index . ((error . "something broke") (paths . nil)))
-                (results . nil))))
-    (should (equal (pogo-parse-result resp) nil))))
-
-(ert-deftest pogo-test-parse-result-hash ()
-  "Test pogo-parse-result with hash-table response (json-parse-buffer parser)."
-  (let ((pogo-json-parser 'json-parse-buffer)
-        (resp (make-hash-table :test 'equal)))
-    (puthash "results" '(1 2 3) resp)
-    (puthash "error" nil resp)
-    (puthash "paths" '("/a" "/b") resp)
-    (let ((result (pogo-parse-result resp)))
-      (should (equal (cdr (assoc 'paths result)) '("/a" "/b")))
-      (should (equal (cdr (assoc 'results result)) '(1 2 3))))))
-
 ;;; pogo-ignored-buffer-p
 
 (ert-deftest pogo-test-ignored-buffer-by-name ()
@@ -320,13 +195,15 @@
 
 ;;; pogo-command-map keybindings
 
-(ert-deftest pogo-test-command-map-has-search ()
-  "Test pogo-command-map has search binding on 'g'."
-  (should (eq (lookup-key pogo-command-map (kbd "g")) 'pogo-search)))
-
-(ert-deftest pogo-test-command-map-has-find-file ()
-  "Test pogo-command-map has find-file binding on 'f'."
-  (should (eq (lookup-key pogo-command-map (kbd "f")) 'pogo-find-file)))
+(ert-deftest pogo-test-command-map-has-no-search-or-find-file ()
+  "Search and find-file are gone with pogod's search index (mg-14647).
+`pogo-search' and `pogo-find-file' depended on the deleted /plugin and
+/projects/file endpoints; their keys must not point at missing commands."
+  (dolist (key '("g" "f" "s g" "s s"))
+    (should-not (commandp (lookup-key pogo-command-map (kbd key)))))
+  (should-not (fboundp 'pogo-search))
+  (should-not (fboundp 'pogo-find-file))
+  (should (eq pogo-switch-project-action 'pogo-dired)))
 
 (ert-deftest pogo-test-command-map-has-switch-buffer ()
   "Test pogo-command-map has switch-to-buffer binding on 'b'."
@@ -386,20 +263,6 @@
         (default-directory "/tmp/"))
     (should-error (pogo-ensure-project nil))))
 
-;;; pogo-symbol-at-point
-
-(ert-deftest pogo-test-symbol-at-point-empty ()
-  "Test pogo-symbol-at-point returns empty string when no symbol."
-  (with-temp-buffer
-    (should (equal (pogo-symbol-at-point) ""))))
-
-(ert-deftest pogo-test-symbol-at-point-word ()
-  "Test pogo-symbol-at-point returns symbol text."
-  (with-temp-buffer
-    (insert "hello world")
-    (goto-char 3)  ;; inside "hello"
-    (should (equal (pogo-symbol-at-point) "hello"))))
-
 ;;; pogo-mode-line
 
 (ert-deftest pogo-test-default-mode-line ()
@@ -441,15 +304,6 @@
     (let ((projects '("/home/user/a/" "/home/user/b/" "/home/user/c/")))
       (should (equal (pogo--remove-current-project projects)
                      '("/home/user/a/" "/home/user/c/"))))))
-
-;;; pogo-print-and-return
-
-(ert-deftest pogo-test-print-and-return ()
-  "Test pogo-print-and-return returns its value."
-  (let ((pogo-debug-log nil))  ;; suppress logging
-    (should (equal (pogo-print-and-return "msg" 42) 42))
-    (should (equal (pogo-print-and-return "msg" "hello") "hello"))
-    (should (equal (pogo-print-and-return "msg" nil) nil))))
 
 ;;; Daemon start path: connect, do not spawn; and detach what you do spawn
 ;;

@@ -3383,7 +3383,7 @@ stamped_rev() {
     [ -x "$bin" ] || { echo "$REV_MISSING"; return 0; }
     local out
     case "$name" in
-        pogo|lsp|pose) out="$("$bin" version --json 2>/dev/null || true)" ;;
+        pogo|lsp) out="$("$bin" version --json 2>/dev/null || true)" ;;
         *)             out="$("$bin" -version -json 2>/dev/null || true)" ;;
     esac
     # NOT json_str: that one is pinned to the compact `"k":"v"` shape pogod's

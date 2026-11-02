@@ -1,5 +1,5 @@
 -- pogo.nvim - Neovim integration for pogo daemon
--- Project navigation, file finding, and code search via pogod HTTP API
+-- Project registration, switching, and status via pogod HTTP API
 
 local M = {}
 local client = require("pogo.client")
@@ -73,82 +73,6 @@ function M.switch_project()
   end)
 end
 
---- Find file in current project (uses telescope if available)
-function M.find_file()
-  if not client.ensure_server() then return end
-
-  local has_telescope = pcall(require, "telescope")
-  if has_telescope then
-    require("pogo.telescope").find_file()
-    return
-  end
-
-  local root = M.project_root()
-  if not root then
-    vim.notify("[pogo] not in a project", vim.log.levels.WARN)
-    return
-  end
-
-  local files = client.get_project_files(root)
-  if #files == 0 then
-    vim.notify("[pogo] no files found", vim.log.levels.INFO)
-    return
-  end
-
-  vim.ui.select(files, { prompt = "Find file:" }, function(choice)
-    if choice then
-      vim.cmd("edit " .. vim.fn.fnameescape(root .. choice))
-    end
-  end)
-end
-
---- Search current project (uses telescope if available)
-function M.search(query)
-  if not client.ensure_server() then return end
-
-  local has_telescope = pcall(require, "telescope")
-  if has_telescope then
-    require("pogo.telescope").search({ query = query })
-    return
-  end
-
-  local root = M.project_root()
-  if not root then
-    vim.notify("[pogo] not in a project", vim.log.levels.WARN)
-    return
-  end
-
-  query = query or vim.fn.input("Zoekt query: ", vim.fn.expand("<cword>"))
-  if query == "" then return end
-
-  local resp = client.search(root, query)
-  if not resp or not resp.results or not resp.results.files then
-    vim.notify("[pogo] no results", vim.log.levels.INFO)
-    return
-  end
-
-  -- Populate quickfix list
-  local items = {}
-  for _, file in ipairs(resp.results.files) do
-    for _, match in ipairs(file.matches or {}) do
-      table.insert(items, {
-        filename = root .. file.path,
-        lnum = match.line,
-        text = vim.trim(match.content),
-      })
-    end
-  end
-
-  if #items == 0 then
-    vim.notify("[pogo] no results for: " .. query, vim.log.levels.INFO)
-    return
-  end
-
-  vim.fn.setqflist(items, "r")
-  vim.fn.setqflist({}, "a", { title = "pogo search: " .. query })
-  vim.cmd("copen")
-end
-
 --- Show project status (uses telescope if available)
 function M.status()
   if not client.ensure_server() then return end
@@ -160,17 +84,19 @@ function M.status()
   end
 
   local statuses = client.get_status()
-  local icons = { ready = "✓", indexing = "⟳", stale = "!", unindexed = "?" }
+  if #statuses == 0 then
+    vim.notify("[pogo] no project status available", vim.log.levels.INFO)
+    return
+  end
   local lines = {}
   for _, s in ipairs(statuses) do
-    local icon = icons[s.indexing_status] or "?"
-    table.insert(lines, string.format(" %s  %s (%d files)", icon, s.path, s.file_count))
+    table.insert(lines, " " .. s.path)
   end
   vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
 end
 
---- Lualine component: returns project name with status indicator
---- Caches status to avoid HTTP calls on every render
+--- Lualine component: returns the current project name, e.g. "pogo[myrepo]"
+--- Caches the result to avoid HTTP calls on every render
 ---@return string
 local status_cache = { value = "", time = 0 }
 local status_cache_ttl = 30 -- seconds
@@ -185,18 +111,7 @@ function M.statusline()
     status_cache = { value = "", time = os.time() }
     return ""
   end
-  local name = M.project_name(root)
-
-  local statuses = client.get_status()
-  local icons = { ready = "✓", indexing = "⟳", stale = "!", unindexed = "?" }
-  local result = string.format("pogo[%s]", name)
-  for _, s in ipairs(statuses) do
-    if s.path == root then
-      local icon = icons[s.indexing_status] or "?"
-      result = string.format("pogo[%s %s]", name, icon)
-      break
-    end
-  end
+  local result = string.format("pogo[%s]", M.project_name(root))
 
   status_cache = { value = result, time = os.time() }
   return result
@@ -234,15 +149,6 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("PogoProjects", function() M.switch_project() end, {
     desc = "Switch to a pogo project",
   })
-  vim.api.nvim_create_user_command("PogoFindFile", function() M.find_file() end, {
-    desc = "Find file in current pogo project",
-  })
-  vim.api.nvim_create_user_command("PogoSearch", function(cmd_opts)
-    M.search(cmd_opts.args ~= "" and cmd_opts.args or nil)
-  end, {
-    desc = "Search current pogo project",
-    nargs = "?",
-  })
   vim.api.nvim_create_user_command("PogoStatus", function() M.status() end, {
     desc = "Show pogo project status",
   })
@@ -253,8 +159,6 @@ function M.setup(opts)
     require("telescope").register_extension({
       exports = {
         projects = require("pogo.telescope").projects,
-        find_file = require("pogo.telescope").find_file,
-        search = require("pogo.telescope").search,
         status = require("pogo.telescope").status,
       },
     })

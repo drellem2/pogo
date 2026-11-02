@@ -1,6 +1,6 @@
 # Emacs Integration
 
-Pogo provides `pogo-mode`, an Emacs minor mode for project navigation and code intelligence. It communicates with the pogo daemon to provide project switching, file finding, code search, and buffer management.
+Pogo provides `pogo-mode`, an Emacs minor mode for project navigation. It communicates with the pogo daemon to provide project switching and buffer management.
 
 ## Installation
 
@@ -61,8 +61,6 @@ All commands are under the configurable prefix (default: `C-c p`):
 
 | Key | Command | Description |
 |-----|---------|-------------|
-| `C-c p f` | `pogo-find-file` | Find file in current project |
-| `C-c p g` | `pogo-search` | Search project code via zoekt |
 | `C-c p p` | `pogo-switch-project` | Switch between known projects |
 | `C-c p b` | `pogo-switch-to-buffer` | Switch to a project buffer |
 | `C-c p D` | `pogo-dired` | Open project root in dired |
@@ -73,8 +71,7 @@ All commands are under the configurable prefix (default: `C-c p`):
 
 ## Features
 
-- **Project navigation**: Switch between projects, find files, and manage buffers within project scope.
-- **Code search**: Search across the current project using zoekt (via the pogo search plugin).
+- **Project navigation**: Switch between projects and manage buffers within project scope.
 - **Auto-discovery**: Projects in `pogo-project-search-path` are discovered automatically when the mode activates.
 - **Mode line**: Displays the current project name in the mode line.
 - **Completion integration**: Works with ido, helm, ivy, or the default Emacs completion system (auto-detected).
@@ -89,7 +86,7 @@ All commands are under the configurable prefix (default: `C-c p`):
 | `pogo-auto-discover` | Auto-discover projects on mode activation | `t` |
 | `pogo-project-search-path` | Directories to scan for projects | `nil` |
 | `pogo-completion-system` | Completion backend: `auto`, `ido`, `helm`, `ivy`, `default` | `auto` |
-| `pogo-switch-project-action` | Function to call after switching projects | `pogo-find-file` |
+| `pogo-switch-project-action` | Function to call after switching projects | `pogo-dired` |
 | `pogo-kill-buffers-filter` | Filter for which buffers to kill | `nil` |
 | `pogo-mode-line-function` | Custom mode-line format function | `pogo-default-mode-line` |
 | `pogo-debug-log` | Enable debug logging to `*pogo-mode-log*` | `t` |

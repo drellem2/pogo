@@ -16,7 +16,6 @@ mkdir -p ~/.pogo
 export POGO_HOME=$(dir_resolve ~/.pogo)
 
 ## These shouldn't require modification
-export POGO_PLUGIN_PATH="$POGO_BINARY_PATH/plugin"
 export PATH="$POGO_BINARY_PATH:$PATH"
 chpwd() {
     pogo visit $(pwd | xargs realpath) > "$POGO_HOME/.pogo-cli-log.txt" 2>&1

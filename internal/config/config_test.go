@@ -820,48 +820,6 @@ func TestUnquote(t *testing.T) {
 	}
 }
 
-func TestDefaultMaxFilesPerTree(t *testing.T) {
-	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	defer os.Unsetenv("XDG_CONFIG_HOME")
-	os.Unsetenv("POGO_MAX_FILES_PER_TREE")
-
-	cfg := Load()
-	if cfg.MaxFilesPerTree != DefaultMaxFilesPerTree {
-		t.Errorf("expected default max files per tree %d, got %d", DefaultMaxFilesPerTree, cfg.MaxFilesPerTree)
-	}
-}
-
-func TestMaxFilesPerTreeEnvOverride(t *testing.T) {
-	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	defer os.Unsetenv("XDG_CONFIG_HOME")
-	os.Setenv("POGO_MAX_FILES_PER_TREE", "1234")
-	defer os.Unsetenv("POGO_MAX_FILES_PER_TREE")
-
-	cfg := Load()
-	if cfg.MaxFilesPerTree != 1234 {
-		t.Errorf("expected max files per tree 1234, got %d", cfg.MaxFilesPerTree)
-	}
-}
-
-func TestMaxFilesPerTreeConfigFile(t *testing.T) {
-	dir := t.TempDir()
-	os.Setenv("XDG_CONFIG_HOME", dir)
-	defer os.Unsetenv("XDG_CONFIG_HOME")
-	os.Unsetenv("POGO_MAX_FILES_PER_TREE")
-
-	pogoDir := filepath.Join(dir, "pogo")
-	os.MkdirAll(pogoDir, 0755)
-	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(`
-[search]
-max_files_per_tree = 9000
-`), 0644)
-
-	cfg := Load()
-	if cfg.MaxFilesPerTree != 9000 {
-		t.Errorf("expected max files per tree 9000 from config file, got %d", cfg.MaxFilesPerTree)
-	}
-}
-
 func TestIndexRootsDefaultEmpty(t *testing.T) {
 	os.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	defer os.Unsetenv("XDG_CONFIG_HOME")
@@ -1812,52 +1770,27 @@ sme = "pm-example"
 	}
 }
 
-// TestSearchEnabledDefaultOff: file-search indexing is off unless configured
-// (mg-cabf4) — with no config file and no env var, SearchEnabled is false.
-func TestSearchEnabledDefaultOff(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("POGO_HOME", t.TempDir())
-	t.Setenv("POGO_SEARCH_ENABLED", "")
-
-	if cfg := Load(); cfg.SearchEnabled {
-		t.Errorf("SearchEnabled = true with no config; search indexing must be off by default")
-	}
-}
-
-func TestSearchEnabledConfigFileAndEnv(t *testing.T) {
+// TestLegacySearchKeysIgnored: `[search] enabled` and `max_files_per_tree`
+// configured the file-search indexer deleted in mg-14647. A config that still
+// carries them must load as before, with the project-index keys in the same
+// section still honored.
+func TestLegacySearchKeysIgnored(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("POGO_HOME", t.TempDir())
-	t.Setenv("POGO_SEARCH_ENABLED", "")
 	pogoDir := filepath.Join(dir, "pogo")
 	os.MkdirAll(pogoDir, 0755)
-	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte("[search]\nenabled = true\n"), 0644)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte(
+		"[search]\nenabled = true\nmax_files_per_tree = 9000\nindex_interval = \"7m\"\nindex_roots = [\"/x/dev\"]\n"), 0644)
 
-	if cfg := Load(); !cfg.SearchEnabled {
-		t.Errorf("[search] enabled = true not honored")
+	cfg := Load()
+	if cfg.Source == "" {
+		t.Fatal("Load() read no config file; the sandbox is wrong")
 	}
-	t.Setenv("POGO_SEARCH_ENABLED", "false")
-	if cfg := Load(); cfg.SearchEnabled {
-		t.Errorf("POGO_SEARCH_ENABLED=false did not override [search] enabled = true")
+	if cfg.IndexInterval != 7*time.Minute {
+		t.Errorf("IndexInterval = %v, want 7m: a legacy key perturbed its neighbour", cfg.IndexInterval)
 	}
-}
-
-// TestSearchEnabledLayering: a $POGO_HOME/config.toml `enabled = false`
-// overrides ~/.config's `true`, and a layer that omits the key keeps it.
-func TestSearchEnabledLayering(t *testing.T) {
-	xdg, home := t.TempDir(), t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", xdg)
-	t.Setenv("POGO_HOME", home)
-	t.Setenv("POGO_SEARCH_ENABLED", "")
-	os.MkdirAll(filepath.Join(xdg, "pogo"), 0755)
-	os.WriteFile(filepath.Join(xdg, "pogo", "config.toml"), []byte("[search]\nenabled = true\n"), 0644)
-
-	os.WriteFile(filepath.Join(home, "config.toml"), []byte("[search]\nmax_files_per_tree = 100\n"), 0644)
-	if cfg := Load(); !cfg.SearchEnabled {
-		t.Errorf("a layer that omits [search] enabled dropped the lower layer's true")
-	}
-	os.WriteFile(filepath.Join(home, "config.toml"), []byte("[search]\nenabled = false\n"), 0644)
-	if cfg := Load(); cfg.SearchEnabled {
-		t.Errorf("$POGO_HOME/config.toml enabled = false did not override ~/.config's true")
+	if len(cfg.IndexRoots) != 1 || cfg.IndexRoots[0] != "/x/dev" {
+		t.Errorf("IndexRoots = %v, want [/x/dev]", cfg.IndexRoots)
 	}
 }

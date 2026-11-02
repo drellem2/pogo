@@ -17,11 +17,8 @@ import (
 	"github.com/hashicorp/go-hclog"
 
 	"github.com/drellem2/pogo/internal/config"
-	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/logging"
-	"github.com/drellem2/pogo/internal/search"
-	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
 type Project struct {
@@ -121,14 +118,6 @@ func migrateLegacyProjectFile(canonical string) {
 	}
 }
 
-// IndexAll processes all loaded projects through plugins in the background.
-// Call this after Init() and after the HTTP server is listening.
-func IndexAll() {
-	for _, p := range projects {
-		addToPlugin(p)
-	}
-}
-
 // SetIndexRoots configures the optional index-roots allowlist. When roots is
 // empty, auto-registration keeps its default zero-config behavior.
 func SetIndexRoots(roots []string) {
@@ -139,7 +128,7 @@ func SetIndexRoots(roots []string) {
 }
 
 // PruneRegistry drops stale registry entries. Call it once on startup, after
-// Init() and before IndexAll(). It removes:
+// Init(). It removes:
 //   - projects whose path no longer exists on disk;
 //   - projects under ephemeral roots (OS temp dirs, polecat worktrees).
 //
@@ -162,7 +151,6 @@ func PruneRegistry() {
 		}
 		if reason != "" {
 			logger.Info("registry GC: pruning project entry", "path", p.Path, "reason", reason)
-			search.SearchService.Evict(p.Path)
 			pruned++
 			continue
 		}
@@ -272,48 +260,18 @@ func Projects() []Project {
 	return projects
 }
 
-func GetProject(id int) *search.IndexedProject {
-	for _, p := range projects {
-		if p.Id == id {
-			resp, err := search.SearchService.GetFiles(p.Path)
-			if err != nil {
-				logger.Error("Error finding files in project", err)
-				return nil
-			}
-			return resp
-		}
-	}
-	return nil
-}
-
+// ProjectStatusResponse is one entry of GET /status: a registered project.
+// Until mg-14647 it also carried the file-search indexer's indexing_status and
+// file_count; the indexer is gone and so are those fields.
 type ProjectStatusResponse struct {
-	Id        int                   `json:"id"`
-	Path      string                `json:"path"`
-	Status    search.IndexingStatus `json:"indexing_status"`
-	FileCount int                   `json:"file_count"`
+	Id   int    `json:"id"`
+	Path string `json:"path"`
 }
 
 func GetProjectStatuses() []ProjectStatusResponse {
 	statuses := make([]ProjectStatusResponse, 0, len(projects))
-	searchOn := driver.SearchEnabled()
 	for _, p := range projects {
-		status := ProjectStatusResponse{
-			Id:   p.Id,
-			Path: p.Path,
-		}
-		if !searchOn {
-			status.Status = search.StatusDisabled
-			statuses = append(statuses, status)
-			continue
-		}
-		s := search.SearchService.GetStatus(p.Path)
-		if s != nil {
-			status.Status = s.Status
-			status.FileCount = s.FileCount
-		} else {
-			status.Status = search.StatusUnindexed
-		}
-		statuses = append(statuses, status)
+		statuses = append(statuses, ProjectStatusResponse{Id: p.Id, Path: p.Path})
 	}
 	return statuses
 }
@@ -327,38 +285,14 @@ func GetProjectByPath(path string) *Project {
 	return nil
 }
 
-func addToPlugin(p Project) {
-	req := pogoPlugin.ProcessProjectReq{PathVar: p.Path}
-	ireq := pogoPlugin.IProcessProjectReq(req)
-	err := driver.GetPluginManager().ProcessProject(&ireq)
-	if err != nil {
-		logger.Error("Error adding project to plugin", err)
-	}
-}
-
 func Add(p *Project) {
 	if len(projects) == 0 {
 		(*p).Id = 1
 	} else {
 		(*p).Id = projects[len(projects)-1].Id + 1
 	}
-	addToPlugin(*p)
 	projects = append(projects, *p)
 	defer SaveProjects()
-}
-
-func AddAll(ps []Project) {
-	var start int
-	if len(projects) == 0 {
-		start = 1
-	} else {
-		start = projects[len(projects)-1].Id + 1
-	}
-	for i, elem := range ps {
-		elem.Id = start + i
-		addToPlugin(elem)
-	}
-	projects = append(projects, ps...)
 }
 
 // If the path is within an existing project, returns the project. Otherwise
@@ -413,10 +347,6 @@ func Visit(req VisitRequest) (*VisitResponse, *ErrorResponse) {
 	}
 
 	if parentProj != nil {
-		// A visit is the activity signal for the reindex backoff scheduler:
-		// it resets the project to base cadence so the next tick re-walks it
-		// even if unchanged passes had backed it off (mg-1236).
-		MarkProjectActivity(parentProj.Path)
 		return &VisitResponse{
 			ParentProject: *parentProj,
 		}, nil
@@ -465,10 +395,10 @@ func searchAndCreate(path string) (*Project, error) {
 			return nil, nil
 		}
 		// Never auto-register a repo in $HOME or a macOS TCC-protected home
-		// subtree (Desktop/Documents/Downloads/…): the periodic indexer would
-		// read it every tick and trigger permission popups (mg-5cd6, regression
-		// of mg-cbc5). Users can still register such repos manually if desired.
-		if search.IsProtectedHomePath(repoPath) {
+		// subtree (Desktop/Documents/Downloads/…): reading it triggers macOS
+		// permission popups (mg-5cd6, regression of mg-cbc5). Users can still
+		// register such repos manually if desired.
+		if IsProtectedHomePath(repoPath) {
 			logger.Info("project: refusing to auto-register repo in macOS-protected home dir (would trigger TCC popups)", "path", repoPath)
 			return nil, nil
 		}
@@ -525,9 +455,6 @@ func Remove(path string) bool {
 		if p.Path == path {
 			projects = append(projects[:i], projects[i+1:]...)
 			SaveProjects()
-			// Drop the search service's in-memory index state too, or the
-			// removed project's paths/hashes stay resident forever (gh #39).
-			search.SearchService.Evict(path)
 			return true
 		}
 	}

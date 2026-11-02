@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/drellem2/pogo/internal/driver"
 )
 
 const aService = "_testdata/a-service/"       // In initial state
@@ -46,7 +44,6 @@ func setUp(t *testing.T) (string, error) {
 		return "", err
 	}
 	t.Logf("a-service at: %s", aServiceAbs)
-	driver.Init()
 	Init()
 	p := Project{
 		Id:   0,
@@ -57,7 +54,6 @@ func setUp(t *testing.T) (string, error) {
 }
 
 func cleanUp() {
-	driver.Kill()
 	RemoveSaveFile()
 }
 

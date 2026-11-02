@@ -29,7 +29,7 @@
 # a line.
 #
 #   Go     — a TestMain calling testsandbox.Main("<pkg>"), plus one test calling
-#            testsandbox.Verify. See internal/driver/testmain_test.go.
+#            testsandbox.Verify. See internal/project/testmain_test.go.
 #   shell  — source "$HERE/pogo-sandbox" and call pogo_sandbox_isolate before
 #            the first command that can reach $HOME. See
 #            scripts/pogo-self-deploy_sigint_test.sh.
@@ -41,7 +41,6 @@
 build_test.sh
 cmd/pogo
 cmd/pogod
-cmd/pose
 internal/ackwatch
 internal/agenttest
 internal/claude
@@ -52,7 +51,6 @@ internal/config
 internal/credexpiry
 internal/cursor
 internal/deafwatch
-internal/diagnostics
 internal/driftwatch
 internal/events
 internal/freshen
@@ -71,7 +69,6 @@ internal/reaper
 internal/reconcile
 internal/refinery
 internal/scheduler
-internal/search
 internal/selfdrift
 internal/server
 internal/service
@@ -79,7 +76,6 @@ internal/stallwatch
 internal/synthfail
 internal/synthwatch
 internal/workitem
-internal/xref
 scripts/assemble-changelog_test.sh
 scripts/changelog-coverage_test.sh
 scripts/mg-scope-guard_test.sh

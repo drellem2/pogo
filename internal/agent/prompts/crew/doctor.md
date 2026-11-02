@@ -241,7 +241,6 @@ journalctl --user -u pogo.service
 
 # Projects
 lsp --json                       # All registered repos
-pose <query>                     # Search across repos
 
 # Mail
 mg mail list doctor              # Check your inbox

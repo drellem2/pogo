@@ -60,7 +60,7 @@ func TestDaemonPlistTemplateSurvivesTheDocumentedUncomment(t *testing.T) {
 	// The uncomment must not cost the keys that were already active. A delimiter
 	// deletion that swallowed a neighbour would still leave POGO_LOG_LEVEL
 	// readable, so checking only that key would miss it.
-	for _, key := range []string{"PATH", "HOME", "POGO_HOME", "POGO_PLUGIN_PATH"} {
+	for _, key := range []string{"PATH", "HOME", "POGO_HOME"} {
 		if env[key] == nil {
 			t.Errorf("after the documented uncomment %s is gone from EnvironmentVariables", key)
 		}

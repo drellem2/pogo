@@ -86,7 +86,7 @@ Swap the prompts and set `[refinery] enabled = false` to drive research, content
 ## Batteries included
 
 - **Refinery** — runs quality gates and merges polecat branches to `main`. Deterministic, not an agent. Disable with `[refinery] enabled = false`.
-- **Discovery + search** — `lsp` lists known repos as you visit them; `pose` searches across them (zoekt-backed). Search indexing is off by default — enable it with `[search] enabled = true` (see [docs/customizing.md](docs/customizing.md#bounding-what-pogo-indexes)).
+- **Discovery** — `lsp` lists known repos as you visit them (`pogo visit`, the shell/editor hooks, or `[search] index_roots`). pogo does not search file contents; use `rg` or `git grep` over the paths `lsp` prints.
 - **Integrations** — shell, editor (Emacs, Neovim, VS Code), and tmux. Installer `--interactive`, or see [docs/](docs/).
 
 ## Configuration
@@ -113,7 +113,6 @@ Swap the prompts and set `[refinery] enabled = false` to drive research, content
   placed directly in `$POGO_HOME` overrides `~/.config/pogo/config.toml`.
   (Legacy: `POGO_HOME=$HOME`, exported by an old shell integration, is
   normalized to `$HOME/.pogo`.)
-- `POGO_PLUGIN_PATH` — plugin discovery. Defaults to `$POGO_HOME/plugin`.
 
 pogod only installs default prompts and auto-starts crew agents when a
 `config.toml` exists — a daemon with no config file never spawns agents. A
@@ -134,7 +133,7 @@ Integrations built by the community. Open a PR to add yours — one bullet per i
 
 ## License
 
-- **Apache 2.0** — CLI tools (`pogo`, `lsp`, `pose`), editor plugins, shell and tmux integrations. See [LICENSE-APACHE](LICENSE-APACHE).
+- **Apache 2.0** — CLI tools (`pogo`, `lsp`), editor plugins, shell and tmux integrations. See [LICENSE-APACHE](LICENSE-APACHE).
 - **BSL 1.1** — daemon (`pogod`), `internal/`, and `pkg/`. Local use is permitted; the only restriction is commercial hosted service. Converts to Apache 2.0 after 4 years. See [LICENSE-BSL](LICENSE-BSL).
 
 Full details in [LICENSING.md](LICENSING.md).

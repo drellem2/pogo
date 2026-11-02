@@ -1,10 +1,14 @@
 # Pogo
 
-Pogo is a code intelligence daemon for multi-repo discovery. It automatically discovers, indexes, and searches local git repositories.
+Pogo is a daemon for multi-repo discovery and agent orchestration. It keeps an
+index of the local git repositories you work in (`projects.json`). It does
+**not** search file contents: the zoekt indexer, `pose`, `pogo refs` and
+`pogo deps` were removed (mg-14647). For code search use `rg` or `git grep`
+over the paths `lsp` prints.
 
 ## CLI Tools
 
-Pogo provides three CLI tools. All support `--json` for machine-readable output.
+Pogo provides two CLI tools. Both support `--json` for machine-readable output.
 
 ### `lsp` - List known projects
 
@@ -17,36 +21,19 @@ lsp --json       # JSON array of project objects
 
 Use this to find local repos, discover what's available, or locate related projects.
 
-### `pose` - Search across projects
-
-Searches code across all indexed repositories using zoekt. **Search indexing
-is off by default** (mg-cabf4): unless `[search] enabled = true` is set in
-pogod's `config.toml`, `pose` exits with "search indexing is disabled; enable
-with …". `lsp` and `pogo visit` do not depend on it.
-
-```bash
-pose QUERY           # Search all indexed repos (results sorted by match count)
-pose QUERY .         # Search current directory's repo
-pose QUERY /path     # Search a specific repo
-pose -l QUERY        # List only file paths (no match details)
-pose --json QUERY    # JSON output with full match details
-```
-
-Query syntax follows [zoekt conventions](https://github.com/sourcegraph/zoekt/blob/main/web/templates.go#L158). Use this when looking for code patterns, function definitions, or usages across multiple repos.
-
 ### `pogo` - Server and project management
 
 ```bash
 pogo visit <path>        # Register a file/directory's repo with pogo
+pogo project list        # List registered projects (also: add, remove)
 pogo server start        # Start the pogo daemon
 pogo server stop         # Stop the pogo daemon
 ```
 
 ## When to Use Pogo
 
-- **Cross-repo dependency questions**: Use `lsp --json` to find local repos, then `pose --json` to search across them.
-- **Finding related code**: `pose` searches all indexed projects at once - faster than grepping repos one by one.
 - **Discovering local repos**: `lsp` shows everything pogo knows about, useful when you're unsure what's cloned locally.
+- **Cross-repo questions**: use `lsp --json` to find the local repos, then search them with `rg` / `git grep`, e.g. `lsp | xargs rg -l PATTERN`.
 
 ## Integration Status
 
@@ -78,7 +65,7 @@ Go project. Build and test:
 that would overwrite the machine's live `pogod` with a branch build. Pass
 `--install` if you want the binaries on `PATH`.
 
-Binaries are in `cmd/`: `cmd/pogo`, `cmd/lsp`, `cmd/pose`, `cmd/pogod` (daemon).
+Binaries are in `cmd/`: `cmd/pogo`, `cmd/lsp`, `cmd/pogod` (daemon).
 
 ### Before committing
 

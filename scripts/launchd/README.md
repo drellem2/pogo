@@ -10,7 +10,7 @@ The easiest way to install the service is:
 pogo service install
 ```
 
-This auto-detects your `pogod` binary path, builds a plist matching the spec below (ProcessType=Interactive, KeepAlive=true, log to `~/Library/Logs/pogo/pogod.log`, PATH/HOME/POGO_HOME/POGO_PLUGIN_PATH wired up), and `launchctl load`s it. The installer is idempotent — rerun it after upgrading pogod or changing the plist template, and it will replace the existing service in place.
+This auto-detects your `pogod` binary path, builds a plist matching the spec below (ProcessType=Interactive, KeepAlive=true, log to `~/Library/Logs/pogo/pogod.log`, PATH/HOME/POGO_HOME wired up), and `launchctl load`s it. The installer is idempotent — rerun it after upgrading pogod or changing the plist template, and it will replace the existing service in place.
 
 If a manually-started `pogod` is already running, the installer stops it first so the launchctl load doesn't collide on the lockfile.
 
@@ -92,8 +92,7 @@ The plist must include all of these keys for pogod to behave correctly under lau
 | `EnvironmentVariables.PATH` | Includes `~/.local/bin`, `~/go/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, system dirs | pogod spawns claude / git / mg as children; launchd's default PATH does not include these. |
 | `EnvironmentVariables.HOME` | User's home dir | launchd sometimes does not set this. |
 | `EnvironmentVariables.POGO_HOME` | `~/.pogo` | Where pogo state, agent metadata, and refinery data live. |
-| `EnvironmentVariables.POGO_PLUGIN_PATH` | `~/.pogo/plugin` | Where pogod looks for plugins. |
-| `EnvironmentVariables.POGO_LOG_LEVEL` | unset (commented out in this template) | Log level for pogod's indexing, diagnostics and project loggers — `trace`, `debug`, `info` (default), `warn`, `error`, `off`. Must be declared in a plist: launchd does not pass the invoking shell's environment to a job, so `POGO_LOG_LEVEL=debug pogo server start` cannot reach a launchd-managed daemon. Unload and load the job after changing it; launchd hands a job its environment at spawn. **`pogo service install` does not carry this key** — it renders its own template and overwrites the installed plist, so on that path add the key to `~/Library/LaunchAgents/com.pogo.daemon.plist` directly and re-add it after every re-install. Uncommenting it in *this* file only affects the manual `sed` install below. Does not cover `internal/driver`'s plugin loggers, which are built at `debug` independently. |
+| `EnvironmentVariables.POGO_LOG_LEVEL` | unset (commented out in this template) | Log level for pogod's project logger — `trace`, `debug`, `info` (default), `warn`, `error`, `off`. Must be declared in a plist: launchd does not pass the invoking shell's environment to a job, so `POGO_LOG_LEVEL=debug pogo server start` cannot reach a launchd-managed daemon. Unload and load the job after changing it; launchd hands a job its environment at spawn. **`pogo service install` does not carry this key** — it renders its own template and overwrites the installed plist, so on that path add the key to `~/Library/LaunchAgents/com.pogo.daemon.plist` directly and re-add it after every re-install. Uncommenting it in *this* file only affects the manual `sed` install below. |
 
 ## Managing the Service
 

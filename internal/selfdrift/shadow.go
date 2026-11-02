@@ -14,10 +14,10 @@ import (
 // different questions. DeployedCmds is "what does a deploy own" — the axes
 // compare those against main, and adding a name there changes the build/restart
 // verdict. This list is "what else of ours is on this box", which is a scan
-// with no verdict attached, and `lsp` and `pose` are exactly the copies the two
-// answers differ on: they are installed, they are not deploy-compared, and
-// nothing was looking at them at all.
-var InstallSet = []string{"pogo", "pogod", "lsp", "pose"}
+// with no verdict attached, and `lsp` is exactly the copy the two answers
+// differ on: it is installed, it is not deploy-compared, and nothing was
+// looking at it at all. (`pose` was the other until mg-14647 deleted it.)
+var InstallSet = []string{"pogo", "pogod", "lsp"}
 
 // Shadow is one copy of a pogo binary that is on $PATH and is NOT the copy that
 // would run.

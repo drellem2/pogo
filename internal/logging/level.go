@@ -14,10 +14,6 @@
 // shell's environment, so a launchd-managed pogod only sees this if it is
 // declared in the job's plist. scripts/launchd/com.pogo.daemon.plist ships a
 // commented-out key for that, and docs/customizing.md says so.
-//
-// This does not reach every logger in the daemon. internal/driver builds its
-// plugin loggers at hclog.Debug independently, so POGO_LOG_LEVEL does not
-// quiet them.
 package logging
 
 import (

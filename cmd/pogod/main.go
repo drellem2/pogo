@@ -13,11 +13,9 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,7 +35,6 @@ import (
 	"github.com/drellem2/pogo/internal/credexpiry"
 	"github.com/drellem2/pogo/internal/deafwatch"
 	"github.com/drellem2/pogo/internal/driftwatch"
-	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/firstturn"
 	"github.com/drellem2/pogo/internal/ghwatch"
@@ -59,7 +56,6 @@ import (
 	"github.com/drellem2/pogo/internal/refusalwatch"
 	"github.com/drellem2/pogo/internal/reviewdecl"
 	"github.com/drellem2/pogo/internal/scheduler"
-	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/server"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/staleness"
@@ -70,8 +66,6 @@ import (
 	"github.com/drellem2/pogo/internal/version"
 	"github.com/drellem2/pogo/internal/wedgewatch"
 	"github.com/drellem2/pogo/internal/workitem"
-
-	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
 )
 
 var agentRegistry *agent.Registry
@@ -800,122 +794,6 @@ func file(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// searchDisabled answers a search request with 503 and the shared
-// how-to-enable message when search indexing is off, and reports whether it
-// did. 503 rather than 404: the endpoint exists, the service is switched off.
-func searchDisabled(w http.ResponseWriter) bool {
-	if driver.SearchEnabled() {
-		return false
-	}
-	http.Error(w, config.SearchDisabledMessage, http.StatusServiceUnavailable)
-	return true
-}
-
-func plugin(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Visited /plugin")
-	switch r.Method {
-	case "GET":
-		encodedPath := r.URL.Query().Get("path")
-		path, err := url.QueryUnescape(encodedPath)
-		if err != nil {
-			fmt.Printf("Error urldecoding path variable: %v\n", err)
-			return
-		}
-		if driver.IsSearchPlugin(path) && searchDisabled(w) {
-			return
-		}
-		plugin := driver.GetPlugin(path)
-		if plugin == nil {
-			http.Error(w, "", http.StatusNotFound)
-			return
-		}
-		resp := (*plugin).Info()
-		json.NewEncoder(w).Encode(resp)
-		return
-	case "POST":
-		var reqObj pogoPlugin.DataObject
-		decoder := json.NewDecoder(r.Body)
-		err := decoder.Decode(&reqObj)
-		if err != nil {
-			fmt.Printf("Request could not be parsed.")
-			http.Error(w, "", http.StatusBadRequest)
-			return
-		}
-
-		path := reqObj.Plugin
-		if driver.IsSearchPlugin(path) && searchDisabled(w) {
-			return
-		}
-		plugin := driver.GetPlugin(path)
-		if plugin == nil {
-			http.Error(w, "", http.StatusNotFound)
-			return
-		}
-		respString := (*plugin).Execute(reqObj.Value)
-		var respObj = pogoPlugin.DataObject{Value: respString}
-		json.NewEncoder(w).Encode(respObj)
-		return
-	default:
-		http.Error(w, "", http.StatusMethodNotAllowed)
-	}
-}
-
-func plugins(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Visited /plugins")
-	switch r.Method {
-	case "GET":
-		json.NewEncoder(w).Encode(driver.GetPluginPaths())
-	default:
-		http.Error(w, "", http.StatusMethodNotAllowed)
-	}
-}
-
-func projectById(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Visited /projects/{projectId}")
-	switch r.Method {
-	case "GET":
-		// A project's file list is served from the search index.
-		if searchDisabled(w) {
-			return
-		}
-		projectIdStr := r.PathValue("projectId")
-		// If projectIdStr blank we look at the queryParameter 'path'
-		if projectIdStr == "file" {
-			projectPathStr := r.URL.Query().Get("path")
-			// url decode projectIdStr
-			path, err := url.QueryUnescape(projectPathStr)
-			log.Printf("Path: %s\n", path)
-			if err != nil {
-				log.Printf("Error urldecoding projectIdStr: %v\n", err)
-				http.Error(w, "", http.StatusBadRequest)
-				return
-			}
-			proj := project.GetProjectByPath(path)
-			if proj == nil {
-				http.Error(w, "", http.StatusNotFound)
-				return
-			}
-			resp := project.GetProject(proj.Id)
-			json.NewEncoder(w).Encode(resp)
-			return
-		}
-		projectId, err := strconv.Atoi(projectIdStr)
-		if err != nil {
-			log.Printf("Error converting projectId to int: %v\n", err)
-			http.Error(w, "", http.StatusBadRequest)
-			return
-		}
-		resp := project.GetProject(projectId)
-		if resp == nil {
-			http.Error(w, "", http.StatusNotFound)
-			return
-		}
-		json.NewEncoder(w).Encode(resp)
-	default:
-		http.Error(w, "", http.StatusMethodNotAllowed)
-	}
-}
-
 func status(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /status")
 	switch r.Method {
@@ -929,10 +807,7 @@ func status(w http.ResponseWriter, r *http.Request) {
 func registerHandlers() {
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
-	http.HandleFunc("/projects/{projectId}", projectById)
 	http.HandleFunc("/projects", allProjects)
-	http.HandleFunc("/plugin", plugin)
-	http.HandleFunc("/plugins", plugins)
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/health/full", healthFull)
 	http.HandleFunc("/health/progress", healthProgress)
@@ -1646,15 +1521,7 @@ Flags:
 		fmt.Printf("Warning: could not apply [agents] extra_path: %v\n", err)
 	}
 
-	// File-search indexing is off unless [search] enabled = true (mg-cabf4).
-	// Must precede driver.Init(), which is what leaves the search plugin out.
-	driver.SetSearchEnabled(cfg.SearchEnabled)
-	if !cfg.SearchEnabled {
-		log.Printf("pogod: search indexing disabled ([search] enabled = false); project index unaffected")
-	}
-
-	// Apply index-scope limits from config (mg-d205).
-	search.SearchService.SetMaxFilesPerTree(cfg.MaxFilesPerTree)
+	// Apply the index_roots allowlist from config (mg-d205).
 	project.SetIndexRoots(cfg.IndexRoots)
 
 	// Configure agent command templates and the harness providers.
@@ -3719,10 +3586,6 @@ Flags:
 		log.Printf("pogod: platform sleep shim unavailable: %v (heartbeat-only wake detection still active)", err)
 	}
 
-	// Start plugins
-	driver.Init()
-
-	defer driver.Kill()
 	defer project.SaveProjects()
 
 	// Load project list from disk (fast, no indexing)
@@ -4016,22 +3879,11 @@ Flags:
 	}
 	fmt.Printf("pogod listening on %s\n", addr)
 
-	// Now start background work: indexing and repo scanning.
-	// The server is already accepting connections above.
-	go func() {
-		project.IndexAll()
-		log.Printf("pogod: background project indexing complete")
-	}()
-
-	// Start the timer-driven incremental indexer: every index_interval it
-	// scans index_roots for new repos and re-walks the registered projects
-	// that are due. Per-project exponential backoff skips projects whose
-	// content hasn't changed (up to 16× the base interval); a detected change
-	// or a `pogo visit` resets a project to base cadence (mg-1236). The walk
-	// itself is incremental — unchanged files cost only an Lstat. This
-	// replaces the event-based filesystem watcher. See
-	// docs/design/indexing-strategy.md and mg-5b0d.
-	project.StartPeriodicIndexer(hbCtx, cfg.IndexInterval)
+	// Start the timer-driven index_roots scan: every index_interval it
+	// registers git repos newly created under a configured index_root. The
+	// file-search re-indexer that used to share this loop was deleted
+	// (mg-14647); only discovery, part of the project index, remains.
+	project.StartRepoDiscovery(hbCtx, cfg.IndexInterval)
 
 	// Prompt refresh and crew auto-start are gated on a config file existing.
 	// A pogod with no config file is an unconfigured or deliberately isolated

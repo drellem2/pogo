@@ -114,7 +114,7 @@ func TestHostShadowsSymlinkIsBenign(t *testing.T) {
 func TestHostShadowsSeparateFileIsAHazard(t *testing.T) {
 	gobin, localbin := t.TempDir(), t.TempDir()
 	for _, dir := range []string{gobin, localbin} {
-		if err := os.WriteFile(filepath.Join(dir, "pose"), []byte("#!/bin/sh\n"), 0755); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "lsp"), []byte("#!/bin/sh\n"), 0755); err != nil {
 			t.Fatalf("write: %v", err)
 		}
 	}
@@ -124,8 +124,8 @@ func TestHostShadowsSeparateFileIsAHazard(t *testing.T) {
 	if len(shadows) != 1 || shadows[0].Benign {
 		t.Fatalf("HostShadows() = %+v, want one non-benign shadow", shadows)
 	}
-	if shadows[0].Name != "pose" {
-		t.Errorf("name = %q, want pose — lsp and pose are exactly the names DeployedCmds does not cover", shadows[0].Name)
+	if shadows[0].Name != "lsp" {
+		t.Errorf("name = %q, want lsp — lsp is exactly the name DeployedCmds does not cover", shadows[0].Name)
 	}
 }
 
@@ -176,7 +176,7 @@ func TestNoteShadowsCarriesIntoActionWithoutMovingStatus(t *testing.T) {
 }
 
 // TestInstallSetMatchesInstallScript is the coupling that produced mg-dabf.
-// install.sh places four binaries; DeployedCmds covers two; nothing compared
+// install.sh places three binaries; DeployedCmds covers two; nothing compared
 // the lists, so lsp and pose sat frozen in /usr/local/bin for five and a half
 // months with no instrument on the box looking at them. A name added to
 // install.sh must arrive here, and this test is the only thing that says so.

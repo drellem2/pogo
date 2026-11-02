@@ -5,10 +5,8 @@ A Neovim plugin (Lua) that integrates with the pogo daemon via its HTTP API, mir
 ## Features
 
 - **Project switching** via Telescope or fzf-lua
-- **File finding** within the current project
-- **Code search** across all indexed projects using zoekt
 - **Auto-registration** of projects on `DirChanged`
-- **Statusline** component showing current project and indexing status
+- **Statusline** component showing the current project (`pogo[<name>]`)
 
 ## Installation
 
@@ -43,7 +41,7 @@ use {
 ## Requirements
 
 - Neovim 0.8+
-- [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) (for project picker and search UI)
+- [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) (for the project picker)
 - pogo server running (`pogo server start`)
 
 ## Configuration

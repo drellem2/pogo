@@ -17,7 +17,6 @@ mkdir -p ~/.pogo
 export POGO_HOME=$(dir_resolve ~/.pogo)
 
 ## These shouldn't require modification
-export POGO_PLUGIN_PATH="$POGO_BINARY_PATH/plugin"
 export PATH="$POGO_BINARY_PATH:$PATH"
 
 ## Track directory changes via PROMPT_COMMAND

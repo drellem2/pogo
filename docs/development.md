@@ -1,6 +1,6 @@
 # Development
 
-Pogo is a Go project. Binaries live in `cmd/`: `cmd/pogo`, `cmd/lsp`, `cmd/pose`, `cmd/pogod` (daemon).
+Pogo is a Go project. Binaries live in `cmd/`: `cmd/pogo`, `cmd/lsp`, `cmd/pogod` (daemon).
 
 ## Build from source
 

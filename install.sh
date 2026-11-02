@@ -8,7 +8,7 @@ set -e
 
 REPO="drellem2/pogo"
 INSTALL_DIR="${POGO_INSTALL_DIR:-/usr/local/bin}"
-BINARIES="pogo pogod lsp pose"
+BINARIES="pogo pogod lsp"
 INTERACTIVE=false
 WITH_EDITORS=false
 SKIP_POGO_INSTALL=false

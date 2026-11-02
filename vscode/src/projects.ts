@@ -1,24 +1,16 @@
 import * as vscode from "vscode";
 import * as client from "./client";
 
-const STATUS_ICONS: Record<string, string> = {
-  ready: "$(check)",
-  indexing: "$(sync~spin)",
-  stale: "$(warning)",
-  unindexed: "$(circle-outline)",
-};
-
 export class ProjectItem extends vscode.TreeItem {
   constructor(
-    public readonly project: client.ProjectStatus,
+    public readonly project: client.Project,
     collapsibleState: vscode.TreeItemCollapsibleState
   ) {
     const name = project.path.replace(/\/$/, "").split("/").pop() || project.path;
     super(name, collapsibleState);
 
-    const icon = STATUS_ICONS[project.indexing_status] || "$(question)";
-    this.description = `${icon} ${project.file_count} files`;
-    this.tooltip = `${project.path}\nStatus: ${project.indexing_status}\nFiles: ${project.file_count}`;
+    this.description = project.path;
+    this.tooltip = project.path;
     this.contextValue = "project";
 
     this.command = {
@@ -42,9 +34,9 @@ export class ProjectsProvider implements vscode.TreeDataProvider<ProjectItem> {
   }
 
   async getChildren(): Promise<ProjectItem[]> {
-    const statuses = await client.getStatus();
-    return statuses.map(
-      (s) => new ProjectItem(s, vscode.TreeItemCollapsibleState.None)
+    const projects = await client.getProjects();
+    return projects.map(
+      (p) => new ProjectItem(p, vscode.TreeItemCollapsibleState.None)
     );
   }
 }

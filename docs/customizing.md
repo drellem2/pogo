@@ -512,70 +512,38 @@ the config. Make sure the file is at `~/.config/pogo/config.toml` (or
 `$XDG_CONFIG_HOME/pogo/config.toml`) and you restarted the daemon, not just
 the agents.
 
-## Bounding what pogo indexes
+## Bounding what pogo registers
 
 pogo auto-discovers git repos you visit and keeps them in its project index
-(`lsp`, `pogo visit`, `GET /projects`). **File-search indexing** — the zoekt
-index behind `pose`, `pogo refs`, `pogo deps` and the editor search commands —
-is **off by default** (mg-cabf4): it re-walks every registered repo on a timer
-and writes an index into each one's `.pogo/search`, and nobody was using it.
-Turn it on with `[search] enabled = true` (or `POGO_SEARCH_ENABLED=true`) and
-restart pogod. With it off, the search commands fail with a message naming
-that key, and `/status` reports each project's `indexing_status` as
-`disabled`. The rest of the `[search]` section bounds indexing cost when it is
-on, so a stray giant directory can't blow it up. `index_roots` discovery runs
-either way.
+(`lsp`, `pogo visit`, `GET /projects`). That index is all pogo keeps: the
+file-content search indexer (`pose`, `pogo refs`, `pogo deps`, the editor
+search commands) was deleted in mg-14647. For code search, run `rg` or
+`git grep` over the paths `lsp` prints. The `[search]` section now only
+controls which repos get registered automatically.
 
 ```toml
 [search]
-# File-search indexing (pose, pogo refs, pogo deps, editor search). Default
-# false. The project index (lsp, pogo visit) does not depend on it.
-enabled = true
-
-# Per-tree file-count ceiling. A repo with more files than this is registered
-# but marked "skipped_too_large": it is not deep-indexed. Default 25000. This
-# is the backstop that catches generated-data directories no exclude list
-# anticipated.
-max_files_per_tree = 25000
-
-# Base cadence for the incremental re-indexer. Each project backs off
-# exponentially while its content is unchanged — up to 16x this interval
-# (32m at the default) — and snaps back to base cadence when a re-index
-# detects changes or the project is visited (`pogo visit`, which the shell
-# and editor integrations fire on every cd). An edit in a repo you're
-# working in surfaces within one interval; an idle repo is re-walked at
-# most every 16 intervals. Default 2m. See docs/design/indexing-strategy.md.
-index_interval = "2m"
-
 # Optional strict mode. When set, ONLY git repos under one of these paths are
-# eligible for auto-registration, and the indexer scans them on each tick to
-# pick up new repos. Unset (the default) keeps the zero-config "visit
-# anything" behavior.
+# eligible for auto-registration, and pogod scans each root's direct children
+# on every tick to register new repos. Unset (the default) keeps the
+# zero-config "visit anything" behavior, and the scan is a no-op.
 index_roots = ["/Users/you/dev", "/Users/you/work"]
+
+# How often pogod scans index_roots for newly created git repos. One directory
+# read per root per tick, so this only bounds how long a new repo takes to
+# appear in `lsp`. Default 2m.
+index_interval = "2m"
 ```
 
-Two more scope controls need no config:
-
-- **Default-excluded directories.** pogo never deep-walks `node_modules`,
-  `vendor`, `target`, `build`, `dist`, `.next`, `.git`, `.pogo`, `IndexedDB`,
-  `*.app` bundles, and similar generated/dependency trees.
-- **`.pogoignore`.** Drop a `.pogoignore` file (gitignore-style globs) at a
-  repo root to carve generated-data subtrees out of pogo's index without
-  touching the repo's `.gitignore`.
-- **Nodes pogo cannot read.** Anything that is not a regular file — a socket,
-  a FIFO, a device node, a dangling symlink — is skipped, and so is a regular
-  file whose read fails, the common case being a mode-`0000` file. An
-  unreadable file is announced once, at `warn`, and left out of the index
-  rather than retried noisily forever; nothing is cached about the failure, so
-  the file is picked up on the next pass once it can be read again.
-
-An environment override exists for the file-count ceiling
-(`POGO_MAX_FILES_PER_TREE`) and takes precedence over the config file.
+`enabled` and `max_files_per_tree` under `[search]`, and the
+`POGO_SEARCH_ENABLED` / `POGO_MAX_FILES_PER_TREE` environment variables, are
+legacy settings from the deleted indexer. An old config that still sets them
+loads fine; they are ignored.
 
 ## Turning the log volume up or down
 
-`POGO_LOG_LEVEL` sets the threshold for pogod's indexing, diagnostics and
-project loggers. Values are hclog's: `trace`, `debug`, `info` (the default),
+`POGO_LOG_LEVEL` sets the threshold for pogod's project logger (project
+registration and `index_roots` discovery). Values are hclog's: `trace`, `debug`, `info` (the default),
 `warn`, `error`, `off` — case- and whitespace-insensitive. A value pogo cannot
 parse falls back to `info` rather than failing the daemon, so a typo costs you
 the level you asked for and nothing else.
@@ -586,10 +554,6 @@ environment variable rather than a `config.toml` key: a config key that can be
 edited while the daemon runs implies the edit will be picked up, and honouring
 that needs reload machinery this does not have. A config key with proper reload
 semantics is tracked separately, as `mg-44d6`.
-
-Not every logger in the daemon is covered. `internal/driver`'s plugin loggers
-are built at `debug` independently of this setting, so `POGO_LOG_LEVEL=warn`
-quiets the indexer but not plugin startup chatter.
 
 ### Setting it when you start pogod yourself
 
@@ -627,8 +591,8 @@ Editing the plist without reloading changes nothing: launchd hands a job its
 environment at spawn.
 
 > **`pogo service install` will drop this key.** The installer renders the plist
-> from its own built-in template, which carries `PATH`, `HOME`, `POGO_HOME` and
-> `POGO_PLUGIN_PATH` and nothing else, and it overwrites the installed plist
+> from its own built-in template, which carries `PATH`, `HOME` and `POGO_HOME`
+> and nothing else, and it overwrites the installed plist
 > whenever the render differs from what is on disk — a hand-added
 > `POGO_LOG_LEVEL` is exactly such a difference. Since the launchd README tells
 > you to re-run the installer after upgrading pogod, this is routine rather than
@@ -641,22 +605,13 @@ rather than `pogo service install`), the repo template ships a commented-out
 `POGO_LOG_LEVEL` key, so uncommenting it before the copy sets the level on the
 plist you install.
 
-**What you get at each level.** By default pogod narrates only the indexing
-passes that did something: a re-index that rebuilt a project's index reports
-`Indexed N files for <root>` at info, while a pass that found nothing changed
-says nothing at all. Set `debug` to see every tick — `Reindexing`,
-`Indexed N files for`, and `No content changes detected` for each project on
-each pass. That per-tick narration used to be unconditional and was 98.8% of
-pogod's log output (gh #111).
-
-Failures to read a project's git tree hash — which mean the indexer cannot use
-its fast path for that repo and must hash every file — still warn, but once per
-project per pogod run rather than once per tick.
-
-A file the indexer cannot read warns the same way — `Skipping unreadable file`,
-with the path and the read error as fields — once when it becomes unreadable,
-not once per pass. It warns again if it goes unreadable a second time after
-being repaired, so a recurrence is not swallowed by the first announcement.
+**What you get at each level.** At `info` the project logger reports
+registrations and refusals (`repo discovery: discovered new repo`, a repo
+outside `index_roots` or in a macOS-protected home dir not being
+auto-registered, registry GC pruning stale entries); a root it cannot read
+warns. Before mg-14647 this logger also covered the file-search indexer, whose
+per-tick narration was 98.8% of pogod's log output (gh #111); that indexer is
+gone.
 
 ## Polecat git garbage collection
 
