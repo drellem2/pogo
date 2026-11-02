@@ -46,22 +46,29 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/ghtoken"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // Status is the verdict for one checkout. Exactly one is returned per call.
-type Status string
+//
+// It and Result are aliases of vcs.RefreshStatus and vcs.RefreshResult since
+// enth-vcs slice 2 (mg-cc7ae), when the refresh became the git backend's
+// vcs.Workspaces.Refresh: the verdict vocabulary is the backend-neutral half,
+// and the git that produces it stayed here. The types, constants, JSON shape
+// and renderings are unchanged; vcs holds their docs.
+type Status = vcs.RefreshStatus
 
 const (
 	// StatusUpdated: the checkout was behind and was fast-forwarded.
-	StatusUpdated Status = "updated"
+	StatusUpdated Status = vcs.RefreshUpdated
 	// StatusAlreadyCurrent: HEAD already contained the upstream tip.
-	StatusAlreadyCurrent Status = "already_current"
+	StatusAlreadyCurrent Status = vcs.RefreshAlreadyCurrent
 	// StatusDeclinedDirty: behind, but a tracked file is modified or staged.
 	// Never clobbered — see the package doc's hard constraint.
-	StatusDeclinedDirty Status = "declined_dirty"
+	StatusDeclinedDirty Status = vcs.RefreshDeclinedDirty
 	// StatusDeclinedDetached: HEAD is detached, so there is no branch to
 	// advance and no upstream to advance it to.
-	StatusDeclinedDetached Status = "declined_detached"
+	StatusDeclinedDetached Status = vcs.RefreshDeclinedDetached
 	// StatusDeclinedNoUpstream: the branch tracks nothing AND no remote
 	// counterpart could be identified, so "behind" has no referent.
 	//
@@ -74,97 +81,21 @@ const (
 	// Deliberate parking is now identified by what it actually looks like —
 	// a branch with no counterpart on the remote, or one that has diverged —
 	// rather than by a config key nobody set either way.
-	StatusDeclinedNoUpstream Status = "declined_no_upstream"
+	StatusDeclinedNoUpstream Status = vcs.RefreshDeclinedNoUpstream
 	// StatusDeclinedDiverged: behind AND ahead — a fast-forward is not
 	// possible and a merge or rebase is a human's decision.
-	StatusDeclinedDiverged Status = "declined_diverged"
+	StatusDeclinedDiverged Status = vcs.RefreshDeclinedDiverged
 	// StatusSkipped: not a working checkout (missing dir, bare repo, not a
 	// repo at all). Not an anomaly: most agents have no repo/ at all.
-	StatusSkipped Status = "skipped"
+	StatusSkipped Status = vcs.RefreshSkipped
 	// StatusFailed: git itself failed, so freshness is UNKNOWN. Deliberately
 	// distinct from AlreadyCurrent — a check that cannot run must not read as
 	// a clean bill of health.
-	StatusFailed Status = "failed"
+	StatusFailed Status = vcs.RefreshFailed
 )
 
-// Result is the outcome of one Checkout call.
-type Result struct {
-	Path   string `json:"path"`
-	Status Status `json:"status"`
-	Branch string `json:"branch,omitempty"`
-	// Upstream is the ref freshness was measured against, e.g. "origin/main".
-	Upstream string `json:"upstream,omitempty"`
-	// UpstreamInferred reports that Upstream was derived from the branch's
-	// name and the remote's refs rather than read from tracking config.
-	//
-	// This is never silent. An inferred referent is a judgement pogo made on
-	// the operator's behalf, and every rendering of this Result says so, so
-	// that "brought current" can never be mistaken for evidence that someone
-	// had configured what current meant.
-	UpstreamInferred bool `json:"upstream_inferred,omitempty"`
-	// Behind is how many commits upstream had that HEAD did not, measured
-	// against the just-fetched tip. -1 means "not determined" (detached, no
-	// upstream, or the fetch failed) — distinct from 0, which is a positive
-	// finding that the checkout is current.
-	Behind int `json:"behind"`
-	// Ahead is commits HEAD had that upstream did not. -1 when not determined.
-	Ahead int `json:"ahead"`
-	// From and To are short OIDs; To is set only on StatusUpdated.
-	From string `json:"from,omitempty"`
-	To   string `json:"to,omitempty"`
-	// Detail carries the git error or the reason text for a decline.
-	Detail string `json:"detail,omitempty"`
-}
-
-// Stale reports whether this checkout is known to be behind and was NOT
-// brought current — i.e. the exact condition the caller must be loud about.
-// A StatusFailed result is not Stale (freshness is unknown, not known-bad);
-// callers surface that separately rather than crying wolf.
-func (r Result) Stale() bool {
-	return r.Behind > 0 && r.Status != StatusUpdated && r.Status != StatusAlreadyCurrent
-}
-
-// Declined reports whether freshen could have acted but deliberately did not.
-func (r Result) Declined() bool {
-	return strings.HasPrefix(string(r.Status), "declined_")
-}
-
-// String renders a one-line log-ready summary.
-func (r Result) String() string {
-	switch r.Status {
-	case StatusUpdated:
-		return fmt.Sprintf("%s: fast-forwarded %s %d commit(s) to %s%s (%s..%s)",
-			r.Path, r.Branch, r.Behind, r.Upstream, inferredNote(r), r.From, r.To)
-	case StatusAlreadyCurrent:
-		return fmt.Sprintf("%s: %s already current with %s%s",
-			r.Path, r.Branch, r.Upstream, inferredNote(r))
-	case StatusSkipped:
-		return fmt.Sprintf("%s: skipped (%s)", r.Path, r.Detail)
-	case StatusFailed:
-		return fmt.Sprintf("%s: FRESHNESS UNKNOWN — %s", r.Path, r.Detail)
-	default:
-		return fmt.Sprintf("%s: DECLINED (%s) — %s behind %s: %s",
-			r.Path, r.Status, behindText(r.Behind), r.Upstream, r.Detail)
-	}
-}
-
-// inferredNote marks a verdict measured against a referent pogo chose rather
-// than one the operator configured. It is appended to every rendering that
-// names an upstream, so an inferred "current" always carries the caveat that
-// nobody said what current meant.
-func inferredNote(r Result) string {
-	if r.UpstreamInferred {
-		return " (upstream inferred from branch name; none configured)"
-	}
-	return ""
-}
-
-func behindText(n int) string {
-	if n < 0 {
-		return "an undetermined number of commits"
-	}
-	return fmt.Sprintf("%d commit(s)", n)
-}
+// Result is the outcome of one Checkout call. See vcs.RefreshResult.
+type Result = vcs.RefreshResult
 
 // Checkout fetches the upstream of repoPath's current branch and
 // fast-forwards onto it when — and only when — that is unambiguously safe.

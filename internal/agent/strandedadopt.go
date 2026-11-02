@@ -3,11 +3,11 @@ package agent
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/strandedwork"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // The ADOPT exit from the stranded-work gate (mg-ba32).
@@ -154,7 +154,7 @@ func verifyAdoption(repo, ref, branch string) error {
 	if repo == "" || ref == "" || branch == "" {
 		return fmt.Errorf("cannot verify the adoption: repo=%q ref=%q branch=%q", repo, ref, branch)
 	}
-	err := exec.Command("git", "-C", repo, "merge-base", "--is-ancestor", ref, branch).Run()
+	err := workspaces.Contains(context.Background(), vcs.Repo{Path: repo}, ref, branch)
 	if err != nil {
 		return fmt.Errorf("branch %s was created but does NOT contain %s: the worktree did not adopt "+
 			"the stranded work (%v). Refusing the spawn rather than handing a worker a tree that only "+

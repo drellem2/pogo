@@ -2,7 +2,7 @@ package agent
 
 import (
 	"bytes"
-	"errors"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -157,91 +157,12 @@ const personaExcludeComment = "# pogo injected agent persona (added automaticall
 // paths (.cursor/rules/pogo-persona.mdc, AGENTS.override.md) are pogo's own and
 // never tracked, so excluding them repo-wide is invisible and harmless. Returns
 // an error the caller may log; it never fails the spawn.
+//
+// The exclude itself is the workspaces backend's (enth-vcs slice 2); see
+// gitvcs.Workspaces.Exclude, which also refuses to edit an enclosing repo's
+// exclude when dir is not a repo root.
 func ensureWorktreeGitExcluded(dir, relPath string) error {
-	if dir == "" || relPath == "" {
-		return nil
-	}
-	pattern := "/" + filepath.ToSlash(filepath.Clean(relPath))
-
-	excludePath, err := worktreeGitExcludePath(dir)
-	if err != nil {
-		return err
-	}
-
-	data, err := os.ReadFile(excludePath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) == pattern {
-			return nil // already excluded
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(excludePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	var b strings.Builder
-	if len(data) > 0 && !strings.HasSuffix(string(data), "\n") {
-		b.WriteString("\n")
-	}
-	// Group all pogo persona patterns under a single comment: only emit the
-	// comment the first time we touch this exclude file for a persona path.
-	if !strings.Contains(string(data), personaExcludeComment) {
-		b.WriteString(personaExcludeComment + "\n")
-	}
-	b.WriteString(pattern + "\n")
-	_, err = f.WriteString(b.String())
-	return err
-}
-
-// worktreeGitExcludePath resolves the info/exclude file for the worktree rooted
-// at dir. `git rev-parse --git-path` handles every layout — plain repo, linked
-// worktree (whose info/exclude lives in the shared common dir), submodule — so
-// we don't hand-parse gitdir indirection. The toplevel is cross-checked against
-// dir because git skips an invalid .git entry and resolves to an enclosing
-// repo, whose exclude file we must not touch.
-func worktreeGitExcludePath(dir string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel", "--git-path", "info/exclude")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("resolve git info/exclude: %w", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 {
-		return "", fmt.Errorf("unexpected git rev-parse output: %q", string(out))
-	}
-	toplevel, exclude := strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1])
-	if toplevel == "" || exclude == "" {
-		return "", fmt.Errorf("empty git rev-parse output")
-	}
-	if !samePath(toplevel, dir) {
-		return "", fmt.Errorf("dir %s is not a repo root (toplevel %s); refusing to edit enclosing repo", dir, toplevel)
-	}
-	if !filepath.IsAbs(exclude) {
-		exclude = filepath.Join(dir, exclude)
-	}
-	return exclude, nil
-}
-
-// samePath reports whether two paths name the same directory, tolerating
-// trailing separators and symlinks (macOS /tmp vs /private/tmp).
-func samePath(a, b string) bool {
-	return resolvePath(a) == resolvePath(b)
-}
-
-func resolvePath(p string) string {
-	p = filepath.Clean(p)
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
-	}
-	return p
+	return workspaces.Exclude(context.Background(), dir, personaExcludeComment, relPath)
 }
 
 // ValidateCommandBinary checks that the first token of the command template
