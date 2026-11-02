@@ -1,7 +1,10 @@
 package refinery
 
 import (
+	"sync/atomic"
+
 	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 	"github.com/drellem2/pogo/internal/vcs/gitvcs"
 )
 
@@ -9,8 +12,11 @@ import (
 //
 // Every git operation of the land pipeline (attemptMerge), the post-merge tag,
 // the branch reap, the default-branch lookup and --auto-create-target goes
-// through a vcs.Lander / vcs.Refs. Only the git backend exists, and selection
-// by repo is slice 4, so backendFor ignores its argument today.
+// through a vcs.Lander / vcs.Refs. backendFor picks the backend from the
+// repo's project record (slice 4, mg-160e8) through the lookup pogod installs
+// with SetRepoVCS. A repo whose record says enth gets the inert enth backend,
+// which refuses every step with vcs.ErrUnsupported; every other repo — no
+// record, no vcs key, or no lookup installed — gets git, exactly as before.
 //
 // The refinery's other git calls (recovery, prune, gate-dirt inspection, the
 // closing-ref scan, submit validation, the source-checkout fast-forward) still
@@ -38,9 +44,36 @@ var theGitBackend landBackend = gitLandBackend{
 	Refs:   gitvcs.Refs{Runner: gitRunner},
 }
 
-// backendFor returns the backend for the repo at repoPath. Always git until
-// slice 4 adds selection from the project record.
+// RepoVCS is the backend lookup by repo: the kind and enth settings recorded
+// for the repo at repoPath. pogod passes project.VCSOf.
+type RepoVCS func(repoPath string) (vcs.Kind, *vcs.EnthRepo)
+
+var repoVCS atomic.Pointer[RepoVCS]
+
+// SetRepoVCS installs the lookup backendFor consults. nil uninstalls it, and
+// every repo is then git.
+func SetRepoVCS(f RepoVCS) {
+	if f == nil {
+		repoVCS.Store(nil)
+		return
+	}
+	repoVCS.Store(&f)
+}
+
+// backendFor returns the backend for the repo at repoPath.
 func backendFor(repoPath string) landBackend {
+	f := repoVCS.Load()
+	if f == nil {
+		return theGitBackend
+	}
+	kind, enth := (*f)(repoPath)
+	if kind == vcs.Enth {
+		b := enthvcs.Backend{}
+		if enth != nil {
+			b.Repo = *enth
+		}
+		return b
+	}
 	return theGitBackend
 }
 

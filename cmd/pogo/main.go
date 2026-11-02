@@ -46,6 +46,7 @@ import (
 	"github.com/drellem2/pogo/internal/sourcewatch"
 	"github.com/drellem2/pogo/internal/supervision"
 	"github.com/drellem2/pogo/internal/synthfail"
+	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/version"
 	"github.com/drellem2/pogo/internal/wedgewatch"
 )
@@ -4423,11 +4424,20 @@ binary. pogod answers the same question — "pogod version --json".`,
 		Long:  `Commands to add, remove, and list registered projects.`,
 	}
 
+	var projVCS, projEnthRemote, projEnthRepo, projEnthTrunk string
 	var cmdProjectAdd = &cobra.Command{
 		Use:   "add <path>",
 		Short: "Register a project directory",
 		Long: `Register a directory (or its parent git repository) as a pogo project.
-The path is resolved to an absolute path and the git root is discovered automatically.`,
+The path is resolved to an absolute path and the git root is discovered automatically.
+
+--vcs selects the repo's version-control backend, as set-vcs does. Without it
+the record carries no vcs key and the repo is git, as every repo was before.
+
+    pogo project add <path> --vcs=enth --enth-remote=URL --enth-repo=NAME
+
+The enth backend is not built yet (enth-vcs slices 5-7): a repo recorded as
+enth refuses every refinery operation with "unsupported by this backend".`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			path := args[0]
@@ -4442,6 +4452,13 @@ The path is resolved to an absolute path and the git root is discovered automati
 			if resp == nil {
 				cli.ExitWithError(jsonOutput, "no git repository found at or above "+absPath, cli.ExitNotFound)
 			}
+			if cmd.Flags().Changed("vcs") || enthFlagsChanged(cmd) {
+				p, err := client.SetProjectVCS(resp.ParentProject.Path, vcs.Kind(projVCS), enthFromFlags(cmd, projEnthRemote, projEnthRepo, projEnthTrunk))
+				if err != nil {
+					cli.ExitWithError(jsonOutput, fmt.Sprintf("registered %s, but setting its vcs failed: %v", resp.ParentProject.Path, err), cli.ExitError)
+				}
+				resp.ParentProject = *p
+			}
 			if jsonOutput {
 				cli.PrintJSON(resp)
 			} else {
@@ -4449,6 +4466,52 @@ The path is resolved to an absolute path and the git root is discovered automati
 			}
 		},
 	}
+	addVCSFlags(cmdProjectAdd, &projVCS, &projEnthRemote, &projEnthRepo, &projEnthTrunk)
+
+	var setVCS, setEnthRemote, setEnthRepo, setEnthTrunk string
+	var cmdProjectSetVCS = &cobra.Command{
+		Use:   "set-vcs <path> --vcs=git|enth",
+		Short: "Change the version-control backend recorded for a project",
+		Long: `Set the VCS a registered project is kept in (docs/design/enth-vcs.md §2).
+
+The selection lives on the project record in projects.json, not in
+.pogo/refinery.toml: it is needed before any checkout exists, and a branch must
+not be able to change the VCS its own work is landed with. A vcs key in
+refinery.toml is ignored with a warning.
+
+    pogo project set-vcs <path> --vcs=enth --enth-remote=URL --enth-repo=NAME [--enth-trunk=REF]
+    pogo project set-vcs <path> --vcs=git
+
+git is stored as no key at all. --enth-trunk defaults to refs/heads/main.
+
+REFUSED while the repo has open merge requests or live polecats: that work was
+started under the current backend, and moving a repo is a handover, not a
+toggle. Let the queue drain and the polecats finish, then re-run. Re-stating the
+current selection is not a change and is never refused.
+
+The enth backend is not built yet (slices 5-7): a repo recorded as enth refuses
+every refinery operation with "unsupported by this backend".`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if !cmd.Flags().Changed("vcs") {
+				cli.ExitWithError(jsonOutput, "--vcs is required (git or enth)", cli.ExitError)
+			}
+			absPath, err := filepath.Abs(args[0])
+			if err != nil {
+				cli.ExitWithError(jsonOutput, fmt.Sprintf("invalid path: %v", err), cli.ExitError)
+			}
+			p, err := client.SetProjectVCS(absPath, vcs.Kind(setVCS), enthFromFlags(cmd, setEnthRemote, setEnthRepo, setEnthTrunk))
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(p)
+			} else {
+				fmt.Printf("%s: vcs=%s\n", p.Path, p.Kind())
+			}
+		},
+	}
+	addVCSFlags(cmdProjectSetVCS, &setVCS, &setEnthRemote, &setEnthRepo, &setEnthTrunk)
 
 	var cmdProjectRemove = &cobra.Command{
 		Use:   "remove <path>",
@@ -4897,6 +4960,7 @@ report; it is safe from anywhere and never acts.`,
 
 	// Project commands
 	cmdProject.AddCommand(cmdProjectAdd)
+	cmdProject.AddCommand(cmdProjectSetVCS)
 	cmdProject.AddCommand(cmdProjectRemove)
 	cmdProject.AddCommand(cmdProjectList)
 	rootCmd.AddCommand(cmdProject)

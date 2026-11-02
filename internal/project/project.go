@@ -19,11 +19,28 @@ import (
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/logging"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 type Project struct {
 	Id   int    `json:"id"`
 	Path string `json:"path"`
+	// VCS names the repo's backend (docs/design/enth-vcs.md §2). Absent means
+	// git, and a git record never carries it: both VCS fields are omitempty,
+	// so a git-only projects.json reads and re-writes byte for byte as it did
+	// before the fields existed. Set only through SetVCS (pogo project
+	// set-vcs / add --vcs), never by a worker.
+	VCS vcs.Kind `json:"vcs,omitempty"`
+	// Enth is the enth repo the record names, present iff VCS is enth.
+	Enth *vcs.EnthRepo `json:"enth,omitempty"`
+}
+
+// Kind is the record's backend, with the absent value read as git.
+func (p Project) Kind() vcs.Kind {
+	if p.VCS == "" {
+		return vcs.Git
+	}
+	return p.VCS
 }
 
 type ProjectsSave struct {

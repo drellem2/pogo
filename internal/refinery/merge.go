@@ -1234,6 +1234,23 @@ func (r *Refinery) loadConfig(wtDir, repoPath string) refineryConfig {
 	if !wt.GateTimeoutSet {
 		wt.GateTimeout, wt.GateTimeoutSet = orig.GateTimeout, orig.GateTimeoutSet
 	}
+	// A vcs key is never read from refinery.toml: the backend is selected on
+	// the project record, where a branch cannot change it (enth-vcs §2). One
+	// warning per load, naming every copy that carries it, so a user who put
+	// it in the obvious place learns where it goes.
+	var vcsIn []string
+	for _, c := range []refineryConfig{wt, orig} {
+		if c.vcsKeyIn != "" {
+			vcsIn = append(vcsIn, c.vcsKeyIn)
+		}
+	}
+	wt.vcsKeyIn = ""
+	if len(vcsIn) > 0 {
+		w := fmt.Sprintf("refinery: ignoring the vcs setting in %s — refinery.toml does not select a repo's VCS; "+
+			"it is set on the project record with `pogo project set-vcs`", strings.Join(vcsIn, " and "))
+		wt.Warnings = append(wt.Warnings, w)
+		log.Print(w)
+	}
 	return wt
 }
 
@@ -1251,6 +1268,13 @@ type refineryConfig struct {
 	// bound instead of taking the default.
 	GateTimeout    time.Duration
 	GateTimeoutSet bool
+
+	// Warnings are the config problems loadConfig reported (and logged), one
+	// line each.
+	Warnings []string
+	// vcsKeyIn is the file's path when it carries a vcs setting, which is
+	// never honoured here (see loadConfig).
+	vcsKeyIn string
 }
 
 // parseRefineryToml reads a .pogo/refinery.toml and extracts gate commands.
@@ -1301,6 +1325,9 @@ func parseRefineryConfig(path string) refineryConfig {
 
 		if strings.HasPrefix(line, "[") {
 			section = strings.TrimSpace(strings.Trim(line, "[]"))
+			if section == "vcs" || section == "enth" {
+				cfg.vcsKeyIn = path
+			}
 			continue
 		}
 
@@ -1313,6 +1340,8 @@ func parseRefineryConfig(path string) refineryConfig {
 		val = strings.Trim(val, "\"")
 
 		switch {
+		case key == "vcs":
+			cfg.vcsKeyIn = path
 		case key == "quality_gate":
 			cfg.Gates = append(cfg.Gates, val)
 		case section == "gates" && key == "commands":

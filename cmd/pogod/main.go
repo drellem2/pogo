@@ -809,6 +809,7 @@ func registerHandlers() {
 	http.HandleFunc("/", homePage)
 	http.HandleFunc("/file", file)
 	http.HandleFunc("/projects", allProjects)
+	http.HandleFunc("/projects/vcs", projectVCSHandler)
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/health/full", healthFull)
 	http.HandleFunc("/health/progress", healthProgress)
@@ -3598,6 +3599,10 @@ Flags:
 	// Prune stale registry entries — nonexistent paths and ephemeral
 	// worktrees — before any indexing runs (mg-d205).
 	project.PruneRegistry()
+
+	// The refinery's backend lookup by repo reads the project record (enth-vcs
+	// §2, slice 4). A repo with no vcs key is git, as every repo was before.
+	refinery.SetRepoVCS(project.VCSOf)
 
 	// Start refinery merge queue loop
 	refineCfg := refinery.DefaultConfig()

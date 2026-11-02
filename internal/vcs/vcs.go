@@ -10,8 +10,7 @@
 //
 // The four groups are declared here as the design sketches them. Lander and
 // Refs have an implementation, the git backend in internal/vcs/gitvcs, and
-// only the refinery calls it. Selection by repo (slice 4) does not exist yet,
-// so nothing returns a Backend.
+// only the refinery calls it.
 //
 // # Slice 2 (mg-cc7ae)
 //
@@ -27,6 +26,13 @@
 // Work has its signatures fixed and a git implementation, gitvcs.Work.
 // internal/strandedwork and internal/gitgc read branches, cherry-judge them,
 // and read commit bodies, paths and blobs through it.
+//
+// # Selection (slice 4, mg-160e8)
+//
+// A repo's backend is named on its project record in projects.json (§2): a
+// `vcs` key, absent meaning git, and for enth an `enth` object (EnthRepo).
+// Selecting enth today gives internal/vcs/enthvcs, which answers
+// ErrUnsupported to everything until slices 5-7.
 package vcs
 
 import (
@@ -44,6 +50,55 @@ const (
 	Git  Kind = "git"
 	Enth Kind = "enth"
 )
+
+// ParseKind reads a user-supplied backend name. The empty string is git.
+func ParseKind(s string) (Kind, error) {
+	switch Kind(s) {
+	case "", Git:
+		return Git, nil
+	case Enth:
+		return Enth, nil
+	}
+	return "", fmt.Errorf("vcs: unknown backend %q (want %q or %q)", s, Git, Enth)
+}
+
+// DefaultEnthTrunk is the trunk ref an enth record gets when none is given.
+const DefaultEnthTrunk = "refs/heads/main"
+
+// EnthRepo is the enth half of a project record (§2): where enthd is, which
+// repo on it, and the ref work lands on. It is per-host configuration, which
+// is why it lives on the project record and not in a committed file.
+type EnthRepo struct {
+	Remote string `json:"remote"`
+	Repo   string `json:"repo"`
+	Trunk  string `json:"trunk,omitempty"`
+}
+
+// NormalizeSelection validates a (kind, enth) pair for a project record and
+// returns it in its stored form. git is stored as the empty kind with no enth
+// object, so a git record serializes exactly as it did before selection
+// existed (§2, "byte-identical git"). enth requires Remote and Repo; an empty
+// Trunk becomes DefaultEnthTrunk.
+func NormalizeSelection(kind Kind, enth *EnthRepo) (Kind, *EnthRepo, error) {
+	k, err := ParseKind(string(kind))
+	if err != nil {
+		return "", nil, err
+	}
+	if k == Git {
+		if enth != nil && (*enth != EnthRepo{}) {
+			return "", nil, fmt.Errorf("vcs: enth settings given for a git repo")
+		}
+		return "", nil, nil
+	}
+	if enth == nil || enth.Remote == "" || enth.Repo == "" {
+		return "", nil, fmt.Errorf("vcs: an enth repo needs both a remote and a repo name")
+	}
+	e := *enth
+	if e.Trunk == "" {
+		e.Trunk = DefaultEnthTrunk
+	}
+	return Enth, &e, nil
+}
 
 // Backend is selected per repo from the project record (slice 4).
 type Backend interface {

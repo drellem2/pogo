@@ -5,6 +5,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"github.com/drellem2/pogo/internal/progresswatch"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/server"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 var serverURL = config.Load().ServerURL()
@@ -450,6 +452,37 @@ func GetStatus() ([]ProjectStatusResponse, error) {
 		return nil, err
 	}
 	return statuses, nil
+}
+
+// SetProjectVCS changes the VCS recorded for the project at path (POST
+// /projects/vcs; enth-vcs §2). pogod refuses a change while the repo has open
+// MRs or live polecats, and the refusal's text is returned as the error.
+func SetProjectVCS(path string, kind vcs.Kind, enth *vcs.EnthRepo) (*project.Project, error) {
+	if err := HealthCheck(); err != nil {
+		return nil, fmt.Errorf("server is not running: %w", err)
+	}
+	body, err := json.Marshal(struct {
+		Path string        `json:"path"`
+		VCS  vcs.Kind      `json:"vcs"`
+		Enth *vcs.EnthRepo `json:"enth,omitempty"`
+	}{path, kind, enth})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.Post(serverURL+"/projects/vcs", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s", strings.TrimSpace(string(data)))
+	}
+	var p project.Project
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 // RemoveProject removes a project from pogod by path.
