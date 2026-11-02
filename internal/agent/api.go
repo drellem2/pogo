@@ -10,17 +10,17 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/drellem2/pogo/internal/events"
-	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/hookarm"
 	"github.com/drellem2/pogo/internal/synthfail"
+	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/gitvcs"
 )
 
 // AgentInfo is the JSON representation of an agent for the API.
@@ -2399,12 +2399,10 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 				spawnReq.Name, worktreeDir, err)
 		}
 
-		wtArgs := []string{"-C", sourceRepo, "worktree", "add", worktreeDir, "-b", branchName}
-		if baseRef != "" {
-			wtArgs = append(wtArgs, baseRef)
-		}
-		wtCmd := exec.Command("git", wtArgs...)
-		if out, err := wtCmd.CombinedOutput(); err != nil {
+		if _, err := workspaces.Create(context.Background(), vcs.WorkspaceSpec{
+			Repo: vcs.Repo{Path: sourceRepo}, Dir: worktreeDir, Branch: branchName, Base: baseRef,
+		}); err != nil {
+			cause, out := commandErrorParts(err)
 			os.Remove(promptFile)
 			// `git worktree add -b` creates the branch and *then* checks it
 			// out, so a failure here can leave the branch behind with no
@@ -2424,7 +2422,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 				cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName, !dirPreexisted)
 			}
 			failPolecatSpawn(w, spawnReq, http.StatusInternalServerError,
-				fmt.Sprintf("worktree creation failed: %v\n%s", err, out))
+				fmt.Sprintf("worktree creation failed: %v\n%s", cause, out))
 			return
 		}
 		log.Printf("polecat %s: created worktree at %s (branch %s, base %q)", spawnReq.Name, worktreeDir, branchName, baseRef)
@@ -2779,7 +2777,7 @@ func cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName string, dirIs
 			"`git -C %s status`) and reclaim it by hand once nobody is working in it "+
 			"(drellem2/pogo#167)", worktreeDir, worktreeDir)
 	} else {
-		exec.Command("git", "-C", sourceRepo, "worktree", "remove", worktreeDir, "--force").Run()
+		workspaces.Rollback(context.Background(), vcs.Repo{Path: sourceRepo}, worktreeDir)
 		// Backstop: if git refused (e.g. files created after checkout) or the
 		// worktree was never registered, reclaim the directory anyway so no
 		// orphan is left behind (gh #31).
@@ -2788,19 +2786,16 @@ func cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName string, dirIs
 		}
 	}
 	if branchName != "" {
-		if out, err := exec.Command("git", "-C", sourceRepo, "branch", "-D", branchName).CombinedOutput(); err != nil {
-			log.Printf("polecat spawn cleanup: failed to delete branch %s in %s: %v\n%s", branchName, sourceRepo, err, out)
+		if err := workspaces.DeleteBranch(context.Background(), vcs.Repo{Path: sourceRepo}, branchName); err != nil {
+			cause, out := commandErrorParts(err)
+			log.Printf("polecat spawn cleanup: failed to delete branch %s in %s: %v\n%s", branchName, sourceRepo, cause, out)
 		}
 	}
 }
 
 // polecatBranchExists reports whether refs/heads/<branch> exists in repo.
 func polecatBranchExists(repo, branch string) bool {
-	if repo == "" || branch == "" {
-		return false
-	}
-	return exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet",
-		"refs/heads/"+branch).Run() == nil
+	return workspaces.BranchExists(context.Background(), vcs.Repo{Path: repo}, branch)
 }
 
 // polecatBranchHolder names the worktrees that stand between a polecat branch
@@ -2880,12 +2875,7 @@ func polecatBranchHolders(repo, branch string) (polecatBranchHolder, error) {
 // deleting it. It answers "no" on any error: an unreadable branch is treated
 // as carrying work, because the cost of a wrong "yes" is destroyed commits.
 func polecatBranchIsSpent(repo, branch, baseRef string) bool {
-	out, err := exec.Command("git", "-C", repo, "rev-list", "--count",
-		baseRef+".."+branch).Output()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) == "0"
+	return workspaces.BranchSpent(context.Background(), vcs.Repo{Path: repo}, branch, baseRef)
 }
 
 // reclaimStalePolecatBranch clears a leftover polecat-<name> branch so that a
@@ -2961,8 +2951,9 @@ func reclaimStalePolecatBranch(repo, branch, baseRef string) error {
 			"and will not be reclaimed automatically. Inspect it (git -C %s log %s..%s) and delete it "+
 			"(git -C %s branch -D %s) once the work is safe", branch, baseRef, repo, baseRef, branch, repo, branch)
 	}
-	if out, err := exec.Command("git", "-C", repo, "branch", "-D", branch).CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to reclaim spent branch %s: %v\n%s", branch, err, out)
+	if err := workspaces.DeleteBranch(context.Background(), vcs.Repo{Path: repo}, branch); err != nil {
+		cause, out := commandErrorParts(err)
+		return fmt.Errorf("failed to reclaim spent branch %s: %v\n%s", branch, cause, out)
 	}
 	log.Printf("polecat: reclaimed spent branch %s in %s (no worktree, nothing unmerged vs %s)",
 		branch, repo, baseRef)
@@ -2979,39 +2970,18 @@ func reclaimStalePolecatBranch(repo, branch, baseRef string) error {
 // This exists because creating the worktree from local HEAD made polecats
 // invisible to commits that had been merged to origin/main but not yet
 // pulled into the source checkout, producing false reports of unmerged work.
+//
+// The git that answers it is the workspaces backend's ResolveBase
+// (slice 2), whose FetchTimeout is polecatFetchTimeout.
 func resolvePolecatBaseRef(sourceRepo, branch string) string {
-	return resolvePolecatBaseRefWithin(sourceRepo, branch, polecatFetchTimeout)
+	return workspaces.ResolveBase(context.Background(), vcs.Repo{Path: sourceRepo}, branch)
 }
 
 // resolvePolecatBaseRefWithin is resolvePolecatBaseRef with the network bound
 // passed in, so a test can prove the bound is enforced without waiting out the
-// production one.
+// production one. It builds the git backend directly, with that bound.
 func resolvePolecatBaseRefWithin(sourceRepo, branch string, fetchTimeout time.Duration) string {
-	if sourceRepo == "" {
-		return ""
-	}
-	if err := exec.Command("git", "-C", sourceRepo, "remote", "get-url", "origin").Run(); err != nil {
-		return ""
-	}
-	if !fetchPolecatBaseRefs(sourceRepo, branch, fetchTimeout) {
-		return ""
-	}
-	if branch != "" {
-		ref := "origin/" + branch
-		if exec.Command("git", "-C", sourceRepo, "rev-parse", "--verify", ref).Run() == nil {
-			return ref
-		}
-	}
-	if out, err := exec.Command("git", "-C", sourceRepo, "symbolic-ref", "refs/remotes/origin/HEAD").Output(); err == nil {
-		ref := strings.TrimSpace(string(out))
-		if r := strings.TrimPrefix(ref, "refs/remotes/"); r != ref {
-			return r
-		}
-	}
-	if exec.Command("git", "-C", sourceRepo, "rev-parse", "--verify", "origin/main").Run() == nil {
-		return "origin/main"
-	}
-	return ""
+	return gitvcs.Workspaces{FetchTimeout: fetchTimeout}.ResolveBase(context.Background(), vcs.Repo{Path: sourceRepo}, branch)
 }
 
 // polecatFetchTimeout bounds the ONE networked operation on the polecat spawn
@@ -3034,95 +3004,16 @@ func resolvePolecatBaseRefWithin(sourceRepo, branch string, fetchTimeout time.Du
 const polecatFetchTimeout = 15 * time.Second
 
 // fetchPolecatBaseRefs updates the remote-tracking refs resolvePolecatBaseRef
-// is about to read, bounded by polecatFetchTimeout. It reports whether origin
-// is usable; false means the caller should fall back to local HEAD.
-//
-// A timeout needs no new failure semantics: resolvePolecatBaseRef ALREADY logs
-// and returns "" when the fetch fails, and "" already means "base the worktree
-// on local HEAD". A bounded failure reuses the path an unbounded one would
-// eventually have taken anyway, minus the wait.
-//
-// # Narrowing, and why it falls back
-//
-// The old call was a bare `git fetch origin`: all 707 refs of this repo, of
-// which 635 are `polecat-*` branches, with `remote.origin.prune` and
-// `fetch.prune` both unset — a cost that grows with every polecat ever spawned.
-// Narrowing it to the refs this function actually reads contributed only ~0.4s
-// of the measured 1.9s, so it is not the win; it is a cap on a slowly
-// degrading one.
-//
-// It is narrow-THEN-WIDE rather than narrow-only because git fails a fetch
-// whole when any refspec matches nothing on the remote. A target branch that
-// does not exist on origin yet is an ordinary case here (the fallback chain
-// below exists for it), and a narrow-only fetch would turn it from "fall back
-// to origin/HEAD" into "fall back to local HEAD" — a silent regression in the
-// thing this function exists to prevent. So a narrow fetch that fails is
-// retried once, wide, inside the SAME deadline: the bound is on the wall clock,
-// not on the number of attempts.
+// is about to read, bounded by fetchTimeout. The git backend owns it since
+// slice 2; see gitvcs.FetchBaseRefs for the narrow-then-wide design.
 func fetchPolecatBaseRefs(sourceRepo, branch string, fetchTimeout time.Duration) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
-	defer cancel()
-
-	if specs := polecatFetchRefspecs(ctx, sourceRepo, branch); len(specs) > 0 {
-		args := append([]string{"-C", sourceRepo, "fetch", "--no-tags", "origin"}, specs...)
-		narrow := exec.CommandContext(ctx, "git", args...)
-		narrow.Env = ghtoken.ChildEnvContext(ctx, os.Environ())
-		if out, err := narrow.CombinedOutput(); err == nil {
-			return true
-		} else if ctx.Err() == nil {
-			log.Printf("polecat: narrow fetch of %v failed in %s, retrying wide: %v\n%s",
-				specs, sourceRepo, err, out)
-		}
-	}
-
-	wide := exec.CommandContext(ctx, "git", "-C", sourceRepo, "fetch", "--no-tags", "origin")
-	wide.Env = ghtoken.ChildEnvContext(ctx, os.Environ())
-	out, err := wide.CombinedOutput()
-	if err == nil {
-		return true
-	}
-	if ctx.Err() != nil {
-		log.Printf("polecat: fetch origin in %s exceeded %s and was killed — basing the worktree on local HEAD. "+
-			"The polecat may not see commits merged to origin since this checkout last pulled",
-			sourceRepo, fetchTimeout)
-		return false
-	}
-	log.Printf("polecat: fetch origin failed in %s, falling back to local HEAD: %v\n%s", sourceRepo, err, out)
-	return false
+	return gitvcs.FetchBaseRefs(sourceRepo, branch, fetchTimeout)
 }
 
-// polecatFetchRefspecs returns explicit refspecs for the refs
-// resolvePolecatBaseRef reads: the polecat's target branch and the repo's
-// default branch. Both are resolved without touching the network — the default
-// comes from the local refs/remotes/origin/HEAD symref. Returns nil when
-// nothing narrow can be named, which makes the caller fetch wide.
-//
-// It takes the fetch's ctx even though it never goes to the network. The
-// defect this file is repairing is an unbounded subprocess on the pre-claim
-// spawn path; adding a NEW unbounded subprocess there while fixing it would be
-// the repair exhibiting the defect it repairs. Sharing the deadline costs
-// nothing and leaves nothing on that path outside it.
+// polecatFetchRefspecs returns the refspecs fetchPolecatBaseRefs narrows to.
+// See gitvcs.FetchRefspecs.
 func polecatFetchRefspecs(ctx context.Context, sourceRepo, branch string) []string {
-	seen := map[string]bool{}
-	var specs []string
-	add := func(b string) {
-		if b == "" || seen[b] {
-			return
-		}
-		seen[b] = true
-		specs = append(specs, fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", b, b))
-	}
-	add(branch)
-	if out, err := exec.CommandContext(ctx, "git", "-C", sourceRepo, "symbolic-ref", "refs/remotes/origin/HEAD").Output(); err == nil {
-		ref := strings.TrimSpace(string(out))
-		// Only when the prefix was actually there. TrimPrefix returns the input
-		// unchanged when it is not, which would name a refspec out of a full
-		// ref path and fail the narrow fetch for no reason.
-		if b := strings.TrimPrefix(ref, "refs/remotes/origin/"); b != ref {
-			add(b)
-		}
-	}
-	return specs
+	return gitvcs.FetchRefspecs(ctx, sourceRepo, branch)
 }
 
 // handleDrain reports and toggles drain mode — the pogod half of the self-deploy

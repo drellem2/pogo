@@ -53,7 +53,7 @@ func WorkspaceRepoDir(name string) string {
 // Never returns an error: a workspace problem must not block an agent start.
 // The bad news travels by event and mail instead.
 func freshenWorkspace(name string) freshen.Result {
-	res := freshen.Checkout(WorkspaceRepoDir(name))
+	res := workspaces.Refresh(context.Background(), WorkspaceRepoDir(name))
 
 	switch {
 	case res.Status == freshen.StatusSkipped:
