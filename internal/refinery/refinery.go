@@ -24,6 +24,8 @@ import (
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/hostload"
+	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/gitvcs"
 )
 
 // DefaultPollInterval is how often the refinery checks for new merge requests
@@ -874,99 +876,22 @@ func validateTargetRef(repoPath, targetRef string) error {
 	return nil
 }
 
-// detectDefaultBranch returns the default branch name for repoPath. It tries
-// origin/HEAD first (working clones with a populated remote), then asks origin
-// directly, then falls back to local HEAD (bare repos used in tests, and clones
-// with no remote at all). Returns an error only when no lookup works.
-//
-// The remote probe matters because local HEAD is a poor proxy for "the repo
-// default": in a working clone it is simply whatever branch is checked out, so
-// a clone parked on a feature branch would report that branch as the default
-// and every merge to main would look like a PR-flow integration step (mg-7746).
+// detectDefaultBranch returns the default branch name for repoPath: origin/HEAD,
+// then origin itself, then local HEAD. See gitvcs.Refs.Default (R3).
 func detectDefaultBranch(repoPath string) (string, error) {
-	out, err := exec.Command("git", "-C", repoPath, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").CombinedOutput()
-	if err == nil {
-		s := strings.TrimSpace(string(out))
-		if rest, ok := strings.CutPrefix(s, "origin/"); ok && rest != "" {
-			return rest, nil
-		}
-	}
-	if ref, ok := remoteDefaultBranch(repoPath); ok {
-		return ref, nil
-	}
-	out, err = exec.Command("git", "-C", repoPath, "symbolic-ref", "--short", "HEAD").CombinedOutput()
-	if err == nil {
-		s := strings.TrimSpace(string(out))
-		if s != "" {
-			return s, nil
-		}
-	}
-	return "", fmt.Errorf("could not determine default branch for %s", repoPath)
+	return backendFor(repoPath).Default(context.Background(), vcs.Repo{Path: repoPath})
 }
 
-// remoteDefaultBranch asks origin which branch its HEAD points at. Used when
-// refs/remotes/origin/HEAD is absent locally — it is only written by `git
-// clone` and is easily lost. GIT_TERMINAL_PROMPT=0 so an auth-required HTTPS
-// remote fails fast rather than hanging on stdin under launchd.
+// remoteDefaultBranch asks origin which branch its HEAD points at. See
+// gitvcs.RemoteDefaultBranch.
 func remoteDefaultBranch(repoPath string) (string, bool) {
-	cmd := exec.Command("git", "-C", repoPath, "ls-remote", "--symref", "origin", "HEAD")
-	cmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", false
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "ref:")
-		if !ok {
-			continue
-		}
-		// Format: "ref: refs/heads/main\tHEAD"
-		fields := strings.Fields(rest)
-		if len(fields) < 2 || fields[1] != "HEAD" {
-			continue
-		}
-		if name, ok := strings.CutPrefix(fields[0], "refs/heads/"); ok && name != "" {
-			return name, true
-		}
-	}
-	return "", false
+	return gitvcs.RemoteDefaultBranch(repoPath)
 }
 
-// createTargetRef creates targetRef pointing at sourceRef in repoPath. In a
-// working clone it pushes origin/<source> to a new branch on origin; in a bare
-// repo (the layout used by tests) it creates the branch directly via update-ref.
+// createTargetRef creates targetRef pointing at sourceRef in repoPath
+// (--auto-create-target, R4). See gitvcs.Refs.CreateRef.
 func createTargetRef(repoPath, targetRef, sourceRef string) error {
-	out, err := exec.Command("git", "-C", repoPath, "rev-parse", "--is-bare-repository").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("inspect %s: %v: %s", repoPath, err, strings.TrimSpace(string(out)))
-	}
-	if strings.TrimSpace(string(out)) == "true" {
-		shaOut, err := exec.Command("git", "-C", repoPath, "rev-parse", "--verify", "refs/heads/"+sourceRef).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("source_ref %q not found in %s: %s", sourceRef, repoPath, strings.TrimSpace(string(shaOut)))
-		}
-		sha := strings.TrimSpace(string(shaOut))
-		if upOut, err := exec.Command("git", "-C", repoPath, "update-ref", "refs/heads/"+targetRef, sha).CombinedOutput(); err != nil {
-			return fmt.Errorf("update-ref %s in %s: %v: %s", targetRef, repoPath, err, strings.TrimSpace(string(upOut)))
-		}
-		return nil
-	}
-
-	// Working clone path: make sure we have origin/<source> locally, then
-	// push it to a new branch on origin. GIT_TERMINAL_PROMPT=0 so an
-	// auth-required HTTPS remote fails fast instead of hanging.
-	fetchCmd := exec.Command("git", "-C", repoPath, "fetch", "origin", sourceRef)
-	fetchCmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
-	if fOut, err := fetchCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("fetch source_ref %q from origin: %v: %s", sourceRef, err, strings.TrimSpace(string(fOut)))
-	}
-	pushCmd := exec.Command("git", "-C", repoPath, "push", "origin",
-		"refs/remotes/origin/"+sourceRef+":refs/heads/"+targetRef)
-	pushCmd.Env = ghtoken.ChildEnv(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"))
-	if pOut, err := pushCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("push %s:%s to origin: %v: %s", sourceRef, targetRef, err, strings.TrimSpace(string(pOut)))
-	}
-	return nil
+	return backendFor(repoPath).CreateRef(context.Background(), vcs.Repo{Path: repoPath}, targetRef, sourceRef)
 }
 
 // Start begins the merge queue loop. Blocks until ctx is cancelled or Stop is called.
