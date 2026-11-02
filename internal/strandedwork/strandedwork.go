@@ -62,7 +62,6 @@ package strandedwork
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -72,6 +71,8 @@ import (
 
 	"github.com/drellem2/pogo/internal/ghpr"
 	"github.com/drellem2/pogo/internal/ghtoken"
+	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/gitvcs"
 )
 
 // PreRegistrationPrefix is the commit-subject prefix that marks a
@@ -1146,16 +1147,13 @@ func polecatBranches(repo string) ([]string, error) {
 // polecatRefs lists the full refnames behind polecatBranches, in for-each-ref's
 // (sorted) order.
 func polecatRefs(repo string) ([]string, error) {
-	out, err := git(repo, "for-each-ref", "--format=%(refname)",
-		"refs/heads/"+BranchPrefix+"*", "refs/remotes/origin/"+BranchPrefix+"*")
+	subs, err := work.Find(context.Background(), vcs.Repo{Path: repo}, vcs.WorkQuery{})
 	if err != nil {
 		return nil, fmt.Errorf("list polecat branches in %s: %w", repo, err)
 	}
 	var refs []string
-	for _, line := range strings.Split(out, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			refs = append(refs, line)
-		}
+	for _, s := range subs {
+		refs = append(refs, s.Ref)
 	}
 	return refs, nil
 }
@@ -1326,33 +1324,22 @@ func tipTime(repo, ref string) (time.Time, string) {
 //   - <sha> <subject>   no patch-equivalent commit upstream
 //   - <sha> <subject>   an equivalent commit is already upstream
 func cherry(repo, targetRef, branchRef string) ([]Commit, int, error) {
-	out, err := git(repo, "cherry", "-v", targetRef, branchRef)
+	st, err := work.State(context.Background(), vcs.Repo{Path: repo}, vcs.Submission{Ref: branchRef}, targetRef)
 	if err != nil {
 		return nil, 0, fmt.Errorf("git cherry %s %s in %s: %w", targetRef, branchRef, repo, err)
 	}
 	var unmerged []Commit
-	equivalent := 0
-	for _, line := range strings.Split(out, "\n") {
-		if len(line) < 2 {
-			continue
-		}
-		mark, rest := line[0], strings.TrimSpace(line[1:])
-		sha, subject, _ := strings.Cut(rest, " ")
-		switch mark {
-		case '+':
-			unmerged = append(unmerged, Commit{SHA: sha, Subject: strings.TrimSpace(subject)})
-		case '-':
-			equivalent++
-		}
+	for _, c := range st.Ahead {
+		unmerged = append(unmerged, Commit{SHA: c.Rev, Subject: c.Subject})
 	}
-	return unmerged, equivalent, nil
+	return unmerged, st.Equivalent, nil
 }
 
 // bodyBatch is how many commits one `git log` invocation is asked for. A branch
 // with hundreds of unmerged commits would otherwise build an argv long enough to
 // hit the platform limit, and an E2BIG here would lose the bodies for the whole
 // branch rather than for one batch.
-const bodyBatch = 100
+const bodyBatch = gitvcs.MessageBatch
 
 // LoadBodies fills Commit.Body for each commit in place, for callers that got
 // their commits from something other than Inspect (LocalOnlyCommits). The error
@@ -1373,37 +1360,21 @@ func LoadBodies(repo string, commits []Commit) error { return loadBodies(repo, c
 // could see, and Finding.BodiesUnread can only say that about all of them.
 func loadBodies(repo string, commits []Commit) error {
 	index := make(map[string]int, len(commits))
+	revs := make([]string, len(commits))
 	for i := range commits {
 		index[commits[i].SHA] = i
+		revs[i] = commits[i].SHA
 	}
-	for start := 0; start < len(commits); start += bodyBatch {
-		end := start + bodyBatch
-		if end > len(commits) {
-			end = len(commits)
+	// Messages returns what it read before a failing batch, and those are
+	// filled in before the error is reported, as the in-place loop always did.
+	msgs, err := work.Messages(context.Background(), vcs.Repo{Path: repo}, vcs.Submission{Revs: revs})
+	for _, m := range msgs {
+		if i, ok := index[m.Rev]; ok {
+			commits[i].Body = m.Body
 		}
-		// %x00 and not a literal NUL in the format string: exec argv cannot carry a
-		// NUL byte at all, so building the separator on this side fails before git
-		// runs. git emits the byte from the escape.
-		args := []string{"log", "--no-walk=unsorted", "--format=%H%n%b%x00"}
-		for _, c := range commits[start:end] {
-			args = append(args, c.SHA)
-		}
-		out, err := git(repo, args...)
-		if err != nil {
-			return fmt.Errorf("git log --format=%%b in %s: %w", repo, err)
-		}
-		for _, rec := range strings.Split(out, "\x00") {
-			rec = strings.TrimLeft(rec, "\n")
-			if rec == "" {
-				continue
-			}
-			sha, body, _ := strings.Cut(rec, "\n")
-			i, ok := index[strings.TrimSpace(sha)]
-			if !ok {
-				continue
-			}
-			commits[i].Body = strings.TrimRight(body, "\n")
-		}
+	}
+	if err != nil {
+		return fmt.Errorf("git log --format=%%b in %s: %w", repo, err)
 	}
 	return nil
 }
@@ -1420,25 +1391,9 @@ func workItemID(commits []Commit) string {
 	return ""
 }
 
-// refExists reports whether ref names a commit in repo.
-//
-// `git rev-parse --verify --quiet` exits 1 for an absent ref, which exec reports
-// as an error indistinguishable from "git is broken". show-ref is used instead
-// precisely because its contract is narrower: an exit status of 1 means "no such
-// ref" and nothing else, so a genuinely broken repository still surfaces as an
-// error rather than as a clean absence.
-func refExists(repo, ref string) (bool, error) {
-	cmd := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", ref)
-	err := cmd.Run()
-	if err == nil {
-		return true, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		return false, nil
-	}
-	return false, fmt.Errorf("show-ref %s in %s: %w", ref, repo, err)
-}
+// refExists reports whether ref names a commit in repo. The runner moved to
+// internal/vcs/gitvcs (slice 3, mg-d72cb), unchanged.
+func refExists(repo, ref string) (bool, error) { return gitvcs.RefExists(repo, ref) }
 
 func git(repo string, args ...string) (string, error) {
 	return gitStdin(repo, "", args...)
@@ -1446,20 +1401,12 @@ func git(repo string, args ...string) (string, error) {
 
 // gitStdin is git with stdin fed from a string (ignored when empty).
 func gitStdin(repo, stdin string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-	if stdin != "" {
-		cmd.Stdin = strings.NewReader(stdin)
-	}
-	out, err := cmd.Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			return "", fmt.Errorf("%s: %w", strings.TrimSpace(string(exitErr.Stderr)), err)
-		}
-		return "", err
-	}
-	return string(out), nil
+	return gitvcs.Output(repo, stdin, args...)
 }
+
+// work is this package's git Work backend. It runs gitvcs.Output, which is the
+// runner git and gitStdin use, so moving a question onto it changes nothing.
+var work = gitvcs.Work{}
 
 // LocalOnlyCommits lists the commits on repo's LOCAL branch head that no remote
 // ref contains — `git rev-list refs/heads/<branch> --not --remotes`, newest

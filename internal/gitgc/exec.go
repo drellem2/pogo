@@ -1,13 +1,9 @@
 package gitgc
 
 import (
-	"bytes"
-	"context"
-	"errors"
-	"fmt"
-	"os/exec"
-	"strings"
 	"time"
+
+	"github.com/drellem2/pogo/internal/vcs/gitvcs"
 )
 
 // commandBudget is how long ONE external command (a git subcommand, `mg list`)
@@ -39,7 +35,9 @@ import (
 var commandBudget = 90 * time.Second
 
 // ErrCommandBudget marks a command this package KILLED for exceeding
-// commandBudget, as opposed to one that ran and failed.
+// commandBudget, as opposed to one that ran and failed. It is
+// gitvcs.ErrCommandBudget: the runner moved to internal/vcs/gitvcs
+// (slice 3, mg-d72cb) and this name is kept for its callers.
 //
 // The distinction is the whole point of the error existing. "git status failed"
 // and "git status was still running after 90 seconds" send a reader to
@@ -47,63 +45,37 @@ var commandBudget = 90 * time.Second
 // — and an operator who reads the first when the second happened will go and
 // fsck a repository that is fine. Every renderer that prints a status failure
 // prints this text verbatim, so the distinction reaches the listing.
-var ErrCommandBudget = errors.New("still running after the per-command budget")
+var ErrCommandBudget = gitvcs.ErrCommandBudget
 
 // runSplit runs an external command under commandBudget and returns its stdout
-// and stderr separately.
+// and stderr separately. See gitvcs.RunSplit, which it calls with the budget
+// read at call time, so a test that shrinks commandBudget still bounds it.
 //
 // A command killed by the budget comes back wrapped in ErrCommandBudget; every
 // other failure comes back as the RAW error from os/exec, untouched, because
 // callers here read exit codes off it (`symbolic-ref` exits 1 for a detached
-// head, `merge-base --is-ancestor` exits 1 for "not an ancestor") and a wrapped
-// *exec.ExitError would defeat the type assertions that do that. The budget
-// error is safe to wrap precisely because a killed process never carries a
-// meaningful exit code — it carries "signal: killed", which no caller reads.
+// head, `merge-base --is-ancestor` exits 1 for "not an ancestor").
 func runSplit(name string, args ...string) (stdout, stderr []byte, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), commandBudget)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	var so, se bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &so, &se
-	rerr := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
-		return so.Bytes(), se.Bytes(), budgetError(name, args)
-	}
-	return so.Bytes(), se.Bytes(), rerr
+	return gitvcs.RunSplit(commandBudget, name, args...)
 }
 
 // runOutput is runSplit for callers that read stdout only — the shape
 // exec.Cmd.Output() had at these call sites before the bound existed.
 func runOutput(name string, args ...string) ([]byte, error) {
-	out, _, err := runSplit(name, args...)
-	if err != nil {
-		return out, err
-	}
-	return out, nil
+	return gitvcs.RunOutput(commandBudget, name, args...)
 }
 
-// runCombined is runSplit for callers that want stdout and stderr interleaved
-// the way exec.Cmd.CombinedOutput() gives them.
-//
-// The two buffers are concatenated rather than shared, so the ORDER within each
-// stream is git's and the order between them is not. Every caller of this uses
-// the result as an error message or reads a single line of stdout, and none
-// depends on the interleaving; the alternative — one shared buffer — would
-// reintroduce the defect WorktreeDirty was fixed for (a warning on stderr read
-// as a porcelain line), one function over.
+// runCombined is runSplit for callers that want stdout and stderr together the
+// way exec.Cmd.CombinedOutput() gives them. See gitvcs.RunCombined for why the
+// streams are concatenated rather than shared.
 func runCombined(name string, args ...string) ([]byte, error) {
-	so, se, err := runSplit(name, args...)
-	out := so
-	if len(se) > 0 {
-		out = append(append([]byte{}, so...), se...)
-	}
-	return out, err
+	return gitvcs.RunCombined(commandBudget, name, args...)
 }
 
-func budgetError(name string, args []string) error {
-	invocation := name
-	if len(args) > 0 {
-		invocation += " " + strings.Join(args, " ")
-	}
-	return fmt.Errorf("%s: %w of %s (killed)", invocation, ErrCommandBudget, commandBudget)
-}
+// work is this package's git Work backend. Its runner is runOutput, the one
+// the cherry calls used before they moved onto it, so they stay under
+// commandBudget and keep its raw-error shape.
+var work = gitvcs.Work{Run: func(dir, stdin string, args ...string) (string, error) {
+	out, err := runOutput("git", append([]string{"-C", dir}, args...)...)
+	return string(out), err
+}}
