@@ -488,6 +488,12 @@ func GetPlugins() ([]string, error) {
 	return plugins, nil
 }
 
+// ErrSearchDisabled is returned by every search entry point (pose, pogo refs,
+// pogo deps) when pogod lists no search plugin. Since mg-cabf4 that is the
+// default configuration — [search] enabled = false — so the error says how to
+// turn it on rather than reporting a missing plugin.
+var ErrSearchDisabled = errors.New(config.SearchDisabledMessage)
+
 func GetSearchPlugin() (string, error) {
 	plugins, err := GetPlugins()
 	if err != nil {
@@ -498,7 +504,7 @@ func GetSearchPlugin() (string, error) {
 			return plugin, nil
 		}
 	}
-	return "", errors.New("search plugin not found")
+	return "", ErrSearchDisabled
 }
 
 // searchProject sends one plugin search request for a single project root

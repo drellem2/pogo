@@ -86,7 +86,7 @@ Swap the prompts and set `[refinery] enabled = false` to drive research, content
 ## Batteries included
 
 - **Refinery** — runs quality gates and merges polecat branches to `main`. Deterministic, not an agent. Disable with `[refinery] enabled = false`.
-- **Discovery + search** — `lsp` lists known repos, `pose` searches across them (zoekt-backed); pogod indexes as you visit.
+- **Discovery + search** — `lsp` lists known repos as you visit them; `pose` searches across them (zoekt-backed). Search indexing is off by default — enable it with `[search] enabled = true` (see [docs/customizing.md](docs/customizing.md#bounding-what-pogo-indexes)).
 - **Integrations** — shell, editor (Emacs, Neovim, VS Code), and tmux. Installer `--interactive`, or see [docs/](docs/).
 
 ## Configuration

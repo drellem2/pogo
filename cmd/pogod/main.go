@@ -800,6 +800,17 @@ func file(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// searchDisabled answers a search request with 503 and the shared
+// how-to-enable message when search indexing is off, and reports whether it
+// did. 503 rather than 404: the endpoint exists, the service is switched off.
+func searchDisabled(w http.ResponseWriter) bool {
+	if driver.SearchEnabled() {
+		return false
+	}
+	http.Error(w, config.SearchDisabledMessage, http.StatusServiceUnavailable)
+	return true
+}
+
 func plugin(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /plugin")
 	switch r.Method {
@@ -808,6 +819,9 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 		path, err := url.QueryUnescape(encodedPath)
 		if err != nil {
 			fmt.Printf("Error urldecoding path variable: %v\n", err)
+			return
+		}
+		if driver.IsSearchPlugin(path) && searchDisabled(w) {
 			return
 		}
 		plugin := driver.GetPlugin(path)
@@ -829,6 +843,9 @@ func plugin(w http.ResponseWriter, r *http.Request) {
 		}
 
 		path := reqObj.Plugin
+		if driver.IsSearchPlugin(path) && searchDisabled(w) {
+			return
+		}
 		plugin := driver.GetPlugin(path)
 		if plugin == nil {
 			http.Error(w, "", http.StatusNotFound)
@@ -857,6 +874,10 @@ func projectById(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Visited /projects/{projectId}")
 	switch r.Method {
 	case "GET":
+		// A project's file list is served from the search index.
+		if searchDisabled(w) {
+			return
+		}
 		projectIdStr := r.PathValue("projectId")
 		// If projectIdStr blank we look at the queryParameter 'path'
 		if projectIdStr == "file" {
@@ -1623,6 +1644,13 @@ Flags:
 	// pathenv.Ensure misses (gh #25). Runs before any agent spawns.
 	if err := pathenv.EnsureExtra(cfg.Agents.ExtraPath); err != nil {
 		fmt.Printf("Warning: could not apply [agents] extra_path: %v\n", err)
+	}
+
+	// File-search indexing is off unless [search] enabled = true (mg-cabf4).
+	// Must precede driver.Init(), which is what leaves the search plugin out.
+	driver.SetSearchEnabled(cfg.SearchEnabled)
+	if !cfg.SearchEnabled {
+		log.Printf("pogod: search indexing disabled ([search] enabled = false); project index unaffected")
 	}
 
 	// Apply index-scope limits from config (mg-d205).

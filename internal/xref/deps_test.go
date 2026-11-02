@@ -1,6 +1,7 @@
 package xref
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -158,5 +159,24 @@ func TestBuildDepGraphDeduplication(t *testing.T) {
 	// The function returns after first match per repo, so only 1 edge
 	if len(graph.Edges) != 1 {
 		t.Fatalf("expected 1 deduplicated edge, got %d", len(graph.Edges))
+	}
+}
+
+// TestBuildDepGraphPropagatesSearchFailure: a whole-search failure (search
+// indexing disabled, mg-cabf4) must surface as an error, not as a graph with
+// nodes and no edges that reads as "nothing imports anything".
+func TestBuildDepGraphPropagatesSearchFailure(t *testing.T) {
+	tmp := t.TempDir()
+	repoA := filepath.Join(tmp, "repoA") + "/"
+	os.MkdirAll(repoA, 0755)
+	os.WriteFile(filepath.Join(repoA, "go.mod"), []byte("module github.com/example/repoA\n"), 0644)
+
+	getProjects := func() ([]ProjectInfo, error) { return []ProjectInfo{{Path: repoA}}, nil }
+	want := errors.New("search indexing is disabled")
+	searchAll := func(string, func(*SearchResponse)) error { return want }
+
+	graph, err := BuildDepGraph(getProjects, searchAll)
+	if !errors.Is(err, want) {
+		t.Fatalf("BuildDepGraph err = %v (graph %+v), want %v", err, graph, want)
 	}
 }

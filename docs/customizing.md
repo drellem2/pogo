@@ -514,13 +514,24 @@ the agents.
 
 ## Bounding what pogo indexes
 
-pogo auto-discovers and indexes git repos you visit. By default this is
-zero-config: visit a repo and search works. The `[search]` section of
-`~/.config/pogo/config.toml` bounds that behavior so a stray giant directory
-can't blow up indexing cost.
+pogo auto-discovers git repos you visit and keeps them in its project index
+(`lsp`, `pogo visit`, `GET /projects`). **File-search indexing** — the zoekt
+index behind `pose`, `pogo refs`, `pogo deps` and the editor search commands —
+is **off by default** (mg-cabf4): it re-walks every registered repo on a timer
+and writes an index into each one's `.pogo/search`, and nobody was using it.
+Turn it on with `[search] enabled = true` (or `POGO_SEARCH_ENABLED=true`) and
+restart pogod. With it off, the search commands fail with a message naming
+that key, and `/status` reports each project's `indexing_status` as
+`disabled`. The rest of the `[search]` section bounds indexing cost when it is
+on, so a stray giant directory can't blow it up. `index_roots` discovery runs
+either way.
 
 ```toml
 [search]
+# File-search indexing (pose, pogo refs, pogo deps, editor search). Default
+# false. The project index (lsp, pogo visit) does not depend on it.
+enabled = true
+
 # Per-tree file-count ceiling. A repo with more files than this is registered
 # but marked "skipped_too_large": it is not deep-indexed. Default 25000. This
 # is the backstop that catches generated-data directories no exclude list

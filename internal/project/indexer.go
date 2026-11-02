@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/search"
 )
 
@@ -164,8 +165,13 @@ func StartPeriodicIndexer(ctx context.Context, interval time.Duration) <-chan st
 	s := newReindexScheduler(interval)
 	sched.Store(s)
 	search.SearchService.SetOnIndexed(s.onIndexed)
-	logger.Info("project: periodic indexer started",
-		"interval", interval.String(), "max_backoff", s.max.String())
+	if driver.SearchEnabled() {
+		logger.Info("project: periodic indexer started",
+			"interval", interval.String(), "max_backoff", s.max.String())
+	} else {
+		logger.Info("project: search indexing disabled; periodic tick runs index_roots discovery only",
+			"interval", interval.String())
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -189,6 +195,12 @@ func StartPeriodicIndexer(ctx context.Context, interval time.Duration) <-chan st
 // backoff scheduler.
 func reindexTick(s *reindexScheduler, now time.Time) {
 	discoverNewRepos()
+	if !driver.SearchEnabled() {
+		// Search indexing is off (the default, mg-cabf4): index_roots
+		// discovery above is part of the project index and keeps running,
+		// but nothing is walked, hashed or written under <repo>/.pogo/search.
+		return
+	}
 	active := make(map[string]bool, len(projects))
 	for _, p := range Projects() {
 		active[p.Path] = true

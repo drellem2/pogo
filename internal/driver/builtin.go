@@ -12,8 +12,12 @@ import (
 
 type BuiltinFactory func() (pogoPlugin.IPogoPlugin, error)
 
+// SearchPluginName is the built-in file-search plugin's registry name — the
+// string /plugins returns and every search client looks for.
+const SearchPluginName = "pogo-plugin-search"
+
 var builtinPlugins = map[string]BuiltinFactory{
-	"pogo-plugin-search":      searchPlugin.New(),
+	SearchPluginName:          searchPlugin.New(),
 	"pogo-plugin-diagnostics": diagnosticsPlugin.New(),
 }
 

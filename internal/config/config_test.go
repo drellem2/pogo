@@ -1811,3 +1811,53 @@ sme = "pm-example"
 		t.Errorf("nil SMEName() = %q, want \"\"", got)
 	}
 }
+
+// TestSearchEnabledDefaultOff: file-search indexing is off unless configured
+// (mg-cabf4) — with no config file and no env var, SearchEnabled is false.
+func TestSearchEnabledDefaultOff(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("POGO_HOME", t.TempDir())
+	t.Setenv("POGO_SEARCH_ENABLED", "")
+
+	if cfg := Load(); cfg.SearchEnabled {
+		t.Errorf("SearchEnabled = true with no config; search indexing must be off by default")
+	}
+}
+
+func TestSearchEnabledConfigFileAndEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("POGO_HOME", t.TempDir())
+	t.Setenv("POGO_SEARCH_ENABLED", "")
+	pogoDir := filepath.Join(dir, "pogo")
+	os.MkdirAll(pogoDir, 0755)
+	os.WriteFile(filepath.Join(pogoDir, "config.toml"), []byte("[search]\nenabled = true\n"), 0644)
+
+	if cfg := Load(); !cfg.SearchEnabled {
+		t.Errorf("[search] enabled = true not honored")
+	}
+	t.Setenv("POGO_SEARCH_ENABLED", "false")
+	if cfg := Load(); cfg.SearchEnabled {
+		t.Errorf("POGO_SEARCH_ENABLED=false did not override [search] enabled = true")
+	}
+}
+
+// TestSearchEnabledLayering: a $POGO_HOME/config.toml `enabled = false`
+// overrides ~/.config's `true`, and a layer that omits the key keeps it.
+func TestSearchEnabledLayering(t *testing.T) {
+	xdg, home := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("POGO_HOME", home)
+	t.Setenv("POGO_SEARCH_ENABLED", "")
+	os.MkdirAll(filepath.Join(xdg, "pogo"), 0755)
+	os.WriteFile(filepath.Join(xdg, "pogo", "config.toml"), []byte("[search]\nenabled = true\n"), 0644)
+
+	os.WriteFile(filepath.Join(home, "config.toml"), []byte("[search]\nmax_files_per_tree = 100\n"), 0644)
+	if cfg := Load(); !cfg.SearchEnabled {
+		t.Errorf("a layer that omits [search] enabled dropped the lower layer's true")
+	}
+	os.WriteFile(filepath.Join(home, "config.toml"), []byte("[search]\nenabled = false\n"), 0644)
+	if cfg := Load(); cfg.SearchEnabled {
+		t.Errorf("$POGO_HOME/config.toml enabled = false did not override ~/.config's true")
+	}
+}

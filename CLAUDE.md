@@ -19,7 +19,10 @@ Use this to find local repos, discover what's available, or locate related proje
 
 ### `pose` - Search across projects
 
-Searches code across all indexed repositories using zoekt.
+Searches code across all indexed repositories using zoekt. **Search indexing
+is off by default** (mg-cabf4): unless `[search] enabled = true` is set in
+pogod's `config.toml`, `pose` exits with "search indexing is disabled; enable
+with …". `lsp` and `pogo visit` do not depend on it.
 
 ```bash
 pose QUERY           # Search all indexed repos (results sorted by match count)

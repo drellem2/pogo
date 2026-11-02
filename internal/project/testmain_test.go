@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
+	"github.com/drellem2/pogo/internal/driver"
 	"github.com/drellem2/pogo/internal/search"
 	"github.com/drellem2/pogo/internal/testsandbox"
 )
@@ -39,6 +40,11 @@ var sandbox *testsandbox.Sandbox
 func TestMain(m *testing.M) {
 	sb, down := testsandbox.Main("project")
 	sandbox = sb
+
+	// Search indexing is off by default in pogod (mg-cabf4), but most tests
+	// here exercise the search plugin through Init/Add/Visit. Opt them in;
+	// the tests of the off default turn it back off for themselves.
+	driver.SetSearchEnabled(true)
 
 	if err := provisionTestdataRepos(); err != nil {
 		down()

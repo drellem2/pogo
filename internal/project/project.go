@@ -295,12 +295,18 @@ type ProjectStatusResponse struct {
 
 func GetProjectStatuses() []ProjectStatusResponse {
 	statuses := make([]ProjectStatusResponse, 0, len(projects))
+	searchOn := driver.SearchEnabled()
 	for _, p := range projects {
-		s := search.SearchService.GetStatus(p.Path)
 		status := ProjectStatusResponse{
 			Id:   p.Id,
 			Path: p.Path,
 		}
+		if !searchOn {
+			status.Status = search.StatusDisabled
+			statuses = append(statuses, status)
+			continue
+		}
+		s := search.SearchService.GetStatus(p.Path)
 		if s != nil {
 			status.Status = s.Status
 			status.FileCount = s.FileCount

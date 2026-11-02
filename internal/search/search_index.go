@@ -55,6 +55,10 @@ const (
 	StatusReady           IndexingStatus = "ready"
 	StatusStale           IndexingStatus = "stale"
 	StatusSkippedTooLarge IndexingStatus = "skipped_too_large"
+	// StatusDisabled is reported for every project while search indexing is
+	// off ([search] enabled = false, the default since mg-cabf4): nothing is
+	// indexed, and that is the configuration, not a failure.
+	StatusDisabled IndexingStatus = "disabled"
 )
 
 type IndexedProject struct {

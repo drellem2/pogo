@@ -74,7 +74,10 @@ func BuildDepGraph(getProjects GetProjectsFunc, searchAll SearchAllFunc) (*DepGr
 
 	// Step 3: For each module path, search across all repos for imports
 	for modPath, modRepo := range moduleToRepo {
-		searchAll(modPath, func(resp *SearchResponse) {
+		// A returned error is a whole-search failure (e.g. search indexing is
+		// disabled); per-repo failures arrive as resp.Error. Dropping it
+		// printed an edgeless graph as if nothing imported anything (mg-cabf4).
+		err := searchAll(modPath, func(resp *SearchResponse) {
 			if resp.Error != "" || resp.Index.Root == modRepo {
 				return // skip self-references and errors
 			}
@@ -95,6 +98,9 @@ func BuildDepGraph(getProjects GetProjectsFunc, searchAll SearchAllFunc) (*DepGr
 				}
 			}
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Deduplicate edges

@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 
 	"github.com/drellem2/pogo/internal/config"
 	pogoPlugin "github.com/drellem2/pogo/pkg/plugin"
@@ -76,6 +78,11 @@ func GetPluginClient(path string) *plugin.Client {
 }
 
 func GetPlugin(path string) *pogoPlugin.IPogoPlugin {
+	if IsSearchPlugin(path) && !SearchEnabled() {
+		// Never fall through to checkAlive: for a path it has not loaded it
+		// exec's the path as an external plugin binary.
+		return nil
+	}
 	checkAlive(path)
 	return Interfaces[path]
 }
@@ -125,6 +132,31 @@ func (g *PluginManager) ProcessProject(req *pogoPlugin.IProcessProjectReq) error
 	return nil
 }
 
+// searchEnabled gates the file-search plugin. Off unless pogod calls
+// SetSearchEnabled(true) from [search] enabled (mg-cabf4). Read by Init, the
+// /plugin handler and GetPlugin; set once at startup before Init.
+var searchEnabled atomic.Bool
+
+// SetSearchEnabled records whether the file-search plugin may be loaded. Call
+// it before Init: Init is what leaves the plugin out of Interfaces, which is
+// what keeps it out of /plugins and out of every ProcessProject fan-out (the
+// startup index pass and `pogo visit` registration).
+func SetSearchEnabled(enabled bool) {
+	searchEnabled.Store(enabled)
+}
+
+// SearchEnabled reports whether the file-search plugin is enabled.
+func SearchEnabled() bool {
+	return searchEnabled.Load()
+}
+
+// IsSearchPlugin reports whether path names the file-search plugin, built-in
+// or an external binary of the same name. It matches the way clients find it
+// (a substring match on SearchPluginName).
+func IsSearchPlugin(path string) bool {
+	return strings.Contains(filepath.Base(path), SearchPluginName)
+}
+
 func Init() {
 	gob.Register(pogoPlugin.ProcessProjectReq{})
 	clients = make(map[string]*plugin.Client)
@@ -135,6 +167,10 @@ func Init() {
 	}
 
 	for name, plugin := range builtinRegistry {
+		if name == SearchPluginName && !SearchEnabled() {
+			logger.Info("search indexing disabled; not loading plugin", "name", name)
+			continue
+		}
 		if Interfaces[name] != nil {
 			logger.Debug("Found runtime copy of plugin, skipping builtin", "name", name)
 		} else {
@@ -178,6 +214,10 @@ func discoverExternalPlugins(pluginPath string) {
 	}
 	fmt.Printf("Discovered %d plugins in dir %s: %v\n", len(paths), pluginPath, paths)
 	for _, path := range paths {
+		if IsSearchPlugin(path) && !SearchEnabled() {
+			logger.Info("search indexing disabled; not starting external plugin", "path", path)
+			continue
+		}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {

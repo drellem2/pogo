@@ -113,6 +113,15 @@ const DefaultMaxFilesPerTree = 25000
 // docs/design/indexing-strategy.md and mg-5b0d.
 const DefaultIndexInterval = 2 * time.Minute
 
+// SearchDisabledMessage is what every search entry point — pogod's /plugin
+// and /projects/{id} handlers, `pose`, `pogo refs`, `pogo deps` — reports when
+// the built-in file-search indexer is off. Search indexing is off by default
+// (mg-cabf4): over three weeks of request logs and transcripts nobody called a
+// search endpoint, while the indexer kept re-walking and rebuilding a zoekt
+// index under every registered repo every two minutes. One string so the
+// clients and the daemon cannot drift apart on how to turn it back on.
+const SearchDisabledMessage = "search indexing is disabled; enable with `[search] enabled = true` in config.toml (or POGO_SEARCH_ENABLED=true) and restart pogod"
+
 // DefaultGitGCInterval is how often pogod runs the polecat git garbage
 // collector (stale `polecat-*` branch + leaked worktree cleanup). Hourly is
 // deliberately conservative: the GC is a backstop for the per-exit cleanup,
@@ -952,17 +961,24 @@ type Config struct {
 	// zero-config behavior: any visited git repo may be auto-registered,
 	// bounded by MaxFilesPerTree and the default-exclude patterns.
 	IndexRoots []string
-	Refinery   RefineryConfig
-	Agents     AgentsConfig
-	Heartbeat  HeartbeatConfig
-	GitGC      GitGCConfig
-	StallWatch StallWatchConfig
-	Reaper     ReaperConfig
-	Reconcile  ReconcileConfig
-	DriftWatch DriftWatchConfig
-	CredExpiry CredExpiryConfig
-	GHTeardown GHTeardownConfig
-	GHIntake   GHIntakeConfig
+	// SearchEnabled turns on the built-in file-search indexer
+	// (pogo-plugin-search): the startup index pass, the periodic re-index of
+	// every registered project, and the zoekt index under <repo>/.pogo/search.
+	// Off by default ([search] enabled, POGO_SEARCH_ENABLED) — see
+	// SearchDisabledMessage. The project index (`pogo visit`, `lsp`,
+	// /projects, /file) and index_roots discovery do not depend on it.
+	SearchEnabled bool
+	Refinery      RefineryConfig
+	Agents        AgentsConfig
+	Heartbeat     HeartbeatConfig
+	GitGC         GitGCConfig
+	StallWatch    StallWatchConfig
+	Reaper        ReaperConfig
+	Reconcile     ReconcileConfig
+	DriftWatch    DriftWatchConfig
+	CredExpiry    CredExpiryConfig
+	GHTeardown    GHTeardownConfig
+	GHIntake      GHIntakeConfig
 	// CarrierDrift is the gh-issue carrier RE-READ (mg-5d9d), the third member
 	// of the triple whose other two are GHIntake (an open issue with no carrier)
 	// and GHTeardown (a done carrier whose issue stayed open). This one covers
@@ -2840,6 +2856,10 @@ func Load() *Config {
 		if len(fileCfg.IndexRoots) > 0 {
 			cfg.IndexRoots = fileCfg.IndexRoots
 		}
+		// Default false, so the layered value can be copied as-is: a later
+		// file that sets `enabled = false` overrides an earlier `true`, and a
+		// file that leaves the key out keeps whatever the earlier layer said.
+		cfg.SearchEnabled = fileCfg.SearchEnabled
 		cfg.Agents = fileCfg.Agents
 		if !fileCfg.agentsAutoStartSet {
 			// The wholesale Agents copy above clobbers the default; restore
@@ -3475,6 +3495,13 @@ func Load() *Config {
 		cfg.Agents.ExtraPath = filepath.SplitList(extra)
 	}
 
+	// POGO_SEARCH_ENABLED overrides [search] enabled from the config file.
+	if v := os.Getenv("POGO_SEARCH_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.SearchEnabled = b
+		}
+	}
+
 	// POGO_AGENT_AUTOSTART overrides [agents] autostart from the config file.
 	if v := os.Getenv("POGO_AGENT_AUTOSTART"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -3957,6 +3984,8 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			}
 		case "search":
 			switch key {
+			case "enabled":
+				cfg.SearchEnabled = val == "true"
 			case "max_files_per_tree":
 				if mf, err := strconv.Atoi(val); err == nil && mf > 0 {
 					cfg.MaxFilesPerTree = mf

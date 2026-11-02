@@ -46,6 +46,10 @@
   "Toggle visibility of the Pogo menu in the menu bar.")
 (defvar pogo-search-plugin nil)
 (defvar pogo-search-plugin-name "pogo-plugin-search")
+
+(defconst pogo-search-disabled-message
+  "search indexing is disabled; enable with `[search] enabled = true` in config.toml (or POGO_SEARCH_ENABLED=true) and restart pogod"
+  "Shown when pogod lists no search plugin (search indexing is off by default).")
 (defvar pogo-process nil)
 (defvar pogo--is-windows
   (or
@@ -1081,10 +1085,9 @@ An open project is a project with any open buffers."
                           resp))
          (search-plugin (cond
                          ((= 0 (length search-plugins))
-                          (progn
-                            (pogo-log
-                             "Warning: No result found for %s" pogo-search-plugin-name)
-                            nil))
+                          ;; pogod lists no search plugin: search indexing
+                          ;; is off, the default since mg-cabf4.
+                          (user-error "pogo: %s" pogo-search-disabled-message))
                          ((= 1 (length search-plugins)) (car search-plugins))
                          (t (progn
                               (pogo-log

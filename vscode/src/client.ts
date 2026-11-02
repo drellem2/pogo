@@ -144,6 +144,10 @@ export async function getStatus(): Promise<ProjectStatus[]> {
 
 let searchPluginCache: string | null = null;
 
+/** Shown when pogod lists no search plugin: search indexing is off by default (mg-cabf4). */
+export const SEARCH_DISABLED_MESSAGE =
+  "search indexing is disabled; enable with `[search] enabled = true` in config.toml (or POGO_SEARCH_ENABLED=true) and restart pogod";
+
 async function getSearchPlugin(): Promise<string | null> {
   if (searchPluginCache) {
     return searchPluginCache;
@@ -153,8 +157,10 @@ async function getSearchPlugin(): Promise<string | null> {
     const found = plugins.find((p) => p.includes("pogo-plugin-search"));
     if (found) {
       searchPluginCache = found;
+      return found;
     }
-    return found || null;
+    vscode.window.showErrorMessage(`pogo: ${SEARCH_DISABLED_MESSAGE}`);
+    return null;
   } catch {
     return null;
   }

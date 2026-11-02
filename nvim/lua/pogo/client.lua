@@ -141,6 +141,10 @@ function M.get_project_files(path)
   return {}
 end
 
+--- Shown when pogod lists no search plugin: search indexing is off by
+--- default (mg-cabf4).
+M.SEARCH_DISABLED_MESSAGE = "search indexing is disabled; enable with `[search] enabled = true` in config.toml (or POGO_SEARCH_ENABLED=true) and restart pogod"
+
 --- Get the search plugin path (cached)
 ---@return string|nil plugin_path
 function M.get_search_plugin()
@@ -165,7 +169,7 @@ end
 function M.search(project_root, query)
   local plugin_path = M.get_search_plugin()
   if not plugin_path then
-    vim.notify("[pogo] search plugin not found", vim.log.levels.ERROR)
+    vim.notify("[pogo] " .. M.SEARCH_DISABLED_MESSAGE, vim.log.levels.ERROR)
     return nil
   end
 

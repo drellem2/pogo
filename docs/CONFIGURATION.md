@@ -44,6 +44,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | Section | Key | Default | Kind | What it does when it fires |
 |---|---|---|---|---|
 | `[server]` | — | — | plumbing | Sets pogod's listen port and bind address. |
+| `[search]` | `enabled` | off | ACTS | File-search indexing for `pose`, `pogo refs`, `pogo deps` and editor search. When on, it walks every registered repo at startup and again every `index_interval`, and writes a zoekt index into each repo's `.pogo/search` plus a matching `.git/info/exclude` line. When off, those commands report that search is disabled. The project index (`lsp`, `pogo visit`) and `index_roots` discovery work either way. Code: `internal/search`, gated in `internal/driver`. |
 | `[search]` | — | — | plumbing | Sets the indexer's limits and roots. The indexer reads your repos and writes only its own index. |
 | `[service]` | — | — | plumbing | Sets which program `pogo service install` writes into the launchd plist or systemd unit (`launcher`; default: pogod on PATH). Read only by the installer and the plist audit, never by pogod. See [Service launcher](#service-launcher). |
 | `[heartbeat]` | — | — | plumbing | Sets the tick that drives every watcher below, and the clock-jump threshold. |

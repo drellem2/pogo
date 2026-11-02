@@ -36,6 +36,11 @@ func TestMain(m *testing.M) {
 	sb, down := testsandbox.Main("driver")
 	sandbox = sb
 
+	// Search indexing is off by default in pogod (mg-cabf4), but most tests
+	// here exercise the search plugin through Init/Add/Visit. Opt them in;
+	// the tests of the off default turn it back off for themselves.
+	SetSearchEnabled(true)
+
 	code := m.Run()
 
 	down()
