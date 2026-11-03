@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
 
@@ -75,6 +76,20 @@ type Options struct {
 	Force bool
 	// Logf, when set, receives a line per action for progress logging.
 	Logf func(format string, args ...any)
+	// VCS is the backend the project record names for Repo (project.VCSOf in
+	// pogod; the registry entry for `pogo gc`). Empty means git, which is what
+	// every repo was before enth selection existed.
+	//
+	// A repo that is NOT git gets none of the git phases (mg-0ff9c): an
+	// enth-born project has no .git, so `git worktree list` fails "not a git
+	// repository" and pogod raised a degraded condition that could never clear;
+	// and a repo cut over to enth that still carries its old .git would have
+	// its git-era branches and worktree registrations judged by rules that no
+	// longer describe where its work lives. Its polecats' trees are enth
+	// checkouts under PolecatsDir, which phase 1b already judges through
+	// `enth status` whichever repo is being swept — so that scan, and the
+	// session-temp scan beside it, still run. Result.GitSkipped says so.
+	VCS vcs.Kind
 }
 
 func (o Options) logf(format string, args ...any) {
@@ -159,6 +174,13 @@ type Result struct {
 	SessionTempKept    []SessionTempAction
 	PruneOutput        string
 	Errors             []string
+	// VCS is the backend the sweep was told Repo uses ("" = git).
+	VCS vcs.Kind
+	// GitSkipped, when non-empty, says why the git phases (worktree list,
+	// prune, branches) did not run for Repo: it is not a git repository to
+	// pogo (Options.VCS). Stated, never silent, so a sweep that covered less
+	// does not read as one that found nothing (mg-0ff9c).
+	GitSkipped string
 }
 
 // Sweep runs one GC pass over opts.Repo:
@@ -192,7 +214,23 @@ func Sweep(opts Options) (Result, error) {
 		tickets = loaded
 	}
 
-	res := Result{Repo: opts.Repo, DryRun: opts.DryRun}
+	res := Result{Repo: opts.Repo, DryRun: opts.DryRun, VCS: opts.VCS}
+
+	// A repo whose project record names another backend is not swept as git
+	// (see Options.VCS). Only the repo-independent scans run: they judge the
+	// directories under PolecatsDir, enth checkouts included, and touch no
+	// git state of Repo's.
+	if opts.VCS != "" && opts.VCS != vcs.Git {
+		res.GitSkipped = fmt.Sprintf("vcs=%s, not git: worktree, prune and branch phases skipped; "+
+			"polecat trees under the polecats dir still judged", opts.VCS)
+		if opts.PolecatsDir != "" {
+			// No registrations to exclude: sweepOrphanDirs leaves any dir
+			// with a .git entry alone on its own account.
+			sweepOrphanDirs(opts, tickets, map[string]bool{}, &res)
+			sweepOrphanSessionTemp(opts, tickets, &res)
+		}
+		return res, nil
+	}
 
 	// --- Phase 1: worktrees ---------------------------------------------
 	worktrees, err := ListWorktrees(opts.Repo)
@@ -692,6 +730,9 @@ func (r Result) Summary() string {
 		delVerb = "would delete"
 	}
 	fmt.Fprintf(&b, "git GC sweep of %s%s\n", r.Repo, dryRunTag(r.DryRun))
+	if r.GitSkipped != "" {
+		fmt.Fprintf(&b, "  coverage:  %s\n", r.GitSkipped)
+	}
 	fmt.Fprintf(&b, "  worktrees: %s %d, kept %d\n", verb, len(r.WorktreesRemoved), len(r.WorktreesKept))
 	fmt.Fprintf(&b, "  branches:  %s %d, kept %d\n", delVerb, len(r.BranchesDeleted), len(r.BranchesKept))
 	if len(r.SessionTempRemoved) > 0 || len(r.SessionTempKept) > 0 {

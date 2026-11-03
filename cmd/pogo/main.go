@@ -4806,8 +4806,13 @@ parseable document while a human can still watch the scan move.`,
 			// Best-effort: without a resolvable home dir the orphan-dir
 			// scan is skipped and gc still sweeps branches and worktrees.
 			polecatsDir, _ := gitgc.DefaultPolecatsDir()
+			kind, kindNote := gcRepoVCS(repo)
+			if kindNote != "" && !jsonOutput {
+				fmt.Println(kindNote)
+			}
 			res, err := gitgc.Sweep(gitgc.Options{
 				Repo:         repo,
+				VCS:          kind,
 				LivePolecats: live,
 				DryRun:       !gcApply,
 				PolecatsDir:  polecatsDir,

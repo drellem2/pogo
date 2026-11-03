@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/vcs"
 )
@@ -108,4 +109,27 @@ func withTokenFile(p project.Project, tokenFile string) (*vcs.EnthRepo, error) {
 	e.WorkspacePaths = append([]string(nil), p.Enth.WorkspacePaths...)
 	e.TokenFile = tokenFile
 	return &e, nil
+}
+
+// gcRepoVCS is the backend `pogo gc --repo` sweeps repo as: the kind pogod's
+// project record names (mg-0ff9c). An enth project is not swept as git — its
+// worktree and branch phases are skipped and the summary's coverage line says
+// so. When pogod cannot be asked, or repo has no record, the answer is git,
+// which is what gc assumed before vcs selection existed; the note says which,
+// so a sweep that fell back does not read as one that checked.
+func gcRepoVCS(repo string) (vcs.Kind, string) {
+	projs, err := client.GetProjects()
+	if err != nil {
+		return vcs.Git, fmt.Sprintf("note: could not ask pogod for %s's vcs (%v); sweeping it as git", repo, err)
+	}
+	return gcKindOf(projs, repo), ""
+}
+
+// gcKindOf is gcRepoVCS's lookup over the records, split out so it is testable
+// without a daemon. A repo with no record is git.
+func gcKindOf(projs []project.Project, repo string) vcs.Kind {
+	if p, ok := findProject(projs, repo); ok {
+		return p.Kind()
+	}
+	return vcs.Git
 }
