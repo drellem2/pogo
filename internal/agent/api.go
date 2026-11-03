@@ -18,6 +18,7 @@ import (
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/hookarm"
+	"github.com/drellem2/pogo/internal/strandedwork"
 	"github.com/drellem2/pogo/internal/synthfail"
 	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/vcs/gitvcs"
@@ -1910,14 +1911,35 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	//
 	// Passing both is refused rather than resolved by precedence — see
 	// conflictingStrandedExits.
+	//
+	// ON AN ENTH REPO the git gate is not consulted (mg-e2ab1): the project path
+	// is an enth checkout with no .git, so it could only fail open. The item's
+	// unlanded trailer listing judges instead (enthStrandedCheck), an unreadable
+	// listing is alerted once the spawn is out (enthUnchecked), and an adopt is
+	// resolved further down by resolveEnthAdoption, from the same listing.
 	var adoption *strandedAdoption
-	if findings, refusal := r.strandedWorkCheck(spawnReq.Id, spawnReq.Repo, spawnReq.Branch); refusal != "" {
+	var findings []strandedwork.Finding
+	var strandedRefusal string
+	var enthUnchecked *EnthStranded
+	enthGate := enthRepoFor(spawnReq.Repo)
+	if enthGate != nil {
+		strandedRefusal, enthUnchecked = r.enthStrandedCheck(*enthGate, spawnReq.Id, spawnReq.Name, spawnReq.Repo)
+	} else {
+		findings, strandedRefusal = r.strandedWorkCheck(spawnReq.Id, spawnReq.Repo, spawnReq.Branch)
+	}
+	if refusal := strandedRefusal; refusal != "" {
 		override := strings.TrimSpace(spawnReq.StrandedOverride)
 		adopt := strings.TrimSpace(spawnReq.StrandedAdopt)
 		switch {
 		case adopt != "" && override != "":
 			failPolecatSpawn(w, spawnReq, http.StatusConflict, conflictingStrandedExits+".\n\n"+refusal)
 			return
+		case adopt != "" && enthGate != nil:
+			// Not adoptableFinding: an enth repo has no branch to base a
+			// worktree on. The enth adoption block below lists the item's
+			// stack and makes the checkout at its top, or refuses.
+			log.Printf("dispatch stranded-work: enth item %s refused by the gate, ADOPT requested (%s) — "+
+				"resolving the stack from the trailer listing below (refusal was: %s)", spawnReq.Id, adopt, refusal)
 		case adopt != "":
 			f, ok := adoptableFinding(findings)
 			if !ok {
@@ -2173,6 +2195,17 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// is refused here rather than degraded into an ordinary spawn. It comes after
 	// the gate because only here is the worktree decision actually resolved
 	// (frontmatter beats the request, and both can turn it off).
+	// The same rule for an enth adopt, whose stack is resolved only further
+	// down and only when a checkout is made: without one, the flag would be
+	// dropped silently and the spawn would go out from nowhere in particular.
+	if enthGate != nil && strings.TrimSpace(spawnReq.StrandedAdopt) != "" && !createWorktree {
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, fmt.Sprintf(
+			"--stranded-adopt was given for %s on enth repo %s, but this spawn creates NO checkout "+
+				"(--no-worktree, or the template declares worktree = false), so there is nothing for the "+
+				"item's unlanded Changes to be adopted into. Nothing was dispatched",
+			spawnReq.Id, enthGate.Repo))
+		return
+	}
 	if adoption != nil && !createWorktree {
 		failPolecatSpawn(w, spawnReq, http.StatusConflict, fmt.Sprintf(
 			"--stranded-adopt was given for %s, but this spawn creates NO worktree (--no-worktree, or the "+
@@ -2237,7 +2270,9 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			if trunk == "" {
 				trunk = vcs.DefaultEnthTrunk
 			}
-			emitPolecatStrandedAdopted(spawnReq, a.record(trunk))
+			rec := a.record(trunk)
+			rec.Refusal = strandedRefusal
+			emitPolecatStrandedAdopted(spawnReq, rec)
 			log.Printf("dispatch stranded-work: ADOPTING enth stack of %s (top %s, %d Change(s)) by explicit request: %s",
 				spawnReq.Id, a.Stack.Ref, len(a.Stack.Changes), reason)
 		}
@@ -2664,6 +2699,18 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// enumerates live polecats' boxes as the backstop for a pointer that failed.
 	// A polecat with no mail-check is therefore the healthy state, not a deaf one.
 	r.registerPolecatMailboxes(spawnReq.Name, spawnReq.Id)
+
+	// The enth stranded gate could not read the item's listing and let this
+	// dispatch through (mg-e2ab1, enthstrandedgate.go). Now that it HAS gone
+	// out, say so: in the response, and by event and mail.
+	if enthUnchecked != nil {
+		warning := enthDispatchUncheckedWarning(spawnReq.Id, spawnReq.Repo, enthUnchecked)
+		if spawnBase.Warning != "" {
+			warning = spawnBase.Warning + "; " + warning
+		}
+		spawnBase.Warning = warning
+		alertEnthDispatchUnchecked(spawnReq, enthUnchecked)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

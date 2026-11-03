@@ -24,8 +24,8 @@ import (
 // item carrying one unlanded Change: the release reporter logged "could NOT
 // check branch polecat-<name> … exit status 128" and sent no event and no mail;
 // the sweep counted it Unjudged, log only. Neither reached a reader outside
-// pogod.log. (The dispatch gate failed open the same way — see the note on
-// GitStrandedWorkGate; it is outside this slice.)
+// pogod.log. (The dispatch gate failed open the same way; mg-e2ab1 gave it the
+// same listing — see enthstrandedgate.go.)
 //
 // WHAT "STRANDED" MEANS ON ENTH. Unlanded, non-superseded Changes carrying the
 // item's Pogo-Item trailer, on an item no live polecat is working. That is the
@@ -43,6 +43,10 @@ import (
 // AN UNREADABLE LISTING ALERTS. "Could not ask enthd" is not "no work": the
 // alert goes out saying so, as slice 9's unreadable-queue rule did — a check
 // whose failure reads as clean is the defect these detectors exist to close.
+
+// enthUnlandedForItemFn is the listing judgeEnthItem reads. A var so a test
+// can make the listing fail while the checkout behind it still works.
+var enthUnlandedForItemFn = enthUnlandedForItem
 
 // enthStrandedProbeTimeout bounds one item's unlanded listing. It sits on the
 // claim-release path, so it must not hold a release open indefinitely.
@@ -75,7 +79,7 @@ type enthJudgement struct {
 // A witness that cannot be read leaves InFlight to the registry alone: the
 // error direction is toward alerting, never toward suppressing.
 func (r *Registry) judgeEnthItem(e vcs.EnthRepo, item, self string) enthJudgement {
-	cs, err := enthUnlandedForItem(e, item)
+	cs, err := enthUnlandedForItemFn(e, item)
 	if err != nil {
 		return enthJudgement{ListErr: err}
 	}
@@ -344,6 +348,11 @@ func (r *Registry) sweepEnthCandidate(e vcs.EnthRepo, c UnadoptablePolecat, rep 
 func (a StrandedAlert) enthMessage() (subject, body string) {
 	es := a.Enth
 	item := a.WorkItemID
+	if a.Route == RouteDispatch && es.Work == nil {
+		// The dispatch gate's unreadable listing: the dispatch already went
+		// out, so "do not dispatch" would be false (enthstrandedgate.go).
+		return a.enthDispatchUncheckedMessage()
+	}
 	var b strings.Builder
 	if es.Work == nil {
 		subject = fmt.Sprintf("[stranded-push] could not list %s's enth work after %s stopped — do NOT dispatch at %s until it is checked",
