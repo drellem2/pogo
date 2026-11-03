@@ -93,7 +93,7 @@ type StrandedAlert struct {
 	SecondOpinion string
 }
 
-// The two routes a stranded-work alert can arrive by.
+// The routes a stranded-work alert can arrive by.
 const (
 	// RouteRelease is the original gate: pogod released a polecat's claim and
 	// the branch had unmerged work. The polecat is gone, so the branch is final.
@@ -103,6 +103,10 @@ const (
 	// gate at all, because it outlived the pogod that spawned it. See
 	// strandedsweep.go.
 	RouteRestartSweep = "restart_sweep"
+
+	// RouteDispatch is the spawn-time stranded-work gate: the dispatch onto the
+	// work item is what found the work.
+	RouteDispatch = "dispatch"
 )
 
 // strandedAlertMail is the mail sink, swappable for tests. Production sends via

@@ -414,11 +414,16 @@ emitted and no `[stranded-push]` mail was sent (drellem2/pogo#147, mg-dbb75).
 On the PR track a builder is stopped to wait for its review with its work
 pushed and unmerged, which against the default branch looks exactly like lost
 work. Emitted by the release gate and by the startup sweep (whose
-`work_item_stranded_sweep` also counts these under `awaiting_review`).
+`work_item_stranded_sweep` also counts these under `awaiting_review`), and by
+the **dispatch** gate (drellem2/pogo#163, mg-64751): a branch attributable to
+the item being dispatched that is the head of an open PR no longer refuses the
+spawn, and this event — with `agent` `"pogod"`, since the spawned agent does not
+exist yet — records that it was set aside.
 
 The check is `gh pr view <branch>` on the origin branch the head is on. **A
 failed check never produces this event**: the alert goes out as before, with
-`pr_probe_error` on its `work_item_stranded_push`. This event exists so the
+`pr_probe_error` on its `work_item_stranded_push`, and at dispatch the spawn is
+still refused (409), with a sentence saying the PR check could not run. This event exists so the
 suppression is countable — without it, "correctly suppressed" and "the
 detector stopped working" are the same silence. Additive — no `schema_version`
 bump.
@@ -433,8 +438,8 @@ bump.
   - `pr_branch` (string, required): the branch the PR was found on — `branch` itself, or the PR head a reviewer checked out
   - `owner_item` (string, required): the work-item id the commit subjects name, or `""`
   - `unmerged` (int, required): how many commits the target does not have
-  - `reason` (string, required): the release reason, or the sweep's
-  - `route` (string, required): `"release"` or `"restart_sweep"`
+  - `reason` (string, required): the release reason, the sweep's, or `"dispatch onto the work item"`
+  - `route` (string, required): `"release"`, `"restart_sweep"` or `"dispatch"`
 
 ```json
 {"schema_version":1,"timestamp":"2026-09-28T17:30:00.000000000Z","event_type":"work_item_push_awaiting_review","agent":"cat-pa95f","work_item_id":"mg-a95f","repo":"/Users/daniel/dev/pogo","details":{"branch":"polecat-pa95f","ref":"refs/remotes/origin/polecat-pa95f","origin_ref":"refs/remotes/origin/polecat-pa95f","target":"refs/remotes/origin/main","pr":146,"pr_branch":"polecat-pa95f","owner_item":"mg-a95f","unmerged":1,"reason":"agent_stopped","route":"release"}}
