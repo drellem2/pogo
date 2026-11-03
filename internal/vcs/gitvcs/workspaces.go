@@ -34,6 +34,9 @@ type Workspaces struct {
 	// FetchTimeout bounds ResolveBase's fetch, wall clock, across the narrow
 	// attempt and its wide retry. Zero means no fetch can succeed in time.
 	FetchTimeout time.Duration
+	// RunSplit runs Dirty's `git status`. Nil means an unbounded exec;
+	// internal/gitgc passes its budgeted runner.
+	RunSplit SplitFunc
 }
 
 var _ vcs.Workspaces = Workspaces{}

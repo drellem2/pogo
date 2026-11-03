@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/strandwatch"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // exitStrandedUsage is `pogo check-stranded`'s exit code for a malformed
@@ -485,8 +487,9 @@ func refineryMergeHistory() (strandwatch.RefineryHistory, error) {
 // all belongs to closed items — which is exactly how a repository holding a
 // polecat worktree came to appear NOWHERE in a report that read as a full sweep.
 //
-// The REPO is taken from git's own answer (`rev-parse --git-common-dir`) rather
-// than from the agent registry, for the reason gitgc.PolecatNameForWorktree
+// The REPO is taken from git's own answer (`rev-parse --git-common-dir`, asked
+// through vcs.Workspaces.Describe) rather than from the agent registry, for
+// the reason gitgc.PolecatNameForWorktree
 // gives about the inverse case: a fact about whose tree this is must come from
 // the tree. A registry entry can be gone while the directory is still on disk —
 // that is the state this enumerator exists to find.
@@ -520,9 +523,13 @@ func polecatWorktrees() ([]strandwatch.Worktree, error) {
 		if _, serr := os.Stat(filepath.Join(path, ".git")); serr == nil {
 			hasGit = true
 		}
-		common, cerr := exec.Command("git", "-C", path,
-			"rev-parse", "--path-format=absolute", "--git-common-dir").Output()
-		if cerr != nil {
+		desc, derr := worktreeWorkspaces.Describe(context.Background(), path)
+		var unnamed *vcs.UnnamedRepoError
+		if errors.As(derr, &unnamed) {
+			out = append(out, strandwatch.Worktree{Path: path, Error: unnamed.Error()})
+			continue
+		}
+		if derr != nil {
 			if !hasGit {
 				continue // a reaped shell: no .git, no branch, nothing to lose
 			}
@@ -534,29 +541,17 @@ func polecatWorktrees() ([]strandwatch.Worktree, error) {
 			// rather than dropping.
 			out = append(out, strandwatch.Worktree{
 				Path:  path,
-				Error: fmt.Sprintf("has a .git but git would not answer: %v", cerr),
+				Error: fmt.Sprintf("has a .git but git would not answer: %v", derr),
 			})
 			continue
 		}
-		gitDir := strings.TrimSpace(string(common))
-		if filepath.Base(gitDir) != ".git" {
-			out = append(out, strandwatch.Worktree{
-				Path: path,
-				Error: fmt.Sprintf("git-common-dir %q is not a conventional worktree layout, "+
-					"so the repository it belongs to could not be named", gitDir),
-			})
-			continue
-		}
-		wt := strandwatch.Worktree{Path: path, Repo: filepath.Dir(gitDir)}
-		br, berr := exec.Command("git", "-C", path, "symbolic-ref", "--short", "HEAD").Output()
-		if berr != nil {
+		wt := strandwatch.Worktree{Path: path, Repo: desc.Repo.Path, Branch: desc.Branch}
+		if desc.Branch == "" {
 			// A DETACHED HEAD holds commits exactly as a branch does. It cannot be
 			// pushed by name and this sweep has no ref to measure, so it is stated
 			// rather than skipped — a worktree that drops out of the population
 			// without appearing anywhere is the shape being repaired.
 			wt.Error = "no branch is checked out (detached HEAD), so no ref could be measured"
-		} else {
-			wt.Branch = strings.TrimSpace(string(br))
 		}
 		out = append(out, wt)
 	}
