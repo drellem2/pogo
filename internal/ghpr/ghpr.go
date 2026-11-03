@@ -242,3 +242,55 @@ func OpenNumber(dir, branch string, timeout time.Duration) (int, error) {
 	}
 	return num, nil
 }
+
+// Merged is one MERGED pull request whose head was a branch.
+type Merged struct {
+	Number      int
+	MergeCommit string
+	HeadCommit  string
+}
+
+// MergedFor lists the MERGED GitHub PRs whose head is branch, with each one's
+// merge commit and final head commit (drellem2/pogo#160). gh infers the GitHub
+// repo from dir's origin remote. No merged PR is (nil, nil); every failure —
+// gh not installed, unauthenticated, rate-limited, a non-GitHub remote, output
+// drift, the timeout — is an error, and the caller must not read it as "no PR".
+func MergedFor(dir, branch string, timeout time.Duration) ([]Merged, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "pr", "list", "--head", branch, "--state", "merged",
+		"--limit", "20", "--json", "number,mergeCommit,headRefOid")
+	cmd.Dir = dir
+	cmd.Env = ghtoken.ChildEnvContext(ctx, append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
+	out, err := cmd.Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return nil, fmt.Errorf("gh pr list --head %s: %s: %w", branch, strings.TrimSpace(string(ee.Stderr)), err)
+		}
+		return nil, fmt.Errorf("gh pr list --head %s: %w", branch, err)
+	}
+	return parseMerged(out)
+}
+
+func parseMerged(out []byte) ([]Merged, error) {
+	var prs []struct {
+		Number      int `json:"number"`
+		MergeCommit *struct {
+			OID string `json:"oid"`
+		} `json:"mergeCommit"`
+		HeadRefOid string `json:"headRefOid"`
+	}
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return nil, fmt.Errorf("parse gh pr list output: %w", err)
+	}
+	var res []Merged
+	for _, p := range prs {
+		m := Merged{Number: p.Number, HeadCommit: p.HeadRefOid}
+		if p.MergeCommit != nil {
+			m.MergeCommit = p.MergeCommit.OID
+		}
+		res = append(res, m)
+	}
+	return res, nil
+}
