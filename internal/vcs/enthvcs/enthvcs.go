@@ -5,7 +5,10 @@
 // (workspaces.go): polecat checkouts through the repo's enthd, their excludes,
 // Dirty via `enth status`, Remove, Describe, Root and Refresh. Slice 6
 // (mg-30da0) gave Work one (work.go): the trailer listing, stacks, land
-// state from land records. Lander and Refs are still inert until slice 7.
+// state from land records. Slice 7 (mg-1fe2b) gave Lander one (land.go): the
+// dry run, the gate checkout of its result, and the land bound to both by
+// --expect-tip/--expect-new under a replayable request id. Refs is still
+// inert until slice 12.
 //
 // Inert is the point for what is not built. A repo whose project record says
 // `"vcs": "enth"` must not fall through to the git backend: git would act on a
@@ -38,18 +41,6 @@ func (b Backend) unsupported(op string) error {
 }
 
 func (Backend) Kind() vcs.Kind { return vcs.Enth }
-
-// Lander
-
-func (b Backend) Prepare(ctx context.Context, mr vcs.MR) (vcs.Prepared, error) {
-	return vcs.Prepared{}, b.unsupported("prepare")
-}
-func (b Backend) Land(ctx context.Context, p vcs.Prepared) (vcs.Landed, error) {
-	return vcs.Landed{}, b.unsupported("land")
-}
-func (b Backend) Cleanup(ctx context.Context, mr vcs.MR) error {
-	return b.unsupported("cleanup")
-}
 
 // Refs
 

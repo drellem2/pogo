@@ -54,6 +54,14 @@
 // Stacks and AmbiguousWorkError, State from land records (E3), and the
 // trailer-less base signal. Submission carries Item, Worker and Changes for
 // enth; the git backend answers exactly as before and leaves them empty.
+//
+// # Slice 7 (mg-1fe2b)
+//
+// enthvcs implements Lander: Prepare is the dry run plus a checkout of its
+// result N, Land is the land bound to the dry run's T and N under a request
+// id. MR carries Changes and RequestID, Prepared carries Tip, New and the
+// plan, Landed carries enth's land line as a LandRecord. git leaves every one
+// of them empty and does not read them.
 package vcs
 
 import (
@@ -661,6 +669,14 @@ type MR struct {
 	Branch string
 	Target string
 	Hooks  LandHooks
+	// Changes is an enth MR's submitted stack, bottom first (§6.1: the
+	// C1…Cn of `enth land`). git leaves it empty and lands Branch.
+	Changes []string
+	// RequestID is the id an enth land is issued under (§6.3:
+	// "<MR id>/<attempt>"). The same id and Changes again answer what the
+	// first land answered and land nothing, which is what makes a land
+	// replayable after a crash. git ignores it.
+	RequestID string
 }
 
 // Prepared is the result of Prepare: the work placed on top of the current
@@ -668,13 +684,64 @@ type MR struct {
 type Prepared struct {
 	MR      MR
 	GateDir string
+	// Tip and New are an enth dry run's old and new (§6.1): the target's tip
+	// the work was placed on (T, "" for a ref that does not exist yet) and
+	// the id the land would move it to (N). GateDir is a checkout of New, so
+	// the tree that is gated is the tree Land lands or nothing lands. git
+	// leaves both empty.
+	Tip string
+	New string
+	// Plan is the dry run's per-Change ids (enth). Informational: Land binds
+	// on Tip and New, not on Plan.
+	Plan []LandedChange
 }
 
 // Landed is what Land moved the target to.
 type Landed struct {
 	// SHA is the target's new tip. For git it is `rev-parse HEAD`'s output,
-	// read best-effort after the push.
+	// read best-effort after the push. enth leaves it empty: a Change id is
+	// not a git sha (§7), and Record carries the land instead.
 	SHA string
+	// Record is enth's `landed` line (§7). nil for git.
+	Record *LandRecord
+}
+
+// LandedChange is one Change of an enth land: the id it was submitted as and
+// the id it landed as (equal when its base was already the tip).
+type LandedChange struct {
+	Submitted string `json:"submitted"`
+	Landed    string `json:"landed"`
+}
+
+// LandRecord is an enth land as enth reports it (§7): the fields of the
+// `landed` line, stored as given. Old is "" when the land created the ref.
+type LandRecord struct {
+	Ref     string         `json:"ref"`
+	Entry   int            `json:"entry"`
+	Old     string         `json:"old"`
+	New     string         `json:"new"`
+	Changes []LandedChange `json:"changes"`
+	// RequestID is the request id the land was issued under. Not part of
+	// enth's line; recorded so a reader can tie the record to its attempt.
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// Covers reports whether every one of ids appears as a submitted Change of
+// the record: the already-merged rule's test (§6.3).
+func (r *LandRecord) Covers(ids []string) bool {
+	if r == nil || len(ids) == 0 {
+		return false
+	}
+	got := make(map[string]bool, len(r.Changes))
+	for _, c := range r.Changes {
+		got[c.Submitted] = true
+	}
+	for _, id := range ids {
+		if !got[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // Lander is the refinery pipeline: R2, R5–R11, R13, R14, R16, R17, R20–R23.
