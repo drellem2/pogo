@@ -99,6 +99,29 @@ A crew or polecat process has been started by pogod (PTY allocated, Claude Code 
 {"schema_version":1,"timestamp":"2026-04-25T10:00:00.000000000Z","event_type":"agent_spawned","agent":"cat-mg-0241","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","pid":48213,"prompt_file":"/Users/daniel/.pogo/agents/templates/polecat.md","worktree":"/Users/daniel/.pogo/polecats/pc-0241"}}
 ```
 
+#### `agent_spawn_requested`
+
+A polecat dispatch reached `/agents/spawn-polecat` and its request was decoded. Emitted **unconditionally**, before any gate, together with a `polecat <name>: spawn requested` line in pogod's log (drellem2/pogo#169).
+
+Read it as the opening of a window that `agent_spawned` or `agent_spawn_failed` closes. Before it existed, the first events this handler wrote fired at the very end, so a spawn that died or wedged mid-handler left the identical nothing as one that was never requested. Now a request with **neither** closing event after it is a spawn still in progress, or one that died without reaching any exit path. It is never a spawn that was never attempted. A request too malformed to decode emits no `agent_spawn_requested`; its `agent_spawn_failed` is the record.
+
+Nothing consumes this event. In particular stall-watch does **not** read it, and that is deliberate. A suppression keyed on a request with no matching claim would let a genuinely failed dispatch silence the alarm forever. If that wiring is ever added, the request may only *delay* an alarm, never cancel it.
+
+pogod also logs phase boundaries for the same spawn, each with the elapsed time since the request line: `gates passed`, `base ref resolved` (the only networked step, a bounded `git fetch`), `created worktree`, and `claim step done`. A spawn whose newest line is one of these died or is stalled in the step after it. These are log lines only, not events.
+
+Identity follows `agent_spawn_failed`: `agent` names the polecat that was *intended*, which does not exist yet.
+
+- **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **Optional envelope:** `work_item_id` (the item being dispatched), `repo` (the target repository)
+- **`details` fields:**
+  - `agent_type` (string, required): always `"polecat"`
+  - `agent_name` (string, required): the intended agent name, as requested
+  - `template` (string, required): the template the caller named explicitly; empty when the template is left to the work item's `type` routing (resolved later, and named on the `gates passed` log line)
+
+```json
+{"schema_version":1,"timestamp":"2026-11-03T15:30:00.000000000Z","event_type":"agent_spawn_requested","agent":"cat-a3aa1","work_item_id":"mg-a3aa1","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"a3aa1","template":"polecat-build-pr"}}
+```
+
 #### `agent_spawn_failed`
 
 A polecat dispatch was refused or failed, and **no agent process was created**. The counterpart to `agent_spawned`: emitted on every failure path of `/agents/spawn-polecat`, including the drain-gate refusal.
