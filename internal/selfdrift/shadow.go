@@ -103,6 +103,9 @@ func shadowVerdict(winner, winnerRev, rev string, sameFile bool) (note string, b
 		// did not measure. It stays a hazard, because "unknown build" is not a
 		// reason to stop looking at it.
 		return "a SEPARATE file from " + winner + " with NO vcs stamp — provenance UNKNOWN", false
+	case rev == RevEnth:
+		// Same reasoning as the unstamped arm: not comparable is not current.
+		return "a SEPARATE file from " + winner + " built from an enth checkout — " + NotComparableEnth, false
 	case rev == winnerRev:
 		return "a separate file, but the same revision as " + winner, true
 	default:

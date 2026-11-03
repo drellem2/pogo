@@ -57,6 +57,11 @@ func HostDeps(repoOverride string) Deps {
 // quietly stop doing.
 type versionBody struct {
 	Revision string `json:"revision"`
+	// Build.VCS is "enth" for a daemon stamped from an enth checkout. An older
+	// daemon has no such key, which decodes as "" — git, as it always was.
+	Build struct {
+		VCS string `json:"vcs"`
+	} `json:"build"`
 }
 
 // RunningRev asks the live daemon what it is.
@@ -84,6 +89,12 @@ func RunningRev(baseURL string) (rev, url string) {
 	var body versionBody
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return RevUnstamped, url
+	}
+	// Checked before the empty-revision test: an enth build carries no
+	// vcs.revision (build.sh passes -buildvcs=false), and calling it UNSTAMPED
+	// would say it cannot name itself when it named an enth Change id.
+	if body.Build.VCS == enthVCS {
+		return RevEnth, url
 	}
 	if body.Revision == "" {
 		return RevUnstamped, url
@@ -158,12 +169,39 @@ func BinaryRev(path string) string {
 		// missing would owe a build that cannot fix it.
 		return RevUnstamped
 	}
+	if enthStamped(info) {
+		return RevEnth
+	}
 	for _, s := range info.Settings {
 		if s.Key == "vcs.revision" && s.Value != "" {
 			return s.Value
 		}
 	}
 	return RevUnstamped
+}
+
+// enthVCS is internal/version.VCSEnth, restated so this package does not
+// import the version package for one string; vcs_test pins the two equal.
+const enthVCS = "enth"
+
+// enthLdflag is the -X build.sh's enth branch writes into -ldflags.
+const enthLdflag = "github.com/drellem2/pogo/internal/version.VCS=" + enthVCS
+
+// enthStamped reports whether a binary's recorded -ldflags name it an enth
+// build. Checked BEFORE vcs.revision: an enth checkout built without
+// -buildvcs=false (by hand, under ~/.pogo) carries the OUTER repo's
+// vcs.revision, which is a foreign stamp wearing a revision's clothes.
+func enthStamped(info *buildinfo.BuildInfo) bool {
+	for _, s := range info.Settings {
+		if s.Key == "-ldflags" {
+			for _, f := range strings.Fields(s.Value) {
+				if f == enthLdflag {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // pogoModule is the module path that identifies a pogo checkout. A directory

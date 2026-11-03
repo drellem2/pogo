@@ -56,6 +56,7 @@ import (
 	"github.com/drellem2/pogo/internal/refusalwatch"
 	"github.com/drellem2/pogo/internal/reviewdecl"
 	"github.com/drellem2/pogo/internal/scheduler"
+	"github.com/drellem2/pogo/internal/selfdrift"
 	"github.com/drellem2/pogo/internal/server"
 	"github.com/drellem2/pogo/internal/service"
 	"github.com/drellem2/pogo/internal/staleness"
@@ -2346,7 +2347,10 @@ Flags:
 		// blind rather than leaving that to be inferred from its silence.
 		rev := driftwatch.BuildRevision()
 		revDesc := "UNSTAMPED (staleness check blind)"
-		if rev.Stamped() {
+		switch {
+		case rev.Enth():
+			revDesc = fmt.Sprintf("enth Change %s (staleness check blind: %s)", rev.EnthChange, selfdrift.NotComparableEnth)
+		case rev.Stamped():
 			revDesc = fmt.Sprintf("%s committed %s", rev.Short(), rev.CommitTime.Format(time.RFC3339))
 		}
 		// The no-fire half gets its own clause, and says which of the two states

@@ -34,3 +34,11 @@ var Branch = ""
 // binary: the same SHA describes a clean build and a build with arbitrary
 // local edits on top of it.
 var Dirty = ""
+
+// VCS names the version-control system Commit was read from, set by ldflags.
+// Empty means git: build.sh's git branch never sets it, so a git binary's
+// stamp — and its `version --json` — is byte-identical to the stamp before
+// this existed. "enth" means Commit is an enth Change id (the base of the
+// `.enth/checkout` the binary was built from), NOT a git commit, and no git
+// ancestry question can be asked of it (docs/design/enth-vcs.md §10).
+var VCS = ""

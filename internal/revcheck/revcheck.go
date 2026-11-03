@@ -89,6 +89,10 @@ const (
 	RevUnstamped = selfdrift.RevUnstamped
 	// RevMissing: the binary whose revision we wanted is not on disk.
 	RevMissing = selfdrift.RevMissing
+	// RevEnth: the daemon or binary was built from an enth checkout, so its
+	// revision is an enth Change id that git ancestry cannot place. Always
+	// UNKNOWN, with selfdrift.NotComparableEnth as the reason.
+	RevEnth = selfdrift.RevEnth
 )
 
 // Verdict is the three-valued answer. There is no fourth value and no boolean
@@ -113,7 +117,7 @@ const (
 // UNKNOWN, not in a comparison against "".
 func IsSentinel(rev string) bool {
 	switch rev {
-	case "", RevUnreachable, RevUnstamped, RevMissing:
+	case "", RevUnreachable, RevUnstamped, RevMissing, RevEnth:
 		return true
 	}
 	return false
@@ -192,6 +196,8 @@ func expectedReason(expected string) string {
 		return "the binary the daemon should be running carries no vcs.revision, so it cannot be compared"
 	case RevUnreachable:
 		return "the expected revision came from a source that did not answer"
+	case RevEnth:
+		return selfdrift.NotComparableEnth + " — the binary the daemon should be running was built from an enth checkout"
 	default:
 		return "no expected revision was supplied"
 	}
@@ -203,6 +209,8 @@ func runningReason(running string) string {
 		return "pogod is not answering GET /version, so what it is running is unmeasured"
 	case RevUnstamped:
 		return "pogod answered /version but reports no vcs.revision — it cannot say what it is"
+	case RevEnth:
+		return selfdrift.NotComparableEnth + " — pogod was built from an enth checkout (build.vcs=enth in GET /version)"
 	default:
 		return "the running revision could not be established"
 	}

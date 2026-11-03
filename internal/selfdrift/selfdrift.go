@@ -57,7 +57,17 @@ const (
 	RevUnstamped   = "<unstamped>"   // the binary is there and carries NO vcs stamp
 	RevMissing     = "<missing>"     // no binary at that path at all
 	RevUnreachable = "<unreachable>" // pogod is not answering /version
+	// RevEnth: the binary (or daemon) was stamped from an enth checkout. Its
+	// revision is an enth Change id, which is not an object in any git repo,
+	// so it is NOT COMPARABLE with git main — not stale, not current, not
+	// foreign (docs/design/enth-vcs.md §10). Teaching these checks enth
+	// ancestry belongs to moving pogo's own repo to enth (§14.2).
+	RevEnth = "<enth>"
 )
+
+// NotComparableEnth is the phrase every revision check uses for RevEnth, so
+// one grep finds every place a check declined to compare an enth build.
+const NotComparableEnth = "not comparable: enth revision"
 
 // DeployedCmds is every binary a pogo deploy owns, in report order.
 //
@@ -182,7 +192,7 @@ const DefaultRef = "main"
 // must not be silently compared to a hash if one does).
 func isSentinel(rev string) bool {
 	switch rev {
-	case RevUnstamped, RevMissing, RevUnreachable, "":
+	case RevUnstamped, RevMissing, RevUnreachable, RevEnth, "":
 		return true
 	}
 	return false
@@ -253,6 +263,9 @@ func annotate(r *Report, deps Deps) {
 		case RevUnreachable:
 			a.Note = "pogod is not answering /version"
 			continue
+		case RevEnth:
+			a.Note = "enth build — " + NotComparableEnth
+			continue
 		}
 		if r.Repo == "" {
 			continue // no repo: the foreign test is not measurable, so do not imply it ran
@@ -309,6 +322,16 @@ func classify(r *Report) {
 		r.Status = StatusUnknown
 		r.Action = fmt.Sprintf("UNKNOWN PROVENANCE: %s — NO vcs stamp. This is not a clean install and it is not a stale one; the binary has told us nothing. A rebuild will NOT clear this: an unstamped binary rebuilds unstamped. Verify with: go version -m $(command -v pogod) | grep vcs",
 			strings.Join(un, ", "))
+		return
+	}
+	// An enth build is checked AFTER unstamped and BEFORE foreign: its axis
+	// carries no git revision, so the foreign test (cat-file in the pogo repo)
+	// must never run against it — the answer would be "foreign", which is a
+	// claim about git history this build is not part of.
+	if en := axesWhere(r, func(a Axis) bool { return a.Revision == RevEnth }); len(en) > 0 {
+		r.Status = StatusUnknown
+		r.Action = fmt.Sprintf("NOT COMPARABLE: %s — built from an enth checkout, so its revision is an enth Change id and cannot be placed against git %s (%s). A rebuild from the same checkout will not change this. Verify with: pogod --version (vcs=enth)",
+			strings.Join(en, ", "), r.Ref, NotComparableEnth)
 		return
 	}
 	if r.Repo != "" {

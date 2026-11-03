@@ -80,7 +80,19 @@ type Info struct {
 	Branch  string `json:"branch"`
 	Dirty   bool   `json:"dirty"`
 	Source  string `json:"source"`
+	// VCS is "" for git and "enth" when Commit is an enth Change id. omitempty,
+	// so every git binary's JSON is unchanged. Reported only for an ldflags
+	// stamp: Go's automatic buildinfo stamp is always git's.
+	VCS string `json:"vcs,omitempty"`
 }
+
+// VCSEnth is Info.VCS (and version.VCS) for a build from an enth checkout.
+const VCSEnth = "enth"
+
+// Enth reports whether Commit is an enth Change id rather than a git commit.
+// A caller about to ask git about Commit (ancestry, cat-file, rev-list) must
+// check this first: the id is not an object in any git repository.
+func (i Info) Enth() bool { return i.VCS == VCSEnth }
 
 // Stamped reports whether this binary can say what it contains at all.
 func (i Info) Stamped() bool { return i.Source != SourceNone && i.Commit != Unknown }
@@ -101,7 +113,11 @@ func (i Info) Describe(prog string) string {
 	if i.Dirty {
 		build += "-dirty"
 	}
-	return fmt.Sprintf("%s %s (%s, branch=%s, source=%s)", prog, i.Version, build, i.Branch, i.Source)
+	s := fmt.Sprintf("%s %s (%s, branch=%s, source=%s", prog, i.Version, build, i.Branch, i.Source)
+	if i.VCS != "" {
+		s += ", vcs=" + i.VCS
+	}
+	return s + ")"
 }
 
 // vcsStamp is the subset of debug.BuildInfo this package reads. Separated out
@@ -131,7 +147,17 @@ func buildInfoStamp() vcsStamp {
 
 // Get resolves this binary's identity.
 func Get() Info {
-	return resolve(Version, Build, Commit, Branch, Dirty, buildInfoStamp())
+	return withVCS(resolve(Version, Build, Commit, Branch, Dirty, buildInfoStamp()), VCS)
+}
+
+// withVCS records which VCS the stamp came from. Only an ldflags stamp can
+// carry one: a buildinfo revision is Go's own git stamp, and a build that had
+// no stamp at all has no VCS to name.
+func withVCS(info Info, vcs string) Info {
+	if info.Source == SourceLdflags {
+		info.VCS = strings.TrimSpace(vcs)
+	}
+	return info
 }
 
 func resolve(version, build, commit, branch, dirty string, bi vcsStamp) Info {

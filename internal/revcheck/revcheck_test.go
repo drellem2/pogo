@@ -316,3 +316,27 @@ func TestBinaryRevisionOfAMissingBinaryIsNeverAgreement(t *testing.T) {
 		t.Fatal("a missing expected binary was reported as agreement")
 	}
 }
+
+// An enth build on either side is UNKNOWN, with the not-comparable reason —
+// even when both sides are enth: the sentinel carries no Change id to compare,
+// and teaching revcheck enth ancestry is §14.2's (docs/design/enth-vcs.md §10).
+func TestAnEnthSideIsNotComparable(t *testing.T) {
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, tc := range []struct{ running, expected string }{
+		{RevEnth, sha}, {sha, RevEnth}, {RevEnth, RevEnth},
+	} {
+		got := Compare(tc.running, tc.expected)
+		if got.Verdict != Unknown || got.OK() {
+			t.Errorf("Compare(%q, %q) = %s, want UNKNOWN", tc.running, tc.expected, got.Verdict)
+		}
+		if !strings.Contains(got.Reason, "not comparable: enth revision") {
+			t.Errorf("Compare(%q, %q) reason %q does not say not comparable: enth revision", tc.running, tc.expected, got.Reason)
+		}
+	}
+	if !IsSentinel(RevEnth) {
+		t.Error("RevEnth is not a sentinel — Wait would poll a daemon for an enth id")
+	}
+	if got := Compare(sha, sha); got.Verdict != Agrees {
+		t.Errorf("control: Compare(sha, sha) = %s, want AGREES", got.Verdict)
+	}
+}

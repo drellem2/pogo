@@ -276,6 +276,12 @@ So the inventory's inference (D4: "absent") holds only for a checkout outside an
 
 The measurement was made on the M1 binary with a stub `.enth/checkout`. Slice 10 re-runs the same table on a #9 checkout before it merges.
 
+**Re-run on #9, and what slice 10 changed (mg-c8568, 2026-11-03).** `scripts/enth_stamp_test.sh` is the table as a script. On enth `origin/main` `6b6fbd4` (built from source: the installed `enth` was still `0.0.0` and wrote no `.enth/`) with `go1.25.0 darwin/arm64`, every row reproduced: the git control stamps its commit; a real #9 checkout (`.enth/checkout` format `enth-checkout` version 1) outside git carries no `vcs.revision`; nested in a git repo it carries the outer HEAD, `GIT_CEILING_DIRECTORIES` does not help, and `-buildvcs=false` removes it. Two departures from the design above, both forced by the measurement:
+- **The branch is not "`git rev-parse HEAD` fails".** Inside an outer repo, the case that matters, `git rev-parse HEAD` *succeeds* with the outer repo's HEAD, so that test would have stamped the foreign sha as `version.Commit`. The test is `stamp_vcs` (`scripts/lib/enth-stamp.sh`): `.enth/checkout` exists in the build directory **and** git's top level for it is not the directory itself. A git repo rooted there still wins.
+- **No `version.Branch`.** #9's `.enth/checkout` records the base, the origin and the selection but not the ref that was checked out, so there is nothing to read. An enth binary reports `branch=unknown`. When pogo's enth workspaces (slice 5) record the ref, the stamp can carry it.
+
+`Dirty` comes from the `ops` count on `enth status`'s first line. When that cannot be read (no `enth` on PATH, an enth older than #9, a refusal) the build is stamped `Dirty=true` and the log says why: a tree nobody checked is not called clean. `selfdrift` and `revcheck` see an enth binary as `<enth>` (from the recorded `-X ...version.VCS=enth`, which wins over any `vcs.revision`) or an enth daemon (from `build.vcs` in `GET /version`). Both report UNKNOWN with "not comparable: enth revision". `driftwatch` disarms its staleness check with the same reason. `scripts/pogo-self-deploy` is untouched: it builds pogo's own repo, which stays git (§1).
+
 ## 11. GitHub stays GitHub (decision 10)
 
 Unchanged for every repo: issue intake and carriers (H3), credentials (H5), `homevcs` (H4, X5), Releases, Actions and `install.sh` (H6).

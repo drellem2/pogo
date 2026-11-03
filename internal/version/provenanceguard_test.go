@@ -167,7 +167,17 @@ var shellStampScrapers = map[string]int{
 	// regex-escaped `vcs\.revision` (invisible to this guard until
 	// mg-41494). The other four are the failure/success messages naming the
 	// field — the redeploy warning names both patterns, so counts twice.
-	"build.sh": 6,
+	// +3 for the enth branch (docs/design/enth-vcs.md §10, mg-c8568): one real
+	// read, a grep requiring vcs.revision to be ABSENT on an enth build (any
+	// value is the enclosing repo's HEAD — this guard's misattribution, again
+	// detected rather than consumed), and two failure/success messages.
+	"build.sh": 9,
+	// §10's table re-run (mg-c8568). Reading vcs.revision is the point: rows
+	// 1-6 MEASURE the misattribution (row 4 asserts it still reproduces), and
+	// row 7 asserts it is absent from build.sh's enth binaries. One real read
+	// (es_vcsrev: `go version -m` + the sed, 2 hits); the rest are the table's
+	// header and assertion messages.
+	filepath.Join("scripts", "enth_stamp_test.sh"): 8,
 	// Test 11 of build_test.sh: six hits in assertions on
 	// verify_installed_stamps's messages, plus 11b's direct `go version -m`
 	// read of the nested install's ldflags Commit (not vcs.revision), which is

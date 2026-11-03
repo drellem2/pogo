@@ -80,10 +80,20 @@ build_dir="${POGO_BUILD_DIR:-./bin}"
 # looks correct in the build command and fails only at runtime, so reading the
 # flag string would not have caught it.
 # ---------------------------------------------------------------------------
+# The enth branch of the stamp (docs/design/enth-vcs.md §10): stamp_vcs,
+# enth_base and enth_ldflags. Checked before sourcing, as go-toolchain.sh is
+# below: under set -e a missing sourced file would otherwise abort silently.
+[ -r "$(cd "$(dirname "$0")" && pwd)/scripts/lib/enth-stamp.sh" ] || { echo "build.sh: missing scripts/lib/enth-stamp.sh" >&2; exit 1; }
+. "$(cd "$(dirname "$0")" && pwd)/scripts/lib/enth-stamp.sh"
+
 version_ldflags() {
   local repo="${1:-.}"
   local pkg="github.com/drellem2/pogo/internal/version"
   local commit branch dirty
+  if [ "$(stamp_vcs "$repo")" = enth ]; then
+    enth_ldflags "$repo"
+    return 0
+  fi
   commit="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
   # No commit means no repo (a tarball, an exported tree). Emit nothing rather
   # than stamping a placeholder: an -X Commit=unknown would report source
@@ -98,6 +108,16 @@ version_ldflags() {
   printf -- '-X %s.Commit=%s -X %s.Build=%s -X %s.Branch=%s -X %s.Dirty=%s' \
     "$pkg" "$commit" "$pkg" "${commit:0:7}" "$pkg" "$branch" "$pkg" "$dirty"
 }
+
+# -buildvcs=false for an enth build, ALWAYS (even unstamped): it is what stops
+# Go stamping the OUTER repo's HEAD as vcs.revision. Empty for git, so a git
+# build's command line — and its binary — is exactly what it was.
+build_vcs="$(stamp_vcs .)"
+buildvcs_flags=()
+if [ "$build_vcs" = enth ]; then
+  buildvcs_flags=(-buildvcs=false)
+  echo "build.sh: enth checkout — stamping the base Change id, building with -buildvcs=false"
+fi
 
 # POGO_BUILD_NO_STAMP=1 builds WITHOUT the flags. It exists for the positive
 # control in scripts/stamp_test.sh: a stamping check that has never been seen
@@ -116,7 +136,11 @@ else
     # Announce the degraded state instead of silently producing the artifact
     # this ticket was filed about. Both repos could always produce an unstamped
     # binary; only one of them said so.
-    echo "build.sh: no git revision available — binaries will be UNSTAMPED"
+    if [ "$build_vcs" = enth ]; then
+      echo "build.sh: no enth base Change id available — binaries will be UNSTAMPED"
+    else
+      echo "build.sh: no git revision available — binaries will be UNSTAMPED"
+    fi
   fi
 fi
 
@@ -146,7 +170,11 @@ fi
 verify_installed_stamps() {
   local expect="${POGO_INSTALL_VERIFY_EXPECT:-}"
   if [ -z "$expect" ]; then
-    expect="$(git rev-parse HEAD 2>/dev/null || true)"
+    if [ "$build_vcs" = enth ]; then
+      expect="$(enth_base .)"
+    else
+      expect="$(git rev-parse HEAD 2>/dev/null || true)"
+    fi
   fi
   if [ -z "$expect" ]; then
     echo "build.sh: no git revision available — installed binaries NOT verified (they are unstamped; the nightly redeploy cannot compare them to main)" >&2
@@ -170,6 +198,24 @@ verify_installed_stamps() {
       continue
     fi
     ldcommit="$(printf '%s\n' "$info" | sed -n 's/.*internal\/version\.Commit=\([0-9a-f]*\).*/\1/p' | head -1)"
+    if [ "$build_vcs" = enth ]; then
+      # An enth build: the ldflags Commit must be the base Change id, the
+      # binary must say VCS=enth, and Go's vcs.revision must be ABSENT — any
+      # value there is the outer repo's HEAD (-buildvcs=false not applied).
+      if [ "$ldcommit" != "$expect" ]; then
+        echo "build.sh: --install verification FAILED for $name ($bin): ldflags Commit is '${ldcommit:-<none>}', expected $expect (the base Change id in .enth/checkout)" >&2
+        bad=1
+      fi
+      case "$info" in
+        *internal/version.VCS=enth*) ;;
+        *) echo "build.sh: --install verification FAILED for $name ($bin): no -X version.VCS=enth — it would be read as a git build" >&2; bad=1 ;;
+      esac
+      if printf '%s\n' "$info" | grep -q 'vcs[.]revision='; then
+        echo "build.sh: --install verification FAILED for $name ($bin): Go stamped a vcs.revision on an enth build — that is the enclosing git repo's HEAD, not this checkout's (was -buildvcs=false lost?)" >&2
+        bad=1
+      fi
+      continue
+    fi
     vcsrev="$(printf '%s\n' "$info" | sed -n 's/.*vcs\.revision=\([0-9a-f]*\).*/\1/p' | head -1)"
     if [ "$ldcommit" != "$expect" ]; then
       echo "build.sh: --install verification FAILED for $name ($bin): ldflags Commit is '${ldcommit:-<none>}', expected $expect (git rev-parse HEAD)" >&2
@@ -187,6 +233,10 @@ EOF
 
   if [ "$bad" -ne 0 ]; then
     return 1
+  fi
+  if [ "$build_vcs" = enth ]; then
+    echo "build.sh: --install verified: every installed binary's ldflags Commit is enth Change $expect (VCS=enth, no vcs.revision)"
+    return 0
   fi
   echo "build.sh: --install verified: every installed binary's ldflags Commit and vcs.revision are $expect"
 }
@@ -250,10 +300,10 @@ fi
 
 echo "Step 3: Building binaries into ${build_dir}..."
 mkdir -p "$build_dir"
-gate_step "go build ./cmd/..." go build -ldflags "$ldflags" -o "${build_dir%/}/" ./cmd/... || exit $?
+gate_step "go build ./cmd/..." go build ${buildvcs_flags[@]+"${buildvcs_flags[@]}"} -ldflags "$ldflags" -o "${build_dir%/}/" ./cmd/... || exit $?
 
 if [ "$do_install" = true ]; then
   echo "Step 4: Installing binaries into GOBIN..."
-  gate_step "go install ./cmd/..." go install -ldflags "$ldflags" ./cmd/... || exit $?
+  gate_step "go install ./cmd/..." go install ${buildvcs_flags[@]+"${buildvcs_flags[@]}"} -ldflags "$ldflags" ./cmd/... || exit $?
   gate_step "verify installed stamps" verify_installed_stamps || exit $?
 fi

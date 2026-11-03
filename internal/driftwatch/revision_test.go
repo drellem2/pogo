@@ -970,3 +970,39 @@ func TestFormatAge(t *testing.T) {
 		}
 	}
 }
+
+// TestEnthBuildDisarmsAsNotComparable (docs/design/enth-vcs.md §10): an enth
+// build's revision is a Change id with no git commit time. Even when Go has
+// stamped a vcs.revision/vcs.time (the OUTER repo's, for a checkout under
+// ~/.pogo built without -buildvcs=false), it must not be dated and must not
+// mail. It says "not comparable: enth revision" once, then stays quiet.
+func TestEnthBuildDisarmsAsNotComparable(t *testing.T) {
+	rec := &recorder{}
+	outer := fixedRevision(staleRevisionSHA, mustTime(t, staleCommitTime))
+	w := New(revCfg(), Options{
+		Revision: func() SelfRevision {
+			r := outer()
+			r.VCS, r.EnthChange = "enth", "3897079975e8712d1191d271d258a53b0d17556f87ca337d93d9e7faf1d01573"
+			return r
+		},
+		Mail: rec.mail, Emit: rec.emit,
+	})
+	start := mustTime(t, measuredAt)
+	for i := 0; i < 3; i++ {
+		w.Check(start.Add(time.Duration(i) * time.Hour))
+	}
+	if rec.mailCount() != 0 {
+		t.Errorf("an enth build was dated and mailed: %d notice(s)", rec.mailCount())
+	}
+	if len(rec.events) != 1 || rec.events[0].EventType != "revision_stale_disarmed" ||
+		rec.events[0].Details["reason"] != "not comparable: enth revision" {
+		t.Fatalf("want one revision_stale_disarmed with reason 'not comparable: enth revision', got %+v", rec.events)
+	}
+
+	// Control: the same stale git stamp without VCS=enth mails.
+	rec2 := &recorder{}
+	New(revCfg(), Options{Revision: outer, Mail: rec2.mail, Emit: rec2.emit}).Check(start)
+	if rec2.mailCount() != 1 {
+		t.Errorf("control: a stale git build mailed %d notice(s), want 1", rec2.mailCount())
+	}
+}

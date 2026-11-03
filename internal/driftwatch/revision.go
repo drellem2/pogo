@@ -68,6 +68,8 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/selfdrift"
+	"github.com/drellem2/pogo/internal/version"
 )
 
 // DefaultStaleAfter is N: how old the running revision's COMMIT may be before
@@ -126,7 +128,19 @@ type SelfRevision struct {
 	// Modified is vcs.modified — the working tree was dirty at build time, so
 	// the running code is not exactly Revision.
 	Modified bool
+	// VCS is the ldflags-stamped VCS (internal/version.VCS): "" for git, "enth"
+	// for a build from an enth checkout. An enth build's revision is a Change
+	// id with no git commit time, and the age of a git commit is the only thing
+	// this check knows how to measure, so an enth build disarms it as NOT
+	// COMPARABLE rather than as unstamped (docs/design/enth-vcs.md §10).
+	VCS string
+	// EnthChange is the enth Change id the build was stamped with (the
+	// ldflags Commit), for the disarm report. Empty for git.
+	EnthChange string
 }
+
+// Enth reports whether the running build came from an enth checkout.
+func (s SelfRevision) Enth() bool { return s.VCS == version.VCSEnth }
 
 // Stamped reports whether the build carries enough vcs information to date.
 func (s SelfRevision) Stamped() bool {
@@ -173,11 +187,14 @@ type BehindFunc func(rev string) Behind
 // BuildRevision reads the running binary's vcs stamp. It is the production
 // RevisionFunc.
 func BuildRevision() SelfRevision {
+	var s SelfRevision
+	if info := version.Get(); info.Enth() {
+		s.VCS, s.EnthChange = info.VCS, info.Commit
+	}
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
-		return SelfRevision{}
+		return s
 	}
-	var s SelfRevision
 	for _, setting := range bi.Settings {
 		switch setting.Key {
 		case "vcs.revision":
@@ -373,6 +390,25 @@ func formatAge(d time.Duration) string {
 // a mail and an event.
 func (w *Watcher) sampleRevision(now time.Time) {
 	rev := w.revision()
+
+	if rev.Enth() {
+		// Checked FIRST, before Stamped: an enth build built without
+		// -buildvcs=false under ~/.pogo would carry the OUTER repo's
+		// vcs.revision/vcs.time, and dating that would be a confident age for
+		// code this binary does not contain. NOT COMPARABLE, said once, as the
+		// unstamped case below is.
+		w.unstampedOnce.Do(func() {
+			log.Printf("pogod: revision-staleness check is NOT armed — %s %s. This binary was built from an enth checkout; "+
+				"the check dates a git commit and cannot place an enth Change id against git main.",
+				selfdrift.NotComparableEnth, rev.EnthChange)
+			w.emit(events.Event{
+				EventType: "revision_stale_disarmed",
+				Agent:     "pogod",
+				Details:   map[string]any{"reason": selfdrift.NotComparableEnth, "vcs": rev.VCS, "enth_change": rev.EnthChange},
+			})
+		})
+		return
+	}
 
 	if !rev.Stamped() {
 		// Nothing to date — and, the important half, nothing CLAIMED either.

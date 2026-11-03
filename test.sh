@@ -177,6 +177,13 @@ gate_step "Testing pogo-self-deploy driver" bash scripts/tmpdir-leak-guard.sh ba
 # to come back RED.
 gate_step "Testing the build stamp (pogo/pogod can say what they contain)" bash scripts/tmpdir-leak-guard.sh bash scripts/stamp_test.sh
 
+# The enth build stamp (docs/design/enth-vcs.md §10, mg-c8568): §10's table
+# re-run on a real enth #9 checkout, and build.sh's enth branch (-buildvcs=false,
+# VCS=enth, verify_installed_stamps) proved on a nested enth checkout of this
+# tree. ~18s with a #9 enth on PATH; it SKIPS (exit 0, and says so) when the
+# enth on PATH predates #9 — POGO_ENTH_REQUIRE=1 makes that a failure.
+gate_step "Testing the enth build stamp (§10 table on an enth #9 checkout)" bash scripts/tmpdir-leak-guard.sh bash scripts/enth_stamp_test.sh
+
 # The size-triggered module-cache reclaim (mg-b7c3). Runs here rather than only
 # in the Go suite because the decision this job exists for — fire, refuse, or
 # defer — lives in the shell script, not in the installer. Its stubs are on PATH,
