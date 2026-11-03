@@ -12,6 +12,7 @@ import (
 // pushes to origin, so origin is the repository whose PR it means; an
 // `upstream` remote, which gh would otherwise prefer, must not redirect it.
 func TestRefineryPRLookupIsPinnedToOrigin(t *testing.T) {
+	ambientGHToken(t)
 	dir := t.TempDir()
 	for _, args := range [][]string{
 		{"init", "-q"},
@@ -47,6 +48,7 @@ func TestRefineryPRLookupIsPinnedToOrigin(t *testing.T) {
 // runs without the network; `remote get-url origin` still reads the github.com
 // fetch URL the pin is derived from.
 func TestClosePRAndReapClosesInTheRepoItLookedUp(t *testing.T) {
+	ambientGHToken(t)
 	dir := t.TempDir()
 	bare := t.TempDir()
 	run := func(args ...string) {
@@ -81,4 +83,13 @@ esac`)
 	if !strings.HasSuffix(close, "-R fork-owner/pogo") {
 		t.Errorf("close %q is not pinned to the repo the lookup used (fork-owner/pogo)", close)
 	}
+}
+
+// ambientGHToken pins a fake GH_TOKEN so ghtoken's per-call fallback chain
+// never runs `gh auth token` through the logging stub — which, in an
+// environment with no ambient credential (pogod's, mg-37183), adds "auth
+// token" lines to the gh log these tests read.
+func ambientGHToken(t *testing.T) {
+	t.Helper()
+	t.Setenv("GH_TOKEN", "ghp_prpin_test_fake_000000000000000000000")
 }
