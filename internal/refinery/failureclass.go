@@ -159,6 +159,28 @@ const (
 	// measured silent for 22 minutes, and an idle subtree is also what a process
 	// blocked on I/O looks like.
 	ClassIndeterminate FailureClass = "indeterminate"
+	// ClassProtected marks a push the REMOTE refused by rule: a branch
+	// protection, a repository ruleset, a pre-receive hook that declined the
+	// update (drellem2/pogo#164). It is terminal at attempt 1.
+	//
+	// It is not ClassContention, and that is the whole ticket. The post-gate
+	// git steps wrap every non-credential failure in retryableError, so before
+	// this class a GH013 refusal reached the contention arm and was recorded
+	// with the signal "target moved during merge" — a race nobody observed —
+	// and spent the whole 7-attempt contention budget in 52 seconds against a
+	// rule no attempt can change. Measured three times on two fleets.
+	//
+	// It is not ClassDefect: the refusal establishes nothing about the branch's
+	// CODE, and dispatching a fix to the branch changes nothing the remote
+	// objected to. It is not ClassInfrastructure either: the remote answered,
+	// the credentials were accepted, and the answer is about the TARGET.
+	//
+	// What it does establish is that an unchanged resubmit against the same
+	// target is refused the same way, which is why ResubmitUnchangedRepeats
+	// answers yes for it. The remedy is PORTABLE on purpose — submit against a
+	// branch the remote lets the refinery push to — and not "open a pull
+	// request", which is one host's answer (Daniel, closing drellem2/pogo#69).
+	ClassProtected FailureClass = "protected"
 	// ClassUnclassified marks a failure the refinery could not place. It is
 	// retried on a small budget — an unrecognised failure might plausibly differ
 	// on a retry — and it is reported as unclassified rather than silently
@@ -170,7 +192,7 @@ const (
 // It lives beside the constants so a class added without a triage note fails a
 // test rather than reaching a coordinator as a bare status.
 var allFailureClasses = []FailureClass{
-	ClassInfrastructure, ClassContention, ClassDefect, ClassHost, ClassSetup, ClassIndeterminate, ClassUnclassified,
+	ClassInfrastructure, ClassContention, ClassDefect, ClassHost, ClassSetup, ClassIndeterminate, ClassProtected, ClassUnclassified,
 }
 
 // TriageNote returns the one-line instruction a coordinator needs on seeing
@@ -228,6 +250,12 @@ func (c FailureClass) TriageNote() string {
 			"condemn it. Read the error below — it names which kill this was, what was observed, and " +
 			"what re-running would and would not establish. Do NOT dispatch a fix on this alone, and do " +
 			"NOT resubmit unchanged without checking the host first."
+	case ClassProtected:
+		return "PROTECTED — the remote REFUSED the push to the target by rule (branch protection, a repository " +
+			"ruleset, or a hook that declined the update). Not a race and not a fact about the branch's code; no " +
+			"number of attempts changes a rule, so it was not retried. Do NOT resubmit unchanged against the same " +
+			"target and do NOT dispatch a fix — target a different branch (the work item's `branch:` value, or " +
+			"--target=<branch>) that the remote lets the refinery push to, or have the rule changed."
 	case ClassUnclassified:
 		return "UNCLASSIFIED — the refinery could not establish which class this is. Read the raw error below before reacting."
 	}
@@ -245,8 +273,11 @@ func (c FailureClass) TriageNote() string {
 // making a fresh submit futile, and reading `NotRetried` as futility would
 // suppress the one remedy that works.
 //
-// ONLY ClassDefect ANSWERS YES, and it does so in its own triage note: "re-running
-// establishes the SAME fact". Every other class either establishes nothing about
+// ClassDefect ANSWERS YES, and it does so in its own triage note: "re-running
+// establishes the SAME fact". ClassProtected ALSO ANSWERS YES (drellem2/pogo#164):
+// the remote refused the TARGET by rule, and an unchanged resubmit against the
+// same target meets the same rule — its paste-ready submit line is the "Resubmit"
+// advice that issue was filed about, one hop downstream. Every other class either establishes nothing about
 // the branch (infrastructure, contention, indeterminate, setup, unclassified) or
 // establishes something about the BOX rather than the branch (host). It exists as
 // a method here, beside the classes and their notes, rather than in the caller
@@ -265,7 +296,7 @@ func (c FailureClass) TriageNote() string {
 // classifier never reached. It answers NO: the strong claim needs evidence, and
 // there is none.
 func (c FailureClass) ResubmitUnchangedRepeats() bool {
-	return c == ClassDefect
+	return c == ClassDefect || c == ClassProtected
 }
 
 // countsAgainstAuthor answers whether a terminal failure of this class should
@@ -289,6 +320,9 @@ func (c FailureClass) ResubmitUnchangedRepeats() bool {
 // not establish who broke it — and the streak's escalation advises stopping a
 // polecat or reassigning its work item, which is a claim about a person. A class
 // that declines to say whose fault it is must not feed one that does.
+// ClassProtected is excluded because a protected target is a property of the
+// REPOSITORY: every branch submitted to it is refused identically, so counting
+// it would accumulate a verdict about whoever happened to target that ref.
 func countsAgainstAuthor(c FailureClass) bool {
 	return c == "" || c == ClassDefect
 }
@@ -499,6 +533,93 @@ var conflictSignals = []string{
 	"conflict (rename",
 	"patch failed",
 	"needs merge",
+}
+
+// protectionSignals mean the remote ANSWERED, accepted the identity, and refused
+// the UPDATE TO THE TARGET by rule (drellem2/pogo#164). Ordered most specific
+// first, so the recorded Signal names the rule rather than the transport flag:
+// GitHub's ruleset code and sentence, then the host-neutral "protected branch"
+// (GitLab and Gitea word their refusals with it), then git's own status flag for
+// a remote-side decline, which is what a bare pre-receive hook produces anywhere.
+var protectionSignals = []string{
+	"gh013",
+	"push declined due to repository rule violations",
+	"repository rule violations",
+	"protected branch",
+	"[remote rejected]",
+}
+
+// transientRemoteRejections are "[remote rejected]" reasons that do NOT mean a
+// rule refused the update, so the git status flag alone must not make them
+// terminal. A lock failure is the one case where the flag can carry a genuine
+// race — two pushes updating the same ref at once — and the others are the
+// remote failing to STORE the push, not deciding against it. They are matched
+// against the parenthesised reason on the same line as the flag.
+var transientRemoteRejections = []string{
+	"lock",
+	"unpacker error",
+	"failed to write",
+	"failed to update ref",
+	"missing necessary objects",
+	"internal server error",
+}
+
+// matchProtection returns the protection signal in the lowercased output, or ""
+// when none applies. The rule wordings match anywhere; the bare
+// "[remote rejected]" flag matches only on a line whose reason is not a
+// transient store failure (see transientRemoteRejections).
+func matchProtection(hay string) string {
+	for _, pat := range protectionSignals {
+		if pat != "[remote rejected]" {
+			if strings.Contains(hay, pat) {
+				return pat
+			}
+			continue
+		}
+		for _, line := range strings.Split(hay, "\n") {
+			i := strings.Index(line, pat)
+			if i < 0 {
+				continue
+			}
+			transient := false
+			for _, t := range transientRemoteRejections {
+				if strings.Contains(line[i:], t) {
+					transient = true
+					break
+				}
+			}
+			if !transient {
+				return pat
+			}
+		}
+	}
+	return ""
+}
+
+// refusedRef names the ref a protection refusal was about, read from the
+// remote's own output: GitHub's "rule violations found for refs/heads/<x>"
+// first, then git's " ! [remote rejected] <src> -> <dst> (...)" line. It
+// returns "" when neither is present, and the caller says "the target" rather
+// than guessing one.
+func refusedRef(raw string) string {
+	lower := strings.ToLower(raw)
+	if i := strings.Index(lower, "rule violations found for "); i >= 0 {
+		rest := strings.Fields(raw[i+len("rule violations found for "):])
+		if len(rest) > 0 {
+			return strings.TrimSuffix(rest[0], ".")
+		}
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		i := strings.Index(line, "[remote rejected]")
+		if i < 0 {
+			continue
+		}
+		f := strings.Fields(line[i+len("[remote rejected]"):])
+		if len(f) >= 3 && f[1] == "->" {
+			return f[2]
+		}
+	}
+	return ""
 }
 
 // outputReportsConflict answers "did this git output say the tree disagreed?"
@@ -776,6 +897,33 @@ func classifyFailure(stage string, raw string, err error) disposition {
 					"Resubmitting unchanged re-runs the same conflict forever; the branch has to be rebased and the " +
 					"conflict resolved by hand before it can land",
 			}
+		}
+	}
+
+	// A push the remote refused BY RULE (drellem2/pogo#164). Judged before the
+	// isRetryable arm below because the post-gate git steps wrap EVERY
+	// non-credential failure in retryableError: without this, a GH013 refusal
+	// reached that arm and was recorded as contention with a race it never
+	// observed. After the network table, so a hook whose own output reports a
+	// network failure is retried as one rather than made terminal; after the
+	// conflict table, which never co-occurs with push output anyway.
+	if pat := matchProtection(hay); pat != "" {
+		ref := refusedRef(raw)
+		if ref == "" && err != nil {
+			ref = refusedRef(err.Error())
+		}
+		if ref == "" {
+			ref = "the target"
+		}
+		return disposition{
+			Class:     ClassProtected,
+			Retryable: false,
+			Signal:    pat,
+			Reason: "the remote refused the push to " + ref + " by rule (" + pat + ") — a protection or ruleset " +
+				"on the TARGET, not a race and not a fact about the branch's code. No number of attempts changes a " +
+				"rule, so it is not retried, and an unchanged resubmit against the same target is refused the same " +
+				"way. Target a different branch that the remote lets the refinery push to (the work item's `branch:` " +
+				"value, or --target=<branch>), or have the rule changed; do NOT dispatch a code fix",
 		}
 	}
 
