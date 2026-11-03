@@ -116,28 +116,8 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 	var gateOutput string
 	startTime := time.Now()
 
-	// Three independent retry budgets, one per retryable class (mg-e5c2). They
-	// are separate on purpose: a network blip must not consume the budget that
-	// exists to absorb a lost race with another merge, and vice versa. The loop
-	// is hard-capped at their sum so a pathological alternation still ends.
-	contentionBudget := maxAttempts
-	netBudget := networkMaxAttempts
-	// A fourth budget, for the infrastructure failures whose retry costs a WHOLE
-	// GATE RUN rather than a git command (mg-67c9). Same class as netBudget, and
-	// separate for the same reason the other three are separate from each other:
-	// spending 28 attempts here would hold one repo's lane for hours. See the
-	// sizing note in gatenetwork.go.
-	gateNetBudget := gateNetworkMaxAttempts
-	// A fifth budget, for a gate whose OWN SETUP did not stand up (mg-15bb).
-	// Separate from gateNetBudget even though both cost a whole gate run: the
-	// two conditions have unrelated durations, and sharing a counter would let
-	// a network outage spend the attempts that exist to ask "was the envelope
-	// broken once, or standing?" — which is the only question this budget buys
-	// an answer to. See the sizing note in gatesetup.go.
-	setupBudget := gateSetupMaxAttempts
-	unclassifiedBudget := defaultUnclassifiedAttempts
-	var contentionUsed, netUsed, gateNetUsed, setupUsed, unclassifiedUsed int
-	var backoffSpent time.Duration
+	// The retry budgets, one per retryable class (mg-e5c2). See retryPolicy.
+	policy := newRetryPolicy(maxAttempts)
 	// gatesReached records whether any attempt has got as far as the quality
 	// gates. It gates skip_on_retry — see the call site below.
 	var gatesReached bool
@@ -146,7 +126,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 	// per-merge-request and revalidated against the rebased tree on every
 	// attempt — see gateHold.
 	hold := &gateHold{}
-	hardCap := contentionBudget + netBudget + gateNetBudget + setupBudget + unclassifiedBudget
+	hardCap := policy.hardCap()
 
 	for attempt := 1; attempt <= hardCap; attempt++ {
 		// Cancellation is honoured at attempt boundaries as well as inside the
@@ -157,8 +137,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 			return mergeResult{GateOutput: gateOutput}, cancelledMergeError("before-attempt")
 		}
 		if attempt > 1 {
-			log.Printf("refinery: MR %s step=retry attempt=%d (cap=%d) contention=%d/%d network=%d/%d gate-network=%d/%d setup=%d/%d unclassified=%d/%d backoff_spent=%s",
-				mr.ID, attempt, hardCap, contentionUsed, contentionBudget, netUsed, netBudget, gateNetUsed, gateNetBudget, setupUsed, setupBudget, unclassifiedUsed, unclassifiedBudget, backoffSpent.Round(time.Second))
+			log.Printf("refinery: MR %s step=retry attempt=%d (cap=%d) %s", mr.ID, attempt, hardCap, policy.counts())
 		}
 
 		emitMergeAttempted(mr, attempt)
@@ -181,8 +160,8 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 			// the dominant failure mode without anybody holding the evidence.
 			if attempt > 1 {
 				log.Printf("refinery: MR %s RECOVERED on attempt %d after %d failed attempt(s) (%s) — %s of backoff; the earlier failures are recorded on the merge request",
-					mr.ID, attempt, attempt-1, r.attemptClassSummary(mr), backoffSpent.Round(time.Second))
-				r.recordRecovery(mr, attempt, backoffSpent)
+					mr.ID, attempt, attempt-1, r.attemptClassSummary(mr), policy.backoffSpent.Round(time.Second))
+				r.recordRecovery(mr, attempt, policy.backoffSpent)
 			}
 			emitMerged(mr, attempt, sha, time.Since(startTime).Seconds(), false)
 			// origin/<target> just advanced; refresh the checkout the MR
@@ -225,76 +204,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 		// whatever the decision is (mg-e5c2).
 		fail, disp := r.describeAttemptFailure(wtDir, attempt, stage, attemptErr)
 
-		retry := false
-		reason := disp.Reason
-		// retryReason is the mirror of reason and is recorded when a retry DOES
-		// follow (mg-15bb). It is composed per arm rather than taken from the
-		// classifier alone, because the sentence a reader needs includes where
-		// in the budget this attempt sat — "attempt 2 of 3" is the difference
-		// between a policy and a loop.
-		retryReason := disp.RetryReason
-		var backoff time.Duration
-		switch {
-		case !disp.Retryable:
-			// reason is the classifier's sentence for why re-running would give
-			// the same answer.
-		case disp.Class == ClassInfrastructure && disp.GateRerun:
-			// Ahead of the plain infrastructure arm: same class, different price.
-			gateNetUsed++
-			next := gateNetworkBackoffFor(gateNetUsed)
-			switch {
-			case gateNetUsed >= gateNetBudget:
-				reason = fmt.Sprintf("not retryable: the gate-network retry budget is spent — %d of %d attempts used over %s of backoff, each one a whole gate run on the single serial slot every queued merge waits behind. The class is still INFRASTRUCTURE: the GATE could not reach the network, so this is not a verdict on the branch and no fix is warranted. The outage outlasted the refinery's patience — resubmit unchanged once the network is back",
-					gateNetUsed, gateNetBudget, backoffSpent.Round(time.Second))
-			case backoffSpent+next > networkRetryBudget:
-				reason = fmt.Sprintf("not retryable: waiting %s more would exceed the %s retry budget (%s already slept). The class is still INFRASTRUCTURE — the GATE could not reach the network, not a verdict on the branch",
-					next, networkRetryBudget, backoffSpent.Round(time.Second))
-			default:
-				retry, backoff = true, next
-			}
-		case disp.Class == ClassInfrastructure:
-			netUsed++
-			next := networkBackoffFor(netUsed)
-			switch {
-			case netUsed >= netBudget:
-				reason = fmt.Sprintf("not retryable: the network retry budget is spent — %d of %d network-class attempts used over %s of backoff. The class is still INFRASTRUCTURE: the outage outlasted the refinery's patience, it is not a verdict on the branch",
-					netUsed, netBudget, backoffSpent.Round(time.Second))
-			case backoffSpent+next > networkRetryBudget:
-				reason = fmt.Sprintf("not retryable: waiting %s more would exceed the %s network retry budget (%s already slept), and this is one serial slot every queued merge waits behind. The class is still INFRASTRUCTURE",
-					next, networkRetryBudget, backoffSpent.Round(time.Second))
-			default:
-				retry, backoff = true, next
-			}
-		case disp.Class == ClassSetup:
-			setupUsed++
-			next := gateSetupBackoffFor(setupUsed)
-			switch {
-			case setupUsed >= setupBudget:
-				reason = fmt.Sprintf("not retryable: the setup retry budget is spent — %d of %d attempts used over %s of backoff, each one a whole gate run on the single serial slot every queued merge waits behind. The class is still SETUP: the gate's own setup failed on every attempt, so it never returned a verdict on this tree and this is NOT a finding against the branch. What the retries established is that the envelope is broken STANDING rather than once; they did NOT establish whose setup it is — a branch can break its own. Read the banner and establish which; do NOT dispatch a fix on this alone",
-					setupUsed, setupBudget, backoffSpent.Round(time.Second))
-			case backoffSpent+next > networkRetryBudget:
-				reason = fmt.Sprintf("not retryable: waiting %s more would exceed the %s retry budget (%s already slept). The class is still SETUP — the gate's own setup failed, not a verdict on the branch",
-					next, networkRetryBudget, backoffSpent.Round(time.Second))
-			default:
-				retry, backoff = true, next
-				retryReason = fmt.Sprintf("RETRYING (setup attempt %d of %d, after %s): %s",
-					setupUsed+1, setupBudget, next, disp.RetryReason)
-			}
-		case disp.Class == ClassContention:
-			contentionUsed++
-			if contentionUsed >= contentionBudget {
-				reason = fmt.Sprintf("not retryable: the contention retry budget is spent — %d of %d attempts used", contentionUsed, contentionBudget)
-			} else {
-				retry = true
-			}
-		case disp.Class == ClassUnclassified:
-			unclassifiedUsed++
-			if unclassifiedUsed >= unclassifiedBudget {
-				reason = fmt.Sprintf("not retryable: %d of %d unclassified attempts used, and the refinery still cannot place this failure — read the raw error above before reacting", unclassifiedUsed, unclassifiedBudget)
-			} else {
-				retry = true
-			}
-		}
+		retry, backoff, reason, retryReason := policy.decide(disp)
 
 		fail.Retried = retry
 		fail.BackoffSeconds = backoff.Seconds()
@@ -330,12 +240,12 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 		if retry {
 			if backoff > 0 {
 				log.Printf("refinery: MR %s waiting %s before attempt %d (class=%s, budget %s of %s spent)",
-					mr.ID, backoff, attempt+1, disp.Class, backoffSpent.Round(time.Second), networkRetryBudget)
+					mr.ID, backoff, attempt+1, disp.Class, policy.backoffSpent.Round(time.Second), networkRetryBudget)
 				if !r.sleepUnlessCancelled(mr, backoff) {
 					emitMergeCancelled(mr, attempt, "retry-backoff", gateOutput)
 					return mergeResult{GateOutput: gateOutput}, cancelledMergeError("retry-backoff")
 				}
-				backoffSpent += backoff
+				policy.backoffSpent += backoff
 			}
 			continue
 		}
