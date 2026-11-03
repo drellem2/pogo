@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -273,17 +274,25 @@ func (m MailSink) Deliver(a Alarm) (Receipt, error) {
 		return rec, errors.New(rec.Err)
 	}
 
-	args := []string{"--root", root, "mail", "send", m.recipient(),
-		"--from", m.sender(), "--subject", a.Subject(), "--body-file", "-", "--json"}
-	if m.Create {
-		args = append(args, "--create")
-	}
-	cmd := exec.Command(bin, args...)
-	cmd.Stdin = strings.NewReader(a.Body())
-	// MG_ROOT is set alongside the flag, and POGO_AGENT_NAME is cleared so mg
-	// cannot attribute this to whatever agent's environment pogod inherited.
-	cmd.Env = append(os.Environ(), "MG_ROOT="+root, "POGO_AGENT_NAME=")
-	out, err := cmd.CombinedOutput()
+	// The send goes through the alert seam (drellem2/pogo#262) with this sink's
+	// own transport: the store root and the --json receipt below are what make
+	// this a confirmed delivery, so the generic transport will not do.
+	var out []byte
+	err = alerts.Mail(alerts.RefusalWatchAlarm, func(to, from, subject, body string) error {
+		args := []string{"--root", root, "mail", "send", to,
+			"--from", from, "--subject", subject, "--body-file", "-", "--json"}
+		if m.Create {
+			args = append(args, "--create")
+		}
+		cmd := exec.Command(bin, args...)
+		cmd.Stdin = strings.NewReader(body)
+		// MG_ROOT is set alongside the flag, and POGO_AGENT_NAME is cleared so mg
+		// cannot attribute this to whatever agent's environment pogod inherited.
+		cmd.Env = append(os.Environ(), "MG_ROOT="+root, "POGO_AGENT_NAME=")
+		var runErr error
+		out, runErr = cmd.CombinedOutput()
+		return runErr
+	}, m.recipient(), m.sender(), a.Subject(), a.Body())
 	if err != nil {
 		rec.Err = fmt.Sprintf("`mg mail send %s` failed: %v: %s", m.recipient(), err, strings.TrimSpace(string(out)))
 		return rec, errors.New(rec.Err)

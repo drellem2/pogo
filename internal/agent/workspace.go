@@ -3,8 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -155,11 +155,7 @@ func mailWorkspaceStale(name string, res freshen.Result) {
 		behindPhrase(res.Behind), res.Status, res.Detail,
 		remedyFor(res))
 
-	cmd := exec.Command("mg", "mail", "send", coordinator,
-		"--from", "pogod-workspace",
-		"--subject", subject,
-		"--body", body)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := alerts.MailOutput(alerts.WorkspaceStale, coordinator, "pogod-workspace", subject, body); err != nil {
 		log.Printf("workspace-freshen: mail to %s failed: %v: %s",
 			coordinator, err, strings.TrimSpace(string(out)))
 	}

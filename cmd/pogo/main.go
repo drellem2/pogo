@@ -4700,6 +4700,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(cmdInit)
 	rootCmd.AddCommand(cmdInstall)
 	rootCmd.AddCommand(newConfigCmd(&jsonOutput))
+	rootCmd.AddCommand(newAlertsCmd(&jsonOutput))
 	rootCmd.AddCommand(newWorktreeDirtyCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdVisit)
 	cmdStatus.Flags().BoolVar(&statusLive, "live", false, "Continuously refresh the dashboard (like watch)")

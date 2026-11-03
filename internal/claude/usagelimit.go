@@ -18,13 +18,13 @@ package claude
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/events"
 )
 
@@ -208,7 +208,7 @@ func (c *usageLimitCoordinator) fireHoldDown() {
 
 	if send != nil {
 		subject, body := hitMail(info)
-		if err := send(to, "pogod", subject, body); err != nil {
+		if err := alerts.Mail(alerts.UsageLimitHit, send, to, "pogod", subject, body); err != nil {
 			log.Printf("usage-limit: failed to send hit mail: %v", err)
 		}
 	}
@@ -279,7 +279,7 @@ func (c *usageLimitCoordinator) OnClear(agentID string, when time.Time) {
 	}
 	if send != nil {
 		subject, body := clearMail(roster, when)
-		if err := send(to, "pogod", subject, body); err != nil {
+		if err := alerts.Mail(alerts.UsageLimitCleared, send, to, "pogod", subject, body); err != nil {
 			log.Printf("usage-limit: failed to send clear mail: %v", err)
 		}
 	}
@@ -435,10 +435,10 @@ var (
 )
 
 // defaultUsageLimitCoordinator returns the process-wide singleton, lazily
-// wired to client.SendMGMail. Lazy so pure-library callers don't construct it.
+// wired to alerts.Transport. Lazy so pure-library callers don't construct it.
 func defaultUsageLimitCoordinator() *usageLimitCoordinator {
 	usageLimitCoordOnce.Do(func() {
-		usageLimitCoord = newUsageLimitCoordinator(client.SendMGMail, time.Now)
+		usageLimitCoord = newUsageLimitCoordinator(alerts.Transport, time.Now)
 	})
 	return usageLimitCoord
 }

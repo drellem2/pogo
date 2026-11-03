@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/drellem2/pogo/internal/alerts"
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/client"
@@ -16,7 +17,7 @@ import (
 func newFilerNotifier(coordinator string, reg *agent.Registry) *filernotify.Notifier {
 	n := filernotify.New(
 		coordinator,
-		client.SendMGMail,
+		alerts.Transport,
 		client.MGWorkItemFiling,
 		workitem.ReadResult,
 		agentKnown(reg),

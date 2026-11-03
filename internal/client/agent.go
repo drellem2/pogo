@@ -510,19 +510,6 @@ func NudgeRunning(name, message string, opts *NudgeOpts) error {
 	return err
 }
 
-// SendMGMail sends a mail message via macguffin (mg mail send).
-// Used by non-agent components like the refinery that need to deliver mail
-// to agents reading via mg mail list.
-func SendMGMail(to, from, subject, body string) error {
-	cmd := execCommand("mg", "mail", "send", to, "--from="+from, "--subject="+subject, "--body="+body)
-	cmd.Stderr = nil
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("mg mail send failed: %s (%w)", string(out), err)
-	}
-	return nil
-}
-
 // RegisterMGMailbox creates an agent's macguffin mailbox so mail can be
 // ADDRESSED to it (`mg mail register <name>`).
 //

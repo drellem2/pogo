@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"strings"
 	"sync"
 	"time"
@@ -50,7 +51,7 @@ const mailFrom = "review-decl-watch"
 // because those two must never collapse into the same "nothing to report".
 type SourceFunc func() ([]Item, error)
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. It is the ONLY side-effect channel this runner has — there is
 // deliberately no seam through which it could edit the work item it names.
 type MailFunc func(to, from, subject, body string) error
@@ -274,7 +275,7 @@ func (w *Watcher) sample(now time.Time) {
 		"population":  rep.Population,
 		"notified":    w.notifyTo,
 	}
-	if err := w.mail(w.notifyTo, mailFrom, subject, body); err != nil {
+	if err := alerts.Mail(alerts.ReviewDeclFinding, w.mail, w.notifyTo, mailFrom, subject, body); err != nil {
 		// The finding was detected but could not be reported — record it, because
 		// a notice that reaches nobody is this detector's own failure mode, one
 		// level up.

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"os"
 	"path/filepath"
@@ -201,7 +202,7 @@ func conditionNoticesPath() string {
 	return filepath.Join(config.PogoHome(), conditionNoticesFile)
 }
 
-// conditionMailer is the send seam — client.SendMGMail in production, a recorder
+// conditionMailer is the send seam — alerts.Transport in production, a recorder
 // in tests. Without it a test run shells out to the real `mg` and manufactures a
 // fleet alarm.
 type conditionMailer func(to, from, subject, body string) error
@@ -214,7 +215,7 @@ type conditionMailer func(to, from, subject, body string) error
 // through the scheduler. pogod's heartbeat (internal/heartbeat) is what drives
 // the scheduler, not the other way round — main.go's OnTick reads
 // `if sched != nil { sched.Tick(...) }`, so a nil scheduler leaves the heartbeat
-// ticking normally. Mail is likewise independent: client.SendMGMail shells out
+// ticking normally. Mail is likewise independent: alerts.Transport shells out
 // to `mg` (mg-c3f0 §4 verified this). So on the A2 boot, mail delivery works and
 // the heartbeat works; the ONLY thing that stops working is the recipient's
 // mail-check loop, and a nudge is exactly the substitute for that.
@@ -438,13 +439,13 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 	a.mu.Unlock()
 
 	subject, body := c.Subject, c.Body
-	err := a.mail(c.To, conditionMailFrom, subject, body)
+	err := alerts.Mail(alerts.ConditionNotice, a.mail, c.To, conditionMailFrom, subject, body)
 	var oobErr error
 	if oob != "" {
 		// The out-of-band copy is sent whatever happened to the first: it is the
 		// one that matters in the states that set it, and a failed coordinator
 		// send is no reason to withhold it.
-		oobErr = a.mail(oob, conditionMailFrom, subject, body)
+		oobErr = alerts.Mail(alerts.ConditionOutOfBand, a.mail, oob, conditionMailFrom, subject, body)
 		if oobErr != nil {
 			log.Printf("pogod: ⚠ OUT-OF-BAND copy of condition %s (%s) to %s FAILED: %v — "+
 				"the only reader outside the fleet was not told", c.ID, c.Row, oob, oobErr)

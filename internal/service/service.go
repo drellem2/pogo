@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"io"
 	"net"
 	"os"
@@ -750,11 +751,7 @@ var installMailer = sendInstallMail
 // config (mg-e545).
 func sendInstallMail(subject, body string) {
 	coordinator := installMailCoordinator()
-	cmd := exec.Command("mg", "mail", "send", coordinator,
-		"--from", "service-install",
-		"--subject", subject,
-		"--body", body)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := alerts.MailOutput(alerts.ServiceInstallReport, coordinator, "service-install", subject, body); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: mail to %s failed: %v: %s\n", coordinator, err, strings.TrimSpace(string(out)))
 		return
 	}

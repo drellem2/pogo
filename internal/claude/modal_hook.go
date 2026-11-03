@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
-	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/alerts"
 	"github.com/drellem2/pogo/internal/events"
 )
 
@@ -736,7 +736,7 @@ func defaultNotifyPM(agentID, matcherName string) {
 	body := "pogod's modal watcher (mg-4421) dismissed a rate-limit-options modal " +
 		"on agent " + agentID + " after 20m of event-log silence. " +
 		"The agent should now be responsive — confirm and chase any in-flight work."
-	if err := client.SendMGMail(pm, "pogod", subject, body); err != nil {
+	if err := alerts.Mail(alerts.ModalRateLimitDismissed, alerts.Transport, pm, "pogod", subject, body); err != nil {
 		log.Printf("modal_hook: failed to notify %s for %s: %v", pm, agentID, err)
 	}
 }

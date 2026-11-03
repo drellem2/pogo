@@ -3,8 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
-	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
@@ -267,11 +267,7 @@ func mailDriftAlert(a DriftAlert) {
 		a.Provider, a.Gate, a.Sentinel, a.Missed, a.Total, a.Fraction*100,
 		a.Window.String(), a.Gate)
 
-	cmd := exec.Command("mg", "mail", "send", coordinator,
-		"--from", "pogod-sentinel",
-		"--subject", subject,
-		"--body", body)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := alerts.MailOutput(alerts.SentinelDrift, coordinator, "pogod-sentinel", subject, body); err != nil {
 		log.Printf("sentinel-drift: mail to %s failed: %v: %s",
 			coordinator, err, strings.TrimSpace(string(out)))
 	}

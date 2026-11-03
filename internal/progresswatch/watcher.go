@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"strings"
 	"sync"
 	"time"
@@ -94,7 +95,7 @@ const (
 // collapse into the same quiet result.
 type SourceFunc func(now time.Time) (Snapshot, error)
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. It is the ONLY side-effect channel this package has: there is
 // deliberately no seam through which the watcher could restart or nudge the
 // workers it names. See the package comment.
@@ -386,7 +387,7 @@ func (w *Watcher) apply(now time.Time, r Reading) {
 	}
 	body := w.body(r, held, openedAt)
 	for _, box := range to {
-		if err := w.mail(box, mailFrom, r.Subject(), body); err != nil {
+		if err := alerts.Mail(alerts.ProgressWatchFinding, w.mail, box, mailFrom, r.Subject(), body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",
@@ -470,7 +471,7 @@ func (w *Watcher) reportBlind(now time.Time, r Reading) {
 		"will not be reported, and the absence of an alarm means nothing.\n\n")
 	b.WriteString(detectorNote)
 
-	if err := w.mail(w.notifyTo, mailFrom, subject, b.String()); err != nil {
+	if err := alerts.Mail(alerts.ProgressWatchBlind, w.mail, w.notifyTo, mailFrom, subject, b.String()); err != nil {
 		w.emit(events.Event{
 			EventType: EventError,
 			Agent:     "pogod",
@@ -525,7 +526,7 @@ func (w *Watcher) clear(now time.Time, r Reading) {
 		whyCleared(r) +
 		"\n" + detectorNote
 	for _, box := range to {
-		if err := w.mail(box, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.ProgressWatchCleared, w.mail, box, mailFrom, subject, body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",

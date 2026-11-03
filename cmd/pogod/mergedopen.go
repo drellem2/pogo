@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"strings"
 	"testing"
@@ -209,7 +210,7 @@ func defaultMergedOpenAlertMail(a mergedOpenAlert) {
 	}
 	to := agent.CoordinatorName()
 	subject, body := a.Message()
-	if err := client.SendMGMail(to, "pogod", subject, body); err != nil {
+	if err := alerts.Mail(alerts.MergedOpenNotClosed, alerts.Transport, to, "pogod", subject, body); err != nil {
 		log.Printf("merged-not-closed: cannot mail %s about %s (%v)", to, a.WorkItemID, err)
 		events.Emit(context.Background(), events.Event{
 			EventType:  "work_item_merged_not_closed_undelivered",

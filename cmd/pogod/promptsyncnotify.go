@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"os"
 	"path/filepath"
@@ -177,7 +178,7 @@ func promptSyncFingerprint(distAbs string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// promptSyncMailer is the send seam. Production wires client.SendMGMail; tests
+// promptSyncMailer is the send seam. Production wires alerts.Transport; tests
 // substitute a recorder. Without this seam a test run shells out to the real
 // `mg` and mails a live crew agent — a manufactured fleet alarm, which is the
 // same class of fault as writing test events onto the real spine.
@@ -238,7 +239,7 @@ func notifyPromptSyncConflicts(
 		}
 
 		subject, body := promptSyncMailText(c, to, owned)
-		if err := mail(to, "pogod-promptsync", subject, body); err != nil {
+		if err := alerts.Mail(alerts.PromptSyncNotice, mail, to, "pogod-promptsync", subject, body); err != nil {
 			// The notifier failed. Say so loudly AND do not remember this
 			// conflict as announced: dropping it from the store means the next
 			// boot treats it as new and tries again. A notifier that silently

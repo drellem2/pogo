@@ -66,6 +66,7 @@ package synthwatch
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"sort"
 	"strings"
@@ -188,7 +189,7 @@ type Target struct {
 	WorkItemID string
 }
 
-// MailFunc sends operator mail. pogod wires client.SendMGMail.
+// MailFunc sends operator mail. pogod wires alerts.Transport.
 type MailFunc func(to, from, subject, body string) error
 
 // Options carries the watcher's dependencies so the package is testable with no
@@ -607,7 +608,8 @@ func (w *Watcher) drain(now time.Time) {
 	// wide than narrow. The details KEY SET is fixed by the cross-repo contract —
 	// do not add one here for the hold.
 	w.opts.Emit(episodeClearedEvent(episodeID, identities, openedAt, now))
-	w.sendMail(clearMail(names, quietSince, now, w.window(), w.opts.ClearHold, recurrences, suppressed))
+	subject, body := clearMail(names, quietSince, now, w.window(), w.opts.ClearHold, recurrences, suppressed)
+	w.sendMail(false, subject, body)
 }
 
 // makeEpisodeID builds a stable per-episode id from the opening agent and the
@@ -688,7 +690,7 @@ func (w *Watcher) page(t Target, rep synthfail.Report, now time.Time) {
 		})
 		return
 	}
-	w.sendMail(subject, body)
+	w.sendMail(true, subject, body)
 }
 
 // window is the trailing window the reports were counted over, for the mails
@@ -701,11 +703,19 @@ func (w *Watcher) window() time.Duration {
 	return synthfail.DefaultWindow
 }
 
-func (w *Watcher) sendMail(subject, body string) {
+func (w *Watcher) sendMail(hit bool, subject, body string) {
 	if w.opts.Mail == nil {
 		return
 	}
-	if err := w.opts.Mail(w.opts.MailTo, mailFrom, subject, body); err != nil {
+	// Two literal names rather than a Name variable, so the alert guard can see
+	// which alert each send is (drellem2/pogo#262).
+	var err error
+	if hit {
+		err = alerts.Mail(alerts.SynthWatchHit, w.opts.Mail, w.opts.MailTo, mailFrom, subject, body)
+	} else {
+		err = alerts.Mail(alerts.SynthWatchCleared, w.opts.Mail, w.opts.MailTo, mailFrom, subject, body)
+	}
+	if err != nil {
 		log.Printf("synthwatch: failed to page %s: %v", w.opts.MailTo, err)
 	}
 }
