@@ -121,12 +121,66 @@ doubling backoff from a 1h base those span ~7h (0, +1h, +2h, +4h) — long past 
 point where "the agent never knew" is a live explanation. A negative value
 disables the cap.
 
-The cap is the *whole* answer to "I know": there is still no acknowledgment
-path, and the notice text says so. An earlier wording told recipients to "say
-so in the item body", which nothing reads. Agents who followed it edited the
-body once per notice and got the same notices anyway (mg-1105). If an
-acknowledgment is ever wanted, it has to be read here in code (e.g. a body
-marker that suppresses the remaining notices), not promised in the string.
+Until drellem2/pogo#161 the cap was the *whole* answer to "I know". An earlier
+wording told recipients to "say so in the item body", which nothing reads.
+Agents who followed it edited the body once per notice and got the same notices
+anyway (mg-1105, and the #161 reporter, who had written the release condition
+into all six bodies before the first notice arrived).
+
+## The acknowledgment: a waiver tag (drellem2/pogo#161)
+
+An item carrying a tag in `blocked_reminder_waiver_tags` (default
+`waiting-on-purpose`) draws no blocked-reminder:
+
+    mg edit <id> --add-tags=waiting-on-purpose
+
+The notice names the configured tag and that command, and still says a reply or
+a body edit does nothing. It is a **tag** and not a body marker because the
+reminder path deliberately reads no item text (the same prohibition
+`indefinitehold.go` states for the sibling reader), and because a marker leading
+the body is unreadable under the carrier-block trap (mg-27d4). The precedent is
+`[dispatch_pairing] waiver_tags`.
+
+It waives a **notice**, nothing else. The item stays gated by its assignee, and
+dispatch is refused at the spawn point regardless of tags. Removing the tag
+re-arms the reminder: the item's backoff key was pruned when it left the
+candidate set, so its next notice is a first notice and fires at once.
+
+## Self-set blocks draw nothing (drellem2/pogo#161)
+
+`blocked:mayor` written by pm-pogo is a request mayor received; `blocked:mayor`
+written by mayor is a statement mayor made, and reminding mayor of it asks the
+coordinator to reconsider a decision it took a minute earlier. On this store 20
+of 53 recorded `blocked:` assignments were self-set (t7476's count), and the #161
+incident was six of them arriving as one burst.
+
+The work item does not record who wrote its assignee, so the setter is read from
+macguffin's `events.jsonl` (beside the work tree): the last `work.created` or
+`work.edited` event that wrote the item's assignee, and its `actor`. When that
+actor is the agent the block names, the item draws no notice.
+
+**Suppression fails open, as acceptance.** A reminder that wrongly fires is
+noise; one that wrongly suppresses is an item nobody is told about, the exact
+failure this mechanism exists to prevent. So the notice is sent whenever the
+setter is anything short of certain: the log is missing or unreadable; no event
+wrote this item's assignee; the last such event recorded a different value than
+the field now holds; the last write was an unattributed one (a `work.unclaim`
+restoring an assignee); or the actor is empty. The actor is self-asserted and
+falls back to the OS user, so a match is a strong heuristic rather than proof —
+and the OS-user fallback names no agent, so it too fails toward the notice.
+
+The log grows monotonically, so it is read **incrementally**: once in full, then
+only the appended bytes on each later tick, and only on ticks that have a
+`blocked:<agent>` item to ask about. A shrunk or replaced log is re-read from
+the start.
+
+Both silences — waived and self-set — emit a `stall_watch_fired` event with
+`item_count: 0` and `waived_ids` / `self_set_ids`, once on entry rather than per
+tick, for the same reason the cap does.
+
+The optional first-sight delay the reporter also suggested was **declined**: the
+first notice is never delayed (see below), and suppressing self-set blocks
+removes the burst without paying that cost.
 
 The base cooldown is an hour rather than the 5-minute stall cooldown because the
 recipients differ in kind: a stall nudge asks the coordinator for a dispatch it

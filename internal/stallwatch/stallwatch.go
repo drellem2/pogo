@@ -163,6 +163,10 @@ type Options struct {
 	WorkRoot string
 	// MailRoot is the macguffin mail directory (default ~/.macguffin/mail).
 	MailRoot string
+	// EventsPath is macguffin's event log, read by the blocked-reminder to learn
+	// who set a block (drellem2/pogo#161). Default: events.jsonl beside
+	// WorkRoot, which is where macguffin writes it.
+	EventsPath string
 	// Nudge delivers the nudge. Required.
 	Nudge Nudger
 	// Emit writes the stall_watch_fired event. Defaults to events.Emit.
@@ -228,6 +232,9 @@ type Watcher struct {
 	preserved Preserved
 	stranded  Stranded
 	paused    func() bool
+	// setters answers "who wrote this item's assignee" for the blocked-reminder
+	// (drellem2/pogo#161). It is read incrementally — see blockSetterLog.
+	setters *blockSetterLog
 
 	mu sync.Mutex
 	// wasPaused records that the previous Check saw the pause, so the first
@@ -248,6 +255,10 @@ type Watcher struct {
 	// last SENT a notice. It gates only when the next notice may go out — see
 	// selectDispatchDue — and records nothing about any item.
 	lastDispatchNotice map[string]time.Time
+	// quietBlocks records, per item id, why the blocked-reminder is holding it
+	// silent ("waived" or "self_set") as of the last sample, so the event that
+	// records the silence is emitted on entry rather than on every tick.
+	quietBlocks map[string]string
 }
 
 // fireRecord is the per-key cooldown state: when the key last fired, and how
@@ -327,6 +338,11 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		}
 	}
 
+	eventsPath := opts.EventsPath
+	if eventsPath == "" && workRoot != "" {
+		eventsPath = filepath.Join(filepath.Dir(workRoot), "events.jsonl")
+	}
+
 	emit := opts.Emit
 	if emit == nil {
 		emit = func(e events.Event) { events.Emit(context.Background(), e) }
@@ -344,6 +360,7 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		preserved: opts.Preserved,
 		stranded:  opts.Stranded,
 		paused:    opts.Paused,
+		setters:   newBlockSetterLog(eventsPath),
 		lastNudge: make(map[string]fireRecord),
 		selfMail:  make(map[string]bool),
 

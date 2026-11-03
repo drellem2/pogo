@@ -1147,9 +1147,13 @@ func TestBlockedReminderConfigFile(t *testing.T) {
 blocked_reminder_enabled = false
 blocked_reminder_cooldown = "20m"
 blocked_reminder_max_notices = -1
+blocked_reminder_waiver_tags = ["hold-ack", "deliberate"]
 `), 0644)
 
 	cfg := Load()
+	if got := cfg.StallWatch.BlockedReminderWaiverTags; len(got) != 2 || got[0] != "hold-ack" || got[1] != "deliberate" {
+		t.Errorf("waiver tags = %v, want [hold-ack deliberate]", got)
+	}
 	if cfg.StallWatch.BlockedReminderEnabled {
 		t.Error("blocked reminder should be disabled by config file")
 	}
@@ -1185,6 +1189,11 @@ nudge_cooldown = "2m"
 	if cfg.StallWatch.BlockedReminderMaxNotices != DefaultBlockedReminderMaxNotices {
 		t.Errorf("max notices = %d, want default %d",
 			cfg.StallWatch.BlockedReminderMaxNotices, DefaultBlockedReminderMaxNotices)
+	}
+	// drellem2/pogo#161: the waiver ships on, so the notice's instruction works
+	// on an untouched config.
+	if got := cfg.StallWatch.BlockedReminderWaiverTags; len(got) != 1 || got[0] != "waiting-on-purpose" {
+		t.Errorf("waiver tags = %v, want default [waiting-on-purpose]", got)
 	}
 }
 

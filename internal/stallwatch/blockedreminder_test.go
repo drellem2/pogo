@@ -312,11 +312,12 @@ func TestBlockedReminderOffersNoFalseAcknowledgment(t *testing.T) {
 			}
 			msg := got[0].message
 			// Positive control for the negatives below: the instrument sees the
-			// stop sentence at all.
-			if !strings.Contains(msg, "nothing to acknowledge") || !strings.Contains(msg, tc.want) {
+			// stop sentence at all. Since drellem2/pogo#161 the sentence offers
+			// the one acknowledgement this check honours — the waiver tag.
+			if !strings.Contains(msg, "will not stop") || !strings.Contains(msg, tc.want) {
 				t.Errorf("message does not state the real stop condition %q: %q", tc.want, msg)
 			}
-			for _, false_ := range []string{"say so in the item body", "item body"} {
+			for _, false_ := range []string{"say so in the item body", "in the item body"} {
 				if strings.Contains(msg, false_) {
 					t.Errorf("message offers %q, an acknowledgment nothing reads: %q", false_, msg)
 				}
