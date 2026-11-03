@@ -1121,7 +1121,8 @@ The refinery successfully merged a branch (gates passed, fast-forward push to ta
   - `merge_request_id` (string, required)
   - `branch` (string, required)
   - `target` (string, required)
-  - `merge_commit` (string, required): SHA of the merge commit (or fast-forwarded HEAD)
+  - `merge_commit` (string, required): SHA of the merge commit (or fast-forwarded HEAD). `""` for an enth land: a Change id is not a merge commit (enth-vcs §7)
+  - `landed` (object, optional since mg-01821): what the MR landed as, by VCS — `{"vcs": "git", "id": "<merge commit>"}` or `{"vcs": "enth", "id": "<the land's new tip>"}`. It is `mr.Landed()` on the merge request. Omitted when the id is unknown. A reader that wants a git sha keys on `vcs`, never on the id's shape
   - `attempt` (int, required): attempt number that succeeded (`0` when no merge attempt ran: restart recovery found the merge already pushed, or the branch was already merged at processing time)
   - `author` (string, required since mg-e9ee): submitting agent (e.g. `"cat-mg-0241"`). Carried on the outcome events, not only on `refinery_merge_attempted`, so a reader reconstructing history from the log can name the author of a merge whose attempt event has rotated out from under it. It is not the same string as `work_item_id`, which is the author with any `cat-` prefix stripped.
   - `duration_seconds` (number, optional): total time from `refinery_merge_attempted` (attempt 1) to merge
