@@ -9,21 +9,21 @@ import (
 	"github.com/drellem2/pogo/internal/vcs"
 )
 
-// TestEveryOperationIsUnsupported walks the still-inert groups of
-// vcs.Backend (Lander, Refs) by reflection, so a method added to them
+// TestEveryOperationIsUnsupported walks the still-inert group of
+// vcs.Backend (Refs, until slice 12) by reflection, so a method added to them
 // later is covered without editing this test: each one, called with zero
 // arguments, must return an error wrapping vcs.ErrUnsupported. Kind must say
 // enth. Workspaces has a body since slice 5 (mg-cc5cd), Work since slice 6
-// (mg-30da0), and each has its own tests.
+// (mg-30da0), Lander since slice 7 (mg-1fe2b), and each has its own tests.
 func TestEveryOperationIsUnsupported(t *testing.T) {
 	var b vcs.Backend = Backend{Repo: vcs.EnthRepo{Remote: "https://enth.example", Repo: "o/r"}}
 	if b.Kind() != vcs.Enth {
 		t.Fatalf("Kind() = %q, want enth", b.Kind())
 	}
-	// Kind, and every Workspaces (slice 5) and Work (slice 6) method, are
-	// skipped.
+	// Kind, and every Workspaces (slice 5), Work (slice 6) and Lander
+	// (slice 7) method, are skipped.
 	total := map[string]bool{"Kind": true}
-	for _, g := range []reflect.Type{reflect.TypeOf((*vcs.Workspaces)(nil)).Elem(), reflect.TypeOf((*vcs.Work)(nil)).Elem()} {
+	for _, g := range []reflect.Type{reflect.TypeOf((*vcs.Workspaces)(nil)).Elem(), reflect.TypeOf((*vcs.Work)(nil)).Elem(), reflect.TypeOf((*vcs.Lander)(nil)).Elem()} {
 		for i := 0; i < g.NumMethod(); i++ {
 			total[g.Method(i).Name] = true
 		}
@@ -55,7 +55,7 @@ func TestEveryOperationIsUnsupported(t *testing.T) {
 		checked++
 	}
 	// Positive control: the walk must actually have visited the groups.
-	if checked < 6 {
+	if checked < 3 {
 		t.Errorf("checked only %d methods; the reflection walk is not seeing vcs.Backend", checked)
 	}
 }

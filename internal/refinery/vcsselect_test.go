@@ -99,18 +99,13 @@ func TestBackendForSelectsFromTheRecord(t *testing.T) {
 		t.Errorf("lookup asked about %v", asked)
 	}
 
-	// The inert backend refuses the land pipeline, and the refinery reports
-	// it as a plain (non-retryable) failure rather than mistaking it for a
-	// git step.
-	_, err := backendFor("/x/enth").Prepare(context.Background(), vcs.MR{})
-	if !errors.Is(err, vcs.ErrUnsupported) {
-		t.Fatalf("enth Prepare = %v, want ErrUnsupported", err)
+	// The enth Lander (slice 7) is reached only through processEnthMerge,
+	// with the submitted Changes; an MR without them is refused, never
+	// handed to git.
+	if _, err := backendFor("/x/enth").Prepare(context.Background(), vcs.MR{}); err == nil || !strings.Contains(err.Error(), "no Changes") {
+		t.Fatalf("enth Prepare of an MR with no Changes = %v, want a refusal", err)
 	}
-	stage, ferr := prepareFailure(&MergeRequest{ID: "mr-e"}, err)
-	var re *retryableError
-	if stage != "fetch" || errors.As(ferr, &re) || !errors.Is(ferr, vcs.ErrUnsupported) {
-		t.Errorf("prepareFailure(ErrUnsupported) = %q, %v; want a non-retryable fetch-stage failure", stage, ferr)
-	}
+	// Refs is still inert (slice 12).
 	if _, err := detectDefaultBranch("/x/enth"); !errors.Is(err, vcs.ErrUnsupported) {
 		t.Errorf("detectDefaultBranch on an enth repo = %v, want ErrUnsupported", err)
 	}
