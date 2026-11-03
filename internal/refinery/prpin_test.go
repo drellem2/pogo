@@ -39,3 +39,46 @@ func TestRefineryPRLookupIsPinnedToOrigin(t *testing.T) {
 		}
 	}
 }
+
+// TestClosePRAndReapClosesInTheRepoItLookedUp: the close is a write addressed
+// by NUMBER, so it must carry the same -R as the lookup that produced the
+// number. Unpinned, gh would pick its own base repo (the upstream remote here)
+// and close PR #7 THERE. The push URL is a local bare repo so the branch reap
+// runs without the network; `remote get-url origin` still reads the github.com
+// fetch URL the pin is derived from.
+func TestClosePRAndReapClosesInTheRepoItLookedUp(t *testing.T) {
+	dir := t.TempDir()
+	bare := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q", "--bare", bare)
+	run("-C", dir, "init", "-q")
+	run("-C", dir, "remote", "add", "origin", "git@github.com:fork-owner/pogo.git")
+	run("-C", dir, "remote", "set-url", "--push", "origin", bare)
+	run("-C", dir, "remote", "add", "upstream", "https://github.com/drellem2/pogo.git")
+
+	logPath := fakeGHLog(t, `case "$1 $2" in
+  "pr view") echo '{"state":"OPEN","number":7}' ;;
+  *) : ;;
+esac`)
+	mr := &MergeRequest{ID: "mr-test", Branch: "polecat-x", TargetRef: "main", RepoPath: dir}
+	(&Refinery{}).closePRAndReap(dir, mr, "abc1234")
+
+	// The close comment spans lines, so the log is split per call on the
+	// "pr " that starts each invocation rather than on newlines.
+	log := strings.Join(ghCalls(t, logPath), "\n")
+	view, close, ok := strings.Cut(log, "\npr close ")
+	if !ok || !strings.HasPrefix(view, "pr view polecat-x") || !strings.HasPrefix(close, "7 ") {
+		t.Fatalf("gh log = %q, want a pr view then a pr close 7", log)
+	}
+	if !strings.HasSuffix(view, "-R fork-owner/pogo") {
+		t.Errorf("lookup %q is not pinned to origin's fork-owner/pogo", view)
+	}
+	if !strings.HasSuffix(close, "-R fork-owner/pogo") {
+		t.Errorf("close %q is not pinned to the repo the lookup used (fork-owner/pogo)", close)
+	}
+}

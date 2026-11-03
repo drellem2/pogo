@@ -165,18 +165,46 @@ var githubHosts = map[string]bool{"github.com": true, "www.github.com": true, "s
 
 var repoPart = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// redactURL drops any userinfo from a remote URL before it is quoted in an
+// error. Errors from ParseGitHubRemote reach Answer.Unpinned and from there
+// durable places — the stranded event log, alert mail — and token-in-URL
+// origins (https://x-access-token:<token>@github.com/...) are the normal
+// shape of GitHub App and CI clones. Only the host and path are ever quoted.
+func redactURL(url string) string {
+	if i := strings.Index(url, "://"); i >= 0 {
+		rest := url[i+3:]
+		auth := rest
+		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+			auth = rest[:slash]
+		}
+		if at := strings.LastIndexByte(auth, '@'); at >= 0 {
+			return url[:i+3] + "<redacted>@" + rest[at+1:]
+		}
+		return url
+	}
+	if c := strings.IndexByte(url, ':'); c > 0 && !strings.Contains(url[:c], "/") {
+		if at := strings.LastIndexByte(url[:c], '@'); at >= 0 {
+			return "<redacted>@" + url[at+1:]
+		}
+	}
+	return url
+}
+
 // ParseGitHubRemote turns a github.com remote URL into OWNER/REPO. It accepts
 // the shapes git itself writes: https://[user@]github.com/OWNER/REPO[.git],
 // ssh://[user@]github.com[:port]/OWNER/REPO[.git], git://github.com/...,
 // and the scp-like [user@]github.com:OWNER/REPO[.git]. Anything else is an
 // error, and the caller falls back to an unpinned lookup.
+//
+// Its errors never quote the URL's userinfo (see redactURL).
 func ParseGitHubRemote(url string) (string, error) {
+	shown := redactURL(url)
 	var host, path string
 	if i := strings.Index(url, "://"); i >= 0 {
 		rest := url[i+3:]
 		slash := strings.IndexByte(rest, '/')
 		if slash < 0 {
-			return "", fmt.Errorf("origin %q has no repository path", url)
+			return "", fmt.Errorf("origin %q has no repository path", shown)
 		}
 		host, path = rest[:slash], rest[slash+1:]
 		if at := strings.LastIndexByte(host, '@'); at >= 0 {
@@ -191,7 +219,7 @@ func ParseGitHubRemote(url string) (string, error) {
 			host = host[at+1:]
 		}
 	} else {
-		return "", fmt.Errorf("origin %q is not a URL gh can be pinned to", url)
+		return "", fmt.Errorf("origin %q is not a URL gh can be pinned to", shown)
 	}
 	if !githubHosts[strings.ToLower(host)] {
 		return "", fmt.Errorf("origin host %q is not github.com", host)
@@ -199,7 +227,7 @@ func ParseGitHubRemote(url string) (string, error) {
 	path = strings.TrimSuffix(strings.TrimSuffix(strings.Trim(path, "/"), ".git"), "/")
 	owner, repo, ok := strings.Cut(path, "/")
 	if !ok || !repoPart.MatchString(owner) || !repoPart.MatchString(repo) {
-		return "", fmt.Errorf("origin %q does not name OWNER/REPO", url)
+		return "", fmt.Errorf("origin %q does not name OWNER/REPO", shown)
 	}
 	return owner + "/" + repo, nil
 }
