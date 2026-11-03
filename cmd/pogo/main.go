@@ -4730,6 +4730,11 @@ The report says how long each kept tree has been untouched so the decision is
 yours to make, and cheap to make. That is the whole use gc makes of a file
 timestamp: it informs you, and it decides nothing.
 
+A repository whose project record names another backend (pogo project set-vcs
+--vcs=enth) is not swept as git: its worktree, prune and branch phases are
+skipped, and the summary's "coverage:" line says so. Polecat trees under the
+polecats dir, enth checkouts included, are still judged.
+
 By default gc only reports what it would do; pass --apply to make changes.
 
 --list-preserved does none of that. It LISTS the worktrees currently being
