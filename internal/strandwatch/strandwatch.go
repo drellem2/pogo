@@ -386,10 +386,10 @@ const (
 	KindRepoUnreadable Kind = "repo_unreadable"
 
 	// KindOrphanBranch is a polecat WORKTREE still present on this host whose
-	// branch holds commits that no remote ref contains, and which no OPEN work
-	// item names. It is the only row in this report whose subject is a branch
-	// rather than an item, and it exists because the item join cannot produce it
-	// (mg-ded2).
+	// branch holds commits that no remote ref contains, that NEITHER landedness
+	// test below shows to have landed, and which no OPEN work item names. It is
+	// the only row in this report whose subject is a branch rather than an item,
+	// and it exists because the item join cannot produce it (mg-ded2).
 	//
 	// THE POPULATION THIS ROW COVERS IS THE INVERSE OF THE ITEM JOIN'S, AND IT IS
 	// THE ONE MOST AT RISK. A polecat whose item is still open has an owner, a
@@ -406,14 +406,37 @@ const (
 	// abandoned by design, and a report that grew by 435 rows would be strictly
 	// worse than one that omits them. The at-risk population is the worktrees
 	// PRESENT ON THIS HOST — 46 on 2026-08-19, enumerable from disk, exactly what
-	// git-gc reaps — of which one held the only copy of anything. A branch with no
-	// worktree has no local-only copy to lose.
+	// git-gc reaps. A branch with no worktree has no local-only copy to lose.
 	//
-	// THE PREDICATE IS "ON NO REMOTE REF", NOT "UNMERGED" (see
-	// strandedwork.LocalOnlyCommits). Unmerged-vs-target is the right question for
-	// a branch somebody still intends to merge, and it is what every other row
-	// here asks; it is the wrong question for a branch nobody owns, because its
-	// answer says nothing about what a `git gc` would destroy.
+	// THE PREDICATE IS THE REAPER'S, NOT A WEAKER ONE (drellem2/pogo#160). This
+	// row used to be gated on strandedwork.LocalOnlyCommits alone — "is this
+	// commit object on some remote ref" — while git-gc, whose reaping is this
+	// row's entire justification, decides with gitgc.BranchDurable: that same
+	// test, then ancestry of the integration ref, then patch-id equivalence (the
+	// refinery rebases, so a landed branch is usually not an ancestor). The two
+	// disagreed on exactly the branches gc had already cleared, and every one of
+	// the 64 orphan rows the reporter classified by hand was landed. The row now
+	// asks, in order:
+	//
+	//	(0) LocalOnlyCommits — a cheap prefilter, unchanged. None: no row.
+	//	(1) Options.BranchDurable, the reaper's verdict. Durable: the branch is
+	//	    SETTLED into Report.Excluded with the verdict's own detail as its
+	//	    reason. Unknown: a KindUnjudged row, never a silent pass.
+	//	(2) Options.MergedPRs, the squash test. BranchDurable cannot see a
+	//	    squash-merged branch (gh#149: no patch id survives a squash), so a
+	//	    MERGED pull request whose head holds this branch's tip, and whose
+	//	    merge commit is an ancestor of the target, settles it too.
+	//
+	// SETTLED IS NOT DROPPED (mg-1af2's rule: a suppression nobody can see is
+	// indistinguishable from a miss). A settled branch is an Excluded entry
+	// carrying KindOrphanBranch, counted on Report.OrphansLanded, printed as a
+	// one-line count on the default output and by name under --all.
+	//
+	// EVERY TEST FAILS TOWARD REPORTING. A source not wired, a gh that is missing,
+	// unauthenticated or rate-limited, a merge commit this clone does not hold,
+	// a local tip the merged PR never saw — each leaves the row REPORTED, and the
+	// row's LandedCheck says which test did not settle it and why. A test that
+	// did not run can cost a suppression; it can never cost a finding.
 	//
 	// THE REMEDY IS NOT `refinery submit`, and that is why this is its own Kind
 	// rather than a stranded row with an empty item. There is no owner to ask and
@@ -751,6 +774,15 @@ type Row struct {
 
 	// Error is why a KindUnjudged row could not be answered. Empty otherwise.
 	Error string `json:"error,omitempty"`
+
+	// Durability is, on a KindOrphanBranch row, the reaper's own detail line
+	// for calling this branch local-only — or why it was not asked.
+	Durability string `json:"durability,omitempty"`
+	// LandedCheck is, on a KindOrphanBranch row, why the merged-PR squash test
+	// did not settle it: not consulted, could not run (gh unavailable or
+	// unauthenticated), no merged PR, or a merged PR that does not cover the
+	// branch. A test that did not run is stated here, never skipped silently.
+	LandedCheck string `json:"landed_check,omitempty"`
 
 	// Enth is set on a row about an enth-backed repository's work, found by its
 	// Pogo-Item trailer rather than on a branch (mg-28cbc). Branch then holds a
@@ -1107,6 +1139,12 @@ type Excluded struct {
 	ItemID string `json:"item_id"`
 	Branch string `json:"branch"`
 	Reason string `json:"reason"`
+	// Kind is set when the exclusion is a row this sweep SETTLED rather than
+	// one it never raised: KindOrphanBranch for an orphan branch shown to have
+	// landed (drellem2/pogo#160). Empty for the item join's exclusions.
+	Kind Kind `json:"kind,omitempty"`
+	// Repo names the repository for an exclusion with no item to name it.
+	Repo string `json:"repo,omitempty"`
 }
 
 // Worktree is one polecat worktree PRESENT ON THIS HOST, as enumerated from
@@ -1268,6 +1306,17 @@ type Report struct {
 	// ReposDiscovered counts repositories that entered the sweep WITHOUT an open
 	// work item naming them.
 	ReposDiscovered int `json:"repos_discovered"`
+	// OrphansLanded counts orphan branches (local-only commits, no open item)
+	// that a landedness test SETTLED: each is an Excluded entry with Kind
+	// KindOrphanBranch, not a row (drellem2/pogo#160). It is the count behind the
+	// default output's "N orphan branch(es), all landed" line, which exists so
+	// the suppression is visible without costing exit status.
+	OrphansLanded int `json:"orphan_branches_landed"`
+	// DurabilityConsulted and MergedPRsConsulted record whether each landedness
+	// test was wired on this run. Unwired, every orphan with local-only commits
+	// is reported, and the frame says which test did not run.
+	DurabilityConsulted bool `json:"durability_consulted"`
+	MergedPRsConsulted  bool `json:"merged_prs_consulted"`
 	// EnthConsulted is whether the enth-backed repositories were asked for at
 	// all; EnthUnreadable is set when they were and the question failed. Either
 	// way enth work is then outside this report, and the frame says so.
@@ -1393,6 +1442,21 @@ type Options struct {
 	// item's unlanded work is exactly what its listing exists to find.
 	Enth func() (map[string]EnthSource, error)
 
+	// BranchDurable is the reaper's own durability verdict on a branch —
+	// gitgc.BranchDurable in production, injected rather than imported so the
+	// detector stays testable without git-gc's policy (drellem2/pogo#160). target
+	// is the integration branch NAME ("main"). Optional: nil means "not
+	// consulted", and every orphan branch holding local-only commits is then
+	// reported, as it was before this test existed. See KindOrphanBranch.
+	BranchDurable func(repo, branch, target string) (Durability, string)
+
+	// MergedPRs lists the MERGED pull requests whose head is branch — the squash
+	// test BranchDurable cannot run (gh#149). Optional: nil means "not
+	// consulted". A branch with no merged PR is (nil, nil); ANY failure — gh
+	// missing, unauthenticated, rate-limited, a non-GitHub remote — is an error,
+	// and an error leaves the row reported. It never settles one.
+	MergedPRs func(repo, branch string) ([]MergedPR, error)
+
 	// ItemByID reads one work item the open set does not hold — the item an
 	// enth Change's Pogo-Item trailer names after it closed. Optional; without
 	// it such a Change is an unjudged row, never dropped.
@@ -1416,6 +1480,29 @@ type Options struct {
 	// Target overrides the ref branches are compared against. Empty resolves each
 	// repository's default branch.
 	Target string
+}
+
+// Durability is the reaper's verdict on whether a branch's commits survive the
+// deletion of its local ref. It mirrors gitgc.DurabilityVerdict without
+// importing it; cmd/pogo maps one onto the other.
+type Durability string
+
+const (
+	DurabilityDurable   Durability = "durable"
+	DurabilityLocalOnly Durability = "local-only"
+	DurabilityUnknown   Durability = "unknown"
+)
+
+// MergedPR is one merged pull request whose head was a branch.
+type MergedPR struct {
+	Number int `json:"number"`
+	// MergeCommit is the commit the merge produced on the base branch — for a
+	// squash merge, the single new commit carrying the branch's content.
+	MergeCommit string `json:"merge_commit"`
+	// HeadCommit is the PR's head as it stood at merge. The local branch tip
+	// must be it, or an ancestor of it, or the branch holds commits the PR never
+	// carried and the merge says nothing about them.
+	HeadCommit string `json:"head_commit"`
 }
 
 // QueueKey is the identity of a branch awaiting merge: a branch name alone is
@@ -1460,6 +1547,8 @@ func Scan(opts Options) (Report, error) {
 	if opts.LiveAgents == nil {
 		return rep, fmt.Errorf("%w: no liveness source configured", ErrNoLiveness)
 	}
+	rep.DurabilityConsulted = opts.BranchDurable != nil
+	rep.MergedPRsConsulted = opts.MergedPRs != nil
 	live, err := opts.LiveAgents()
 	if err != nil {
 		return rep, fmt.Errorf("%w: %v", ErrNoLiveness, err)
@@ -1735,7 +1824,10 @@ func Scan(opts Options) (Report, error) {
 			}
 		}
 
-		rep.Rows = append(rep.Rows, orphanBranchRows(repo, byWorktree[repo], items, live)...)
+		orows, settled := orphanBranchRows(repo, byWorktree[repo], items, live, opts)
+		rep.Rows = append(rep.Rows, orows...)
+		rep.Excluded = append(rep.Excluded, settled...)
+		rep.OrphansLanded += len(settled)
 	}
 
 	rep.Frame = BuildFrame(rep, opts)
@@ -2035,9 +2127,11 @@ func (v historyView) forBranch(repo, branch string, tip time.Time, tipErr string
 }
 
 // orphanBranchRows reports the polecat worktrees on this host whose branch holds
-// commits no remote ref contains and which no OPEN work item names.
+// commits no remote ref contains, that no landedness test shows landed, and
+// which no OPEN work item names. It returns the rows and, separately, the
+// branches it SETTLED as landed — which the caller files under Excluded.
 //
-// THE THREE FILTERS ARE ALL NARROWING, AND EACH ONE IS LOAD-BEARING:
+// THE FILTERS ARE ALL NARROWING, AND EACH ONE IS LOAD-BEARING:
 //
 //   - a LIVE polecat's branch is skipped. A running worker has unpushed commits
 //     because that is what work in progress is, and a detector that fires on
@@ -2053,12 +2147,18 @@ func (v historyView) forBranch(repo, branch string, tip time.Time, tipErr string
 //     difference between a bounded row and an unbounded one: `git cherry` calls
 //     435 polecat branches unmerged in one repository on this box, while exactly
 //     one of the 46 polecat worktrees present held a commit on no remote ref.
+//   - a branch the reaper calls durable, or whose merged PR landed it, is
+//     SETTLED rather than skipped: it leaves the rows and enters the exclusions,
+//     named and counted (see KindOrphanBranch for the order and the reasons).
 //
 // A FAILED MEASUREMENT IS A ROW, for the reason KindUnjudged exists: the natural
 // shape of this predicate answers "nothing local-only" whenever git fails, and
-// that is the direction that converts an orphan into an all-clear.
-func orphanBranchRows(repo string, worktrees []Worktree, items []Item, live map[string]bool) []Row {
+// that is the direction that converts an orphan into an all-clear. The same
+// rule holds one level down — a landedness test that could not run never
+// settles a branch.
+func orphanBranchRows(repo string, worktrees []Worktree, items []Item, live map[string]bool, opts Options) ([]Row, []Excluded) {
 	var rows []Row
+	var settled []Excluded
 	seen := map[string]bool{}
 	for _, w := range worktrees {
 		if w.Branch == "" || !strings.HasPrefix(w.Branch, strandedwork.BranchPrefix) {
@@ -2089,6 +2189,25 @@ func orphanBranchRows(repo string, worktrees []Worktree, items []Item, live map[
 			Item: Item{Repo: repo}, Branch: w.Branch, Kind: KindOrphanBranch,
 			Ref: "refs/heads/" + w.Branch, Unmerged: len(commits),
 		}
+
+		lv := judgeOrphanLanded(repo, w.Branch, opts)
+		if lv.settled != "" {
+			settled = append(settled, Excluded{
+				Branch: w.Branch, Repo: repo, Kind: KindOrphanBranch, Reason: lv.settled,
+			})
+			continue
+		}
+		if lv.unknown != "" {
+			rows = append(rows, Row{
+				Item: Item{Repo: repo}, Branch: w.Branch, Kind: KindUnjudged,
+				Ref: "refs/heads/" + w.Branch, Error: lv.unknown, Target: lv.target,
+			})
+			continue
+		}
+		row.Target = lv.target
+		row.Durability = lv.durability
+		row.LandedCheck = lv.landedCheck
+
 		// An orphan branch is the row with NO OWNER TO ASK, so a self-declaration on
 		// it is worth at least as much as one on an owned row: the reader deciding
 		// what to do with it has no work item, no author and no ticket to read.
@@ -2102,7 +2221,129 @@ func orphanBranchRows(repo string, worktrees []Worktree, items []Item, live map[
 		}
 		rows = append(rows, row)
 	}
-	return rows
+	return rows, settled
+}
+
+// orphanLanded is judgeOrphanLanded's answer. Exactly one of settled and
+// unknown may be set; when neither is, the branch is reported, and durability
+// and landedCheck say what each test found.
+type orphanLanded struct {
+	// settled is the Excluded reason when a test showed the branch landed.
+	settled string
+	// unknown is the reaper's own detail when it could not judge the branch,
+	// which makes the row KindUnjudged.
+	unknown string
+	// target is the integration ref the tests compared against, when one
+	// resolved.
+	target string
+	// durability is the reaper's detail on a branch it called local-only, or
+	// why it was not asked.
+	durability string
+	// landedCheck is why the squash test did not settle the branch.
+	landedCheck string
+}
+
+// judgeOrphanLanded runs the two landedness tests on an orphan branch, in the
+// order KindOrphanBranch states, and fails toward reporting at every step.
+func judgeOrphanLanded(repo, branch string, opts Options) orphanLanded {
+	var lv orphanLanded
+	targetRef, terr := strandedwork.ResolveTarget(repo, opts.Target)
+	if terr == nil {
+		lv.target = targetRef
+	}
+
+	// (1) The reaper's verdict.
+	if opts.BranchDurable == nil {
+		lv.durability = "the reaper's durability test (gitgc.BranchDurable) was NOT CONSULTED on this run"
+	} else {
+		name := opts.Target
+		if terr == nil {
+			name = strings.TrimPrefix(strings.TrimPrefix(targetRef, "refs/remotes/origin/"), "refs/heads/")
+		}
+		verdict, detail := opts.BranchDurable(repo, branch, name)
+		switch verdict {
+		case DurabilityDurable:
+			lv.settled = "landed (the reaper's durability test): " + detail
+			return lv
+		case DurabilityLocalOnly:
+			lv.durability = detail
+		default:
+			lv.unknown = "the reaper's durability test could not judge this orphan branch: " + detail
+			return lv
+		}
+	}
+
+	// (2) The squash test.
+	switch {
+	case opts.MergedPRs == nil:
+		lv.landedCheck = "the merged-PR squash test was NOT CONSULTED on this run"
+	case terr != nil:
+		lv.landedCheck = "the merged-PR squash test DID NOT RUN: no target ref to test ancestry against (" +
+			terr.Error() + ")"
+	default:
+		prs, err := opts.MergedPRs(repo, branch)
+		if err != nil {
+			lv.landedCheck = "the merged-PR squash test DID NOT RUN, so this row is NOT settled: " + err.Error()
+			return lv
+		}
+		if len(prs) == 0 {
+			lv.landedCheck = "no MERGED pull request has this branch as its head"
+			return lv
+		}
+		var why []string
+		for _, pr := range prs {
+			ok, reason := mergedPRLanded(repo, branch, targetRef, pr)
+			if ok {
+				lv.settled = "landed (squash test): " + reason
+				return lv
+			}
+			why = append(why, reason)
+		}
+		lv.landedCheck = "a merged pull request names this branch but does not settle it: " + strings.Join(why, "; ")
+	}
+	return lv
+}
+
+// mergedPRLanded decides whether one merged PR shows branch landed on
+// targetRef. BOTH halves are required, and the first is the one that keeps the
+// test from silencing real work: a branch committed to AFTER its PR merged
+// holds commits the merge never carried, so the local tip must be the PR's
+// head or an ancestor of it. Then the merge commit must be an ancestor of the
+// target — docs/pm-open-pr-pass.md's predicate. Any git failure (including a
+// merge or head commit this clone does not hold) is a reason, never a pass.
+func mergedPRLanded(repo, branch, targetRef string, pr MergedPR) (bool, string) {
+	label := fmt.Sprintf("PR #%d", pr.Number)
+	if pr.MergeCommit == "" {
+		return false, label + " reports no merge commit"
+	}
+	if pr.HeadCommit == "" {
+		return false, label + " reports no head commit, so it cannot be shown to carry this branch's tip"
+	}
+	tip, err := strandedwork.RevParse(repo, "refs/heads/"+branch)
+	if err != nil {
+		return false, fmt.Sprintf("%s: cannot resolve %s: %v", label, branch, err)
+	}
+	if tip != pr.HeadCommit {
+		in, aerr := strandedwork.IsAncestor(repo, tip, pr.HeadCommit)
+		if aerr != nil {
+			return false, fmt.Sprintf("%s: cannot tell whether its head %s carries this branch's tip %s: %v",
+				label, short(pr.HeadCommit), short(tip), aerr)
+		}
+		if !in {
+			return false, fmt.Sprintf("%s merged head %s, and this branch's tip %s is NOT in it — "+
+				"the branch holds commits the PR never carried", label, short(pr.HeadCommit), short(tip))
+		}
+	}
+	in, err := strandedwork.IsAncestor(repo, pr.MergeCommit, targetRef)
+	if err != nil {
+		return false, fmt.Sprintf("%s: cannot test whether merge commit %s is in %s: %v",
+			label, short(pr.MergeCommit), targetRef, err)
+	}
+	if !in {
+		return false, fmt.Sprintf("%s's merge commit %s is NOT an ancestor of %s", label, short(pr.MergeCommit), targetRef)
+	}
+	return true, fmt.Sprintf("%s merged this branch's tip, and its merge commit %s is an ancestor of %s",
+		label, short(pr.MergeCommit), targetRef)
 }
 
 // firstDeclaring returns the first commit satisfying pred, or nil. The
@@ -2169,9 +2410,11 @@ func BuildFrame(rep Report, opts Options) []string {
 		frame = append(frame,
 			fmt.Sprintf("Branches whose work item is done, archived or shelved are outside the join. "+
 				"%d polecat worktree(s) were enumerated on this host and %d entered this sweep; one "+
-				"is reported only when its branch holds commits NO REMOTE REF CONTAINS, so a branch "+
-				"of a closed item that is fully pushed is outside this report.",
-				rep.WorktreesSeen, rep.WorktreesInScope),
+				"is reported only when its branch holds commits NO REMOTE REF CONTAINS and no "+
+				"landedness test shows it landed, so a branch of a closed item that is fully pushed "+
+				"is outside this report. %d such branch(es) were shown landed and settled into the "+
+				"exclusions.",
+				rep.WorktreesSeen, rep.WorktreesInScope, rep.OrphansLanded),
 			fmt.Sprintf("Polecat branches with NO worktree on this host — hundreds of them — were "+
 				"NOT looked at, by any instrument in this run. %d repo(s) entered this sweep named "+
 				"by no open item.", rep.ReposDiscovered))
@@ -2179,6 +2422,21 @@ func BuildFrame(rep Report, opts Options) []string {
 			frame = append(frame, fmt.Sprintf("%d polecat worktree(s) COULD NOT BE READ and were "+
 				"measured by nothing here — see worktrees_unreadable_list; they are named, not "+
 				"dropped.", n))
+		}
+		// A LANDEDNESS TEST THAT DID NOT RUN IS STATED (drellem2/pogo#160). Each
+		// one can only remove an orphan row, so an unwired one makes the report
+		// louder, never quieter — but a reader comparing two runs needs to know
+		// that the difference is the instrument and not the branches.
+		if !rep.DurabilityConsulted {
+			frame = append(frame, "The reaper's durability test (gitgc.BranchDurable) was NOT "+
+				"consulted, so an orphan branch that landed by rebase is reported as if it had not.")
+		}
+		if !rep.MergedPRsConsulted {
+			frame = append(frame, "The merged-PR squash test was NOT consulted, so an orphan branch "+
+				"that landed by squash merge is reported as if it had not.")
+		} else {
+			frame = append(frame, "Orphan branches were also tested against MERGED pull requests "+
+				"(gh); a query that failed leaves its row reported and the row says so.")
 		}
 	}
 	// THE REFINERY'S MEMORY IS A WINDOW AND THE FRAME HAS TO SAY SO (mg-441f). A
