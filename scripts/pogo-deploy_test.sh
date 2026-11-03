@@ -5267,6 +5267,253 @@ grep -q '\] mg: installed .* result=' "$E2E/ok.log" \
 
 
 # ---------------------------------------------------------------------------
+# mg-1be6c — THIS BOX'S enth: newest CI-green main, staged, swapped whole
+# ---------------------------------------------------------------------------
+# The world is scratch: a real git "enth" whose scripts/install.sh is a fake
+# that writes a 3-binary set into --prefix, a fake gh that answers each
+# commit's check-runs from $ENX/ctl/ci/<sha>, and a PREFIX under $WORK holding
+# a stale 0.0.0 set (plus an enth-bench that is not part of any set). Nothing
+# here can reach the live ~/.local/bin: ENTH_PREFIX is under $WORK in every
+# call, and the only gh that ever RUNS is the fake.
+ENX="$WORK/enx"
+mkdir -p "$ENX/ctl/ci" "$ENX/prefix"
+"$REALGIT" init -q "$ENX/origin"
+mkdir -p "$ENX/origin/scripts"
+cat > "$ENX/origin/scripts/install.sh" <<'IEOF'
+#!/bin/sh
+set -e
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+CTL="$ENX_CTL"
+PREFIX=
+while [ $# -gt 0 ]; do case "$1" in --prefix) PREFIX=$2; shift 2 ;; *) shift ;; esac; done
+echo x >> "$CTL/installs"
+V=$(cat "$ROOT/VERSION")
+mkdir -p "$PREFIX"
+mk() {  # mk NAME VERSION
+cat > "$PREFIX/$1" <<BEOF
+#!/bin/sh
+case "\$0" in */.enth-deploy.*) ;; *) [ "$1" = enthd ] && [ -f "$CTL/bad_at_target" ] && { echo '{"type":"version","tool":"$1","version":"6.6.6"}'; exit 0; } ;; esac
+[ "\$1" = --version ] && echo '{"type":"version","tool":"$1","version":"$2"}'
+exit 0
+BEOF
+chmod +x "$PREFIX/$1"
+}
+if [ -f "$CTL/install_fails" ]; then
+    # What the real script does when the build is mixed: some binaries are
+    # already in the prefix, they disagree, and it exits 1.
+    mk enth "$V"; mk enthd 0.0.1
+    echo "install.sh: the installed binaries report different versions (see above)" >&2
+    exit 1
+fi
+mk enth "$V"; mk enthd "$V"; mk enth-land "$V"
+printf '{"type":"installed","prefix":"%s","count":3,"version":"%s"}\n' "$PREFIX" "$V"
+IEOF
+chmod +x "$ENX/origin/scripts/install.sh"
+enxcommit() {   # enxcommit VERSION MSG
+    ( cd "$ENX/origin" && echo "$1" > VERSION && "$REALGIT" add -A \
+        && "$REALGIT" -c user.email=t@t -c user.name=t commit -qm "$2" )
+    ENXHEAD="$("$REALGIT" -C "$ENX/origin" rev-parse HEAD)"
+}
+enxcommit 1.0.0 one
+( cd "$ENX/origin" && "$REALGIT" branch -M main )
+export ENX_CTL="$ENX/ctl"
+cat > "$ENX/gh" <<'GEOF'
+#!/bin/sh
+[ -f "$ENX_CTL/gh_fails" ] && { echo "HTTP 401: Bad credentials" >&2; exit 1; }
+sha=$(printf '%s\n' "$2" | sed -n 's#.*/commits/\([0-9a-f]*\)/check-runs.*#\1#p')
+echo "$sha" >> "$ENX_CTL/gh_calls"
+cat "$ENX_CTL/ci/$sha" 2>/dev/null
+exit 0
+GEOF
+chmod +x "$ENX/gh"
+# enxci SHA "NAME STATUS CONCLUSION" ... — one check run per line, written in
+# the tab-separated shape the runner's --jq asks gh for.
+enxci() { printf '%s\n' "$2" | tr ' ' '\t' > "$ENX/ctl/ci/$1"; }
+# The STALE set — the mg-fde18 shape: 0.0.0, and no enth-land at all.
+for n in enth enthd enth-bench; do
+    printf '#!/bin/sh\n[ "$1" = --version ] && echo %s\nexit 0\n' "'{\"type\":\"version\",\"tool\":\"$n\",\"version\":\"0.0.0\"}'" > "$ENX/prefix/$n"
+    chmod +x "$ENX/prefix/$n"
+done
+enxsnap() { ( cd "$ENX/prefix" && for f in enth*; do printf '%s %s\n' "$f" "$(cksum < "$f")"; done ) ; }
+
+enthstep() (
+    GIT="$REALGIT"
+    POGO_CLI=""
+    DRY_RUN="${ENTHSTEP_DRY:-false}"
+    ENTH_ENABLED=1
+    ENTH_SRC="$ENX/src"
+    ENTH_REMOTE="$ENX/origin"
+    ENTH_BOOTSTRAP_REPO="$ENX/nonexistent"
+    ENTH_REF=main
+    ENTH_PREFIX="$ENX/prefix"
+    ENTH_GH="$ENX/gh"
+    ENTH_GH_REPO="drellem2/enth-fake"
+    ENTH_CI_DEPTH=5
+    ENTH_TIMEOUT=60
+    DEADLINE_S=0
+    alert() { echo "ALERT-SUBJECT: $1"; echo "$2"; }
+    enth_deploy_step 2>&1
+)
+# enthstep_ci_only — just the CI classifier, against the fake gh, for one sha.
+enthstep_ci_only() ( ENTH_GH="$ENX/gh"; ENTH_GH_REPO="drellem2/enth-fake"; enth_ci_state "$ENXHEAD" )
+enthline() { grep '^\[[^]]*\] enth: installed ' | tail -1; }
+enxinstalls() { if [ -f "$ENX/ctl/installs" ]; then wc -l < "$ENX/ctl/installs" | tr -d ' '; else echo 0; fi; }
+# The record (.enth-deploy.installed) and .enth-prev are meant to stay; a
+# staging dir, a half-made prev dir or a copy temp file is not.
+enxleft() { ls -A "$ENX/prefix" | grep -E '^\.enth-(deploy|prev)\.|^\.mg-deploy' | grep -vx '\.enth-deploy\.installed' ; }
+E1="$(printf '%s' "$ENXHEAD" | cut -c1-7)"
+
+# --- 1. CI-RED: install skipped, old set kept ----------------------------
+enxci "$ENXHEAD" "nightly completed success
+msrv completed failure"
+SNAP0="$(enxsnap)"
+OUT="$(enthstep)"; L="$(printf '%s\n' "$OUT" | enthline)"
+case "$L" in
+    *"enth: installed version=0.0.0 sha=unknown green=none head=$E1 prev_version=0.0.0 prev_sha=unknown result=skipped reason=ci-red red_checks=msrv@$E1 rc=0") pass "mg-1be6c: ACCEPTANCE (CI-red) — a red head with nothing green behind it is skipped reason=ci-red, and the line names the UNCHANGED 0.0.0 set" ;;
+    *) fail "mg-1be6c: CI-red line: [$L] — $(printf '%s' "$OUT" | tail -5)" ;;
+esac
+[ "$(enxsnap)" = "$SNAP0" ] \
+    && pass "mg-1be6c: ACCEPTANCE (CI-red) — the old set is byte-identical" \
+    || fail "mg-1be6c: a red CI changed the prefix"
+[ "$(enxinstalls)" = 0 ] \
+    && pass "mg-1be6c: and install.sh never ran" || fail "mg-1be6c: install.sh ran on a red CI"
+# The knob: with ENTH_CI_CHECKS naming only `nightly`, msrv no longer counts and
+# the same commit is green. Empty (the default, above) counts every check.
+L="$(ENTH_CI_CHECKS=nightly ENTHSTEP_DRY=false enthstep_ci_only)"
+case "$L" in green) pass "mg-1be6c: POGO_DEPLOY_ENTH_CI_CHECKS narrows the counted checks (nightly only -> green), and empty counts all (-> red above)" ;;
+    *) fail "mg-1be6c: ENTH_CI_CHECKS=nightly gave [$L]" ;; esac
+# A commit with NO check runs is not green either: nothing ran on it.
+rm -f "$ENX/ctl/ci/$ENXHEAD"
+L="$(enthstep | enthline)"
+case "$L" in *"green=none "*"result=skipped reason=ci-red rc=0") pass "mg-1be6c: a commit with no check runs at all is not green" ;;
+    *) fail "mg-1be6c: no-check-runs line: [$L]" ;; esac
+enxci "$ENXHEAD" "nightly in_progress null
+msrv completed success"
+L="$(enthstep | enthline)"
+case "$L" in *"result=skipped reason=ci-red rc=0") pass "mg-1be6c: nor is one whose CI is still running" ;;
+    *) fail "mg-1be6c: pending line: [$L]" ;; esac
+
+# --- 2. the CI query fails: failed, old set kept, mailed -----------------
+: > "$ENX/ctl/gh_fails"
+OUT="$(enthstep)"; L="$(printf '%s\n' "$OUT" | enthline)"; rm -f "$ENX/ctl/gh_fails"
+case "$L" in *"result=failed reason=ci-query rc=1") pass "mg-1be6c: a CI query that fails is failed reason=ci-query — 'could not ask' is not green" ;;
+    *) fail "mg-1be6c: ci-query line: [$L]" ;; esac
+printf '%s' "$OUT" | grep -q 'Bad credentials' && printf '%s' "$OUT" | grep -q 'ALERT-SUBJECT: .*box enth: result=failed' \
+    && pass "mg-1be6c: and it is alerted with gh's own words" || fail "mg-1be6c: ci-query not alerted verbatim: $(printf '%s' "$OUT" | tail -4)"
+[ "$(enxsnap)" = "$SNAP0" ] && pass "mg-1be6c: and the old set is untouched" || fail "mg-1be6c: a failed CI query changed the prefix"
+
+# --- 3. a FAILING install.sh: the half-set stays in staging --------------
+enxci "$ENXHEAD" "nightly completed success
+l7-gate completed skipped"
+: > "$ENX/ctl/install_fails"
+OUT="$(enthstep)"; L="$(printf '%s\n' "$OUT" | enthline)"; rm -f "$ENX/ctl/install_fails"
+case "$L" in
+    *"enth: installed version=0.0.0 sha=unknown green=$E1 head=$E1 prev_version=0.0.0 prev_sha=unknown result=failed reason=install rc=1") pass "mg-1be6c: ACCEPTANCE (install.sh fails) — result=failed reason=install, and the line names the unchanged set" ;;
+    *) fail "mg-1be6c: failing-install line: [$L] — $(printf '%s' "$OUT" | tail -6)" ;;
+esac
+[ "$(enxinstalls)" = 1 ] && pass "mg-1be6c: premise — install.sh really ran, and really exited 1" || fail "mg-1be6c: premise: installs=$(enxinstalls)"
+[ "$(enxsnap)" = "$SNAP0" ] \
+    && pass "mg-1be6c: ACCEPTANCE (install.sh fails) — the old set is byte-identical; the mixed half-set never reached the prefix" \
+    || fail "mg-1be6c: a failing install.sh changed the prefix: $(enxsnap)"
+[ -z "$(enxleft)" ] && pass "mg-1be6c: and no staging leftovers" || fail "mg-1be6c: leftovers: $(enxleft)"
+printf '%s' "$OUT" | grep -q 'enth-install: install.sh: the installed binaries report different versions' \
+    && pass "mg-1be6c: install.sh's own words reach the deploy log" || fail "mg-1be6c: install.sh output lost"
+
+# --- 4. SUCCESS: the green commit's set, whole, by rename ----------------
+INO0="$(ls -i "$ENX/prefix/enth" | awk '{print $1}')"
+OUT="$(enthstep)"; L="$(printf '%s\n' "$OUT" | enthline)"
+case "$L" in
+    *"enth: installed version=1.0.0 sha=$E1 green=$E1 head=$E1 prev_version=0.0.0 prev_sha=unknown result=ok rc=0") pass "mg-1be6c: ACCEPTANCE (success) — the line names the installed version AND the enth sha" ;;
+    *) fail "mg-1be6c: success line: [$L] — $(printf '%s' "$OUT" | tail -6)" ;;
+esac
+OKSET=true
+for n in enth enthd enth-land; do
+    "$ENX/prefix/$n" --version | grep -q '"version":"1.0.0"' || OKSET=false
+done
+$OKSET && pass "mg-1be6c: every binary of the set at the PREFIX reports 1.0.0 — enth-land included, which the stale set lacked" \
+    || fail "mg-1be6c: the installed set is not whole"
+[ "$(ls -i "$ENX/prefix/enth" | awk '{print $1}')" != "$INO0" ] \
+    && pass "mg-1be6c: enth is a NEW inode — renamed in, never written in place under a running enthd" \
+    || fail "mg-1be6c: enth was written in place"
+"$ENX/prefix/.enth-prev/enth" --version 2>/dev/null | grep -q '0.0.0' && grep -qx enth-land "$ENX/prefix/.enth-prev/.absent" \
+    && pass "mg-1be6c: the previous set is kept in .enth-prev, with the names it did not have" \
+    || fail "mg-1be6c: .enth-prev wrong: $(ls -A "$ENX/prefix/.enth-prev" 2>&1)"
+[ -x "$ENX/prefix/enth-bench" ] && printf '%s' "$OUT" | grep -q 'enth: note: .*enth-bench is not part of the installed set' \
+    && pass "mg-1be6c: an enth* outside the set (enth-bench) is named in the log and left alone" \
+    || fail "mg-1be6c: enth-bench handling wrong"
+[ -z "$(enxleft)" ] && pass "mg-1be6c: no staging leftovers after a success" || fail "mg-1be6c: leftovers: $(enxleft)"
+[ -z "$("$REALGIT" -C "$ENX/src" status --porcelain)" ] \
+    && pass "mg-1be6c: the dedicated checkout is still clean" || fail "mg-1be6c: checkout dirty"
+
+# --- 5. current: nothing rebuilt -----------------------------------------
+N0="$(enxinstalls)"
+L="$(enthstep | enthline)"
+case "$L" in *"version=1.0.0 sha=$E1 green=$E1 "*"prev_sha=$E1 result=ok reason=current rc=0") pass "mg-1be6c: a rerun is ok reason=current — the record names the sha it installed" ;;
+    *) fail "mg-1be6c: current line: [$L]" ;; esac
+[ "$(enxinstalls)" = "$N0" ] && pass "mg-1be6c: and install.sh did not run again" || fail "mg-1be6c: current set rebuilt"
+
+# --- 6. newest GREEN, not head -------------------------------------------
+enxcommit 2.0.0 two;   E2="$(printf '%s' "$ENXHEAD" | cut -c1-7)"; enxci "$ENXHEAD" "nightly completed success"
+enxcommit 3.0.0 three; E3="$(printf '%s' "$ENXHEAD" | cut -c1-7)"; enxci "$ENXHEAD" "msrv completed failure
+nightly completed failure"
+L="$(enthstep | enthline)"
+case "$L" in *"version=2.0.0 sha=$E2 green=$E2 head=$E3 prev_version=1.0.0 prev_sha=$E1 result=ok red_checks=msrv,nightly@$E3 rc=0") pass "mg-1be6c: a red head is passed over for the newest green commit behind it" ;;
+    *) fail "mg-1be6c: newest-green line: [$L]" ;; esac
+
+# --- 7. installed-newer: never downgrade over our own newer install ------
+# Pretend the live 2.0.0 set came from three. The newest green is then two,
+# an ancestor of three.
+REC="$(cat "$ENX/prefix/.enth-deploy.installed")"
+E3FULL="$ENXHEAD"
+printf '%s %s\n' "$E3FULL" "$(printf '%s' "$REC" | cut -d' ' -f2-)" > "$ENX/prefix/.enth-deploy.installed"
+L="$(enthstep | enthline)"
+case "$L" in *"sha=$E3 green=$E2 "*"result=skipped reason=installed-newer red_checks=msrv,nightly@$E3 rc=0") pass "mg-1be6c: a green commit older than the recorded install is skipped reason=installed-newer" ;;
+    *) fail "mg-1be6c: installed-newer line: [$L]" ;; esac
+printf '%s\n' "$REC" > "$ENX/prefix/.enth-deploy.installed"
+# A hand install makes the record stale: sha is then unknown, never a guess.
+cp -p "$ENX/prefix/enth" "$ENX/enth.keep"; echo '# hand' >> "$ENX/prefix/enth"
+L="$(ENTHSTEP_DRY=true enthstep | enthline)"
+case "$L" in *"sha=unknown "*"result=skipped reason=dry-run rc=0") pass "mg-1be6c: a live enth that no longer matches the record reports sha=unknown (and a dry run is skipped reason=dry-run)" ;;
+    *) fail "mg-1be6c: stale-record line: [$L]" ;; esac
+mv -f "$ENX/enth.keep" "$ENX/prefix/enth"
+
+# --- 8. ROLLBACK: the set at the prefix disagrees after the swap ---------
+enxci "$E3FULL" "msrv completed success"
+SNAP2="$(enxsnap)"
+: > "$ENX/ctl/bad_at_target"
+OUT="$(enthstep)"; L="$(printf '%s\n' "$OUT" | enthline)"; rm -f "$ENX/ctl/bad_at_target"
+case "$L" in *"version=2.0.0 sha=$E2 green=$E3 "*"result=rolled-back reason=installed-set rc=2") pass "mg-1be6c: a set that disagrees AT THE PREFIX after the swap is rolled back, and the line names the restored 2.0.0 set" ;;
+    *) fail "mg-1be6c: rollback line: [$L] — $(printf '%s' "$OUT" | tail -6)" ;; esac
+[ "$(enxsnap)" = "$SNAP2" ] && pass "mg-1be6c: the restored set is byte-identical to the one before" \
+    || fail "mg-1be6c: restore not byte-identical"
+printf '%s' "$OUT" | grep -q 'ALERT-SUBJECT: .*result=rolled-back' && pass "mg-1be6c: a rollback is alerted" || fail "mg-1be6c: rollback not alerted"
+L="$(enthstep | enthline)"
+case "$L" in *"version=3.0.0 sha=$E3 green=$E3 "*"result=ok rc=0") pass "mg-1be6c: once the fault is gone the next run installs the owed commit" ;;
+    *) fail "mg-1be6c: recovery line: [$L]" ;; esac
+
+# --- 9. independence from pogod: on_exit order and rc -------------------
+ON_EXIT_BODY="$(sed -n '/^on_exit() {/,/^}/p' "$RUNNER")"
+printf '%s\n' "$ON_EXIT_BODY" | awk '
+    /stamp_write "\$STAMP"/ && !a {a=NR} /^[[:space:]]*mg_deploy_step$/ && !b {b=NR}
+    /^[[:space:]]*enth_deploy_step$/ && !c {c=NR} /^[[:space:]]*runner_refresh_step$/ && !d {d=NR}
+    /kill_tree "\$WATCHDOG_PID"/ && !e {e=NR}
+    END {exit !(a && b && c && d && e && a < b && b < c && c < d && d < e)}' \
+    && pass "mg-1be6c: on_exit order — attempt record, mg, THEN enth, THEN the runner, all before the watchdog is disarmed" \
+    || fail "mg-1be6c: on_exit order: $(printf '%s' "$ON_EXIT_BODY" | grep -n 'stamp_write\|_step$\|WATCHDOG_PID"' | tr '\n' ' ')"
+[ "$(grep -v '^[[:space:]]*#' "$RUNNER" | grep -cE 'exit[[:space:]]+"?\$ENTH_RC')" -eq 1 ] \
+    && sed -n '/^run_enth_only() {/,/^}/p' "$RUNNER" | grep -q 'exit "\$ENTH_RC"' \
+    && pass "mg-1be6c: ENTH_RC becomes an exit status ONLY in --enth-only — never the nightly's" \
+    || fail "mg-1be6c: ENTH_RC leaks into an exit status outside run_enth_only"
+grep -q '\] enth: installed .* result=' "$E2E/ok.log" \
+    && awk '/\] enth: installed /{m=NR} /pogo-deploy: end \(rc=/{e=NR} END{exit !(m && e && m < e)}' "$E2E/ok.log" \
+    && pass "mg-1be6c: the real runner's healthy e2e night writes the enth line, before the terminal line" \
+    || fail "mg-1be6c: no enth line in the e2e ok night: $(grep 'enth' "$E2E/ok.log" | tail -3)"
+grep '\] enth: installed ' "$E2E/ok.log" | grep -q 'result=skipped' \
+    && pass "mg-1be6c: and in the e2e sandbox it SKIPS (HOME is \$E2E, so no clone URL and no live prefix are in reach)" \
+    || fail "mg-1be6c: the e2e enth step did not skip: $(grep '\] enth: installed ' "$E2E/ok.log")"
+
+
+# ---------------------------------------------------------------------------
 # mg-cba69 — THE RUNNER REFRESHES ITSELF, for the next night
 # ---------------------------------------------------------------------------
 # The rehearsal the ticket's acceptance asks for: a scratch "pogo" repo whose

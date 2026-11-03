@@ -406,6 +406,9 @@
 #   pogo-deploy.sh --mg-only    # ONLY the fleet-mg install (section 8c), no window,
 #                               # no pogod — for a rehearsal against a scratch
 #                               # POGO_DEPLOY_MG_GOBIN, or a deliberate by-hand install
+#   pogo-deploy.sh --enth-only  # ONLY this box's enth install (section 8e), no
+#                               # window, no pogod — rehearse it against a scratch
+#                               # POGO_DEPLOY_ENTH_PREFIX
 #   pogo-deploy.sh --runner-only  # ONLY the runner self-refresh (section 8d),
 #                               # from $POGO_DEPLOY_SRC's HEAD as it stands (no
 #                               # sync) — for a rehearsal against a scratch
@@ -487,6 +490,18 @@
 #   POGO_DEPLOY_MG_GOBIN     directory holding the fleet's mg (default: the
 #                            directory of the mg this run resolved, ~/go/bin)
 #   POGO_DEPLOY_MG_TIMEOUT   seconds the macguffin build may take (600)
+#   POGO_DEPLOY_ENTH         0 disables this box's enth install (section 8e); default 1
+#   POGO_DEPLOY_ENTH_SRC     enth's dedicated checkout (~/.pogo/deploy-src-enth)
+#   POGO_DEPLOY_ENTH_REMOTE  clone URL used to create it if absent
+#   POGO_DEPLOY_ENTH_BOOTSTRAP_REPO  repo to read that URL from ($HOME/dev/enth)
+#   POGO_DEPLOY_ENTH_REF     the branch whose newest CI-green commit is installed (main)
+#   POGO_DEPLOY_ENTH_PREFIX  where the enth set lives (~/.local/bin)
+#   POGO_DEPLOY_ENTH_GH      the gh used to read CI (default: gh on PATH)
+#   POGO_DEPLOY_ENTH_GH_REPO owner/repo for the CI query (default: from the
+#                            checkout's github.com origin URL)
+#   POGO_DEPLOY_ENTH_CI_DEPTH  how many first-parent commits to look back for a
+#                            green one (30)
+#   POGO_DEPLOY_ENTH_TIMEOUT seconds enth's install.sh (a release build) may take (2400)
 #   POGO_DEPLOY_RUNNER_REFRESH  0 disables the runner self-refresh (section 8d)
 #   POGO_DEPLOY_RUNNER       the INSTALLED runner that step compares and refreshes
 #                            (${POGO_HOME:-~/.pogo}/bin/pogo-deploy.sh — the file the
@@ -499,6 +514,15 @@
 #     mg: installed <sha> (origin/main <sha>) prev <sha> result=<...>
 # with its own rc. It never changes this run's exit status and pogod's outcome
 # never gates it — see section 8c.
+#
+# AND THIS BOX'S enth (mg-1be6c). After the mg step, every attempting fire
+# finds enth's newest CI-green main commit and runs THAT commit's own
+# scripts/install.sh into a staging prefix. It swaps the set into
+# ~/.local/bin only when the whole set agrees on one version, and writes ONE
+# line, which deploy-verify reads:
+#     enth: installed version=<v> sha=<sha> green=<sha> head=<sha> prev_version=<v> prev_sha=<sha> result=<...>
+# A red CI or a failing install.sh leaves the previous set in place. It never
+# changes this run's exit status — see section 8e.
 #
 # AND IT REFRESHES ITSELF, FOR THE NEXT NIGHT (mg-cba69). Last of all, every
 # attempting fire whose sync reached the tree compares the installed runner
@@ -724,6 +748,8 @@ POGO_CLI=""
 MG_STEP_DUE=false
 # Same moment, same reason, for the runner self-refresh (section 8d).
 RUNNER_STEP_DUE=false
+# Same moment, same reason, for this box's enth install (section 8e).
+ENTH_STEP_DUE=false
 # The commit gate 5 synced $SRC to, recorded at the moment the sync succeeded.
 # Empty means no sync reached the tree this run, and then there is no commit to
 # compare the installed runner against — section 8d says so rather than guess.
@@ -5004,6 +5030,517 @@ run_mg_only() {
 }
 
 # ---------------------------------------------------------------------------
+# 8e. This box's enth (mg-1be6c — pm-pogo decision 2026-11-03)
+# ---------------------------------------------------------------------------
+# pogo's refinery gate runs pogo's enth suites against whatever enth is in
+# ~/.local/bin. Nothing kept that current, so it fell behind enth main and the
+# gate either skipped those suites or tested them against an old enth. It has
+# happened once already: a 0.0.0 set with no enth-land, found by slice 5
+# (mg-cc5cd) and fixed by hand in mg-fde18. So every attempting fire now also
+# installs enth's newest CI-GREEN main, using enth's own supported installer
+# (scripts/install.sh, drellem2/enth#53, mg-e9a6d). The install is not
+# reimplemented here.
+#
+# THE RULES:
+#
+#   CI-GREEN, NOT HEAD. The candidates are the first-parent commits of
+#     origin/$ENTH_REF in the dedicated clone, newest first, at most
+#     $ENTH_CI_DEPTH of them. A commit is GREEN when GitHub reports at least
+#     one check run for it, and every check run is completed with a
+#     conclusion of success, skipped or neutral. A commit with no check runs
+#     is not green, because nothing ran on it. The newest green one is
+#     installed. If none is green, nothing is installed (skipped
+#     reason=ci-red). If the check-runs query itself fails, nothing is
+#     installed either (failed reason=ci-query), because "could not ask" is
+#     not "green".
+#   CLEAN CHECKOUT. A dedicated clone ($ENTH_SRC), detached at the green
+#     commit. Never ~/dev/enth, which agents work in. That tree's .git/config
+#     is read once, for the clone URL. A dirty dedicated clone refuses.
+#   NEVER A HALF-SET. install.sh exits 1 when the binaries it installed report
+#     different versions. It never installs into the live prefix. It installs
+#     into a STAGING prefix inside $ENTH_PREFIX (so every move is a rename(2)
+#     on one filesystem), and the staged set is checked to agree on one
+#     version. Only then is the live set copied to $ENTH_PREFIX/.enth-prev
+#     and each staged binary renamed over its live name. Afterwards the set AT
+#     THE PREFIX must report the staged version, every binary of it. If a
+#     rename or that check fails, .enth-prev is put back, and any name the
+#     old set did not have is removed. The restore is judged by bytes.
+#   NO DOWNGRADE OVER A NEWER INSTALL OF OURS. The step records what it
+#     installed in $ENTH_PREFIX/.enth-deploy.installed (sha, version, the
+#     enth binary's cksum). If the green commit is an ancestor of that record,
+#     the install is skipped (reason=installed-newer). The record is trusted
+#     only while the live enth still has the recorded cksum. A hand install
+#     makes it stale, and the prev sha is then reported as `unknown`.
+#   INDEPENDENT OF pogod. It runs from on_exit after the mg step, so a bad enth
+#     commit cannot fail or roll back the pogod redeploy. Its rc is on its own
+#     line and never becomes the run's exit status, except under --enth-only.
+#
+# THE LINE, on every attempting fire, whatever happened. deploy-verify reads it:
+#
+#   enth: installed version=<v> sha=<sha> green=<sha|none> head=<sha> prev_version=<v> prev_sha=<sha> result=<r> [reason=<why>] [red_checks=<names>@<sha>] rc=<n>
+#
+# `version` is exactly the .version field that `<prefix>/enth --version`
+# prints (for example 0.2.0-dev), because deploy-verify compares the two.
+# `green` is the commit that was (or would have been) installed. On
+# reason=no-install-script, that is the nearest green commit. `red_checks`
+# appears whenever the walk passed over a red commit: the newest one, and the
+# check runs that failed on it (for example msrv@d9e8540).
+#
+#   ok               the live set is the green commit. It was installed
+#                    tonight, or it was already current (reason=current). rc 0.
+#   skipped          nothing was attempted: disabled, dry run, deadline,
+#                    no-time, no clone URL, no git or gh, ci-red,
+#                    installed-newer, no-install-script. Live set untouched.
+#                    rc 0.
+#   failed           something broke BEFORE the swap (sync, CI query,
+#                    install.sh, the staged set). Live set untouched. rc 1.
+#   rolled-back      the swap or the installed set's check failed, and
+#                    .enth-prev was restored. rc 2.
+#   rollback-failed  ...and the restore did not take. rc 3. This is the
+#                    loudest alert: the box's enth is suspect.
+#
+# `version` and `sha` are what is live AFTER the step. On anything but ok, they
+# describe the unchanged set, not the attempted one. `unknown` means the step
+# has no record that it installed the live set.
+ENTH_ENABLED="${POGO_DEPLOY_ENTH:-1}"
+ENTH_SRC="${POGO_DEPLOY_ENTH_SRC:-$HOME/.pogo/deploy-src-enth}"
+ENTH_REMOTE="${POGO_DEPLOY_ENTH_REMOTE:-}"
+ENTH_BOOTSTRAP_REPO="${POGO_DEPLOY_ENTH_BOOTSTRAP_REPO:-$HOME/dev/enth}"
+ENTH_REF="${POGO_DEPLOY_ENTH_REF:-main}"
+ENTH_PREFIX="${POGO_DEPLOY_ENTH_PREFIX:-$HOME/.local/bin}"
+ENTH_GH="${POGO_DEPLOY_ENTH_GH:-}"
+ENTH_GH_REPO="${POGO_DEPLOY_ENTH_GH_REPO:-}"
+ENTH_CI_DEPTH="${POGO_DEPLOY_ENTH_CI_DEPTH:-30}"
+# Which check runs count toward "green": a comma-separated list of check-run
+# names, matched exactly. EMPTY = EVERY check run counts, and that is the
+# ruling (pm-enth and pm-pogo, 2026-11-03): msrv counts, because it fails on
+# real test failures. This is a knob so that narrowing the set later is a
+# one-line change. It is not a recommendation to narrow it.
+ENTH_CI_CHECKS="${POGO_DEPLOY_ENTH_CI_CHECKS:-}"
+ENTH_TIMEOUT="${POGO_DEPLOY_ENTH_TIMEOUT:-2400}"
+ENTH_ONLY=false
+
+ENTH_RESULT=""
+ENTH_REASON=""
+ENTH_RC=0
+ENTH_VERSION=""
+ENTH_SHA=""
+ENTH_PREV_VERSION=""
+ENTH_PREV_SHA=""
+ENTH_GREEN=""
+ENTH_HEAD=""
+ENTH_RED=""
+ENTH_DETAIL=""
+
+enth_short() { [ -n "${1:-}" ] && printf '%s' "$1" | cut -c1-7 || printf '%s' "${2:-unknown}"; }
+
+# enth_version BIN — the version BIN reports in its `--version` JSON line, or
+# empty when it is absent, will not run, or prints no version.
+enth_version() {
+    local out
+    [ -x "${1:-}" ] || return 0
+    out="$(run_bounded "$TOOL_PROBE_TIMEOUT" "$1" --version 2>/dev/null)" || return 0
+    printf '%s\n' "$out" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -1
+}
+
+enth_cksum() { [ -f "${1:-}" ] && cksum < "$1" 2>/dev/null | awk '{print $1 "-" $2}'; }
+
+# enth_set_version DIR NAME... — the one version every DIR/NAME reports.
+# Prints it and returns 0. If any of them fails, or they disagree, it prints the
+# offending line on stderr and returns 1.
+enth_set_version() {
+    local dir="$1" n v want=""
+    shift
+    for n in "$@"; do
+        v="$(enth_version "$dir/$n")"
+        if [ -z "$v" ]; then echo "$dir/$n reports no version" >&2; return 1; fi
+        if [ -z "$want" ]; then want="$v"
+        elif [ "$v" != "$want" ]; then echo "$dir/$n reports $v, $dir/$1 reports $want" >&2; return 1; fi
+    done
+    [ -n "$want" ] || { echo "no binaries to check in $dir" >&2; return 1; }
+    printf '%s' "$want"
+}
+
+# enth_read_live — set ENTH_VERSION/ENTH_SHA from what is at the prefix now.
+# The sha comes from the record, and only while the live enth's cksum matches it.
+enth_read_live() {
+    local rec rsha rver rck
+    ENTH_VERSION="$(enth_version "$ENTH_PREFIX/enth")"
+    ENTH_SHA=""
+    rec="$(cat "$ENTH_PREFIX/.enth-deploy.installed" 2>/dev/null)"
+    [ -n "$rec" ] || return 0
+    rsha="$(printf '%s' "$rec" | awk '{print $1}')"
+    rver="$(printf '%s' "$rec" | awk '{print $2}')"
+    rck="$(printf '%s' "$rec" | awk '{print $3}')"
+    if [ -n "$rck" ] && [ "$rck" = "$(enth_cksum "$ENTH_PREFIX/enth")" ] && [ "$rver" = "$ENTH_VERSION" ]; then
+        ENTH_SHA="$rsha"
+    fi
+}
+
+# enth_resolve_gh — a gh that runs. $POGO_DEPLOY_ENTH_GH first (the tests' seam).
+enth_resolve_gh() {
+    local c
+    for c in "$ENTH_GH" "$(command -v gh 2>/dev/null)" /opt/homebrew/bin/gh /usr/local/bin/gh; do
+        [ -n "$c" ] && [ -x "$c" ] || continue
+        ENTH_GH="$c"; return 0
+    done
+    ENTH_GH=""; return 1
+}
+
+# enth_gh_slug URL — owner/repo for a github.com clone URL, or empty.
+enth_gh_slug() {
+    printf '%s\n' "${1:-}" | sed -n 's#^.*github\.com[:/]\([^/]*/[^/]*\)$#\1#p' | sed 's/\.git$//' | head -1
+}
+
+# enth_ci_state SHA — prints the state of one commit's CI: `green`, `pending`,
+# `none` (no check runs counted), or `red <names>`, where <names> are the
+# comma-joined failing check runs. Only the runs named in $ENTH_CI_CHECKS
+# count, or all of them when it is empty. When the query itself failed it
+# prints why instead and returns 1. It runs in a command substitution, so the
+# reason has to travel on stdout.
+enth_ci_state() {
+    local out errf rc=0
+    errf="$(mktemp)" || { echo "mktemp failed"; return 1; }
+    out="$(run_bounded 60 "$ENTH_GH" api "repos/$ENTH_GH_REPO/commits/$1/check-runs?per_page=100" \
+        --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion)"' 2>"$errf")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "gh api repos/$ENTH_GH_REPO/commits/$1/check-runs exited $rc: $(head -5 "$errf")"
+        rm -f "$errf"; return 1
+    fi
+    rm -f "$errf"
+    printf '%s\n' "$out" | awk -F'\t' -v want=",$ENTH_CI_CHECKS," '
+        NF < 3 { next }
+        want != ",," && index(want, "," $1 ",") == 0 { next }
+        { n++ }
+        $2 != "completed" { pending = 1; next }
+        $3 != "success" && $3 != "skipped" && $3 != "neutral" { red = red (red ? "," : "") $1 }
+        END {
+            if (!n) print "none"
+            else if (red) print "red " red
+            else if (pending) print "pending"
+            else print "green"
+        }'
+}
+
+# enth_sync — clone/fetch $ENTH_SRC. Returns 2 when there is no clone URL
+# (nothing attempted), 1 on a failure. Sets ENTH_REASON either way.
+enth_sync() {
+    local remote=""
+    if [ ! -d "$ENTH_SRC/.git" ]; then
+        remote="$ENTH_REMOTE"
+        [ -n "$remote" ] || remote="$(git_q "$GIT" -C "$ENTH_BOOTSTRAP_REPO" remote get-url origin 2>/dev/null)"
+        if [ -z "$remote" ]; then
+            ENTH_REASON="no-remote"
+            ENTH_DETAIL="no POGO_DEPLOY_ENTH_REMOTE, and 'git -C $ENTH_BOOTSTRAP_REPO remote get-url origin' produced nothing"
+            return 2
+        fi
+        log "enth: bootstrapping enth's dedicated checkout at $ENTH_SRC from $remote"
+        if ! git_step "$GIT" clone --quiet "$remote" "$ENTH_SRC"; then
+            ENTH_REASON="clone"; ENTH_DETAIL="$SYNC_DETAIL"; return 1
+        fi
+    fi
+    if ! git_step "$GIT" -C "$ENTH_SRC" fetch --quiet --force origin; then
+        ENTH_REASON="fetch"; ENTH_DETAIL="$SYNC_DETAIL"; return 1
+    fi
+    if [ -n "$(git_q "$GIT" -C "$ENTH_SRC" status --porcelain 2>/dev/null)" ]; then
+        ENTH_REASON="dirty"
+        ENTH_DETAIL="$ENTH_SRC is DIRTY. Only this step should write there, and a reset would destroy the evidence of whatever did:
+$(git_q "$GIT" -C "$ENTH_SRC" status --short 2>&1)"
+        return 1
+    fi
+    return 0
+}
+
+# enth_report — the one line, the event, and the alert when it is owed.
+enth_report() {
+    case "$ENTH_RESULT" in
+        ok|skipped)  ENTH_RC=0 ;;
+        failed)      ENTH_RC=1 ;;
+        rolled-back) ENTH_RC=2 ;;
+        *)           ENTH_RC=3 ;;
+    esac
+    log "enth: installed version=${ENTH_VERSION:-none} sha=$(enth_short "$ENTH_SHA") green=$(enth_short "$ENTH_GREEN" none) head=$(enth_short "$ENTH_HEAD") prev_version=${ENTH_PREV_VERSION:-none} prev_sha=$(enth_short "$ENTH_PREV_SHA") result=$ENTH_RESULT${ENTH_REASON:+ reason=$ENTH_REASON}${ENTH_RED:+ red_checks=$ENTH_RED} rc=$ENTH_RC"
+    if [ -n "$ENTH_DETAIL" ] && [ "$ENTH_RESULT" != ok ]; then
+        printf '%s\n' "$ENTH_DETAIL" | head -40 | sed 's/^/enth-detail: /'
+    fi
+    if [ -n "$POGO_CLI" ]; then
+        run_bounded 30 "$POGO_CLI" events emit --type=deploy_enth --agent=pogo-deploy \
+            --details="{\"result\":\"$ENTH_RESULT\",\"reason\":\"$ENTH_REASON\",\"rc\":$ENTH_RC,\"version\":\"${ENTH_VERSION:-}\",\"sha\":\"${ENTH_SHA:-}\",\"green\":\"${ENTH_GREEN:-}\",\"prev_version\":\"${ENTH_PREV_VERSION:-}\",\"prev_sha\":\"${ENTH_PREV_SHA:-}\"}" >/dev/null 2>&1 || true
+    fi
+    # Transport failures belong to the pogod sync's alert. A red CI is enth's
+    # own business and is visible there. Neither is mailed from here.
+    case "$ENTH_RESULT:$ENTH_REASON" in
+        ok:*|skipped:*|failed:fetch|failed:clone) return 0 ;;
+    esac
+    local subject="[pogo-deploy] box enth: result=$ENTH_RESULT (${ENTH_REASON:-no reason recorded})" note
+    case "$ENTH_RESULT" in
+        failed) note="Nothing was swapped: $ENTH_PREFIX still has the enth set it had. pogo's
+refinery gate keeps testing against that set until this is fixed." ;;
+        rolled-back) note="The new set WAS swapped in, failed its check at $ENTH_PREFIX, and the
+previous set was put back from $ENTH_PREFIX/.enth-prev." ;;
+        *) note="The installed set failed its check AND restoring the previous one did not take.
+The enth binaries in $ENTH_PREFIX are suspect. Restore by hand NOW, from $ENTH_PREFIX/.enth-prev:
+  for f in $ENTH_PREFIX/.enth-prev/enth*; do cp -p \"\$f\" $ENTH_PREFIX/.tmp && mv -f $ENTH_PREFIX/.tmp $ENTH_PREFIX/\${f##*/}; done" ;;
+    esac
+    [ "$ENTH_RESULT" = "rollback-failed" ] && subject="[pogo-deploy] box enth: ROLLBACK FAILED. The enth install is suspect"
+    alert "$subject" \
+"The nightly enth install (mg-1be6c) did not land. It is independent of the
+pogod redeploy, whose outcome has its own line in the same log.
+
+  result:    $ENTH_RESULT (${ENTH_REASON:-none})
+  live:      version ${ENTH_VERSION:-none}, sha ${ENTH_SHA:-unknown}, at $ENTH_PREFIX
+  green:     ${ENTH_GREEN:-none} (origin/$ENTH_REF head ${ENTH_HEAD:-unknown})
+  checkout:  $ENTH_SRC
+  log:       $HOME/Library/Logs/pogo/pogo-deploy.log
+
+$note
+
+WHAT IT SAW, verbatim:
+
+${ENTH_DETAIL:-(nothing recorded)}" "\"enth_result\":\"$ENTH_RESULT\",\"enth_rc\":$ENTH_RC" deploy_enth_failed
+    return 0
+}
+
+# enth_restore PREVDIR — put the previous set back: every file in PREVDIR, by
+# copy-then-rename, and remove each name listed in PREVDIR/.absent (names the
+# old set did not have). Returns 0 only if the prefix then matches PREVDIR byte
+# for byte, and none of the absent names is left.
+enth_restore() {
+    local prev="$1" f n ok=0
+    for f in "$prev"/*; do
+        [ -f "$f" ] || continue
+        mg_replace "$f" "$ENTH_PREFIX/${f##*/}" || ok=1
+    done
+    if [ -f "$prev/.absent" ]; then
+        while IFS= read -r n; do
+            [ -n "$n" ] && rm -f "$ENTH_PREFIX/$n"
+        done < "$prev/.absent"
+    fi
+    for f in "$prev"/*; do
+        [ -f "$f" ] || continue
+        cmp -s "$f" "$ENTH_PREFIX/${f##*/}" || ok=1
+    done
+    if [ -f "$prev/.absent" ]; then
+        while IFS= read -r n; do
+            [ -n "$n" ] && [ -e "$ENTH_PREFIX/$n" ] && ok=1
+        done < "$prev/.absent"
+    fi
+    return $ok
+}
+
+# enth_deploy_step — the whole step. It never exits and never touches the run's rc.
+enth_deploy_step() {
+    ENTH_RESULT=""; ENTH_REASON=""; ENTH_RC=0; ENTH_GREEN=""; ENTH_HEAD=""; ENTH_RED=""; ENTH_DETAIL=""
+    local budget left shas sha state seen="" want stage ilog summary names n count v got="" tmpprev prev rec swapped=0
+
+    enth_read_live
+    ENTH_PREV_VERSION="$ENTH_VERSION"; ENTH_PREV_SHA="$ENTH_SHA"
+
+    if [ "$ENTH_ENABLED" = "0" ]; then
+        ENTH_RESULT=skipped; ENTH_REASON=disabled; enth_report; return 0
+    fi
+    if $DRY_RUN; then
+        log "enth: dry-run. It would sync $ENTH_SRC, resolve origin/$ENTH_REF's newest CI-green commit, run its scripts/install.sh into a staging prefix under $ENTH_PREFIX, and swap that set in"
+        ENTH_RESULT=skipped; ENTH_REASON=dry-run; enth_report; return 0
+    fi
+    if [ -z "${GIT:-}" ]; then
+        ENTH_RESULT=skipped; ENTH_REASON=no-git; enth_report; return 0
+    fi
+    if ! enth_resolve_gh; then
+        ENTH_RESULT=skipped; ENTH_REASON=no-gh
+        ENTH_DETAIL="no runnable gh, so no commit's CI can be read"
+        enth_report; return 0
+    fi
+
+    budget="$ENTH_TIMEOUT"
+    if [ "${DEADLINE_S:-0}" -gt 0 ] && [ "$RUN_T0" -gt 0 ]; then
+        left=$(( DEADLINE_S - ( $(date +%s) - RUN_T0 ) - 120 ))
+        if [ "$left" -lt 300 ]; then
+            ENTH_RESULT=skipped; ENTH_REASON=no-time
+            ENTH_DETAIL="only ${left}s of the ${DEADLINE_S}s run deadline would be left for the build"
+            enth_report; return 0
+        fi
+        [ "$left" -lt "$budget" ] && budget="$left"
+    fi
+
+    local src_rc=0
+    enth_sync || src_rc=$?
+    if [ "$src_rc" -ne 0 ]; then
+        if [ "$src_rc" -eq 2 ]; then ENTH_RESULT=skipped; else ENTH_RESULT=failed; fi
+        enth_report; return 0
+    fi
+    if [ -z "$ENTH_GH_REPO" ]; then
+        ENTH_GH_REPO="$(enth_gh_slug "$(git_q "$GIT" -C "$ENTH_SRC" remote get-url origin 2>/dev/null)")"
+        if [ -z "$ENTH_GH_REPO" ]; then
+            ENTH_RESULT=skipped; ENTH_REASON=no-gh-repo
+            ENTH_DETAIL="$ENTH_SRC's origin is not a github.com URL, and POGO_DEPLOY_ENTH_GH_REPO is unset"
+            enth_report; return 0
+        fi
+    fi
+
+    # The newest CI-green commit on origin/$ENTH_REF's first-parent line.
+    shas="$(git_q "$GIT" -C "$ENTH_SRC" rev-list --first-parent --max-count="$ENTH_CI_DEPTH" "origin/$ENTH_REF" 2>/dev/null)"
+    ENTH_HEAD="$(printf '%s\n' "$shas" | head -1)"
+    if [ -z "$ENTH_HEAD" ]; then
+        ENTH_RESULT=failed; ENTH_REASON=rev-list
+        ENTH_DETAIL="'git -C $ENTH_SRC rev-list origin/$ENTH_REF' produced nothing"
+        enth_report; return 0
+    fi
+    for sha in $shas; do
+        if ! state="$(enth_ci_state "$sha")"; then
+            ENTH_RESULT=failed; ENTH_REASON=ci-query; ENTH_DETAIL="$state"
+            enth_report; return 0
+        fi
+        case "$state" in
+            "red "*)
+                # The NEWEST red commit's failing checks, for the line.
+                [ -n "$ENTH_RED" ] || ENTH_RED="${state#red }@$(enth_short "$sha")"
+                seen="${seen:+$seen }$(enth_short "$sha")=red(${state#red })" ;;
+            *) seen="${seen:+$seen }$(enth_short "$sha")=$state" ;;
+        esac
+        if [ "$state" = green ]; then ENTH_GREEN="$sha"; break; fi
+    done
+    log "enth: CI on origin/$ENTH_REF, newest first: $seen"
+    if [ -z "$ENTH_GREEN" ]; then
+        ENTH_RESULT=skipped; ENTH_REASON=ci-red
+        ENTH_DETAIL="none of the newest $ENTH_CI_DEPTH first-parent commits of origin/$ENTH_REF is CI-green: $seen"
+        enth_report; return 0
+    fi
+    want="$ENTH_GREEN"
+
+    if [ -n "$ENTH_SHA" ] && [ "$ENTH_SHA" = "$want" ]; then
+        ENTH_RESULT=ok; ENTH_REASON=current; enth_report; return 0
+    fi
+    if [ -n "$ENTH_SHA" ] && git_q "$GIT" -C "$ENTH_SRC" merge-base --is-ancestor "$want" "$ENTH_SHA" 2>/dev/null; then
+        ENTH_RESULT=skipped; ENTH_REASON=installed-newer
+        ENTH_DETAIL="the live set was installed from $ENTH_SHA, a descendant of the newest green commit $want"
+        enth_report; return 0
+    fi
+
+    if ! git_step "$GIT" -C "$ENTH_SRC" checkout --quiet --detach "$want"; then
+        ENTH_RESULT=failed; ENTH_REASON=checkout; ENTH_DETAIL="$SYNC_DETAIL"; enth_report; return 0
+    fi
+    if [ ! -f "$ENTH_SRC/scripts/install.sh" ]; then
+        ENTH_RESULT=skipped; ENTH_REASON=no-install-script
+        ENTH_DETAIL="$(enth_short "$want") has no scripts/install.sh (it landed in drellem2/enth#53)"
+        enth_report; return 0
+    fi
+
+    mkdir -p "$ENTH_PREFIX" 2>/dev/null
+    stage="$(mktemp -d "$ENTH_PREFIX/.enth-deploy.XXXXXX")" || {
+        ENTH_RESULT=failed; ENTH_REASON=stage; ENTH_DETAIL="could not create a staging dir in $ENTH_PREFIX"
+        enth_report; return 0
+    }
+    ilog="$stage/install.log"
+    log "enth: installing $(enth_short "$want") with its scripts/install.sh --prefix $stage/bin (bounded at ${budget}s)"
+    if ! run_bounded "$budget" /bin/sh "$ENTH_SRC/scripts/install.sh" --prefix "$stage/bin" >"$ilog" 2>&1; then
+        ENTH_RESULT=failed
+        if $BOUNDED_TIMED_OUT; then ENTH_REASON=install-timeout; else ENTH_REASON=install; fi
+        ENTH_DETAIL="$(tail -40 "$ilog" 2>/dev/null)"
+        tail -40 "$ilog" 2>/dev/null | sed 's/^/enth-install: /'
+        rm -rf "$stage"; enth_report; return 0
+    fi
+    tail -40 "$ilog" 2>/dev/null | sed 's/^/enth-install: /'
+
+    # BEFORE the swap: the staged set is whole and agrees on one version.
+    summary="$(grep '"type":"installed"' "$ilog" | tail -1)"
+    count="$(printf '%s' "$summary" | sed -n 's/.*"count":\([0-9][0-9]*\).*/\1/p')"
+    names=""
+    for n in "$stage"/bin/*; do
+        [ -f "$n" ] && [ -x "$n" ] && names="$names ${n##*/}"
+    done
+    # shellcheck disable=SC2086
+    if [ -z "$count" ] || [ "$count" != "$(echo $names | wc -w | tr -d ' ')" ] || ! v="$(enth_set_version "$stage/bin" $names 2>"$stage/check.err")"; then
+        ENTH_RESULT=failed; ENTH_REASON=staged-set
+        ENTH_DETAIL="install.sh exited 0 but the staged set is not whole and consistent: summary '${summary:-none}', staged:${names:- nothing}; $(cat "$stage/check.err" 2>/dev/null)"
+        rm -rf "$stage"; enth_report; return 0
+    fi
+
+    # Keep the previous set, then swap. Both by rename.
+    tmpprev="$(mktemp -d "$ENTH_PREFIX/.enth-prev.XXXXXX")" || {
+        ENTH_RESULT=failed; ENTH_REASON=prev-copy; ENTH_DETAIL="could not create a dir to keep the previous set in"
+        rm -rf "$stage"; enth_report; return 0
+    }
+    : > "$tmpprev/.absent"
+    for n in $names; do
+        if [ -e "$ENTH_PREFIX/$n" ]; then
+            cp -p "$ENTH_PREFIX/$n" "$tmpprev/$n" || {
+                ENTH_RESULT=failed; ENTH_REASON=prev-copy
+                ENTH_DETAIL="could not keep $ENTH_PREFIX/$n, so there would be nothing to roll back to. Not swapping"
+                rm -rf "$stage" "$tmpprev"; enth_report; return 0
+            }
+        else
+            echo "$n" >> "$tmpprev/.absent"
+        fi
+    done
+    prev="$ENTH_PREFIX/.enth-prev"
+    rm -rf "$prev" && mv "$tmpprev" "$prev" || {
+        ENTH_RESULT=failed; ENTH_REASON=prev-copy; ENTH_DETAIL="could not move $tmpprev to $prev"
+        rm -rf "$stage" "$tmpprev"; enth_report; return 0
+    }
+    for n in $names; do
+        if ! mv -f "$stage/bin/$n" "$ENTH_PREFIX/$n"; then
+            swapped=1; ENTH_REASON=swap; ENTH_DETAIL="mv $stage/bin/$n $ENTH_PREFIX/$n failed"
+            break
+        fi
+    done
+    rm -rf "$stage"
+
+    # AFTER the swap: the check that counts is on the path the gate runs.
+    if [ "$swapped" -eq 0 ]; then
+        # shellcheck disable=SC2086
+        if got="$(enth_set_version "$ENTH_PREFIX" $names 2>"$prev/.check.err")" && [ "$got" = "$v" ]; then
+            rec="$want $v $(enth_cksum "$ENTH_PREFIX/enth")"
+            if ! { printf '%s\n' "$rec" > "$ENTH_PREFIX/.enth-deploy.installed.tmp" \
+                    && mv -f "$ENTH_PREFIX/.enth-deploy.installed.tmp" "$ENTH_PREFIX/.enth-deploy.installed"; }; then
+                err "enth: installed $(enth_short "$want") but could not write $ENTH_PREFIX/.enth-deploy.installed. Tomorrow's line will report sha=unknown"
+            fi
+            rm -f "$prev/.check.err"
+            enth_read_live
+            [ -n "$ENTH_SHA" ] || ENTH_SHA="$want"
+            for n in "$ENTH_PREFIX"/enth*; do
+                [ -f "$n" ] && [ -x "$n" ] || continue
+                case " $names " in *" ${n##*/} "*) continue ;; esac
+                log "enth: note: $n is not part of the installed set (stale? left in place; install.sh --prune would remove it)"
+            done
+            ENTH_RESULT=ok; enth_report; return 0
+        fi
+        ENTH_REASON=installed-set
+        ENTH_DETAIL="the set at $ENTH_PREFIX does not all report $v after the swap: $(cat "$prev/.check.err" 2>/dev/null) (got '${got:-}')"
+        rm -f "$prev/.check.err"
+    fi
+    err "enth: the swap or the INSTALLED set failed its check ($ENTH_REASON). Restoring $prev"
+    if enth_restore "$prev"; then ENTH_RESULT=rolled-back
+    else
+        ENTH_RESULT=rollback-failed
+        ENTH_DETAIL="$ENTH_DETAIL
+AND the restore did not take: $ENTH_PREFIX does not match $prev"
+    fi
+    enth_read_live
+    enth_report
+    return 0
+}
+
+# run_enth_only — `--enth-only`: the step alone, for a rehearsal against a
+# scratch POGO_DEPLOY_ENTH_PREFIX or a deliberate install outside the window.
+# It takes the nightly's lock, so it can never race a nightly run.
+run_enth_only() {
+    resolve_mg || true
+    resolve_pogo || true
+    resolve_alert_recipients
+    resolve_git || { err "enth-only: no working git"; exit 1; }
+    harden_git_transport
+    load_gh_token || log "enth-only: no GH_TOKEN. gh's own login will be used if it has one"
+    if ! acquire_lock; then
+        log "lock: another pogo-deploy run holds $LOCK_DIR — exiting 0"
+        exit 0
+    fi
+    LOCK_HELD=true
+    enth_deploy_step
+    exit "$ENTH_RC"
+}
+
+# ---------------------------------------------------------------------------
 # 8d. The runner refreshes ITSELF, for the next night (mg-cba69)
 # ---------------------------------------------------------------------------
 # launchd runs a STATIC COPY of this file ($RUNNER_TARGET, written by
@@ -5635,6 +6172,18 @@ on_exit() {
         fi
     fi
 
+    # This box's enth (section 8e) — after the mg step and still under the
+    # watchdog. Like it, its rc is its own line and never the run's.
+    if $ENTH_STEP_DUE; then
+        if [ "$rc" = "$DEADLINE_RC" ]; then
+            ENTH_RESULT=skipped; ENTH_REASON=deadline; ENTH_GREEN=""; ENTH_HEAD=""; ENTH_RED=""; ENTH_DETAIL=""
+            enth_read_live; ENTH_PREV_VERSION="$ENTH_VERSION"; ENTH_PREV_SHA="$ENTH_SHA"
+            enth_report
+        else
+            enth_deploy_step
+        fi
+    fi
+
     # The runner itself (section 8d) — LAST of the work, after everything this
     # run decided, so no outcome tonight is executed from a file it wrote. The
     # swap is by rename, so the rest of this function still reads the inode the
@@ -5686,6 +6235,7 @@ main() {
         case "$1" in
             --dry-run) DRY_RUN=true ;;
             --mg-only) MG_ONLY=true ;;
+            --enth-only) ENTH_ONLY=true ;;
             --runner-only) RUNNER_ONLY=true ;;
             # Bounded by the `set -u` sentinel, not by a line number. The header
             # is long and grows, and a hardcoded range starts truncating --help
@@ -5716,6 +6266,10 @@ main() {
     # --mg-only: section 8c alone — no window, no pogod, no attempt record.
     if $MG_ONLY; then
         run_mg_only
+    fi
+    # --enth-only: section 8e alone — no window, no pogod, no attempt record.
+    if $ENTH_ONLY; then
+        run_enth_only
     fi
     # --runner-only: section 8d alone, against $SRC as it stands.
     if $RUNNER_ONLY; then
@@ -5794,6 +6348,7 @@ main() {
     # The fleet-mg step (section 8c) is owed by every fire that got this far,
     # dry runs included — they get its "skipped reason=dry-run" line.
     MG_STEP_DUE=true
+    ENTH_STEP_DUE=true
     RUNNER_STEP_DUE=true
 
     # --- tools + credentials ------------------------------------------------

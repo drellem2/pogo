@@ -513,6 +513,12 @@ All optional; the defaults are the production values.
 | `POGO_DEPLOY_MG_SRC` | `~/.pogo/deploy-src-macguffin` | macguffin's dedicated checkout. Never `~/dev/macguffin`. |
 | `POGO_DEPLOY_MG_GOBIN` | the directory of the resolved `mg` (`~/go/bin`) | Where the fleet's `mg` lives. Point it at a scratch dir to rehearse. |
 | `POGO_DEPLOY_MG_TIMEOUT` | `600` | Seconds the macguffin build may take. |
+| `POGO_DEPLOY_ENTH` | `1` | `0` disables this box's enth install (below). |
+| `POGO_DEPLOY_ENTH_SRC` | `~/.pogo/deploy-src-enth` | enth's dedicated checkout. Never `~/dev/enth`. |
+| `POGO_DEPLOY_ENTH_PREFIX` | `~/.local/bin` | Where the enth set lives. Point it at a scratch dir to rehearse. |
+| `POGO_DEPLOY_ENTH_CI_CHECKS` | empty (every check counts) | Comma-separated check-run names that count toward green. Empty is the ruling: msrv counts. |
+| `POGO_DEPLOY_ENTH_CI_DEPTH` | `30` | How many first-parent commits of `origin/main` to search for a CI-green one. |
+| `POGO_DEPLOY_ENTH_TIMEOUT` | `2400` | Seconds enth's `install.sh` (a release build) may take. |
 
 ### The fleet's `mg` (mg-44ee4)
 
@@ -565,6 +571,67 @@ POGO_DEPLOY_MG_GOBIN=/tmp/r/gobin  ~/.pogo/bin/pogo-deploy.sh --mg-only
 
 (`/tmp/r/gobin/mg` must exist first. Copy the live one there as the "previous"
 binary.)
+
+### This box's enth (mg-1be6c)
+
+pogo's refinery gate runs pogo's enth suites against the enth set in
+`~/.local/bin`. Nothing kept that set current, so it fell behind enth main and
+the gate either skipped those suites or tested them against an old enth. This
+happened once: a `0.0.0` set with no `enth-land`, found by mg-cc5cd and fixed
+by hand in mg-fde18. So after the mg step, every nightly fire that attempts a
+deploy also installs enth's newest CI-green `main`. This is pm-pogo's decision
+of 2026-11-03.
+
+- **CI-green, not head**: the step walks the first-parent commits of
+  `origin/main` in its clean clone, newest first, and asks GitHub (`gh api
+  .../commits/<sha>/check-runs`) about each one. A commit counts as green when
+  it has at least one check run and every check run completed with
+  `success`, `skipped` or `neutral`. A commit with no check runs is not green.
+  If none is green, nothing is installed (`skipped reason=ci-red`). If the
+  query itself fails, nothing is installed either (`failed reason=ci-query`).
+- **enth's own installer**: the green commit is checked out in
+  `~/.pogo/deploy-src-enth`, and its `scripts/install.sh` (drellem2/enth#53)
+  does the build and the install. pogo does not reimplement either.
+- **Never a half-set**: `install.sh` installs into a staging prefix inside
+  `~/.local/bin`, never into the live one. Its exit 1 ("the installed binaries
+  report different versions") stops the step there. Before anything is
+  swapped, the staged set is checked to be whole and to agree on one version.
+  The live set is copied to `~/.local/bin/.enth-prev`, and each binary is
+  renamed in. Afterwards the set at the prefix must all report the staged
+  version. If it does not, `.enth-prev` is put back and the restore is checked
+  byte for byte.
+- **No downgrade over its own newer install**: the step records the sha it
+  installed in `~/.local/bin/.enth-deploy.installed`. It trusts that record
+  only while the live `enth` still has the recorded cksum, so after a hand
+  install the sha is reported as `unknown`.
+- **Independent of pogod**: like the mg step, it runs from the exit path, and
+  its rc never becomes the run's exit status.
+
+Each attempting fire writes one line. deploy-verify reads it:
+
+```
+enth: installed version=<v> sha=<sha> green=<sha|none> head=<sha> prev_version=<v> prev_sha=<sha> result=<ok|skipped|failed|rolled-back|rollback-failed> [reason=...] [red_checks=<names>@<sha>] rc=<n>
+```
+
+`version` is exactly the `.version` field that `~/.local/bin/enth --version`
+prints. `green` is the nearest green commit, including on
+`reason=no-install-script`. `red_checks` names the failing check runs on the
+newest red commit the walk passed over, for example `msrv@6b02fe8`. A line
+before it, `enth: CI on origin/main, newest first: ...`, lists every commit
+the walk looked at.
+
+`version` and `sha` describe what is live *after* the step. `failed` (rc 1)
+means nothing was swapped. `rolled-back` (rc 2) and `rollback-failed` (rc 3)
+are mailed, and so is `failed` unless the cause was the transport. A red CI is
+not mailed. It is visible in enth's own CI, and the line says `reason=ci-red`.
+Each run also emits a `deploy_enth` event.
+
+Rehearse it against a scratch prefix:
+
+```bash
+POGO_DEPLOY_LOCK_DIR=/tmp/e/lock POGO_DEPLOY_ENTH_PREFIX=/tmp/e/bin \
+  ~/.pogo/bin/pogo-deploy.sh --enth-only
+```
 
 ### The runner refreshes itself (mg-cba69)
 
@@ -623,6 +690,7 @@ POGO_DEPLOY_RUNNER=/tmp/rr/pogo-deploy.sh POGO_DEPLOY_LOCK_DIR=/tmp/rr/lock \
 | Run it now, gates and all | `POGO_DEPLOY_SKIP_WINDOW=1 ~/.pogo/bin/pogo-deploy.sh` |
 | Rehearse without deploying | `POGO_DEPLOY_SKIP_WINDOW=1 ~/.pogo/bin/pogo-deploy.sh --dry-run` |
 | Install the fleet's `mg` now, nothing else | `~/.pogo/bin/pogo-deploy.sh --mg-only` |
+| Install this box's enth now, nothing else | `~/.pogo/bin/pogo-deploy.sh --enth-only` |
 | Compare/refresh the runner only (no sync) | `~/.pogo/bin/pogo-deploy.sh --runner-only` |
 | View logs | `tail -f ~/Library/Logs/pogo/pogo-deploy.log` |
 
