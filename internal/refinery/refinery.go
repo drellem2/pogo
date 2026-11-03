@@ -335,6 +335,46 @@ func (m *MergeRequest) StatusLabel() string {
 	return fmt.Sprintf("%s(%s)", m.Status, m.FailureClass)
 }
 
+// Landed is what this MR landed as, by VCS (enth-vcs §7): (git, MergedSHA)
+// for a git MR, (enth, the land record's `new`) for an enth one. The id is ""
+// when nothing has landed or nothing was recorded. Every consumer that names
+// a landing reads it here rather than reading MergedSHA, which an enth MR
+// leaves empty on purpose: a 64-hex Change id must never be taken for a git
+// sha.
+//
+// An MR is enth when it carries a land record or a submitted Change stack;
+// both are empty on every git MR, so a git MR answers exactly what MergedSHA
+// says.
+func (m *MergeRequest) Landed() (vcs.Kind, string) {
+	if m.Enth != nil {
+		return vcs.Enth, m.Enth.New
+	}
+	if len(m.EnthSubmitted) > 0 {
+		return vcs.Enth, ""
+	}
+	return vcs.Git, m.MergedSHA
+}
+
+// LandedLabel renders Landed for a human reader: a git MR's sha exactly as
+// MergedSHA held it (truncated to short characters when short > 0), an enth
+// MR's id as "enth <id>". "" when nothing was recorded.
+func (m *MergeRequest) LandedLabel(short int) string {
+	k, id := m.Landed()
+	return vcs.LandedLabel(k, id, short)
+}
+
+// EnthLandedDetail is the `landed: {vcs, id}` detail for an enth MR that has
+// landed, and false for everything else. Readers that write a git MR's
+// landing as `merged_sha` add this beside it, so their git output is
+// byte-unchanged and an enth landing is still named (§7).
+func (m *MergeRequest) EnthLandedDetail() (map[string]string, bool) {
+	k, id := m.Landed()
+	if k != vcs.Enth || id == "" {
+		return nil, false
+	}
+	return vcs.LandedDetail(k, id), true
+}
+
 // OnMerged is called when a branch is successfully merged.
 type OnMerged func(mr *MergeRequest)
 

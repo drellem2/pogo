@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // resolveRecovered resolves the in-flight MRs loaded from the state file after
@@ -126,7 +128,7 @@ func (r *Refinery) resolveRecoveredOne(mr *MergeRequest) {
 	if probeErr != nil {
 		emitRecoveryLost(mr, probeErr)
 	} else if merged {
-		emitMerged(mr, 0, sha, 0, false)
+		emitMerged(mr, 0, vcs.Git, sha, 0, false)
 		if fire != nil {
 			fire(mr)
 		}

@@ -869,3 +869,32 @@ func (e *StepError) Error() string {
 }
 
 func (e *StepError) Unwrap() error { return e.Err }
+
+// LandedLabel renders a landing for a human reader (§7): a git sha bare, so
+// every git rendering that printed a sha prints exactly what it did, and an
+// enth id prefixed with its kind, so a 64-hex Change id is never read as a
+// git sha. "" when nothing landed or nothing was recorded. short truncates
+// the id to 12 characters (enth) or to n characters (git, n > 0); 0 keeps it
+// whole.
+func LandedLabel(kind Kind, id string, short int) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	if kind == Enth {
+		if short > 0 && len(id) > 12 {
+			id = id[:12]
+		}
+		return string(Enth) + " " + id
+	}
+	if short > 0 && len(id) > short {
+		id = id[:short]
+	}
+	return id
+}
+
+// LandedDetail is the machine-readable form of a landing, `{"vcs", "id"}`,
+// as event details and sidecars carry it under "landed" (§7).
+func LandedDetail(kind Kind, id string) map[string]string {
+	return map[string]string{"vcs": string(kind), "id": id}
+}

@@ -3679,6 +3679,9 @@ Flags:
 				// starts here, and the SHA used to be unreachable (mg-6879).
 				if mr.MergedSHA != "" {
 					body += fmt.Sprintf("\nMerged SHA: %s", mr.MergedSHA)
+				} else if mr.Enth != nil && mr.Enth.New != "" {
+					// An enth land has no sha (enth-vcs §7): name it with its kind.
+					body += fmt.Sprintf("\nLanded: %s (entry %d on %s)", mr.LandedLabel(0), mr.Enth.Entry, mr.Enth.Ref)
 				}
 				// Say plainly which kind of merge this was. The mayor has to
 				// tell "merged to the default branch, done" from "merged to an

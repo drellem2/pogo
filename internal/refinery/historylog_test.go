@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // errTestGate stands in for a gate failure in event-emission tests.
@@ -535,7 +536,7 @@ func TestOutcomeEventsCarryAuthor(t *testing.T) {
 	path := useTempEventLog(t)
 	mr := &MergeRequest{ID: "mr-a", Branch: "polecat-a", TargetRef: "main", Author: "cat-mg-a", RepoPath: "/repo"}
 
-	emitMerged(mr, 1, "abc123", 1.5, false)
+	emitMerged(mr, 1, vcs.Git, "abc123", 1.5, false)
 	emitMergeFailed(mr, 1, "test", errTestGate, true, "", AttemptFailure{Attempt: 1, Stage: "test", Class: ClassDefect})
 	emitMergeCancelled(mr, 1, "test", "")
 

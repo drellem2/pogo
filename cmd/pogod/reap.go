@@ -12,6 +12,7 @@ import (
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/filernotify"
 	"github.com/drellem2/pogo/internal/refinery"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // mergedPolecatStopTimeout bounds how long reapMergedPolecat waits for a
@@ -240,7 +241,7 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 			// Outranks the others: whatever lane this MR was in, a failed
 			// post-merge step is the most important thing about it (mg-6879).
 			reason = fmt.Sprintf("merged as %s but its declared post-merge step FAILED (%s) — deliverable missing",
-				mr.MergedSHA, mr.PostMergeError)
+				mr.LandedLabel(0), mr.PostMergeError)
 		case mr.PRFlow:
 			reason = fmt.Sprintf("merged into integration branch %q, not the repo default — PR still pending (mg-7746)", mr.TargetRef)
 		case mr.DeferDone:
@@ -295,6 +296,13 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	}
 	if mr.MergedSHA != "" {
 		sidecar["merged_sha"] = mr.MergedSHA
+	}
+	// An enth merge has no sha, and merged_sha stays absent rather than holding
+	// a Change id: the release-cut recipe tags `.result.merged_sha` and must
+	// refuse an enth MR, not tag a Change id as a commit (enth-vcs §7). The
+	// landing is named under `landed` instead; a git sidecar has no such key.
+	if d, ok := mr.EnthLandedDetail(); ok {
+		sidecar["landed"] = d
 	}
 	if mr.PostMergeTag != "" {
 		sidecar["post_merge_tag"] = mr.PostMergeTag
@@ -375,7 +383,7 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		// contradicting it. Both of those now say what actually happened.
 		log.Printf("refinery: MERGED BUT NOT CLOSED — work item %s is STILL OPEN after branch %s merged as %s: %v. "+
 			"No completion is being reported for it; close it by hand once you know why, or leave it open if that is "+
-			"correct (mg-2b71)", mr.Author, mr.Branch, mr.MergedSHA, completeErr)
+			"correct (mg-2b71)", mr.Author, mr.Branch, mr.LandedLabel(0), completeErr)
 		// GIVE THE FACT AN ADDRESSEE (mg-9d4e). The line above is a log line, and
 		// a log line is exactly what this state already had: on 2026-08-12 mg-0e8c
 		// and mg-ac0c each merged, each refused to close, and each was back in
@@ -468,7 +476,7 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 	if a != nil {
 		worker = a.Name
 	}
-	notifyFiler(filer, filernotify.Completion{
+	completion := filernotify.Completion{
 		ItemID:          mr.Author,
 		Route:           filernotify.RouteMerge,
 		Worker:          worker,
@@ -477,7 +485,12 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		Result:          fallbackSidecar(completeErr, string(result)),
 		Closed:          closed,
 		NotClosedReason: notClosedReason(completeErr, closed),
-	})
+	}
+	// An enth merge has no MergedSHA; name its landing instead (enth-vcs §7).
+	if d, ok := mr.EnthLandedDetail(); ok {
+		completion.LandedVCS, completion.LandedID = vcs.Enth, d["id"]
+	}
+	notifyFiler(filer, completion)
 
 	// There is nothing to stop. The close was the whole point of this call
 	// (mg-be37) — say so at the same volume as the polecat path, because this
@@ -493,7 +506,7 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		if closed {
 			log.Printf("refinery: closed work item %s at merge with NO polecat running (branch=%s, merged=%s) — "+
 				"a hand-submitted branch used to leave its item in available/, where priority-wake advertises "+
-				"work that is already on the target (mg-be37)", mr.Author, mr.Branch, mr.MergedSHA)
+				"work that is already on the target (mg-be37)", mr.Author, mr.Branch, mr.LandedLabel(0))
 		}
 		return
 	}

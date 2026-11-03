@@ -71,6 +71,8 @@ import (
 	"log"
 	"strings"
 	"sync"
+
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // Route says how the completion was observed. It changes one decision (see
@@ -105,6 +107,11 @@ type Completion struct {
 	// Branch and MergedSHA describe what landed, on the merge route.
 	Branch    string
 	MergedSHA string
+	// LandedVCS and LandedID name an enth landing (enth-vcs §7), which has no
+	// MergedSHA; rendered "enth <id>". They are read only when MergedSHA is
+	// empty, so a git notice reads exactly as it did. Empty for git.
+	LandedVCS vcs.Kind
+	LandedID  string
 	// Result is a FALLBACK copy of the result sidecar, used only when the store
 	// yields none. The authoritative copy is always the file mg wrote, read at
 	// notify time — see Notify for why the reading, not the caller's copy, is
@@ -389,8 +396,8 @@ func body(c Completion, res string, readErr error, creator, title string, redire
 		if c.Branch != "" {
 			fmt.Fprintf(&b, " (%s)", c.Branch)
 		}
-		if c.MergedSHA != "" {
-			fmt.Fprintf(&b, " as %s", c.MergedSHA)
+		if l := c.landed(); l != "" {
+			fmt.Fprintf(&b, " as %s", l)
 		}
 		b.WriteString("\n")
 	case c.Route == RouteMerge:
@@ -398,8 +405,8 @@ func body(c Completion, res string, readErr error, creator, title string, redire
 		if c.Branch != "" {
 			fmt.Fprintf(&b, " (%s)", c.Branch)
 		}
-		if c.MergedSHA != "" {
-			fmt.Fprintf(&b, " as %s", c.MergedSHA)
+		if l := c.landed(); l != "" {
+			fmt.Fprintf(&b, " as %s", l)
 		}
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "NOT CLOSED: the item is still open")
@@ -482,6 +489,15 @@ func verdict(c Completion, res string, readErr error) string {
 
 // detail is the short context block used by the escalation paths, where there
 // is no creator to address and the coordinator needs the facts anyway.
+// landed is what the merge landed as: the git sha, or the enth label when
+// there is no sha.
+func (c Completion) landed() string {
+	if c.MergedSHA != "" {
+		return c.MergedSHA
+	}
+	return vcs.LandedLabel(c.LandedVCS, c.LandedID, 0)
+}
+
 func detail(c Completion, res string, readErr error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Route:  %s\n", c.Route)
@@ -490,6 +506,8 @@ func detail(c Completion, res string, readErr error) string {
 	}
 	if c.MergedSHA != "" {
 		fmt.Fprintf(&b, "SHA:    %s\n", c.MergedSHA)
+	} else if l := c.landed(); l != "" {
+		fmt.Fprintf(&b, "Landed: %s\n", l)
 	}
 	b.WriteString("\n" + verdict(c, res, readErr))
 	return b.String()

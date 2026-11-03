@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // stubMergedGate answers from a fixed map, so the handler-side behaviour is
@@ -212,5 +214,24 @@ func TestSpawnPolecatMergedOverrideDispatchesAnyway(t *testing.T) {
 	rr = spawnPolecatWithMergedOverride(t, reg, "mg-ac0c", "   ")
 	if rr.Code != http.StatusConflict {
 		t.Errorf("a whitespace-only --merged-override bypassed the gate: status = %d", rr.Code)
+	}
+}
+
+// An enth merge has no sha (enth-vcs §7): the refusal names its landing with
+// its kind, not "(sha not recorded)". The git fixture above is the control.
+func TestMergedWorkRefusalNamesAnEnthLanding(t *testing.T) {
+	m := mergedFixture()
+	m.MergedSHA, m.LandedVCS, m.LandedID = "", vcs.Enth, strings.Repeat("ab", 32)
+	r := &Registry{}
+	r.SetMergedWorkGate(&stubMergedGate{merged: map[string]MergedWork{"mg-e1": m}})
+	refusal := r.mergedWorkRefusal("mg-e1")
+	if !strings.Contains(refusal, " as enth abababababab") || strings.Contains(refusal, "sha not recorded") {
+		t.Errorf("enth refusal does not name the landing:\n%s", refusal)
+	}
+	g := mergedFixture()
+	g.LandedVCS, g.LandedID = vcs.Git, g.MergedSHA
+	r.SetMergedWorkGate(&stubMergedGate{merged: map[string]MergedWork{"mg-g1": g}})
+	if got := r.mergedWorkRefusal("mg-g1"); !strings.Contains(got, " as 0123456789ab ") || strings.Contains(got, "enth") {
+		t.Errorf("git refusal changed:\n%s", got)
 	}
 }

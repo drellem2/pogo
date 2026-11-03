@@ -70,6 +70,9 @@ func recordCloseWithoutVerdict(mr *refinery.MergeRequest, a *agent.Agent, poleca
 	if mr.MergedSHA != "" {
 		details["merged_sha"] = mr.MergedSHA
 	}
+	if d, ok := mr.EnthLandedDetail(); ok {
+		details["landed"] = d
+	}
 	events.Emit(context.Background(), events.Event{
 		EventType:  EventClosedWithoutVerdict,
 		Agent:      "pogod",

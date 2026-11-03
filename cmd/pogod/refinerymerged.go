@@ -85,11 +85,14 @@ func mergedWorkFor(history []refinery.MergeRequest, workItemID string) (agent.Me
 		if strings.ToLower(strings.TrimSpace(mr.Author)) != want {
 			continue
 		}
+		kind, id := mr.Landed()
 		return agent.MergedWork{
 			MR:        mr.ID,
 			Branch:    mr.Branch,
 			Target:    mr.TargetRef,
 			MergedSHA: mr.MergedSHA,
+			LandedVCS: kind,
+			LandedID:  id,
 			MergedAt:  mr.DoneTime,
 		}, true
 	}

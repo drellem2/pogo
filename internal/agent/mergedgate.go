@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // MergedWorkGate answers, at the moment of dispatch, whether a work item's work
@@ -101,8 +102,14 @@ type MergedWork struct {
 	// this gate refuses on.
 	Target string
 	// MergedSHA is the commit on the target, so the claim is checkable with one
-	// `git log` and no daemon.
+	// `git log` and no daemon. Empty for an enth merge (enth-vcs §7).
 	MergedSHA string
+	// LandedVCS and LandedID are the merge request's Landed() (§7): what it
+	// landed as, by VCS. For git they repeat MergedSHA; for enth they are the
+	// only record of the landing, rendered with the kind so a Change id is
+	// never read as a sha.
+	LandedVCS vcs.Kind
+	LandedID  string
 	// MergedAt is when it landed, or the zero time when the record does not say.
 	// Rendered as an age, because "merged 4 minutes ago" and "merged last week"
 	// call for different reactions from a coordinator holding a queue.
@@ -186,7 +193,7 @@ func (r *Registry) mergedWorkRefusal(workItemID string) string {
 		"File the successor and close this item (`mg done %s --successor=<new id>`), or archive it if "+
 		"the remainder is already filed elsewhere. If this item genuinely has work AFTER that merge, "+
 		"dispatch anyway with --merged-override=\"<why>\"",
-		workItemID, m.Branch, m.Target, shortMergedSHA(m.MergedSHA), m.age(), m.MR, workItemID)
+		workItemID, m.Branch, m.Target, m.landedLabel(), m.age(), m.MR, workItemID)
 }
 
 // age renders how long ago the merge landed, or "" when the record does not say.
@@ -201,6 +208,15 @@ func (m MergedWork) age() string {
 		return ""
 	}
 	return fmt.Sprintf(" %s ago", d.Round(time.Second))
+}
+
+// landedLabel is the landing as the refusal names it: a git sha exactly as
+// before, or "enth <id>" for an enth merge, which has no sha.
+func (m MergedWork) landedLabel() string {
+	if m.MergedSHA == "" && m.LandedVCS == vcs.Enth && strings.TrimSpace(m.LandedID) != "" {
+		return vcs.LandedLabel(m.LandedVCS, m.LandedID, 12)
+	}
+	return shortMergedSHA(m.MergedSHA)
 }
 
 // shortMergedSHA keeps a sha quotable in one line, and says so when there is

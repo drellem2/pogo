@@ -550,3 +550,33 @@ func TestTheNotClosedNoticeDoesNotSwallowTheLaterCompletion(t *testing.T) {
 		t.Errorf("the second mail is the completion: %q", rec.last().subject)
 	}
 }
+
+// An enth merge has no sha (enth-vcs §7): the notice names its landing with
+// its kind rather than leaving "as" blank, and a git notice is unchanged.
+func TestAnEnthMergeIsNamedWithItsKind(t *testing.T) {
+	rec := &recorder{}
+	n := New("mayor", rec.send, filing("pm-x", "t"), resultOf(`{"verdict":"pass"}`), knownSet("pm-x", "mayor"))
+	id := strings.Repeat("ab", 32)
+	if o := n.Notify(Completion{Closed: true, ItemID: "mg-e1", Route: RouteMerge, LandedVCS: "enth", LandedID: id}); !o.Sent() {
+		t.Fatalf("not sent: %+v", o)
+	}
+	body := rec.last().body
+	if !strings.Contains(body, "Closed: its branch merged as enth "+id+"\n") {
+		t.Errorf("enth notice does not name the landing:\n%s", body)
+	}
+	if d := detail(Completion{Route: RouteMerge, LandedVCS: "enth", LandedID: id}, "", nil); !strings.Contains(d, "Landed: enth "+id+"\n") || strings.Contains(d, "SHA:") {
+		t.Errorf("enth detail:\n%s", d)
+	}
+
+	// Git control: the sha wins and the enth fields are never consulted.
+	if o := n.Notify(Completion{Closed: true, ItemID: "mg-g1", Route: RouteMerge, Branch: "b", MergedSHA: "abc1234"}); !o.Sent() {
+		t.Fatalf("not sent: %+v", o)
+	}
+	body = rec.last().body
+	if !strings.Contains(body, "Closed: its branch merged (b) as abc1234\n") || strings.Contains(body, "enth") {
+		t.Errorf("git notice changed:\n%s", body)
+	}
+	if d := detail(Completion{Route: RouteMerge, Branch: "b", MergedSHA: "abc1234", LandedVCS: "enth", LandedID: id}, "", nil); !strings.HasPrefix(d, "Route:  merge\nBranch: b\nSHA:    abc1234\n\n") || strings.Contains(d, "Landed:") {
+		t.Errorf("git detail changed:\n%s", d)
+	}
+}

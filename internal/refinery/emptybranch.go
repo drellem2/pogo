@@ -5,6 +5,8 @@ import (
 	"log"
 	"path/filepath"
 	"time"
+
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // A branch with no commits of its own is a FAILED merge, not a landed one
@@ -62,7 +64,9 @@ func (r *Refinery) priorMergeCovering(mr *MergeRequest, wtDir, head string) *Mer
 		if h == nil || h == mr || h.ID == mr.ID {
 			continue
 		}
-		if h.Status != StatusMerged || h.AlreadyMerged || h.MergedSHA == "" {
+		// A git ancestry check needs a git landing: an enth MR's land record
+		// (enth-vcs §7) is read by the enth rule instead (enthland.go).
+		if kind, landed := h.Landed(); h.Status != StatusMerged || h.AlreadyMerged || kind != vcs.Git || landed == "" {
 			continue
 		}
 		if filepath.Clean(h.RepoPath) != filepath.Clean(mr.RepoPath) {

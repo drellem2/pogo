@@ -166,7 +166,7 @@ func reopenMailLine(failed *refinery.MergeRequest, res reopenResult) string {
 			"so this item's status rests on work that landed and a later failed branch is not evidence that it is "+
 			"unfinished (mg-4d21). If this failure really does mean more work on this item, reopen it deliberately: "+
 			"`mg reopen %s`.",
-			id, res.Landed.ID, res.Landed.Branch, res.Landed.TargetRef, shortSHASuffix(res.Landed.MergedSHA), id)
+			id, res.Landed.ID, res.Landed.Branch, res.Landed.TargetRef, landedSuffix(&res.Landed), id)
 	case reopenPerformed:
 		return fmt.Sprintf("Work item: %s was REOPENED (done -> claimed) so its author can retry. NOTHING OWNS IT — "+
 			"`mg reopen` writes claimed/%s.md with no pid, no polecat is running it, and every stall check scans "+
@@ -181,6 +181,16 @@ func reopenMailLine(failed *refinery.MergeRequest, res reopenResult) string {
 	default:
 		return fmt.Sprintf("Work item: %s could NOT be reopened and its status is UNKNOWN to this notice: %v", id, res.Err)
 	}
+}
+
+// landedSuffix renders the landing of mr as the declined line names it: a git
+// MR exactly as shortSHASuffix renders its sha, an enth MR as " as enth <id>"
+// (enth-vcs §7), which has no sha to render.
+func landedSuffix(mr *refinery.MergeRequest) string {
+	if l := mr.LandedLabel(7); l != "" && mr.MergedSHA == "" {
+		return " as " + l
+	}
+	return shortSHASuffix(mr.MergedSHA)
 }
 
 // shortSHASuffix renders " as 45b4421" for a non-empty sha, so the claim in the
@@ -229,6 +239,9 @@ func reopenEvent(failed *refinery.MergeRequest, res reopenResult) (events.Event,
 		details["landed_target"] = res.Landed.TargetRef
 		if res.Landed.MergedSHA != "" {
 			details["landed_sha"] = res.Landed.MergedSHA
+		}
+		if d, ok := res.Landed.EnthLandedDetail(); ok {
+			details["landed"] = d
 		}
 	}
 	if res.Err != nil {

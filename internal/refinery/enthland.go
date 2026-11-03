@@ -136,7 +136,7 @@ func (r *Refinery) processEnthMerge(mr *MergeRequest) (mergeResult, error) {
 		if res.prior != nil {
 			log.Printf("refinery: MR %s item=%s: every submitted Change already landed under MR %s (entry %d) — resolving as merged without re-running gates (no-op)",
 				mr.ID, mr.Item, res.prior.ID, res.prior.Enth.Entry)
-			emitMerged(mr, 0, "", 0, true)
+			emitMerged(mr, 0, vcs.Enth, res.prior.Enth.New, 0, true)
 			return mergeResult{GateOutput: gateOutput, AlreadyMerged: true, Enth: res.prior.Enth}, nil
 		}
 		if res.err == nil {
@@ -146,7 +146,7 @@ func (r *Refinery) processEnthMerge(mr *MergeRequest) (mergeResult, error) {
 				r.recordRecovery(mr, attempt, policy.backoffSpent)
 			}
 			// merged_sha stays empty: a Change id is not a git sha (§7).
-			emitMerged(mr, attempt, "", time.Since(startTime).Seconds(), false)
+			emitMerged(mr, attempt, vcs.Enth, res.record.New, time.Since(startTime).Seconds(), false)
 			log.Printf("refinery: MR %s landed through enth: %s entry %d %s -> %s (%d Change(s), request %s)",
 				mr.ID, res.record.Ref, res.record.Entry, shortSHA(res.record.Old), shortSHA(res.record.New), len(res.record.Changes), res.record.RequestID)
 			deployErr := r.runEnthDeploy(b, gateDir, mr, res.record)
@@ -493,7 +493,7 @@ func (r *Refinery) runEnthDeploy(b enthvcs.Backend, gateDir string, mr *MergeReq
 			return "deploy: check out the landed result " + shortSHA(rec.New) + ": " + cerr.Error()
 		}
 	}
-	return r.runDeploy(gateDir, mr)
+	return r.runDeploy(gateDir, mr, vcs.Enth, rec.New)
 }
 
 // resolveRecoveredEnth resolves an enth MR that was in flight when pogod
@@ -559,7 +559,7 @@ func (r *Refinery) resolveRecoveredEnth(mr *MergeRequest) {
 	r.flushState()
 
 	if landed {
-		emitMerged(mr, 0, "", 0, false)
+		emitMerged(mr, 0, vcs.Enth, rec.New, 0, false)
 		if fire != nil {
 			fire(mr)
 		}

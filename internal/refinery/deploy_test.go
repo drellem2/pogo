@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // setupRepoWithDeploy creates a bare origin repo plus a polecat-style branch
@@ -311,7 +313,7 @@ command = "yes x | head -c 5000; exit 1"
 // can detect they're running under the refinery vs. a developer shell.
 func TestRunDeployHookEnv(t *testing.T) {
 	dir := t.TempDir()
-	output, err := runDeployHook(dir, `printf "%s" "$POGO_REFINERY"`)
+	output, err := runDeployHook(dir, `printf "%s" "$POGO_REFINERY"`, vcs.Git, "")
 	if err != nil {
 		t.Fatalf("runDeployHook: %v (output=%q)", err, output)
 	}
@@ -324,7 +326,7 @@ func TestRunDeployHookEnv(t *testing.T) {
 // not the caller's cwd.
 func TestRunDeployHookCwd(t *testing.T) {
 	dir := t.TempDir()
-	output, err := runDeployHook(dir, "pwd")
+	output, err := runDeployHook(dir, "pwd", vcs.Git, "")
 	if err != nil {
 		t.Fatalf("runDeployHook: %v", err)
 	}

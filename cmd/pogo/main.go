@@ -5531,6 +5531,9 @@ Examples:
 				}
 				if mr.MergedSHA != "" {
 					fmt.Printf("Merged as: %s\n", mr.MergedSHA)
+				} else if mr.Enth != nil && mr.Enth.New != "" {
+					// An enth land has no sha; merged_sha stays empty (enth-vcs §7).
+					fmt.Printf("Landed as: %s (entry %d on %s)\n", mr.LandedLabel(0), mr.Enth.Entry, mr.Enth.Ref)
 				}
 				// Print the post-merge step in both directions (mg-6879). A
 				// declared-but-failed step is the one case where Status reads

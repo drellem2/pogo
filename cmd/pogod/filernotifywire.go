@@ -7,6 +7,7 @@ import (
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/filernotify"
+	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/workitem"
 )
 
@@ -81,6 +82,9 @@ func recordFilerNotice(c filernotify.Completion, o filernotify.Outcome) {
 	}
 	if c.MergedSHA != "" {
 		details["merged_sha"] = c.MergedSHA
+	}
+	if c.MergedSHA == "" && c.LandedID != "" {
+		details["landed"] = vcs.LandedDetail(c.LandedVCS, c.LandedID)
 	}
 	if o.Skipped != "" {
 		details["skipped"] = o.Skipped

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // gateOutputCap caps the gate_output_truncated field per docs/event-log.md
@@ -84,7 +85,16 @@ func emitMergeAttempted(mr *MergeRequest, attempt int) {
 // emitMerged writes a refinery_merged event for a successful merge.
 // alreadyMerged marks the no-op resolution of a re-submitted branch that had
 // already landed on the target (gh #34) — no gates ran, nothing was pushed.
-func emitMerged(mr *MergeRequest, attempt int, mergeCommit string, durationSec float64, alreadyMerged bool) {
+//
+// kind and landedID name the landing (enth-vcs §7): a git merge's commit, or
+// an enth land's `new`. The event carries it as `landed: {vcs, id}`, beside
+// `merge_commit`, which stays the git sha for git and "" for enth: a Change
+// id is not a merge commit. `landed` is omitted when the id is unknown.
+func emitMerged(mr *MergeRequest, attempt int, kind vcs.Kind, landedID string, durationSec float64, alreadyMerged bool) {
+	mergeCommit := ""
+	if kind != vcs.Enth {
+		mergeCommit = landedID
+	}
 	details := map[string]any{
 		"merge_request_id": mr.ID,
 		"branch":           mr.Branch,
@@ -103,6 +113,9 @@ func emitMerged(mr *MergeRequest, attempt int, mergeCommit string, durationSec f
 	}
 	if alreadyMerged {
 		details["already_merged"] = true
+	}
+	if landedID != "" {
+		details["landed"] = vcs.LandedDetail(kind, landedID)
 	}
 	events.Emit(context.Background(), events.Event{
 		EventType:  "refinery_merged",

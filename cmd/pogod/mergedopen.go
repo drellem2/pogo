@@ -107,6 +107,12 @@ type mergedOpenAlert struct {
 	MR        string
 	Target    string
 	MergedSHA string
+	// Landed is the merge request's LandedLabel: MergedSHA for git, "enth <id>"
+	// for an enth merge, which leaves MergedSHA empty (enth-vcs §7).
+	Landed string
+	// EnthLanded is the `landed: {vcs, id}` detail of an enth merge; nil for git,
+	// whose event keeps exactly its merged_sha.
+	EnthLanded map[string]string
 	// CloseError is what `mg done` actually said. It is quoted verbatim because
 	// it names the reason — "declares a remainder" is the common one, but this
 	// alert must not assume it and then be wrong in the one case that is
@@ -116,6 +122,16 @@ type mergedOpenAlert struct {
 	// failed close. It changes the wording and nothing else: an unreadable store
 	// is not evidence that the item closed, so the alert still goes out.
 	StatusUnknown bool
+}
+
+// landed is the landing as the alert prints it. Landed is unset on an alert
+// built by hand (the tests' fixtures predate it), so MergedSHA stands in: for
+// git the two are the same string.
+func (a mergedOpenAlert) landed() string {
+	if a.Landed != "" {
+		return a.Landed
+	}
+	return a.MergedSHA
 }
 
 // mergedOpenAlertMail is the mail sink, swappable for tests. Production sends via
@@ -159,6 +175,7 @@ func reportMergedButOpen(mr *refinery.MergeRequest, worker string, closeErr erro
 		MR:            mr.ID,
 		Target:        mr.TargetRef,
 		MergedSHA:     mr.MergedSHA,
+		Landed:        mr.LandedLabel(0),
 		CloseError:    closeErr.Error(),
 		StatusUnknown: err != nil,
 	}
@@ -169,21 +186,28 @@ func reportMergedButOpen(mr *refinery.MergeRequest, worker string, closeErr erro
 	log.Printf("refinery: raising merged-not-closed alert for work item %s — branch %s landed on %s as %s "+
 		"and the item is open with its work already on the target, which is the state priority-wake "+
 		"advertises as ready and unclaimed (mg-9d4e)",
-		a.WorkItemID, a.Branch, a.Target, a.MergedSHA)
+		a.WorkItemID, a.Branch, a.Target, a.Landed)
+	if d, ok := mr.EnthLandedDetail(); ok {
+		a.EnthLanded = d
+	}
+	details := map[string]any{
+		"worker":         a.Worker,
+		"branch":         a.Branch,
+		"mr":             a.MR,
+		"target":         a.Target,
+		"merged_sha":     a.MergedSHA,
+		"close_error":    a.CloseError,
+		"status_unknown": a.StatusUnknown,
+	}
+	if a.EnthLanded != nil {
+		details["landed"] = a.EnthLanded
+	}
 	events.Emit(context.Background(), events.Event{
 		EventType:  "work_item_merged_not_closed",
 		Agent:      "pogod",
 		WorkItemID: a.WorkItemID,
 		Repo:       a.Repo,
-		Details: map[string]any{
-			"worker":         a.Worker,
-			"branch":         a.Branch,
-			"mr":             a.MR,
-			"target":         a.Target,
-			"merged_sha":     a.MergedSHA,
-			"close_error":    a.CloseError,
-			"status_unknown": a.StatusUnknown,
-		},
+		Details:    details,
 	})
 	mergedOpenAlertMail(a)
 }
@@ -249,7 +273,7 @@ func (a mergedOpenAlert) Message() (subject, body string) {
 	}
 	fmt.Fprintf(&b, "Repo:       %s\n", a.Repo)
 	fmt.Fprintf(&b, "Branch:     %s\n", a.Branch)
-	fmt.Fprintf(&b, "Merge:      %s -> %s as %s\n", a.MR, a.Target, a.MergedSHA)
+	fmt.Fprintf(&b, "Merge:      %s -> %s as %s\n", a.MR, a.Target, a.landed())
 	fmt.Fprintf(&b, "mg said:    %s\n\n", a.CloseError)
 
 	if a.StatusUnknown {
@@ -301,18 +325,22 @@ func recordMergedGatedNotClosed(mr *refinery.MergeRequest, worker string, closeE
 	if mr == nil || mr.Author == "" || closeErr == nil {
 		return
 	}
+	details := map[string]any{
+		"worker":      worker,
+		"branch":      mr.Branch,
+		"mr":          mr.ID,
+		"target":      mr.TargetRef,
+		"merged_sha":  mr.MergedSHA,
+		"close_error": closeErr.Error(),
+	}
+	if d, ok := mr.EnthLandedDetail(); ok {
+		details["landed"] = d
+	}
 	events.Emit(context.Background(), events.Event{
 		EventType:  EventMergedGatedNotClosed,
 		Agent:      "pogod",
 		WorkItemID: mr.Author,
 		Repo:       mr.RepoPath,
-		Details: map[string]any{
-			"worker":      worker,
-			"branch":      mr.Branch,
-			"mr":          mr.ID,
-			"target":      mr.TargetRef,
-			"merged_sha":  mr.MergedSHA,
-			"close_error": closeErr.Error(),
-		},
+		Details:    details,
 	})
 }

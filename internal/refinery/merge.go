@@ -88,7 +88,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 		sha := probe.Head
 		log.Printf("refinery: MR %s branch=%s already merged into origin/%s by %s (landed as %s) — resolving as merged without re-running gates (no-op)",
 			mr.ID, mr.Branch, mr.TargetRef, prior.ID, shortSHA(prior.MergedSHA))
-		emitMerged(mr, 0, sha, 0, true)
+		emitMerged(mr, 0, vcs.Git, sha, 0, true)
 		gateOutput := fmt.Sprintf("(branch already merged into origin/%s by %s — quality gates, push, and deploy skipped)", mr.TargetRef, prior.ID)
 		// The post-merge step is NOT skipped here, unlike gates/push/deploy.
 		// Those are skipped because repeating them would be a no-op; the tag is
@@ -168,7 +168,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 					mr.ID, attempt, attempt-1, r.attemptClassSummary(mr), policy.backoffSpent.Round(time.Second))
 				r.recordRecovery(mr, attempt, policy.backoffSpent)
 			}
-			emitMerged(mr, attempt, sha, time.Since(startTime).Seconds(), false)
+			emitMerged(mr, attempt, vcs.Git, sha, time.Since(startTime).Seconds(), false)
 			// origin/<target> just advanced; refresh the checkout the MR
 			// was submitted from so it doesn't go stale (gh #30).
 			// Best-effort — logs and skips unless clean and on the target.
@@ -182,7 +182,7 @@ func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 			// hook owns refreshing runtime snapshots like ~/.pogo/<repo>/bin/
 			// so they reflect the just-merged code. Failure is reported via
 			// DeployError + event but does not unwind the merge.
-			deployErr := r.runDeploy(wtDir, mr)
+			deployErr := r.runDeploy(wtDir, mr, vcs.Git, sha)
 			// Perform the post-merge protocol the submitter declared, against
 			// the SHA that just landed (mg-6879). This runs INSIDE the merge
 			// pipeline on purpose: processNext fires OnMerged only after
