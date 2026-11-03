@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"embed"
@@ -1023,6 +1022,7 @@ const (
 	metaFieldProvider
 	metaFieldModel
 	metaFieldWake
+	metaFieldEnv
 )
 
 // metaFieldByKey maps a TOML key name to its bitmask flag. The second return
@@ -1044,6 +1044,8 @@ func metaFieldByKey(key string) (metaFieldFlag, bool) {
 		return metaFieldModel, true
 	case "wake":
 		return metaFieldWake, true
+	case "env":
+		return metaFieldEnv, true
 	}
 	return 0, false
 }
@@ -1084,11 +1086,49 @@ type AgentMeta struct {
 	Model          string `json:"model,omitempty"`
 	Wake           string `json:"wake,omitempty"`
 
+	// Env is the crew-only `env` key: KEY=VALUE entries a crew agent is
+	// started with, applied BENEATH pogo's identity catalogue so a prompt can
+	// never rename an agent or repoint its mailbox, and re-applied on every
+	// restart (drellem2/pogo#263). Written as a TOML string array, single- or
+	// multi-line: env = ["K=V", "K2=V2"]. Ignored for every non-crew spawn.
+	//
+	// json:"-" because an env can carry secrets: nothing that encodes an
+	// AgentMeta may print the values. Report key names only (EnvKeys).
+	Env []string `json:"-"`
+
+	// envWarnings records why an env line or entry was skipped. A malformed
+	// env never fails the parse — StartCrewAgent discards parse errors, so a
+	// block-level error would silently take auto_start, restart_on_crash and
+	// nudge_on_start down with it. The crew start path logs these instead.
+	envWarnings []string
+
 	// explicit is a bitmask of recognized keys that appeared in the
-	// frontmatter. Unexported so it stays out of JSON output; uint8 so
-	// AgentMeta remains comparable with `==`. Zero for prompts without
-	// frontmatter.
+	// frontmatter. Unexported so it stays out of JSON output. Zero for
+	// prompts without frontmatter.
 	explicit metaFieldFlag
+}
+
+// EnvWarnings returns the reasons any part of the `env` key was skipped, one
+// per skipped line or entry. Empty when env was absent or fully valid.
+func (m *AgentMeta) EnvWarnings() []string {
+	if m == nil {
+		return nil
+	}
+	return m.envWarnings
+}
+
+// EnvKeys returns the variable NAMES declared by the `env` key, in order, for
+// logging. Never the values: an env can carry secrets.
+func (m *AgentMeta) EnvKeys() []string {
+	if m == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(m.Env))
+	for _, e := range m.Env {
+		k, _, _ := strings.Cut(e, "=")
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // HasField reports whether key was explicitly present in the prompt's
@@ -1206,14 +1246,15 @@ func findFenceLine(s string) int {
 // parseFrontmatterBody parses the TOML key=value lines between the fences.
 // The accepted grammar is intentionally tiny: blank lines, '#' comments, and
 // 'key = value' lines where value is either a bool literal (true|false) or a
-// double-quoted string (with \\, \", \n, \r, \t escapes). Unknown keys are
-// ignored so adding new AgentMeta fields stays backwards compatible.
+// double-quoted string (with \\, \", \n, \r, \t escapes). The one exception is
+// `env`, whose value is an array of double-quoted strings that may span lines
+// (see parseFrontmatterStringArray). Unknown keys are ignored so adding new
+// AgentMeta fields stays backwards compatible.
 func parseFrontmatterBody(text string, meta *AgentMeta) error {
-	scanner := bufio.NewScanner(strings.NewReader(text))
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := strings.TrimSpace(scanner.Text())
+	lines := strings.Split(text, "\n")
+	for i := 0; i < len(lines); i++ {
+		lineNo := i + 1
+		line := strings.TrimSpace(lines[i])
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -1226,11 +1267,188 @@ func parseFrontmatterBody(text string, meta *AgentMeta) error {
 		if key == "" {
 			return fmt.Errorf("line %d: empty key in %q", lineNo, line)
 		}
+		if key == "env" {
+			// A multi-line array continues while the array is unclosed and the
+			// next line is shaped like an array line (an element, a comment, a
+			// blank, a bare comma or the closing bracket). Stopping at the first
+			// line that is not keeps an unterminated array from swallowing the
+			// keys after it.
+			if strings.HasPrefix(val, "[") {
+				for findArrayClose(val) == -1 && i+1 < len(lines) && isArrayContinuation(lines[i+1]) {
+					i++
+					val += "\n" + strings.TrimSpace(lines[i])
+				}
+			}
+			assignEnvField(meta, val, lineNo)
+			continue
+		}
 		if err := assignMetaField(meta, key, val); err != nil {
 			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 	}
-	return scanner.Err()
+	return nil
+}
+
+// isArrayContinuation reports whether line could belong to a multi-line
+// string array: a quoted element, a comment, a blank, a separator or the
+// closing bracket.
+func isArrayContinuation(line string) bool {
+	t := strings.TrimSpace(line)
+	if t == "" {
+		return true
+	}
+	switch t[0] {
+	case '"', '#', ',', ']':
+		return true
+	}
+	return false
+}
+
+// assignEnvField parses the `env` value and records it on meta. It never
+// returns an error, by design: a malformed env must cost exactly the env field
+// and nothing else in the block (see AgentMeta.envWarnings). A malformed array
+// drops the whole field; a well-formed array drops only its bad entries.
+func assignEnvField(meta *AgentMeta, raw string, lineNo int) {
+	elems, err := parseFrontmatterStringArray(raw)
+	if err != nil {
+		meta.envWarnings = append(meta.envWarnings, fmt.Sprintf("line %d: env ignored: %v", lineNo, err))
+		return
+	}
+	var env []string
+	for _, e := range elems {
+		k, _, ok := strings.Cut(e, "=")
+		switch {
+		case !ok:
+			// Do not quote the entry: it may be a secret that lost its '='.
+			meta.envWarnings = append(meta.envWarnings, fmt.Sprintf("line %d: env entry skipped: want KEY=VALUE, got an entry with no '='", lineNo))
+			continue
+		case !validEnvName(k):
+			meta.envWarnings = append(meta.envWarnings, fmt.Sprintf("line %d: env entry skipped: key %q is not a valid name ([A-Za-z_][A-Za-z0-9_]*)", lineNo, k))
+			continue
+		}
+		env = append(env, e)
+	}
+	meta.Env = env
+	meta.explicit |= metaFieldEnv
+}
+
+// validEnvName reports whether k is a portable environment variable name.
+func validEnvName(k string) bool {
+	if k == "" {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		switch {
+		case c == '_', c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// findArrayClose returns the index of the ']' closing the array that opens at
+// s[0], skipping brackets inside double-quoted strings (with backslash
+// escapes) and '#' comments. -1 when the array is not closed in s.
+func findArrayClose(s string) int {
+	inStr := false
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			switch c {
+			case '\\':
+				i++
+			case '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '#':
+			nl := strings.IndexByte(s[i:], '\n')
+			if nl == -1 {
+				return -1
+			}
+			i += nl
+		case ']':
+			return i
+		}
+	}
+	return -1
+}
+
+// parseFrontmatterStringArray parses a TOML array of double-quoted strings:
+// `["a", "b"]`, optionally spread over lines, with a trailing comma and '#'
+// comments allowed. Anything else — an unquoted element, a missing comma, an
+// unterminated array, text after the ']' — is an error.
+func parseFrontmatterStringArray(raw string) ([]string, error) {
+	if !strings.HasPrefix(raw, "[") {
+		return nil, fmt.Errorf("expected an array of double-quoted strings, got a value not starting with '['")
+	}
+	end := findArrayClose(raw)
+	if end == -1 {
+		return nil, fmt.Errorf("unterminated array (no closing ']')")
+	}
+	if rest := strings.TrimSpace(raw[end+1:]); rest != "" && !strings.HasPrefix(rest, "#") {
+		return nil, fmt.Errorf("unexpected text after closing ']'")
+	}
+	inner := raw[1:end]
+	out := []string{}
+	i := 0
+	skip := func() {
+		for i < len(inner) {
+			switch c := inner[i]; {
+			case c == ' ', c == '\t', c == '\r', c == '\n':
+				i++
+			case c == '#':
+				nl := strings.IndexByte(inner[i:], '\n')
+				if nl == -1 {
+					i = len(inner)
+				} else {
+					i += nl + 1
+				}
+			default:
+				return
+			}
+		}
+	}
+	for {
+		skip()
+		if i >= len(inner) {
+			return out, nil
+		}
+		if inner[i] != '"' {
+			return nil, fmt.Errorf("array element %d: expected a double-quoted string", len(out)+1)
+		}
+		j := i + 1
+		for j < len(inner) && inner[j] != '"' {
+			if inner[j] == '\\' {
+				j++
+			}
+			j++
+		}
+		if j >= len(inner) {
+			return nil, fmt.Errorf("array element %d: unterminated string", len(out)+1)
+		}
+		v, err := unescapeFrontmatterString(inner[i+1 : j])
+		if err != nil {
+			return nil, fmt.Errorf("array element %d: %w", len(out)+1, err)
+		}
+		out = append(out, v)
+		i = j + 1
+		skip()
+		if i >= len(inner) {
+			return out, nil
+		}
+		if inner[i] != ',' {
+			return nil, fmt.Errorf("array element %d: expected ',' or ']' after it", len(out))
+		}
+		i++
+	}
 }
 
 func assignMetaField(meta *AgentMeta, key, raw string) error {

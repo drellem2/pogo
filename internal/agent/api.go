@@ -1640,6 +1640,24 @@ func (r *Registry) startCrewAgent(name string, preflight *authPreflight) (*Agent
 	// A prompt file may declare its own message via `nudge_on_start` in the
 	// TOML frontmatter; otherwise the coordinator gets a coordination message
 	// and everyone else gets a generic start message.
+	// The crew-only `env` frontmatter key (drellem2/pogo#263). Passed as
+	// BaseEnv, NOT Env: Env lands after the identity catalogue and would let a
+	// prompt override POGO_AGENT_NAME / POGO_ROLE; BaseEnv lands beneath it.
+	// Spawn captures it, and a crash restart re-applies that captured copy.
+	// Names are logged, never values (an env can carry secrets) — so the env is
+	// reported, not just present (mg-fbaf). Skipped lines/entries are logged
+	// here because the parser cannot: they never fail the parse.
+	var baseEnv []string
+	if meta != nil {
+		for _, w := range meta.EnvWarnings() {
+			log.Printf("crew agent %s: prompt %s: %s", name, promptFile, w)
+		}
+		if len(meta.Env) > 0 {
+			baseEnv = meta.Env
+			log.Printf("crew agent %s: env from frontmatter: %s", name, strings.Join(meta.EnvKeys(), ", "))
+		}
+	}
+
 	var nudgeMsg string
 	if meta != nil && meta.NudgeOnStart != "" {
 		nudgeMsg = meta.NudgeOnStart
@@ -1659,6 +1677,7 @@ func (r *Registry) startCrewAgent(name string, preflight *authPreflight) (*Agent
 		RestartOnCrash: ResolveRestartOnCrashWithStub(stubFile, promptFile, TypeCrew),
 		Provider:       provider,
 		Model:          model,
+		BaseEnv:        baseEnv,
 	})
 }
 
