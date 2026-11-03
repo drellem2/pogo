@@ -203,19 +203,20 @@ func lookupPRBody(wtDir, branch string) (int, string, error) {
 	return pr.Number, pr.Body, nil
 }
 
-// changeMessageReader reads enth Changes' whole messages. enthvcs.Backend is
+// ChangeMessageReader reads enth Changes' whole messages. enthvcs.Backend is
 // the production one (FullMessages).
-type changeMessageReader interface {
+type ChangeMessageReader interface {
 	FullMessages(ctx context.Context, ids []string) ([]vcs.Message, error)
 }
 
-var _ changeMessageReader = enthvcs.Backend{}
+var _ ChangeMessageReader = enthvcs.Backend{}
 
-// enthClosingRefs is checkClosingRefs for an enth MR (enth-vcs slice 9,
-// mg-2e9fc; docs/design/enth-vcs.md §11). The enth land pipeline calls it
-// through Refinery.checkEnthClosingRefs (enthland.go) on the Changes it is
-// about to land, at the point the git pipeline calls checkClosingRefs, and
-// under the same rules: never skipped on retry, never retryable.
+// EnthClosingRefs is checkClosingRefs for enth work (enth-vcs slice 9,
+// mg-2e9fc; docs/design/enth-vcs.md §11). Since the worker lands its own enth
+// work (mg-5b904) there is no refinery pipeline to run it in: `pogo
+// presubmit --item` runs it on the stack the worker is about to land, which
+// is the last moment before the land — the same point the git pipeline calls
+// checkClosingRefs.
 //
 // It reads the CHANGE MESSAGES, and only them. A message lands on the GitHub
 // mirror verbatim (enth's export writes it), so a `Fixes #N` in one still
@@ -226,7 +227,7 @@ var _ changeMessageReader = enthvcs.Backend{}
 //
 // A message that cannot be read is an error, not a clean bill: the same
 // stance commitClosingRefs takes on unreadable history.
-func enthClosingRefs(ctx context.Context, r changeMessageReader, changes []string) error {
+func EnthClosingRefs(ctx context.Context, r ChangeMessageReader, changes []string) error {
 	if len(changes) == 0 {
 		return errors.New("closing-ref check: the MR names no Changes, so there is nothing to judge — " +
 			"refusing rather than reporting an empty stack as clean")

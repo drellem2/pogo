@@ -66,7 +66,7 @@ type EnthWork struct {
 	// Workers are the distinct Pogo-Worker trailers on them.
 	Workers []string `json:"workers,omitempty"`
 	// Stacks is how many stacks the Changes form. More than one is the
-	// ambiguous case `refinery submit --item` refuses.
+	// ambiguous case `pogo presubmit --item` refuses.
 	Stacks int `json:"stacks"`
 	// Newest is the newest Change's committer time.
 	Newest time.Time `json:"newest,omitempty"`
@@ -235,15 +235,22 @@ func (r Row) enthRemedy() string {
 			"no trailer listing, so no work was looked for on this item", w.Remote, w.Repo)
 	}
 	if w.Stacks > 1 {
-		return fmt.Sprintf("%s   # %d STACKS from worker(s) %s — `refinery submit --item` refuses an ambiguous "+
-			"listing; choose one and submit it with --worker; do NOT dispatch at %s",
+		return fmt.Sprintf("%s   # %d STACKS from worker(s) %s — `pogo presubmit` refuses an ambiguous "+
+			"listing; choose one and land it with --worker; do NOT dispatch at %s",
 			list, w.Stacks, strings.Join(w.Workers, ", "), r.Item.ID)
 	}
-	submit := fmt.Sprintf("pogo refinery submit --item=%s --repo=%s --author=%s --target=%s",
-		r.Item.ID, r.Item.Repo, r.Item.ID, r.Target)
-	if strings.EqualFold(r.Item.Status, "done") {
-		return fmt.Sprintf("%s   # the item is DONE and this work NEVER LANDED — read it first (`%s`); "+
-			"submit it, or record that it is superseded", submit, list)
+	// An enth repo has no merge queue (enth-vcs §6, mg-5b904): the work is
+	// landed by hand, under a request id of its own, and recorded with pogo
+	// land, which closes the item. Nothing tests it first, so the line says so.
+	out := "/tmp/" + r.Item.ID + "-land.out"
+	land := fmt.Sprintf("enth --remote %s --repo %s land %s --request-id %s/recover-1 > %s && pogo land --item=%s --repo=%s --landed-file=%s",
+		w.Remote, w.Repo, strings.Join(w.Changes, " "), r.Item.ID, out, r.Item.ID, r.Item.Repo, out)
+	if r.Target != "" && r.Target != "main" {
+		land += " --target=" + r.Target
 	}
-	return fmt.Sprintf("%s   # do NOT dispatch at %s", submit, r.Item.ID)
+	if strings.EqualFold(r.Item.Status, "done") {
+		return fmt.Sprintf("%s   # the item is DONE and this work NEVER LANDED — read it first (`%s`), and build it (nothing tests a land); "+
+			"land it, or retire it with a Pogo-Supersedes Change", land, list)
+	}
+	return fmt.Sprintf("%s   # UNTESTED: build it first, or adopt it (spawn-polecat --stranded-adopt) so a worker tests and lands it; do NOT dispatch at %s", land, r.Item.ID)
 }

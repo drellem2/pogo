@@ -29,8 +29,6 @@ type mergeResult struct {
 	// AlreadyMerged marks the no-op path: the branch was an ancestor of the
 	// target before processing began.
 	AlreadyMerged bool
-	// Enth is an enth MR's land record (§7); nil for git.
-	Enth *vcs.LandRecord
 }
 
 // runPostMergeSteps performs the post-merge protocol the submitter declared on

@@ -56,9 +56,9 @@ const defaultMaxAttempts = 7
 // is not unwound.
 func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
 	if len(mr.EnthSubmitted) > 0 {
-		// An enth submission lands through enth (enth-vcs slice 7, mg-1fe2b),
-		// before any git step: the git clone is not where its work lands.
-		return r.processEnthMerge(mr)
+		// The refinery does not land enth work: the worker lands its own
+		// (enth-vcs §6, mg-5b904). Refused before any git step.
+		return r.refuseEnthMR(mr)
 	}
 	wtDir, err := r.ensureGateWorktree(mr)
 	if err != nil {

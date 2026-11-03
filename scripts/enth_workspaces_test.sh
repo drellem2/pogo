@@ -25,10 +25,10 @@
 #   6b WORK (slice 6, mg-30da0): the worker is given an identity for
 #      `enth change` (and, the control, enth refuses no_identity without one);
 #      `pogo presubmit --item` refuses none, dirty and trailer-less and passes
-#      one stack; `pogo refinery submit --item` records the stack's ids (and the
-#      MR is refused by its gate, so nothing lands; landing is
-#      enth_land_test.sh's), refuses a branch,
-#      an empty item and two workers' stacks; check-stranded reports the
+#      one stack, printing it with --print-stack, and refuses two workers'
+#      stacks; `pogo refinery submit` refuses enth work with the pointer to
+#      `pogo land` (mg-5b904; the self-land is enth_selfland_test.sh's);
+#      check-stranded reports the
 #      trailer-less base; --stranded-adopt checks out the item's top Change
 #   6  THE GIT CONTROL: the same daemon spawns a polecat on a git repo and it
 #      is the git worktree it always was — a polecat-<name> branch, a .git
@@ -300,28 +300,16 @@ POUT="$(presubmit_in "$W1" w1 mg-y)"; PRC=$?
 [ "$PRC" = 0 ] && printf '%s' "$POUT" | grep -q "pre-submit OK: 1 Change(s) for mg-y, top $C1" \
     && ok "P2   presubmit passes ONE stack whose top is the checkout's base" || bad "P2   presubmit one: rc $PRC $POUT"
 
-# A refusing gate keeps C1 unlanded for the steps below: since slice 7 an
-# enth MR lands (scripts/enth_land_test.sh proves the landing itself).
-mkdir -p "$PROJ/.pogo"; printf 'quality_gate = "exit 1"\n' > "$PROJ/.pogo/refinery.toml"
+# An enth repo has no merge queue (mg-5b904): the refinery refuses every enth
+# submit with the pointer to the worker's own land, and C1 stays unlanded for
+# the steps below (scripts/enth_selfland_test.sh proves the self-land itself).
 SUB="$(pogo refinery submit --item=mg-y --repo="$PROJ" --author=mg-y --json 2>&1)"; SRC=$?
-MR="$(printf '%s' "$SUB" | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p')"
-[ "$SRC" = 0 ] && [ -n "$MR" ] && ok "R1   refinery submit --item queued $MR" || bad "R1   submit --item: rc $SRC $SUB"
-if [ -n "$MR" ]; then
-    SHOW="$(pogo refinery show "$MR" --json 2>&1)"
-    printf '%s' "$SHOW" | tr -d ' \n' | grep -qF "\"enth_submitted\":[\"$C1\"]" \
-        && ok "R1   the MR records the submitted Change ids" || bad "R1   MR record: $SHOW"
-    for _ in $(seq 1 50); do
-        ST="$(pogo refinery show "$MR" --json 2>/dev/null | sed -n 's/.*"status": *"\([a-z]*\)".*/\1/p' | head -1)"
-        [ "$ST" = failed ] && break; sleep 0.2
-    done
-    pogo refinery show "$MR" --json 2>/dev/null | grep -q 'quality gate: exit 1 failed' \
-        && ok "     ... and is refused by the gate it was landed through (slice 7): nothing landed" || bad "     MR $MR status $ST: $(pogo refinery show "$MR" --json 2>&1 | head -40)"
-fi
-rm -f "$PROJ/.pogo/refinery.toml"
+[ "$SRC" != 0 ] && printf '%s' "$SUB" | grep -q 'no merge queue' && printf '%s' "$SUB" | grep -q 'pogo land --item=mg-y' \
+    && ok "R1   refinery submit --item is refused on an enth repo, naming pogo land" || bad "R1   submit --item: rc $SRC $SUB"
 SUB="$(pogo refinery submit polecat-w1 --item=mg-y --repo="$PROJ" 2>&1)"
-[ $? != 0 ] && printf '%s' "$SUB" | grep -q 'not a branch' && ok "R1   a branch is refused on an enth repo" || bad "R1   branch on enth: $SUB"
-SUB="$(pogo refinery submit --item=mg-none --repo="$PROJ" 2>&1)"
-[ $? != 0 ] && printf '%s' "$SUB" | grep -q 'class=defect: mg-none carries nothing' && ok "R1   an item with no Changes is refused class=defect" || bad "R1   empty item: $SUB"
+[ $? != 0 ] && printf '%s' "$SUB" | grep -q 'no merge queue' && ok "R1   ... and so is a branch" || bad "R1   branch on enth: $SUB"
+POUT="$(cd "$W1" && POGO_AGENT_NAME=w1 pogo presubmit --item=mg-y --print-stack 2>/dev/null)"
+[ "$POUT" = "$C1" ] && ok "P5   presubmit --print-stack prints the stack to land ($C1)" || bad "P5   --print-stack: [$POUT]"
 
 # TRAILER-LESS: the worker forgets the trailers on its next Change.
 echo more > "$W1/more.txt"
@@ -339,7 +327,7 @@ W2="$POGO_HOME/polecats/w2"
 wait_env w2 || true
 echo w2 > "$W2/w2.txt"
 X1="$(worker_change "$S/env.w2" "$W2" "feat: w2 (mg-y)" Pogo-Item=mg-y Pogo-Worker=w2 | change_id)"
-SUB="$(pogo refinery submit --item=mg-y --repo="$PROJ" 2>&1)"
+SUB="$(presubmit_in "$W2" "" mg-y)"
 [ $? != 0 ] && printf '%s' "$SUB" | grep -q 'form 2 stacks' && printf '%s' "$SUB" | grep -q 'worker w2' \
     && ok "R1   two workers' stacks are refused as ambiguous, naming each worker" || bad "R1   ambiguous: $SUB"
 pogo agent stop w1 >/dev/null 2>&1; pogo agent stop w2 >/dev/null 2>&1

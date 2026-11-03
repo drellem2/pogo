@@ -159,6 +159,30 @@ func CancelMerge(id string) (*refinery.CancelResponse, error) {
 	return &resp, nil
 }
 
+// RecordLand records an enth worker's own land with pogod (POST
+// /refinery/land, enth-vcs §6): the work item then closes as a merge closes
+// it. A land recorded before answers its first MR with AlreadyRecorded.
+func RecordLand(req refinery.LandRequest) (*refinery.LandResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	r, err := http.Post(serverURL+"/refinery/land", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusCreated && r.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("land not recorded: %s", strings.TrimSpace(string(msg)))
+	}
+	var resp refinery.LandResponse
+	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("pogod answered, but the answer was unreadable (the land may be recorded — re-run to find out): %w", err)
+	}
+	return &resp, nil
+}
+
 // SubmitMerge submits a branch to the refinery merge queue.
 // Returns a wrapped error containing refinery.DisabledMessage when the
 // daemon has refinery disabled in config.

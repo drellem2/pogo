@@ -119,84 +119,51 @@ func withEnthRepo(t *testing.T, repo string, bin string) {
 	t.Cleanup(func() { SetRepoVCS(nil); enthWork = old })
 }
 
-func TestSubmitEnthItem(t *testing.T) {
+// An enth repo has no merge queue (mg-5b904): every enth submit is refused
+// with the pointer to the worker's own land, before enth is asked anything.
+func TestSubmitEnthItemIsRefused(t *testing.T) {
 	r, _ := newCallbackRefinery(t)
 	repo := t.TempDir() // an enth project's path: no .git, so any git call fails
 
-	cases := []struct {
-		name     string
-		changes  string
-		req      MergeRequest
-		resolve  bool
-		wantErr  string
-		wantIDs  string
-		wantWkr  string
-		wantArgv string
-	}{
-		{name: "one stack", changes: change("c1", "T", "mg-1", "p1") + change("c2", "c1", "mg-1", "p1"),
-			req: MergeRequest{Item: "mg-1"}, wantIDs: "c1,c2", wantWkr: "p1"},
-		{name: "the live polecat filters by worker", changes: change("c1", "T", "mg-1", "p1"),
-			req: MergeRequest{Item: "mg-1"}, resolve: true, wantIDs: "c1", wantArgv: "--trailer Pogo-Worker=p1"},
-		{name: "none", changes: "", req: MergeRequest{Item: "mg-1"},
-			wantErr: "class=defect: mg-1 carries nothing ahead of main"},
-		{name: "ambiguous", changes: change("c1", "T", "mg-1", "p1") + change("x1", "T", "mg-1", "p2"),
-			req: MergeRequest{Item: "mg-1"}, wantErr: "form 2 stacks, not one"},
-		{name: "a branch is refused", req: MergeRequest{Item: "mg-1", Branch: "polecat-p1"},
-			wantErr: "named by its work item, not a branch"},
-		{name: "no item", req: MergeRequest{}, wantErr: "branch is required"},
-		{name: "no item but a branch", req: MergeRequest{Branch: "b"}, wantErr: "not a branch"},
-		{name: "a missing target", changes: change("c1", "T", "mg-1", "p1"), req: MergeRequest{Item: "mg-1", TargetRef: "nope"},
-			wantErr: `target ref "nope" not found`},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			bin, argv := fakeEnth(t, c.changes)
+	for name, req := range map[string]MergeRequest{
+		"an item":              {Item: "mg-1"},
+		"an item and a branch": {Item: "mg-1", Branch: "polecat-p1"},
+		"a branch":             {Branch: "b"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bin, argv := fakeEnth(t, change("c1", "T", "mg-1", "p1"))
 			withEnthRepo(t, repo, bin)
-			if c.resolve {
-				withItemResolver(t, func(string) (ItemWorker, bool) { return ItemWorker{Name: "p1"}, true })
-			}
-			req := c.req
 			req.RepoPath = repo
 			id, err := r.Submit(req)
-			if c.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
-					t.Fatalf("Submit = %q, %v; want an error containing %q", id, err, c.wantErr)
-				}
-				return
+			if err == nil || !strings.Contains(err.Error(), "pogo land --item=") || !strings.Contains(err.Error(), "no merge queue") {
+				t.Fatalf("Submit = %q, %v; want the self-land refusal", id, err)
 			}
-			if err != nil {
-				t.Fatalf("Submit: %v", err)
-			}
-			mr := r.byID[id]
-			if strings.Join(mr.EnthSubmitted, ",") != c.wantIDs || mr.Item != "mg-1" || mr.Branch != "" || mr.TargetRef != "main" {
-				t.Errorf("MR = %+v; want enth ids %s", mr, c.wantIDs)
-			}
-			if c.wantWkr != "" && mr.EnthWorker != c.wantWkr {
-				t.Errorf("worker = %q, want %q", mr.EnthWorker, c.wantWkr)
-			}
-			if c.wantArgv != "" {
-				data, _ := os.ReadFile(argv)
-				if !strings.Contains(string(data), c.wantArgv) {
-					t.Errorf("enth was called as %q, want %q in it", data, c.wantArgv)
-				}
+			if data, _ := os.ReadFile(argv); len(strings.TrimSpace(string(data))) != 0 {
+				t.Errorf("a refused submit still called enth: %q", data)
 			}
 		})
 	}
+	if len(r.Queue()) != 0 {
+		t.Error("a refused enth submit was queued")
+	}
+	// Submit's own first check still comes first.
+	bin, _ := fakeEnth(t, "")
+	withEnthRepo(t, repo, bin)
+	if _, err := r.Submit(MergeRequest{RepoPath: repo}); err == nil || !strings.Contains(err.Error(), "branch is required") {
+		t.Errorf("no item, no branch = %v", err)
+	}
 }
 
-func TestProcessMergeRefusesEnthWorkOnARepoNoLongerEnth(t *testing.T) {
+// An enth MR that reaches the queue — whatever its repo's record now says —
+// is failed before any git step, never handed to the git pipeline.
+func TestProcessMergeRefusesEnthWork(t *testing.T) {
 	r, _ := newCallbackRefinery(t)
-	// No lookup says enth for this path: the MR's enth Changes cannot be
-	// placed. Refused before any git step, never handed to the git pipeline.
 	mr := &MergeRequest{ID: "mr-x", RepoPath: t.TempDir(), Item: "mg-1", TargetRef: "main", EnthSubmitted: []string{"c1"}}
 	_, err := r.processMerge(mr)
-	if err == nil || !strings.Contains(err.Error(), "not recorded as an enth repo") {
-		t.Fatalf("processMerge = %v, want the not-enth refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "no longer lands enth work") || !strings.Contains(err.Error(), "pogo land --item=mg-1") {
+		t.Fatalf("processMerge = %v, want the self-land refusal", err)
 	}
-	if mr.FailureClass != ClassInfrastructure || !strings.Contains(mr.NotRetriedReason, "not retryable") || mr.AttemptCount != 1 || mr.Attempts[0].Stage != stageEnthConfig {
+	if mr.FailureClass != ClassDefect || !strings.Contains(mr.NotRetriedReason, "not retryable") || mr.AttemptCount != 1 || mr.Attempts[0].Stage != "enth-config" {
 		t.Errorf("record = class %q reason %q attempts %d", mr.FailureClass, mr.NotRetriedReason, mr.AttemptCount)
-	}
-	if countsAgainstAuthor(mr.FailureClass) {
-		t.Error("a record change counted against the author")
 	}
 }

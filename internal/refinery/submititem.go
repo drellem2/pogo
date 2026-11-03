@@ -2,9 +2,7 @@ package refinery
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"path/filepath"
 	"sync/atomic"
 
 	"github.com/drellem2/pogo/internal/vcs"
@@ -15,12 +13,10 @@ import (
 // `pogo refinery submit --item` (docs/design/enth-vcs.md §5, "Submit"; slice
 // 6, mg-30da0).
 //
-// On an enth repo the work item is the identity of the work: there is no
-// branch. Submit lists the item's unlanded Changes through enthd, refuses an
-// empty listing as a defect (it would deliver nothing, mg-c184d) and an
-// ambiguous one (more than one stack), and records the submitted ids on the
-// MR. A listed Change is on enthd, so "does the refinery reach it" (R1) is
-// the listing itself.
+// On an enth repo submit is REFUSED (mg-5b904): an enth repo has no merge
+// queue, and the worker lands its own work (selfland.go, enth-vcs §6). The
+// refusal names `pogo land`. Until then (slice 6) submit listed the item's
+// Changes and queued them for the refinery's enth land path, which is gone.
 //
 // On git --item is accepted too, and resolves to the worker's branch through
 // the spawn record — pogod's registry entry for the item's live polecat — so
@@ -129,42 +125,8 @@ func resolveSubmitIdentity(req *MergeRequest) (isEnth bool, err error) {
 	return false, nil
 }
 
-// resolveEnthSubmission lists the item's Changes and records them on req.
-func resolveEnthSubmission(req *MergeRequest, e vcs.EnthRepo) error {
-	if req.Branch != "" {
-		return fmt.Errorf("%s is an enth repo: a submission is named by its work item, not a branch — pogo refinery submit --item=<id> (got branch %q)", req.RepoPath, req.Branch)
-	}
-	if req.Item == "" {
-		return fmt.Errorf("%s is an enth repo: --item is required (the work item names the work)", req.RepoPath)
-	}
-	if req.PostMergeTag != "" || req.AutoCreateTargetRef {
-		return fmt.Errorf("%s is an enth repo: --post-merge-tag and --auto-create-target are not supported on enth yet (enth-vcs slice 12)", req.RepoPath)
-	}
-	if parseRefineryConfig(filepath.Join(req.RepoPath, ".pogo", "refinery.toml")).PRMode {
-		return fmt.Errorf("%s is an enth repo and its .pogo/refinery.toml sets pr_mode, which is refused on enth: there is no pull request to push back to (enth-vcs §11)", req.RepoPath)
-	}
-	b := enthWork(e)
-	ctx := context.Background()
-	if _, err := b.RefTip(ctx, req.TargetRef); err != nil {
-		return fmt.Errorf("target ref %q not found on %s (%s): %w", req.TargetRef, e.Repo, e.Remote, err)
-	}
-	// The worker filter is the normal case and makes ambiguity rare (§5);
-	// without a live polecat for the item, list by the item alone.
-	worker := ""
-	if w, ok := resolveItemWorker(req.Item); ok {
-		worker = w.Name
-	}
-	s, err := b.FindStack(ctx, req.Item, worker)
-	var amb *vcs.AmbiguousWorkError
-	switch {
-	case errors.Is(err, vcs.ErrNoWork):
-		return fmt.Errorf("class=%s: %s carries nothing ahead of %s — nothing would be delivered: %v", ClassDefect, req.Item, req.TargetRef, err)
-	case errors.As(err, &amb):
-		return fmt.Errorf("refusing to guess which work to land: %w", err)
-	case err != nil:
-		return fmt.Errorf("listing %s's Changes on %s: %w", req.Item, e.Remote, err)
-	}
-	req.EnthWorker = s.Worker
-	req.EnthSubmitted = append([]string(nil), s.Revs...)
-	return nil
+// resolveEnthSubmission refuses: the refinery does not land enth work, the
+// worker does (enth-vcs §6, mg-5b904). The refusal names the verb.
+func resolveEnthSubmission(req *MergeRequest, _ vcs.EnthRepo) error {
+	return enthSubmitRefusal(req)
 }

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // SubmitRequest is the JSON body for POST /refinery/submit.
@@ -45,8 +47,9 @@ type SubmitRequest struct {
 	// time is the only moment an auto-done author can record one.
 	Verdict json.RawMessage `json:"verdict,omitempty"`
 	// Item is the work item the submission is for (`submit --item`,
-	// mg-30da0). Required on an enth repo, where Branch must be empty; on git
-	// it resolves an empty Branch through the item's live polecat.
+	// mg-30da0). On git it resolves an empty Branch through the item's live
+	// polecat. An enth repo is refused whatever is given: its workers land
+	// their own work (POST /refinery/land, mg-5b904).
 	Item string `json:"item,omitempty"`
 }
 
@@ -81,6 +84,7 @@ func RegisterHandlersFunc(mux *http.ServeMux, get func() *Refinery) {
 	mux.HandleFunc("/refinery/queue", wrap((*Refinery).handleQueue))
 	mux.HandleFunc("/refinery/history", wrap((*Refinery).handleHistory))
 	mux.HandleFunc("/refinery/submit", wrap((*Refinery).handleSubmit))
+	mux.HandleFunc("/refinery/land", wrap((*Refinery).handleLand))
 	mux.HandleFunc("/refinery/mr/{id}", wrap((*Refinery).handleMR))
 	mux.HandleFunc("/refinery/cancel", wrap((*Refinery).handleCancel))
 	mux.HandleFunc("/refinery/prune", wrap((*Refinery).handlePrune))
@@ -161,6 +165,56 @@ func (r *Refinery) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"id": id})
+}
+
+// LandRequest is the JSON body for POST /refinery/land: an enth worker's own
+// land, recorded so the work item closes as a merge closes it (enth-vcs §6,
+// mg-5b904). See RecordSelfLand.
+type LandRequest struct {
+	RepoPath  string `json:"repo_path"`
+	Item      string `json:"item"`
+	Author    string `json:"author,omitempty"`     // default: item
+	TargetRef string `json:"target_ref,omitempty"` // default: the repo's trunk
+	// Landed is `enth land`'s stdout, verbatim.
+	Landed    string          `json:"landed"`
+	RequestID string          `json:"request_id,omitempty"`
+	Verdict   json.RawMessage `json:"verdict,omitempty"`
+}
+
+// LandResponse is POST /refinery/land's answer.
+type LandResponse struct {
+	// ID is the merged MR the land is recorded as.
+	ID string `json:"id"`
+	// AlreadyRecorded is true when an earlier call recorded the same land:
+	// nothing was fired again.
+	AlreadyRecorded bool `json:"already_recorded,omitempty"`
+	// Landed is the land record.
+	Landed *vcs.LandRecord `json:"landed"`
+}
+
+func (r *Refinery) handleLand(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	var lr LandRequest
+	if err := json.NewDecoder(req.Body).Decode(&lr); err != nil {
+		http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+		return
+	}
+	res, err := r.RecordSelfLand(SelfLandRequest{RepoPath: lr.RepoPath, Item: lr.Item, Author: lr.Author,
+		TargetRef: lr.TargetRef, Landed: []byte(lr.Landed), RequestID: lr.RequestID, Verdict: lr.Verdict})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if res.AlreadyRecorded {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusCreated)
+	}
+	json.NewEncoder(w).Encode(LandResponse{ID: res.MR.ID, AlreadyRecorded: res.AlreadyRecorded, Landed: res.MR.Enth})
 }
 
 // CancelRequest is the JSON body for POST /refinery/cancel.

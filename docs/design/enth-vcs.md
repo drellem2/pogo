@@ -151,7 +151,7 @@ They are written with `enth change DIR -m "…" --trailer Pogo-Item=mg-X --trail
 
 **What a submission is.** A `Submission` is an ordered stack: the listed Changes sorted so that each one's base is the previous one, ending at a top Change. The listing is refused as ambiguous when the Changes form more than one stack. That happens when two workers on the same item both produced work, for example a respawn that did not adopt. The refusal names each stack's worker, so the mayor chooses rather than pogo guessing. Filtering by `Pogo-Worker` too is the normal case and makes the ambiguity rare.
 
-**Submit (P5, R1).** `pogo refinery submit` takes the work item as the identity of the work on an enth repo:
+**Submit (P5, R1).** *(Superseded, mg-5b904: an enth repo has no merge queue, and the refinery refuses an enth submit. The worker lands its own stack and records it with `pogo land --item`, §6. The listing and the stack rules below are unchanged: `pogo presubmit --item --print-stack` applies them to what the worker lands.)* `pogo refinery submit` takes the work item as the identity of the work on an enth repo:
 
 ```bash
 pogo refinery submit --item=mg-X --repo=… --author=… --target=main --verdict-file=…
@@ -176,14 +176,76 @@ Trailers are free-form text (epic §2), so a worker can write another worker's i
 - **S2's candidate set on enth (slice 6b, mg-28cbc)** is `enth changes --unlanded` with no trailer filter, one listing per enth-backed project record. Each Change's `Pogo-Item` trailer is joined to the item's status. An open item with no live worker (matched by `Pogo-Worker` or by the item) is `stranded`, and so is a **done** item, because on enth no branch outlives the item. A queued enth MR is matched by its `item`. Archived and shelved items are excluded and counted. An item `mg show` cannot read is `unjudged`. A failed listing is a `repo_unreadable` row per open item in that repo. The remedy is `pogo refinery submit --item`, or the listing itself when the Changes form more than one stack. A landed Change is absent from `--unlanded` by its land record, so it is not reported. Not built: an open item whose Changes have *all* landed is not yet reported as git's `landed_not_closed`, and enth rows are not checked against the refinery's history of refusals.
 - **S7–S9:** `Messages` is the message without its subject line (git's `%b`), trailers included. `Diff` compares `enth query ls -r` at the first parent and at the Change. `Cat` is `enth query cat`, and a missing path is the refusal `not_found`. `Fetch` is a no-op. S6 is the listing's `created`.
 - **`pogo presubmit`** runs the template's `presubmit_check` line for line on git. `cmd/pogo/presubmit_test.go` runs the template's own shell function beside the verb on nine trees and requires the same stdout and the same pass or fail; a deliberate one-word change to a refusal fails four of those cases. On enth it requires `--item`, a clean checkout, a base that is not trailer-less, one stack, and that stack's top equal to the base. The templates keep their shell until slice 11.
-- **`pogo refinery submit --item`:** on enth the branch is refused, the target is checked on enthd (`RefTip`), and the stack is filtered by the item's live polecat as `Pogo-Worker` when there is exactly one. The ids are recorded as `enth_submitted`, kept apart from §7's `enth` land record, which is slice 8's. An empty listing fails as `class=defect … carries nothing ahead of <target>`. On git `--item` resolves an omitted branch to the branch checked out in the item's live polecat's worktree, and a given branch must agree with it. A git request without `--item` is byte-identical. Until slice 7 the merge worker failed an enth MR before any git step; slice 7 (§6.7) lands it.
+- **`pogo refinery submit --item`:** on enth the branch is refused, the target is checked on enthd (`RefTip`), and the stack is filtered by the item's live polecat as `Pogo-Worker` when there is exactly one. The ids are recorded as `enth_submitted`, kept apart from §7's `enth` land record, which is slice 8's. An empty listing fails as `class=defect … carries nothing ahead of <target>`. On git `--item` resolves an omitted branch to the branch checked out in the item's live polecat's worktree, and a given branch must agree with it. A git request without `--item` is byte-identical. Until slice 7 the merge worker failed an enth MR before any git step; slice 7 (§6.5.7) lands it. **Superseded by mg-5b904 (§6.4):** the refinery now refuses every enth submit, and the worker lands its own work.
 - **The worker's identity.** enth reads no git config, and this host has no enth config and no `ENTH_`/`GIT_` identity, so every polecat's `enth change` would have been refused `no_identity`. pogod now fills only the fields enth's own chain leaves empty (`enthvcs.IdentityEnv`). It uses git's `user.name`/`user.email` for the source repo, which is the identity a git polecat's commits carry, and falls back to `<worker>@pogo.invalid`.
 - **`--stranded-adopt` (W7)** resolves the item's one unlanded stack and checks out its top. It verifies that `.enth/checkout`'s base reads back as that Change, and rolls the checkout back if it does not. It refuses no stack, an ambiguous one, and a missing `--id`. The git stranded gate is not consulted for an enth repo.
 - **gitgc's preserved scan** lists an enth checkout (repo from pogod's record, no branch, no commits at risk) instead of counting it "not a worktree". It skips the git-only probes, which in an enth tree would read `~/.pogo`.
 
-## 6. The refinery: gate exactly what lands (decision 5)
+## 6. Landing: the worker lands its own Change (decision 5, revised)
 
-### 6.1 The pipeline for one MR
+### 6.1 The decision
+
+**DECISION (Daniel, 2026-11-03, mg-5b904).** 09:30Z: "pogo in enth mode won't need the refinery ... each polecat can just submit its own change". 09:37Z: skip refinery changes; CI on the GitHub mirror after the land is acceptable in the interim. 09:39Z: "I'd rather remove the enth ~~recovery~~ refinery path to have more confidence the de facto workflow is what we expect" (corrected at 09:39:31Z to "Refinery\*", so no reading of "recovery path" remains open).
+
+So an enth repo has **no merge queue**. The worker lands its own work, and the refinery's enth land path (slice 7, §6.5.7) is **deleted rather than left dormant**, so the workflow in the templates is the only one. Git repos are unchanged: they still merge through the refinery, and its git pipeline is byte-for-byte what it was.
+
+**ACCEPTED TRADE-OFF (Daniel's call; recorded so nobody "fixes" it).** The merged result `N` is **not tested before it lands**. A worker tests its own base (`./build.sh` before `enth change`), and `enth land` hunk-merges onto whatever the tip is by then. Decision 5 as first written, "gate exactly what lands" (§6.7), existed to rule exactly that out; this revision accepts it. Post-land CI on the GitHub mirror (mg-dd053) is the safety net. An enth pre-land gate (mg-b729a) may close the gap later, under a new GO.
+
+### 6.2 The worker's land
+
+Step 5 of the build protocol (`polecat.md`) and shape D of the architect protocol (`polecat-architect.md`) render one shell function, `self_land`. Their enth blocks carry the same text (`TestSelfLandIsTheSameInBothTemplates`). It is a bounded loop:
+
+1. `pogo presubmit --item=<item> --print-stack` runs the pre-land check and prints the stack to land, bottom first. The check is §12's, plus the closing-ref check (R12) on every Change's whole message. The refinery ran that check on enth MRs, and now nothing else would.
+2. `enth land [--ref refs/heads/<branch>] <stack> --request-id <item>/<attempt>`, with stdout kept.
+3. On success, `pogo land --item=<item> --repo=… --landed-file=<stdout> --request-id=… --verdict-file=…` (§6.3).
+4. `stale_tip`: nothing landed. It lands again under the **next** attempt number (at most six tries).
+5. **No answer** (`unreachable`, `interrupted`, `bad_response`, or exit 4 with no error line): the land may have happened, so the **same** request id is re-issued. enthd answers what the first land answered and lands nothing twice. A new id would land the same Changes a second time (measured in slice 7; enth bug mg-19949). The attempt number and a `pending` marker live in `/tmp/<item>-land.*`, so a later `self_land` re-issues a pending request before it plans a new one.
+6. `conflict` stops with exit 3, the conflict lines printed and nothing landed. The prompt's re-make (step 6) checks the new trunk out into a fresh directory, because an enth checkout cannot be moved. The worker re-applies the work, runs `./build.sh` (the only test the merged work gets), makes the Change with a `Pogo-Supersedes: <old ids>` trailer and runs `self_land` again. At most three re-makes; a fourth conflict goes to the coordinator.
+7. Any other refusal stops with exit 1. A land that happened but could not be recorded stops with exit 2, `LANDED BUT NOT RECORDED`, and the instruction to re-run only `pogo land`.
+
+**Why `Pogo-Supersedes`.** enth cannot withdraw a Change. Without the trailer, the Change that conflicted stays unlanded beside its re-make. `pogo presubmit` would then refuse the item as two stacks, and once the item closed, check-stranded would report the dead Change as stranded work forever. `vcs.DropSuperseded` drops every Change that a Change *of the same item* names in the trailer. A trailer naming another item's Change retires nothing. `enthvcs.Backend.ListChanges(…, unlanded=true)` now reads the whole listing (landed Changes included, because the superseding Change has usually landed by the time anyone asks), drops the superseded Changes, and keeps those whose `landed` is null. FindStack, presubmit, the trailer-less base check and check-stranded all read through it.
+
+### 6.3 Completion: `pogo land --item`
+
+One verb, in one place, testable: `pogo land` → `POST /refinery/land` → `Refinery.RecordSelfLand` (`internal/refinery/selfland.go`). It refuses, and records nothing, in these cases:
+- a repo whose project record is not enth;
+- output that is not exactly one `landed` line (a dry run, a conflict, nothing, two);
+- a land that moved a ref other than the target (default: the project record's trunk);
+- a record whose `new` is not its top Change's landed id;
+- a Change that enthd does not list under `Pogo-Item=<item>`;
+- a Change that enthd does not show as landed, or shows as landed under a different id.
+
+pogo closes an item on what enthd says landed, never on the worker's word alone.
+
+It then records the land as a merged MR in the refinery's history, with slice 8's `enth` land record (the request id included), `"self_landed": true`, `enth_submitted`, `enth_worker`, the verdict and `merged_sha` absent. It emits `refinery_merged` with `landed: {enth, N}` and fires the **same OnMerged callback** a refinery merge fires. So pogod closes the item exactly as it closes one today: the item is marked done; the sidecar names `landed {vcs: enth, id}` and carries the verdict; the filer is notified, the coordinator gets the `MERGED:` mail, and the polecat is stopped.
+
+**The worker is not reaped before the land is recorded (mg-cef7).** The MR is written through to the state file *before* OnMerged runs (tested: the callback reads the file and finds the MR). The reap is therefore downstream of the record. A worker stopped between `enth land` and `pogo land` leaves landed work on an open item. `pogo land` can be re-run by anyone with the same output, and enthd replays the same request id to produce that output again. Recording the same land twice answers the first MR (`already_recorded`) and fires nothing.
+
+**Not done by a self-land:** the per-repo deploy hook. The refinery did not land the work and holds no checkout of `N`. A repo that needs a deploy on land has none on enth until something runs it.
+
+### 6.4 What was removed
+
+The refinery no longer lands enth work:
+- `pogo refinery submit` on an enth repo is **refused**, naming `pogo land` (`resolveEnthSubmission`). The listing it used to do at submit is gone with it.
+- An enth MR that reaches the queue anyway (one queued before this change, or one restored by crash recovery) is failed on its first attempt, `class=defect`, before any git step, with the same pointer (`refuseEnthMR`, `requeueRecoveredEnth`).
+- Deleted: the slice-7 pipeline (`enthland.go`: dry run, the gate checkout of `N`, `--expect-tip/--expect-new`, the `enth_pending` replay, enth crash recovery, the enth deploy, the `.enth` gate lock); the enth `Lander` (`Prepare` and `Land` now return `enthvcs.ErrSelfLanded`); `DryRun`, `LandExpect`, `CheckoutWhole` and `RemoveGateDir`; `scripts/enth_land_test.sh`.
+- Kept: slice 8's merge-record shape (`enth`, `mr.Landed()`, `landed {vcs, id}`, every consumer), which a self-land writes, and slice 6b's check-stranded, which is how an unlanded Change is noticed. Its remedy is now the hand land plus `pogo land`, marked untested. The closing-ref judgement (`refinery.EnthClosingRefs`) moved to `pogo presubmit`.
+
+**Proved by** `internal/refinery/selfland_test.go`, `internal/vcs/enthvcs/land_test.go` (both against a sandboxed enthd), and end to end by `scripts/enth_selfland_test.sh`. That script runs a real pogod and a real enthd, takes the `self_land` block from the prompt pogod rendered for a real (sleeping) polecat, and runs it in the polecat's checkout with the polecat's environment: 33 of 33 observations. It covers these cases:
+- a clean self-land: the item is done, and the sidecar has `landed` and the verdict;
+- `stale_tip`, retried and landed;
+- a lost answer, re-issued under the same id, with one trunk entry;
+- a conflict, re-made with `Pogo-Supersedes` and landed. check-stranded does not report the retired Change; as a positive control, it does report an unretired one;
+- the refinery refusing an enth submit;
+- the git control: a git branch through the same daemon gets a `merged_sha` and no `enth` record.
+
+The `stale_tip` there is made by a wrapper `enth`, because a plain land without `--expect-tip` meets a real one only in a CAS race.
+
+### 6.5 The superseded design (slice 7), for the record
+
+What follows is decision 5 as first designed and built in slice 7 (mg-1fe2b): the refinery gated exactly what landed. It is **no longer in the code** (§6.5.4). It is kept here as the rationale an enth pre-land gate (mg-b729a) would start from.
+
+#### 6.5.1 The pipeline for one MR
 
 | Step | git today | enth backend | Entries |
 |---|---|---|---|
@@ -198,7 +260,7 @@ Trailers are free-form text (epic §2), so a worker can write another worker's i
 
 `--expect-new N` is mg-b1b9e's addition: the land refuses with `result_mismatch` (exit 3) if its rebased result is not `N`. Together with `--expect-tip T` it binds the gated result to the landed one. **The tree that was gated is the tree that lands, or nothing lands.** `stale_tip` and `result_mismatch` are both "re-run from the dry run". They count against the existing `max_attempts` budget (default 7), as a lost ff-only race does today. `skip_on_retry` keeps its meaning (no gates on attempts after the first), and it keeps today's cost too: a retry it skipped landed a tree nobody gated. That is a property of the knob, not of enth, and this design does not change it.
 
-### 6.2 The prerequisite: a dry run's result must be checkable-out
+#### 6.5.2 The prerequisite: a dry run's result must be checkable-out
 
 **This is the one place the decisions rest on an enth behaviour that the enth items do not yet promise.** mg-b1b9e says `--dry-run` "returns the landed ids, writes nothing". If nothing is written, `enth checkout N` has no `N` to read whenever `N ≠ submitted`, which is every land whose base is not the tip. That is the common case at concurrency: epic §3.2 measured 53% of pogo's lands sharing a path with one of the previous three. The gate step needs the rebased Change records and any merged blobs to be **stored**, though not landed: no `L` record and no CAS. Content-addressed records that no ref reaches are harmless, and they are what a later real land would write anyway.
 
@@ -208,17 +270,17 @@ Trailers are free-form text (epic §2), so a worker can write another worker's i
 
 When `N = submitted` (the base is the tip), the submitted Change is already stored and the gate checks it out directly. This works with no enth change at all, and slice 6 can be tested on that path first.
 
-### 6.3 Crash recovery and already-merged (R9)
+#### 6.5.3 Crash recovery and already-merged (R9)
 
 The request id `<MR id>/<attempt>` makes a land idempotent across a pogod restart (I12). `recovery.go`'s in-flight path re-issues the same land with the same request id. If it had landed, enthd replays the recorded answer and pogo records it. If it had not, it lands now or is refused `stale_tip`. A new attempt after `stale_tip` takes a new request id, because its `T` and `N` differ.
 
 An already-merged resubmit (gh #34, `emptybranch.go`) keeps mg-c184d's rule: it resolves as `already_merged` only when the refinery's own history holds a merged MR for the same item whose `enth` record (§7) lists every submitted id. An item with no unlanded Changes and no such record fails as a defect: it delivers nothing.
 
-### 6.4 Gate reuse (R14)
+#### 6.5.4 Gate reuse (R14)
 
 git reuses a passed gate when a retry produces the same tree id (`merge.go:610,716`). enth has no tree id (epic §8 Q1). The reuse key is `N`, which identifies the result only from the same tip. So after a `stale_tip` the gate re-runs even when the tree is the same. This is a throughput cost, inferred and not measured. It is accepted for v1 and goes away if enth adds a tree id. mg-927f8's replay is the place to measure how often it fires.
 
-### 6.5 One Change stack per MR in v1; batch land later
+#### 6.5.5 One Change stack per MR in v1; batch land later
 
 v1 lands **one MR's stack per `enth land` call**: the Changes of one item, in order. That keeps parity with git, where one MR is one branch. It also means the refinery's lanes, attempt budget, failure routing and verdicts all keep their one-MR shape.
 
@@ -230,11 +292,11 @@ v1 lands **one MR's stack per `enth land` call**: the Changes of one item, in or
 
 What it costs is the reason it is not v1: a red gate on a batch has to be bisected to find the failing MR, and the refinery's per-MR states become per-batch states. That is a design of its own.
 
-### 6.6 What the refinery no longer needs on enth
+#### 6.5.6 What the refinery no longer needs on enth
 
 No private clone for landing (R5: a gate dir is still needed and is a fresh checkout per attempt), no fetch (R7), no credential helper (R24, replaced by the enthd token), no remote-URL lookup for failure records beyond the enthd endpoint (R22), no committer identity (R23: `land` keeps author and committer and records the lander in the `L` record), and no `refinery prune` (R21). `refinery.toml` keeps every key and its meaning, except `pr_mode`, which is refused on an enth repo (§11).
 
-### 6.7 As built (slice 7, mg-1fe2b, 2026-11-03)
+#### 6.5.7 As built (slice 7, mg-1fe2b, 2026-11-03)
 
 Against enth `0.2.0-dev` (#9 B, D, E, F, G), measured by `internal/refinery/enthland_test.go` and `internal/vcs/enthvcs/land_test.go` against a sandboxed enthd, and end to end by `scripts/enth_land_test.sh` (a real pogod and a real enthd: 26 of 26 observations, with the git control). What differs from the text above, or was settled by building it:
 - **E1 is used, not the `N = submitted` fallback.** `vcs.Lander.Prepare` on enth is `enth land --dry-run --ref <target> C1…Cn` and then a whole-repo `enth checkout N` into the refinery's gate dir, `<worktrees>/<repo>.enth-gate`, re-made from scratch on every attempt. `Prepare` checks that the checkout's base reads back as `N`. The tests gate a land whose base is behind the tip, so `N` exists only because the dry run stored it, and they check that the gate saw `N` and the trunk then holds `N`.
@@ -242,8 +304,8 @@ Against enth `0.2.0-dev` (#9 B, D, E, F, G), measured by `internal/refinery/enth
 - **The request id is `<MR id>/<attempt>`, and the land is persisted before it is sent** (`enth_pending` on the MR, written through). Measured: a land of already-landed Changes under a **new** request id is not refused; enth lands them a second time as a new trunk entry (pm-enth: a bug, `already_landed` checks only the Change's own id on the ref; filed as mg-19949. pogo's guard stays regardless). So a land whose answer was lost (a dropped connection, a killed pogod) is re-issued with its **original** request id before anything is re-planned. enthd replays the recorded answer if it had landed, even after the tip has moved on to `N`. A refusal that establishes nothing landed (enth's exit-3 codes, `unauthorized`, `forbidden`: `enthvcs.LandedNothing`) clears it. `unreachable`, an unknown code or no answer at all leaves the outcome unknown, and the attempt fails without re-planning. A land that never reached enthd with the tip unmoved simply lands on replay, because it is persisted only after its gates passed on that `N`.
 - **Crash recovery (R9)** has no git probe for an enth MR. With a pending land it replays it: landed means merged (OnMerged fires, the gate is not re-run), refused means re-queued at head. An enthd that does not answer re-queues it with the pending land kept, and the re-run replays it first. An enth MR is never marked lost by recovery, because everything needed to finish it is on the record. `scripts/enth_land_test.sh` step 8 SIGKILLs pogod from inside the land (after enth landed, before pogod read the answer) and restarts it.
 - **Retries** go through `retryPolicy`, which is processMerge's budget switch moved out unchanged so both pipelines share it. `stale_tip` and `result_mismatch` are `contention` and count against `max_attempts`. enthd's `unreachable` is `infrastructure` and retried on the network budget. `unauthorized`/`forbidden` are `infrastructure`, not retried. `conflict` is a `defect` at stage `rebase` naming each path. Every other enth refusal code is a `defect`, and `request_id_reused` (a refinery bug) is `infrastructure`, not retried. Stage names stay git's (`rebase`, `closing-ref-check`, the gate stages, `push`), so readers of `AttemptFailure.Stage` need no enth table.
-- **Gate reuse (§6.4)** holds a passed gate on `N`. A `result_mismatch` retry from the same tip re-plans to the same `N` and replays the verdict. A `stale_tip` retry re-plans to a new `N` and re-gates.
-- **The already-merged rule (§6.3)** reads the submitted Changes' land records (E3) on every attempt. If all have landed, the MR resolves `already_merged` only when history holds a merged MR for the same item and repo, not itself a no-op, whose land record lists every submitted id. Otherwise it fails `class=defect` at stage `empty-branch` ("NOTHING WAS DELIVERED"). Since a submit lists only unlanded Changes, this is reached by a resubmit queued before the first one landed, or by a land made out of band. Some-but-not-all landed is a defect too.
+- **Gate reuse (§6.5.4)** holds a passed gate on `N`. A `result_mismatch` retry from the same tip re-plans to the same `N` and replays the verdict. A `stale_tip` retry re-plans to a new `N` and re-gates.
+- **The already-merged rule (§6.5.3)** reads the submitted Changes' land records (E3) on every attempt. If all have landed, the MR resolves `already_merged` only when history holds a merged MR for the same item and repo, not itself a no-op, whose land record lists every submitted id. Otherwise it fails `class=defect` at stage `empty-branch` ("NOTHING WAS DELIVERED"). Since a submit lists only unlanded Changes, this is reached by a resubmit queued before the first one landed, or by a land made out of band. Some-but-not-all landed is a defect too.
 - **The closing-ref gate (R12)** reads every submitted Change's whole message (subject included, as git's `%B`) through `enth query show`. There is no PR body on enth.
 - **`pr_mode` is refused** at submit (the repo's `.pogo/refinery.toml`) and at land time (either copy, including the submission's own), as a `defect` naming the key.
 - **The `enth` land record is written now (§7's shape, plus the request id), not in slice 8.** The already-merged rule and recovery both read it. `merged_sha` stays empty and the `refinery_merged` event carries no merge commit. Slice 8 still owns `mr.Landed()`, the event's `landed` field, the deploy-hook environment, and the pogod consumers that print `merged_sha` (which print nothing for an enth MR until then).
@@ -268,7 +330,7 @@ An enth MR records its land under a field named for the VCS, and leaves `merged_
 These are the fields of enth's `landed` line (epic §3.3), stored as given. A reader that wants a git sha finds `merged_sha` empty and an `enth` object it does not know, so it cannot take a 64-hex Change id for a 40-hex git sha by accident.
 
 The consumers of `merged_sha` become VCS-aware through one accessor, `mr.Landed() (vcs.Kind, id string)`, rather than each reading the field:
-- `internal/refinery/emptybranch.go:65-82` (the prior-merge check, §6.3),
+- `internal/refinery/emptybranch.go:65-82` (the prior-merge check, §6.5.3),
 - `internal/refinery/events.go:186,205` (the event carries `landed: {vcs, id}` alongside the existing `merged_sha`, which stays as it is for git),
 - `internal/refinery/postmerge.go` (§8),
 - `cmd/pogod/refinerymerged.go:92`, `mergedopen.go`, `reopenguard.go:169-231` (the merged-but-open and reopen guards, which print the id with its kind).
@@ -409,13 +471,14 @@ The blocks are the load-bearing instructions the inventory names: the polecat pr
 - **The spawn refusal** reads the template's parse tree, not its text, so `.VCS` in prose does not count and `$.VCS` does. It checks the body the worker would be rendered from: the resolved template plus its drop-ins. A template that does not branch is refused 409 before any side effect, with the remedy (`pogo agent prompt install`).
 - **Each arm starts on its own line.** A block that replaces whole lines is written `P{{if eq .VCS "enth"}}\nENTH{{else}}\nGIT{{end}}`, with the newline moved inside both arms, and an arm that ends in a closing fence gets its own newline. The prompt-corpus checks (the `--body=` ratchet, the CLI-surface check) read the raw source with both arms present, so a list marker or a fence that followed `{{else}}` on one line was invisible to them and flipped their fence parity for the rest of the file.
 - **Not done here:** the "running daemon carries the control" bullet still shows `git merge-base`, because it asks about pogo's own repo, which stays git (§1).
+- **Since mg-5b904** the build and architect enth arms end in `self_land` (§6.2) instead of `pogo refinery submit --item`, and the steps that polled the refinery are an enth arm of their own (what to do when `self_land` did not land, and what happens when it did). The git arms are still byte-identical to 26ae00d9 (`TestGitRenderUnchangedSinceBase`, 384 of 384).
 
 ## 13. What enth must provide
 
 | # | What | enth item | State on 2026-11-02 |
 |---|---|---|---|
-| E1 | `land --dry-run` stores its result so `enth checkout N` works (§6.2) | ask against mg-b1b9e | **not promised** at writing; **shipped in #9 item D** ("a dry run stores what it predicts", epic §3.4) |
-| E2 | `land --expect-new N` → `result_mismatch` | mg-b1b9e | placed (19:20Z section); **shipped in #9 item D**, used by slice 7 (§6.7) |
+| E1 | `land --dry-run` stores its result so `enth checkout N` works (§6.5.2) | ask against mg-b1b9e | **not promised** at writing; **shipped in #9 item D** ("a dry run stores what it predicts", epic §3.4) |
+| E2 | `land --expect-new N` → `result_mismatch` | mg-b1b9e | placed (19:20Z section); **shipped in #9 item D**, used by slice 7 (§6.5.7) |
 | E3 | the landed complement of the listing: `--landed`, or a `landed` field (§5) | ask against mg-10079 | **not promised** at writing; **shipped in #9** as the `landed` field of `enth changes` (slice 6) |
 | E4 | `enth changes --unlanded --trailer K=V` through enthd | mg-10079 | placed |
 | E5 | exported git sha for a Change id (§11) | ask against #10 | **not promised** |
@@ -424,7 +487,7 @@ The blocks are the load-bearing instructions the inventory names: the polecat pr
 | E8 | `.gitignore` semantics plus `.enth/info/exclude` | mg-2ef01 | placed |
 | E9 | `enth status`, `change --trailer`, `--remote` write routes, `--request-id` replay | mg-2ef01, mg-6ac27, mg-10079 | in #9 as designed |
 
-E1, E3, E5 and E6 are new asks from this design. pm-pogo carries them to pm-enth. E1 is the one the gate design depends on (§6.2), so it is first.
+E1, E3, E5 and E6 are new asks from this design. pm-pogo carries them to pm-enth. E1 is the one the gate design depends on (§6.5.2), so it is first.
 
 ## 14. Open (stated, not resolved)
 
@@ -463,12 +526,14 @@ All slices wait for enth #9 to exit (mg-927f8). Slices 1–3 are pure refactors 
 | 4 | **Selection.** `vcs` and `enth` on the project record, `pogo project add --vcs`, `set-vcs` with its refusal, the `refinery.toml` warning, backend lookup by repo. enth selects a backend that answers `ErrUnsupported` everywhere | a golden round trip of today's `projects.json` (byte-identical); tests for the refusal and the warning | 1 |
 | 5 | **enth workspaces.** `enth --remote checkout` whole-repo, the `workspace_paths` narrowing, `.enth/info/exclude`, `Dirty` via `enth status`, `Remove`, `Describe` (spawn record until E6), X1/X2 markers, O3, `Refresh`. pogod passes `ENTH_REMOTE` and the token | shell-level tests against a sandboxed enthd on an enth-native repo (epic item F): spawn, edit, dirty, remove | 2, 4; enth B, F, G |
 | 6 | **enth work.** Trailer listing, stacks and the ambiguity refusal, the trailer-less base signal, `State` via land records (E3), S6–S9. `pogo refinery submit --item`, git's `--item` resolution, `pogo presubmit` | tests for the listing → stack cases (one, none, ambiguous, trailer-less), and git `presubmit` equal to today's shell | 3, 5; enth G + E3 |
-| 7 | **enth land.** §6.1's pipeline: dry run, gate on `N` (E1, or on the `N = submitted` path first), `--expect-tip/--expect-new`, retries counted against `max_attempts`, request ids, crash recovery, the already-merged rule. `pr_mode` refused | sandboxed enthd: clean land, conflict, `stale_tip` re-run, `result_mismatch`, kill pogod mid-land then replay, a gated tree equal to the landed tree | 6; enth D, E, G + E1 |
+| 7 | **enth land.** §6.5.1's pipeline: dry run, gate on `N` (E1, or on the `N = submitted` path first), `--expect-tip/--expect-new`, retries counted against `max_attempts`, request ids, crash recovery, the already-merged rule. `pr_mode` refused | sandboxed enthd: clean land, conflict, `stale_tip` re-run, `result_mismatch`, kill pogod mid-land then replay, a gated tree equal to the landed tree | 6; enth D, E, G + E1 |
 | 8 | **Merge record.** The `enth` field, `mr.Landed()`, every consumer listed in §7, the deploy-hook env | tests that a git MR's JSON is unchanged, and that an enth MR has an empty `merged_sha` | 7 |
 | 9 | **GitHub boundary and doctor.** PR-flow spawn refused, open-PR probe skipped, closing-ref gate without the PR body, O4 | unit tests per refusal and skip, plus a control showing the git path unchanged | 6 |
 | 10 | **Revision stamp.** `build.sh`'s enth branch, `-buildvcs=false`, `version.VCS`, `verify_installed_stamps`, driftwatch/revcheck "not comparable". Re-run §10's table on a #9 checkout | §10's table as a script, with the git control. git build stamps unchanged | — (needs only enth B) |
 | 11 | **Prompts.** `TemplateVars.VCS`, the blocks of §12 in the six polecat templates, `pogo presubmit` in place of `presubmit_check`, the spawn refusal for a template that does not branch | render every embedded template with `VCS=""` and diff it against today's output (byte-identical), and render with `VCS="enth"` | 6, 7 |
 | 12 | **Tags and release refs.** `Refs.Tag` → `enth tag` with the idempotent retry, `Refs.Create` → `enth ref create`, `pogo refinery ref-create`, `--auto-create-target` | sandboxed enthd: a tag, a retry, a conflicting tag, a release branch landed onto | 7, 8; enth K (mg-40d5e) |
-| 13 | **Batch land** (later; §6.5). Several MRs' stacks per `enth land`, the bisect on a red gate, per-batch states | its own design first | 7, and mg-927f8's numbers |
+| 13 | **Batch land** (later; §6.5.5). Several MRs' stacks per `enth land`, the bisect on a red gate, per-batch states | its own design first | 7, and mg-927f8's numbers |
+
+**Slice 7 was removed by mg-5b904** (§6): workers land their own enth work, and the refinery refuses it. Slice 13 (batch land) went with it: there is no queue left to batch.
 
 The order follows the dependencies. Slices 1–3 de-risk the seam with no enth in the loop. Slice 4 makes selection real while the enth backend is still inert. Slices 5–7 are the enth path end to end. After 7, an enth-native repo can be worked by pogo, and the box-op for drellem2/enth (mg-2151d step 4) can be filed once that repo has been handed over (#11).

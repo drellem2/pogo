@@ -116,11 +116,33 @@ func (b Backend) remote() []string { return remoteArgs(b.Repo.Remote, b.Repo.Rep
 // (oldest first) whose trailers include Pogo-Item=item (when item is set) and
 // Pogo-Worker=worker (when worker is set), only the unlanded ones when
 // unlanded is true.
+//
+// The unlanded listing also leaves out every Change that a Change of the
+// same item supersedes (vcs.TrailerSupersedes, mg-5b904): the work a
+// self-landing worker re-made after a conflict. It is read from the WHOLE
+// listing, landed Changes included, because the superseding Change has
+// usually landed by the time anyone asks — and a superseded Change is
+// unlanded forever, since enth cannot withdraw it. "Unlanded" is then the
+// listing's own landed field being null (E3), which is what enth's
+// --unlanded filters on.
 func (b Backend) ListChanges(ctx context.Context, item, worker string, unlanded bool) ([]vcs.Change, error) {
-	args := append(b.remote(), "changes")
-	if unlanded {
-		args = append(args, "--unlanded")
+	cs, err := b.listChanges(ctx, item, worker)
+	if err != nil || !unlanded {
+		return cs, err
 	}
+	var out []vcs.Change
+	for _, c := range vcs.DropSuperseded(cs) {
+		if c.Landed == "" {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// listChanges is `enth changes` with the trailer filters: every Change, landed
+// or not, each with its landed id.
+func (b Backend) listChanges(ctx context.Context, item, worker string) ([]vcs.Change, error) {
+	args := append(b.remote(), "changes")
 	if item != "" {
 		args = append(args, "--trailer", vcs.TrailerItem+"="+item)
 	}

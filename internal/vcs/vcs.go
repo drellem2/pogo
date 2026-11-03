@@ -455,7 +455,53 @@ type Submission struct {
 const (
 	TrailerItem   = "Pogo-Item"
 	TrailerWorker = "Pogo-Worker"
+	// TrailerSupersedes names an earlier Change of the same item that this
+	// one replaces (enth-vcs §6, mg-5b904). A self-landing worker whose land
+	// conflicts re-makes its work on the new trunk, and enth has no way to
+	// withdraw the Change that conflicted: without this trailer the item
+	// would carry two stacks forever — presubmit would refuse the re-made one
+	// as ambiguous, and check-stranded would report the dead one as stranded
+	// work once the item closed.
+	TrailerSupersedes = "Pogo-Supersedes"
 )
+
+// DropSuperseded removes from cs every Change that another Change in cs of
+// the same item names in a Pogo-Supersedes trailer. A trailer naming a
+// Change of a different item supersedes nothing: an item's work is retired
+// only by that item's own work. Order is kept.
+func DropSuperseded(cs []Change) []Change {
+	itemOf := make(map[string]string, len(cs))
+	for _, c := range cs {
+		itemOf[c.ID] = c.Trailer(TrailerItem)
+	}
+	gone := map[string]bool{}
+	for _, c := range cs {
+		item := c.Trailer(TrailerItem)
+		if item == "" {
+			continue
+		}
+		for _, t := range c.Trailers {
+			if !strings.EqualFold(t.Key, TrailerSupersedes) {
+				continue
+			}
+			for _, id := range strings.Fields(strings.ReplaceAll(t.Value, ",", " ")) {
+				if id != c.ID && itemOf[id] == item {
+					gone[id] = true
+				}
+			}
+		}
+	}
+	if len(gone) == 0 {
+		return cs
+	}
+	out := make([]Change, 0, len(cs)-len(gone))
+	for _, c := range cs {
+		if !gone[c.ID] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
 
 // Trailer is one key/value trailer of a Change's message.
 type Trailer struct {

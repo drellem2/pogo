@@ -41,7 +41,7 @@ func TestEnthClosingRefGateReadsChangeMessages(t *testing.T) {
 		"c1": "feat: a (mg-9)\n\nRefs drellem2/pogo#111\n\nPogo-Item: mg-9\n",
 		"c2": "fix: b (mg-9)\n\nPogo-Item: mg-9\n",
 	}}
-	if err := enthClosingRefs(ctx, clean, []string{"c1", "c2"}); err != nil {
+	if err := EnthClosingRefs(ctx, clean, []string{"c1", "c2"}); err != nil {
 		t.Errorf("clean Changes rejected: %v", err)
 	}
 	if strings.Join(clean.asked, ",") != "c1,c2" {
@@ -52,7 +52,7 @@ func TestEnthClosingRefGateReadsChangeMessages(t *testing.T) {
 		"c1": "feat: a (mg-9)\n",
 		"c2": "fix: closes drellem2/pogo#89 (mg-9)\n\nPogo-Item: mg-9\n",
 	}}
-	err := enthClosingRefs(ctx, inSubject, []string{"c1", "c2"})
+	err := EnthClosingRefs(ctx, inSubject, []string{"c1", "c2"})
 	if err == nil {
 		t.Fatal("MISS: a closing keyword in a Change subject would have landed on the mirror")
 	}
@@ -70,7 +70,7 @@ func TestEnthClosingRefGateReadsChangeMessages(t *testing.T) {
 	acked := &fakeChangeMessages{msgs: map[string]string{
 		"c1": "fix: x (mg-9)\n\nFixes drellem2/pogo#89\n\nClosing-ref-ack: drellem2/pogo#89 — intentional; discharges it\n",
 	}}
-	if err := enthClosingRefs(ctx, acked, []string{"c1"}); err != nil {
+	if err := EnthClosingRefs(ctx, acked, []string{"c1"}); err != nil {
 		t.Errorf("acknowledged closure rejected: %v", err)
 	}
 
@@ -96,15 +96,15 @@ func TestEnthClosingRefGateReadsChangeMessages(t *testing.T) {
 // Unreadable is not clean, as for git's unreadable history.
 func TestEnthClosingRefGateFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	if err := enthClosingRefs(ctx, &fakeChangeMessages{}, nil); err == nil {
+	if err := EnthClosingRefs(ctx, &fakeChangeMessages{}, nil); err == nil {
 		t.Error("an MR with no Changes was judged clean")
 	}
 	failing := &fakeChangeMessages{msgs: map[string]string{"c1": "feat: ok\n"}, err: errors.New("enthd: connection refused")}
-	if err := enthClosingRefs(ctx, failing, []string{"c1"}); err == nil || !strings.Contains(err.Error(), "connection refused") {
+	if err := EnthClosingRefs(ctx, failing, []string{"c1"}); err == nil || !strings.Contains(err.Error(), "connection refused") {
 		t.Errorf("a failed read = %v, want the error", err)
 	}
 	short := &fakeChangeMessages{msgs: map[string]string{"c1": "feat: ok\n", "c2": "fix: closes #4\n"}, short: true}
-	if err := enthClosingRefs(ctx, short, []string{"c1", "c2"}); err == nil || !strings.Contains(err.Error(), "partial") {
+	if err := EnthClosingRefs(ctx, short, []string{"c1", "c2"}); err == nil || !strings.Contains(err.Error(), "partial") {
 		t.Errorf("a partial read = %v, want a refusal", err)
 	}
 }

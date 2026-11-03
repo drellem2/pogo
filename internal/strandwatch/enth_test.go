@@ -89,11 +89,13 @@ func TestEnthUnlandedWorkOfDoneAndAvailableItemsIsStranded(t *testing.T) {
 	if len(rep.Repos) != 1 || rep.Repos[0].VCS != "enth" || rep.Repos[0].EnthUnlanded != 4 || rep.Repos[0].EnthUntrailed != 1 {
 		t.Errorf("coverage = %+v, want one enth repo with 4 unlanded, 1 untrailed", rep.Repos)
 	}
-	want := "pogo refinery submit --item=mg-a1 --repo=" + enthRepoPath + " --author=mg-a1 --target=main   # do NOT dispatch at mg-a1"
-	if got := a.Remedy(); got != want {
-		t.Errorf("available remedy:\n got %s\nwant %s", got, want)
+	// No merge queue on enth (mg-5b904): the remedy lands the stack by hand
+	// under a request id of its own and records it with pogo land.
+	if got := a.Remedy(); !strings.Contains(got, " land "+strings.Join(a.Enth.Changes, " ")+" --request-id mg-a1/recover-1 > /tmp/mg-a1-land.out && pogo land --item=mg-a1 --repo="+enthRepoPath+" --landed-file=/tmp/mg-a1-land.out") ||
+		!strings.Contains(got, "do NOT dispatch at mg-a1") || strings.Contains(got, "refinery submit") {
+		t.Errorf("available remedy: %s", got)
 	}
-	if got := d.Remedy(); !strings.Contains(got, "--item=mg-d1") || !strings.Contains(got, "DONE and this work NEVER LANDED") {
+	if got := d.Remedy(); !strings.Contains(got, "pogo land --item=mg-d1") || !strings.Contains(got, "DONE and this work NEVER LANDED") {
 		t.Errorf("done remedy = %s", got)
 	}
 	out := Render(rep, true)
@@ -166,7 +168,7 @@ func TestEnthExclusionsAndEdgeRows(t *testing.T) {
 		t.Errorf("queued available item: %+v", r)
 	}
 	if r := enthRowFor(rep, "mg-s1"); r == nil || r.Kind != KindStranded || r.Enth.Stacks != 2 ||
-		strings.HasPrefix(r.Remedy(), "pogo refinery submit") || !strings.Contains(r.Remedy(), "2 STACKS") {
+		strings.Contains(r.Remedy(), "pogo land") || !strings.Contains(r.Remedy(), "2 STACKS") {
 		t.Errorf("ambiguous item: %+v remedy=%q", r, r.Remedy())
 	}
 	if r := enthRowFor(rep, "mg-gone"); r == nil || r.Kind != KindUnjudged || !strings.Contains(r.Error, "no such work item") {

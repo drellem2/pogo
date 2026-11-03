@@ -267,9 +267,12 @@ ON AN ENTH-BACKED REPO THERE ARE NO BRANCHES (mg-28cbc). Work is the Changes
 carrying a Pogo-Item trailer, listed through enthd (` + "`enth changes --unlanded`" + `) and
 joined to each item's status. Unlanded work on an open item with no running worker
 is ` + "`stranded`" + `, and so is unlanded work on a DONE item: on enth no branch outlives
-the item, so this listing is the only place that work is visible. The remedy is
-` + "`pogo refinery submit --item=<id>`" + `. A landed Change has a land record and is not
-listed.
+the item, so this listing is the only place that work is visible. An enth repo
+has no merge queue (mg-5b904), so the remedy is the land itself, by hand under a
+request id of its own, recorded with ` + "`pogo land --item=<id>`" + ` — untested, so build it
+first or adopt it. A landed Change has a land record and is not listed, and
+neither is a Change a later Change of the same item retires with a
+Pogo-Supersedes trailer (the work a worker re-made after a conflict).
 
 REPORTS ONLY. It never submits and never closes. Both remedies are one command
 by hand once you know, and each is destructive in the wrong direction.

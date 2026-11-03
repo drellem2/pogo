@@ -11,7 +11,8 @@ import (
 
 // The stranded sweep's enumerator on an enth checkout (enth-vcs slice 6,
 // mg-30da0): read through enth, never git, and its trailer-less base reported
-// as stranded work (§5, guard 1). The enthd is a stub that lists base b0 as an
+// as stranded work (§5, guard 1). The enthd is a stub whose `enth changes`
+// (read whole since mg-5b904, landed field and all) lists base b0 as an
 // unlanded Change, with or without a Pogo-Item trailer.
 func TestPolecatWorktreesReportsATrailerlessEnthBase(t *testing.T) {
 	for _, tc := range []struct {
@@ -34,7 +35,7 @@ func TestPolecatWorktreesReportsATrailerlessEnthBase(t *testing.T) {
 			bin := filepath.Join(root, "bin")
 			os.MkdirAll(bin, 0o755)
 			line := `{"type":"change","id":"b0","entry":2,"author":{"name":"w","email":"w@x"},"created":1700000000,"base":"r0","trailers":` + tc.trailers + `,"landed":null}`
-			os.WriteFile(filepath.Join(bin, "enth"), []byte("#!/bin/sh\ncase \"$*\" in *'changes --unlanded'*) printf '%s\\n' '"+line+"' ;; *) exit 2 ;; esac\n"), 0o755)
+			os.WriteFile(filepath.Join(bin, "enth"), []byte("#!/bin/sh\ncase \"$*\" in *' changes'*) printf '%s\\n' '"+line+"' ;; *) exit 2 ;; esac\n"), 0o755)
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 			wts, err := polecatWorktrees()

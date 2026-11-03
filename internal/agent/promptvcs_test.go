@@ -176,14 +176,30 @@ func TestEnthRenderCarriesTheEnthProtocol(t *testing.T) {
 			if br != "" {
 				target = br
 			}
+			ref, tgt := "", ""
+			if br != "" {
+				ref, tgt = "--ref refs/heads/"+br+" ", " --target="+br
+			}
 			for _, want := range []string{
 				`--trailer Pogo-Item=mg-9 --trailer Pogo-Worker="$POGO_AGENT_NAME" /w`,
-				"pogo presubmit --item=mg-9 &&\n",
-				"pogo refinery submit --item=mg-9 --repo=/r --author=mg-9 --target=" + target + " \\",
+				// The self-land of enth-vcs §6 (mg-5b904), whole.
+				`stack=$(pogo presubmit --item="$item" --print-stack) || return 1`,
+				`enth land ` + ref + `$stack --request-id "$item/$n"`,
+				`pogo land --item="$item" --repo=/r` + tgt + ` --landed-file="$st.out"`,
+				`--verdict-file=/tmp/mg-9-verdict.json && return 0`,
+				"   self_land\n",
+				`--trailer Pogo-Supersedes="$OLD"`,
+				"enth checkout " + target + ` "$REMAKE"`,
 				`--result="{\"item\": \"mg-9\"`,
 			} {
 				if !strings.Contains(out, want) {
 					t.Errorf("%s (branch=%q): enth render lacks %q", name, br, want)
+				}
+			}
+			// The refinery does not land enth work: no enth render submits to it.
+			for _, no := range []string{"pogo refinery submit", "Poll the refinery", "pogo refinery show <id> --json | jq -r .status"} {
+				if strings.Contains(out, no) {
+					t.Errorf("%s (branch=%q): enth render still says %q", name, br, no)
 				}
 			}
 			// No PR flow on enth (§11): the PR steps are git's alone.
@@ -204,6 +220,35 @@ func TestEnthRenderCarriesTheEnthProtocol(t *testing.T) {
 	}
 	if out := render(t, "polecat-build-pr.md", tmpls["polecat-build-pr.md"], TemplateVars{Id: "mg-9", VCS: TemplateVCSEnth, EnthRepo: "o/r"}); !strings.Contains(out, "enth repos have no pull-request track") {
 		t.Error("polecat-build-pr.md: the enth render does not stop the worker")
+	}
+}
+
+// The self_land function is one function: the architect's is the build
+// protocol's, re-indented, so a fix to one cannot silently miss the other.
+func TestSelfLandIsTheSameInBothTemplates(t *testing.T) {
+	tmpls := embeddedPolecatTemplates(t)
+	fn := func(name string) string {
+		body := tmpls[name]
+		i := strings.Index(body, "self_land() {")
+		j := strings.Index(body[i:], "\n")
+		if i < 0 || j < 0 {
+			t.Fatalf("%s: no self_land function", name)
+		}
+		end := strings.Index(body[i:], "\n   }\n")
+		if name == "polecat-architect.md" {
+			end = strings.Index(body[i:], "\n     }\n")
+		}
+		if end < 0 {
+			t.Fatalf("%s: self_land has no closing brace", name)
+		}
+		var out []string
+		for _, l := range strings.Split(body[i:i+end], "\n") {
+			out = append(out, strings.TrimSpace(l))
+		}
+		return strings.Join(out, "\n")
+	}
+	if a, b := fn("polecat.md"), fn("polecat-architect.md"); a != b {
+		t.Errorf("self_land differs between polecat.md and polecat-architect.md:\n%s\n---\n%s", a, b)
 	}
 }
 

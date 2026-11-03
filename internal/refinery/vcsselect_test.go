@@ -99,11 +99,11 @@ func TestBackendForSelectsFromTheRecord(t *testing.T) {
 		t.Errorf("lookup asked about %v", asked)
 	}
 
-	// The enth Lander (slice 7) is reached only through processEnthMerge,
-	// with the submitted Changes; an MR without them is refused, never
-	// handed to git.
-	if _, err := backendFor("/x/enth").Prepare(context.Background(), vcs.MR{}); err == nil || !strings.Contains(err.Error(), "no Changes") {
-		t.Fatalf("enth Prepare of an MR with no Changes = %v, want a refusal", err)
+	// The refinery does not land enth work (mg-5b904): the enth Lander
+	// refuses every step with the pointer to the worker's own land, and is
+	// never handed to git.
+	if _, err := backendFor("/x/enth").Prepare(context.Background(), vcs.MR{Changes: []string{"c1"}}); !errors.Is(err, enthvcs.ErrSelfLanded) {
+		t.Fatalf("enth Prepare = %v, want ErrSelfLanded", err)
 	}
 	// Refs is still inert (slice 12).
 	if _, err := detectDefaultBranch("/x/enth"); !errors.Is(err, vcs.ErrUnsupported) {

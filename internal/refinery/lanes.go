@@ -265,9 +265,6 @@ func (r *Refinery) runLane(ln *lane, mr *MergeRequest) {
 	mr.PostMergeError = outcome.PostMergeError
 	mr.MergedSHA = outcome.MergedSHA
 	mr.AlreadyMerged = outcome.AlreadyMerged
-	if outcome.Enth != nil {
-		mr.Enth = outcome.Enth
-	}
 	mr.DoneTime = time.Now()
 	alreadyMerged := outcome.AlreadyMerged
 	if isCancelled(err) {

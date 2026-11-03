@@ -78,47 +78,38 @@ func TestGitMergeRequestJSONUnchanged(t *testing.T) {
 	}
 }
 
-// An enth MR, landed through a real (sandboxed) enthd, has an empty
-// merged_sha — absent from its JSON, so `jq .merged_sha` is null and the
-// release-cut recipe refuses to tag it — and names its landing under `enth`.
-// Its refinery_merged event carries `landed: {enth, N}` and no merge commit,
-// and its deploy hook sees POGO_LANDED_VCS=enth, POGO_LANDED_ID=N. The git
-// control in the same test: merged_sha set, no `enth`, `landed: {git, sha}`,
-// and the deploy hook sees the git sha.
+// An enth MR — since mg-5b904 a worker's own land, recorded by
+// RecordSelfLand against a real (sandboxed) enthd — has an empty merged_sha,
+// absent from its JSON, so `jq .merged_sha` is null and the release-cut recipe
+// refuses to tag it; it names its landing under `enth`, and its
+// refinery_merged event carries `landed: {enth, N}` and no merge commit. The
+// git control in the same test: merged_sha set, no `enth`, `landed: {git,
+// sha}`, and the deploy hook sees the git sha. (A self-land runs no deploy
+// hook: the refinery does not land it.)
 func TestEnthMergeRecordAndGitControl(t *testing.T) {
 	logPath := useTempEventLog(t)
-	// A stale landing inherited from pogod's own environment must not reach
-	// the hook.
 	t.Setenv("POGO_LANDED_VCS", "stale")
 	t.Setenv("POGO_LANDED_ID", "stale")
-
-	// The hook records what it was told landed into ./landed_env, in whatever
-	// directory the refinery runs it (the gate checkout for enth, the clone
-	// for git).
 	hook := filepath.Join(t.TempDir(), "deploy.sh")
 	if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf '%s %s' \"$POGO_LANDED_VCS\" \"$POGO_LANDED_ID\" > landed_env\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	deployTOML := "[deploy]\ncommand = \"" + hook + "\"\n"
 
-	fx := newEnthLandFixture(t)
-	fx.writeConfig(t, "quality_gate = \""+filepath.Join(fx.ctl, "gate.sh")+"\"\n"+deployTOML)
+	fx := newSelfLandFixture(t)
 	r, cl := newCallbackRefinery(t)
-	fx.s.Work(t, "mg-1", "p1", "one", map[string]string{"x.txt": "x\n"})
-	mr := fx.process(t, r, fx.submit(t, r, "mg-1"))
-	if mr.Status != StatusMerged || mr.Enth == nil {
-		t.Fatalf("enth MR = %s %q enth %+v; want merged with a land record", mr.Status, mr.Error, mr.Enth)
+	c1, _ := fx.s.Work(t, "mg-1", "p1", "one", map[string]string{"x.txt": "x\n"})
+	res, err := r.RecordSelfLand(fx.request(t, "mg-1", fx.land(t, "mg-1/1", c1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := r.Get(res.MR.ID)
+	if mr == nil || mr.Status != StatusMerged || mr.Enth == nil {
+		t.Fatalf("enth MR = %+v; want merged with a land record", mr)
 	}
 	tip := fx.s.Tip(t)
 	if k, id := mr.Landed(); k != vcs.Enth || id != tip {
 		t.Errorf("enth Landed() = (%s, %s); want (enth, %s)", k, id, tip)
-	}
-	if mr.DeployError != "" {
-		t.Fatalf("enth deploy: %s", mr.DeployError)
-	}
-	gateDir := r.enthGateDir(fx.repo)
-	if env, err := os.ReadFile(filepath.Join(gateDir, "landed_env")); err != nil || string(env) != "enth "+tip {
-		t.Errorf("enth deploy env = %q (%v); want %q", env, err, "enth "+tip)
 	}
 	b, err := json.Marshal(mr)
 	if err != nil {
@@ -161,8 +152,8 @@ func TestEnthMergeRecordAndGitControl(t *testing.T) {
 		t.Errorf("git deploy env = %q (%v); want %q", env, err, "git "+gm.MergedSHA)
 	}
 	gb, _ := json.Marshal(gm)
-	if strings.Contains(string(gb), `"enth"`) || strings.Contains(string(gb), `"landed"`) {
-		t.Errorf("git MR JSON grew an enth/landed key: %s", gb)
+	if strings.Contains(string(gb), `"enth"`) || strings.Contains(string(gb), `"landed"`) || strings.Contains(string(gb), `"self_landed"`) {
+		t.Errorf("git MR JSON grew an enth/landed/self_landed key: %s", gb)
 	}
 
 	merged := filterEvents(readEvents(t, logPath), "refinery_merged")

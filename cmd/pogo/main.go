@@ -4784,6 +4784,7 @@ branches; work items and mail live in mg/macguffin (the task-store CLI).`,
 	rootCmd.AddCommand(newConfigCmd(&jsonOutput))
 	rootCmd.AddCommand(newWorktreeDirtyCmd(&jsonOutput))
 	rootCmd.AddCommand(newPresubmitCmd())
+	rootCmd.AddCommand(newLandCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdVisit)
 	cmdStatus.Flags().BoolVar(&statusLive, "live", false, "Continuously refresh the dashboard (like watch)")
 	cmdStatus.Flags().DurationVar(&statusInterval, "interval", 2*time.Second, "Refresh interval for --live mode (must be > 0)")
@@ -5119,18 +5120,15 @@ The work item itself is untouched by that record, on purpose: the drop-detector
 reads any unexpected sidecar key as "an outcome was written down", so a marker
 saying "no verdict here" would have made a verdict-free close read as answered.
 
---item names the work item the submission is for (enth-vcs slice 6). On an
-enth repo it is REQUIRED and the branch is refused: there are no branches, and
-the work is the item's unlanded Changes, found by their Pogo-Item trailer (and
-the item's live polecat's Pogo-Worker trailer). Submit refuses an item with no
-such Changes (class=defect: it would deliver nothing) and one whose Changes
-form more than one stack (it names each stack's worker rather than guess), and
-records the submitted Change ids on the MR (enth_submitted). Landing them is
-enth-vcs slice 7; until then the MR is failed before any git step. On git
---item is accepted too: without a branch it resolves to the branch of the
-item's live polecat, and beside a branch it must agree with it.
+--item names the work item the submission is for (enth-vcs slice 6). On git
+it is accepted beside or instead of a branch: without a branch it resolves to
+the branch of the item's live polecat, and beside a branch it must agree with
+it.
 
-  pogo refinery submit --item=mg-a3f --repo=/path/to/enth-repo --author=mg-a3f
+An ENTH repo has no merge queue (enth-vcs §6, mg-5b904): every submit to one is
+refused, naming the replacement. The worker lands its own work with
+'enth land' and records it with 'pogo land', which closes the item as a merge
+would — see 'pogo land --help'.
 
 Example:
   pogo refinery submit polecat-a3f --repo=/path/to/repo`,
@@ -5196,7 +5194,7 @@ Example:
 		},
 	}
 	cmdRefinerySubmit.Flags().StringVar(&submitRepo, "repo", "", "Repository path (required)")
-	cmdRefinerySubmit.Flags().StringVar(&submitItem, "item", "", "Work item the submission is for: required on an enth repo (the branch is refused there); on git it resolves an omitted branch through the item's live polecat")
+	cmdRefinerySubmit.Flags().StringVar(&submitItem, "item", "", "Work item the submission is for: on git it resolves an omitted branch through the item's live polecat (an enth repo is refused: its workers land their own work, see pogo land)")
 	cmdRefinerySubmit.Flags().StringVar(&submitTarget, "target", "main", "Target ref to merge into")
 	cmdRefinerySubmit.Flags().StringVar(&submitAuthor, "author", "", "Author agent name")
 	cmdRefinerySubmit.Flags().BoolVar(&submitAutoCreateTarget, "auto-create-target", false, "Create the target ref from the repo's default branch if it doesn't exist (off by default; safer to fail loudly on typos)")

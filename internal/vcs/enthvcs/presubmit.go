@@ -20,25 +20,32 @@ import (
 // and that stack's top is the checkout's base. A check that cannot run
 // refuses: it never reads as clean. bin is the enth executable ("" = PATH).
 func Presubmit(ctx context.Context, root, item, worker, bin string) (string, error) {
+	msg, _, _, err := PresubmitStack(ctx, root, item, worker, bin)
+	return msg, err
+}
+
+// PresubmitStack is Presubmit that also returns the stack it approved and the
+// backend that listed it — what the worker then lands (mg-5b904).
+func PresubmitStack(ctx context.Context, root, item, worker, bin string) (string, vcs.Submission, Backend, error) {
 	if item == "" {
-		return "", fmt.Errorf("%s is an enth checkout, and on enth the work item names the work: pass --item=<work item id>", root)
+		return "", vcs.Submission{}, Backend{}, fmt.Errorf("%s is an enth checkout, and on enth the work item names the work: pass --item=<work item id>", root)
 	}
 	change := fmt.Sprintf("enth change %s -m \"…\" --trailer %s=%s --trailer %s=%s",
 		root, vcs.TrailerItem, item, vcs.TrailerWorker, workerOr(worker))
 	files, err := Backend{Bin: bin}.Dirty(ctx, root)
 	if err != nil {
-		return "", fmt.Errorf("enth status failed — cannot tell whether this checkout holds uncommitted work: %v", err)
+		return "", vcs.Submission{}, Backend{}, fmt.Errorf("enth status failed — cannot tell whether this checkout holds uncommitted work: %v", err)
 	}
 	if len(files) > 0 {
-		return "", fmt.Errorf("uncommitted work in this checkout — make it a Change (%s), or discard it deliberately:\n%s",
+		return "", vcs.Submission{}, Backend{}, fmt.Errorf("uncommitted work in this checkout — make it a Change (%s), or discard it deliberately:\n%s",
 			change, strings.Join(files, "\n"))
 	}
 	b, base, err := WorkspaceBase(root, bin)
 	if err != nil {
-		return "", fmt.Errorf("cannot read this checkout's base: %v", err)
+		return "", vcs.Submission{}, Backend{}, fmt.Errorf("cannot read this checkout's base: %v", err)
 	}
 	if err := b.UntrailedBase(ctx, root, base); err != nil {
-		return "", err
+		return "", vcs.Submission{}, Backend{}, err
 	}
 	s, err := b.FindStack(ctx, item, worker)
 	var amb *vcs.AmbiguousWorkError
@@ -48,18 +55,18 @@ func Presubmit(ctx context.Context, root, item, worker, bin string) (string, err
 		if worker != "" {
 			who += " " + vcs.TrailerWorker + "=" + worker
 		}
-		return "", fmt.Errorf("no unlanded Change carries %s — nothing would be delivered. Make your Change with: %s", who, change)
+		return "", vcs.Submission{}, Backend{}, fmt.Errorf("no unlanded Change carries %s — nothing would be delivered. Make your Change with: %s", who, change)
 	case errors.As(err, &amb):
-		return "", err
+		return "", vcs.Submission{}, Backend{}, err
 	case err != nil:
-		return "", fmt.Errorf("cannot list the Changes of %s on %s: %v", item, b.Repo.Remote, err)
+		return "", vcs.Submission{}, Backend{}, fmt.Errorf("cannot list the Changes of %s on %s: %v", item, b.Repo.Remote, err)
 	}
 	if s.Ref != base {
-		return "", fmt.Errorf("this checkout's base %s is not the top of %s's stack (%s): what would be submitted is not the work in this checkout",
+		return "", vcs.Submission{}, Backend{}, fmt.Errorf("this checkout's base %s is not the top of %s's stack (%s): what would be submitted is not the work in this checkout",
 			base, item, s.Ref)
 	}
 	return fmt.Sprintf("pre-submit OK: %d Change(s) for %s, top %s, checkout clean, durable on %s",
-		len(s.Changes), item, s.Ref, b.Repo.Remote), nil
+		len(s.Changes), item, s.Ref, b.Repo.Remote), s, b, nil
 }
 
 func workerOr(w string) string {

@@ -90,12 +90,19 @@ func (s *Server) Cmd(t testing.TB, name string, args ...string) string {
 
 // Try is Cmd without the failure.
 func (s *Server) Try(name string, args ...string) (string, error) {
+	out, err := s.Command(name, args...).CombinedOutput()
+	return string(out), err
+}
+
+// Command is one of the enth binaries, unstarted, with the server's token and
+// a fixed author/committer: for a caller that wants stdout apart from stderr,
+// as a worker reading `enth land`'s answer does.
+func (s *Server) Command(name string, args ...string) *exec.Cmd {
 	c := exec.Command(filepath.Join(s.BinDir, name), args...)
 	c.Env = append(os.Environ(), "ENTH_TOKEN="+s.Token,
 		"ENTH_AUTHOR_NAME=worker", "ENTH_AUTHOR_EMAIL=worker@example.com",
 		"ENTH_COMMITTER_NAME=worker", "ENTH_COMMITTER_EMAIL=worker@example.com")
-	out, err := c.CombinedOutput()
-	return string(out), err
+	return c
 }
 
 // Remote is the global-flag prefix that sends an enth verb to this server.

@@ -65,8 +65,9 @@ func (r *Refinery) resolveRecoveredOne(mr *MergeRequest) {
 		return
 	}
 	if len(mr.EnthSubmitted) > 0 {
-		// No git probe for enth work: its land is a request enthd can replay.
-		r.resolveRecoveredEnth(mr)
+		// No git probe for enth work, and nothing of the refinery's to
+		// resume: re-queued, and the queue refuses it (mg-5b904).
+		r.requeueRecoveredEnth(mr)
 		return
 	}
 

@@ -33,7 +33,7 @@ make, not by a branch. That means:
   your environment, so every `enth` verb reaches `{{.EnthRepo}}` without flags.
 - **Never `cd {{.Repo}}`.** It is the user's own checkout and may hold their uncommitted
   edits. Run everything from this workspace.
-- The `Source repo` value above is for the `pogo refinery submit --repo=...`
+- The `Source repo` value above is for the `pogo land --repo=...`
   argument only. Treat it as a label, not a directory to enter.{{else}}
 Your worktree at `{{.WorktreeDir}}` is a git worktree that **shares the
 `.git` infrastructure with the source repo at `{{.Repo}}`**. That means:
@@ -105,7 +105,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
 3. **Do the work.** Stay focused on the task described above. {{if eq .VCS "enth"}}You are already in your enth checkout at `{{.WorktreeDir}}`, at the trunk as it was when you were spawned. **Run all commands in this directory** — do not `cd` to the source repository (see "Working in your worktree" above).
 
-   **There is no branch to read, and none to push.** Your work is identified by the work item: every Change you make carries `Pogo-Item={{.Id}}` and `Pogo-Worker=$POGO_AGENT_NAME` (step 4), and `pogo presubmit` and the refinery find it by those trailers. If a dispatch body, a wakeup note, or the {{.Coordinator}} names a branch for this work, it was written for git — say so in your reply and carry on by item.{{else}}You are already in your isolated worktree at `{{.WorktreeDir}}`, on a branch that is **already checked out for you**. **Run all commands in this directory** — do not `cd` to the source repository (see "Working in your worktree" above for why and for the equivalents).
+   **There is no branch to read, and none to push.** Your work is identified by the work item: every Change you make carries `Pogo-Item={{.Id}}` and `Pogo-Worker=$POGO_AGENT_NAME` (step 4), and `pogo presubmit` and `pogo land` find it by those trailers. If a dispatch body, a wakeup note, or the {{.Coordinator}} names a branch for this work, it was written for git — say so in your reply and carry on by item.{{else}}You are already in your isolated worktree at `{{.WorktreeDir}}`, on a branch that is **already checked out for you**. **Run all commands in this directory** — do not `cd` to the source repository (see "Working in your worktree" above for why and for the equivalents).
 
    **Read your branch name — do not guess it, and do not let anyone tell you what it is:**
    ```bash
@@ -137,7 +137,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    enth status {{.WorktreeDir}}    # every edit listed here goes into the Change
    enth change -m "<type>: <description> ({{.Id}})" --trailer Pogo-Item={{.Id}} --trailer Pogo-Worker="$POGO_AGENT_NAME" {{.WorktreeDir}}
    ```
-   **Copy the `enth change` line whole.** Its two trailers are the only thing that ties the Change to this work item: a Change without them is invisible to `pogo presubmit`, to the refinery and to stranded-work recovery — and unlike a branch, a trailer can be left off. There is no staging step — every edit `enth status` lists goes in, so remove scratch files first or keep them outside the checkout. A second `enth change` stacks a new Change on the first; that is how a fix is added, and the stack is submitted whole. If enth refuses with `outside_selection`, widen the checkout with `enth checkout --add <PATH> {{.WorktreeDir}}` and run `enth change` again.{{else}}
+   **Copy the `enth change` line whole.** Its two trailers are the only thing that ties the Change to this work item: a Change without them is invisible to `pogo presubmit`, to `pogo land` and to stranded-work recovery — and unlike a branch, a trailer can be left off. There is no staging step — every edit `enth status` lists goes in, so remove scratch files first or keep them outside the checkout. A second `enth change` stacks a new Change on the first; that is how a fix is added, and the stack is submitted whole. If enth refuses with `outside_selection`, widen the checkout with `enth checkout --add <PATH> {{.WorktreeDir}}` and run `enth change` again.{{else}}
 4. **Commit and push your branch:**
    ```bash
    git add <files>
@@ -145,7 +145,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    git push origin "$BRANCH"
    ```{{end}}
 
-5. **Write your verdict, then submit to the merge queue** (capture the MR ID from output). Your verdict goes in **at submit time**, not after the merge:
+5. {{if eq .VCS "enth"}}**Write your verdict, then land your Change yourself.** An enth repo has no merge queue: you land your own work, and `pogo land` records it (enth-vcs §6). Your verdict goes in **at land time**, not after:{{else}}**Write your verdict, then submit to the merge queue** (capture the MR ID from output). Your verdict goes in **at submit time**, not after the merge:{{end}}
    ```bash
    cat > /tmp/{{.Id}}-verdict.json <<'EOF'
    {"verdict": "pass",
@@ -154,10 +154,38 @@ Follow these steps exactly, in order. Skipping any step is a failure.
     "unverified": ["<anything you are asserting without having measured it — [] if nothing>"]}
    EOF
    jq -e . /tmp/{{.Id}}-verdict.json >/dev/null || echo 'NOT VALID JSON — fix it before submitting; submit rejects it while you can still hear about it'{{if eq .VCS "enth"}}
-   # Pre-submit check (mg-c184d): refuse to submit work that would deliver nothing.
-   pogo presubmit --item={{.Id}} &&
-   pogo refinery submit --item={{.Id}} --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}} \
-       --verdict-file=/tmp/{{.Id}}-verdict.json{{else}}
+   # Land your own Change (enth-vcs §6). Copy this whole block; run it from your checkout.
+   self_land() {
+     local item={{.Id}} st=/tmp/{{.Id}}-land stack n try rc code
+     # The pre-land check (mg-c184d) prints the stack to land, or refuses.
+     stack=$(pogo presubmit --item="$item" --print-stack) || return 1
+     n=$(cat "$st.attempt" 2>/dev/null || echo 0)
+     # A land whose answer was lost is re-issued under its SAME request id:
+     # a new id would land the same Changes twice (mg-19949).
+     [ -f "$st.pending" ] || n=$((n+1))
+     for try in 1 2 3 4 5 6; do
+       echo "$n" > "$st.attempt"; touch "$st.pending"
+       enth land {{if .Branch}}--ref refs/heads/{{.Branch}} {{end}}$stack --request-id "$item/$n" > "$st.out" 2> "$st.err"; rc=$?
+       code=$(sed -n 's/.*"code":"\([a-z_]*\)".*/\1/p' "$st.err" | head -1)
+       if [ "$rc" -eq 0 ]; then
+         rm -f "$st.pending"
+         echo "LANDED as $item/$n: $(cat "$st.out")"
+         pogo land --item="$item" --repo={{.Repo}}{{if .Branch}} --target={{.Branch}}{{end}} --landed-file="$st.out" \
+             --request-id="$item/$n" --verdict-file=/tmp/{{.Id}}-verdict.json && return 0
+         echo "LANDED BUT NOT RECORDED. Re-run ONLY the pogo land line above (same --landed-file $st.out). Do NOT run self_land or enth land again."
+         return 2
+       fi
+       case "$code" in
+         stale_tip) rm -f "$st.pending"; n=$((n+1)); echo "stale_tip: the trunk moved under the land, nothing landed — landing again as $item/$n" ;;
+         conflict) rm -f "$st.pending"; cat "$st.out"; echo "CONFLICT: nothing landed — re-make your work on the new trunk, then run self_land again"; return 3 ;;
+         unreachable|interrupted|bad_response|"") echo "no answer from enthd (${code:-exit $rc}): the land may have happened — re-issuing the SAME request $item/$n"; sleep 10 ;;
+         *) rm -f "$st.pending"; cat "$st.err"; echo "REFUSED ($code): nothing landed"; return 1 ;;
+       esac
+     done
+     echo "GAVE UP after $try tries (last: ${code:-exit $rc}) — mail the {{.Coordinator}}; a later self_land re-issues $item/$n first"
+     return 1
+   }
+   self_land{{else}}
    # Pre-submit check (mg-c184d): refuse to submit a branch that would deliver nothing.
    presubmit_check() {
      local target="$1" dirty ahead
@@ -180,16 +208,43 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}} \
        --verdict-file=/tmp/{{.Id}}-verdict.json{{end}}
    ```{{if eq .VCS "enth"}}
-   **The `pogo presubmit` line is not optional, and its refusal is not something to work around.** Work that is uncommitted, or that carries nothing the refinery can find, delivers nothing — on 2026-10-01 exactly that was resolved as "already merged", the item closed `done`, and the worker reaped with ~240 lines of work uncommitted (mg-3b86e). In an enth checkout it refuses: edits `enth status` still lists (pogod's own `.claude/` files excluded); a checkout standing on a Change with no `Pogo-Item` trailer; no unlanded Change carrying `Pogo-Item={{.Id}}` and your `Pogo-Worker`; more than one stack of them; and a stack whose top is not this checkout's base. Each of those would submit nothing, or something other than the work in this checkout. A check that cannot run refuses too. If it refuses: fix what it names (usually: make the Change of step 4), and re-run step 5.{{else}}
+   **`self_land` is the whole land step, and its refusals are not something to work around.** It runs `pogo presubmit`, which refuses: edits `enth status` still lists (pogod's own `.claude/` files excluded); a checkout standing on a Change with no `Pogo-Item` trailer; no unlanded Change carrying `Pogo-Item={{.Id}}` and your `Pogo-Worker`; more than one stack of them; a stack whose top is not this checkout's base; and a Change message carrying a GitHub closing keyword (`Fixes #N` would close the issue on the mirror). Each of those would land nothing, or something other than the work in this checkout — on 2026-10-01 work that delivered nothing was closed `done` with ~240 lines of it uncommitted (mg-3b86e). A check that cannot run refuses too. If it refuses: fix what it names (usually: make the Change of step 4), and run `self_land` again.
+
+   Then it lands your stack with `enth land … --request-id {{.Id}}/<attempt>` and hands enth's answer to `pogo land`, which checks it against enthd and closes your item exactly as a refinery merge closes one. **Nothing tests the merged result before it lands:** you tested your own base, and `enth land` merges onto the trunk. That is the accepted trade-off (enth-vcs §6); post-land CI on the GitHub mirror is the check, so a green `./build.sh` before step 4 is not optional.{{else}}
    **The `presubmit_check` line is not optional, and its refusal is not something to work around.** A branch that is clean but has nothing ahead of the target, or that has its work sitting uncommitted in the worktree, delivers nothing — and on 2026-10-01 exactly that branch was resolved as "already merged", the item closed `done`, and the polecat reaped with ~240 lines of work uncommitted (mg-3b86e). The refinery now refuses such a branch too (`class=defect`, "branch carries no commits ahead of <target>"), but that is the backstop; this check catches it while you can still fix it. It keys on each command's exit status, so a failed `git` or `pogo` refuses rather than reading as "nothing to report". The dirty check is `pogo worktree-dirty`, not a bare `git status --porcelain`: it is the predicate gc uses, which does not count the `.claude/` files pogod itself writes into your tree (the hook settings and mail-hook stamp) — in a repo whose `.gitignore` lacks `.claude/` those alone used to refuse every submit (gh #240, mg-54263). Every other untracked file and every tracked change still refuses. If it refuses: commit, push, and re-run step 5.{{end}}
 
    `"verdict"` is your own word for how the work came out — `pass`, `partial`, `blocked`, whatever is true. Nothing enumerates the legal values and nothing reads the contents: this is the record of what **you** concluded, and the only reader who benefits is the one who later asks what this branch was supposed to have done. A verdict of `partial` with an honest `unverified` list is worth more than a `pass` nobody can check.
 
-   {{if and .Branch (ne .VCS "enth")}}On this track you call `mg done --result` yourself in step 7 and nothing preempts you, so `--verdict-file` is not strictly required. Pass it anyway — it is recorded on the merge request and readable from `pogo refinery show <id> --json` even if your process does not survive to step 7.{{else}}**This is the only moment you can record a verdict.** pogod closes your work item the instant your branch merges and stops you about half a second later; `mg` refuses a second `mg done` rather than overwriting the first, so the `mg done --result` in step 7 arrives at an already-closed item and is turned away. Nothing overwrites your verdict — you are simply beaten to the item, and until mg-dfea the protocol called that refusal success. Skip `--verdict-file` and your work item closes recording only which branch merged (mg-dfea).{{end}}
+   {{if eq .VCS "enth"}}**This is the only moment you can record a verdict.** pogod closes your work item the instant `pogo land` records the land and stops you about half a second later; `mg` refuses a second `mg done` rather than overwriting the first, so a later `mg done --result` arrives at an already-closed item and is turned away (mg-dfea). `self_land` passes `--verdict-file=/tmp/{{.Id}}-verdict.json`: write it before you run it.{{else if and .Branch (ne .VCS "enth")}}On this track you call `mg done --result` yourself in step 7 and nothing preempts you, so `--verdict-file` is not strictly required. Pass it anyway — it is recorded on the merge request and readable from `pogo refinery show <id> --json` even if your process does not survive to step 7.{{else}}**This is the only moment you can record a verdict.** pogod closes your work item the instant your branch merges and stops you about half a second later; `mg` refuses a second `mg done` rather than overwriting the first, so the `mg done --result` in step 7 arrives at an already-closed item and is turned away. Nothing overwrites your verdict — you are simply beaten to the item, and until mg-dfea the protocol called that refusal success. Skip `--verdict-file` and your work item closes recording only which branch merged (mg-dfea).{{end}}
+{{if eq .VCS "enth"}}
+6. **If `self_land` did not land**, its last line says why, and nothing landed unless it says `LANDED`:
+   - **`CONFLICT` (exit 3)** — someone landed an edit to a path your Change touches, and the conflict lines above name each path. Re-make your work on the new trunk, in a fresh checkout (an enth checkout cannot be moved), naming the Change it replaces so the old one is retired rather than left as a second stack:
+     ```bash
+     OLD=$(pogo presubmit --item={{.Id}} --print-stack)   # the Change(s) being replaced; run it where you ran self_land
+     REMAKE=$(mktemp -d)/w
+     enth checkout {{if .Branch}}{{.Branch}}{{else}}main{{end}} "$REMAKE" && cd "$REMAKE"
+     # Re-apply your work here: every file your Change touched, from the checkout you made it in.
+     # The paths the conflict named: merge your edit into the trunk's version by hand.
+     ./build.sh
+     enth change -m "<type>: <description> ({{.Id}})" --trailer Pogo-Item={{.Id}} --trailer Pogo-Worker="$POGO_AGENT_NAME" --trailer Pogo-Supersedes="$OLD" "$REMAKE"
+     self_land
+     ```
+     Run `./build.sh` on the re-made tree before landing it — it is the only test the merged work gets. Copy the `enth change` line whole: without `Pogo-Supersedes` the old Change stays unlanded beside the new one, `pogo presubmit` refuses the pair as two stacks, and stranded-work recovery reports the old one forever. **At most three re-makes:** a fourth conflict means the trunk is moving under the same paths faster than you can land — mail the {{.Coordinator}} the conflict lines and hold per step 8.
+   - **`stale_tip`** is handled inside `self_land`: the trunk moved during the land, nothing landed, and it lands again under the next request id.
+   - **No answer from enthd** is handled inside `self_land` too: the land may have happened, so it re-issues the SAME request id, which enthd answers with the first land's result and lands nothing twice. If it `GAVE UP`, mail the {{.Coordinator}}; running `self_land` again later re-issues that same request first.
+   - **`LANDED BUT NOT RECORDED` (exit 2)** — your work IS on the trunk; only the record is missing (pogod unreachable, or it refused the record). Re-run only the `pogo land` line it printed. Never land again to recover a record: a new request id lands the same Changes a second time.
+   - **`REFUSED`, or a `pogo presubmit` refusal** — fix what it names and run `self_land` again; if you cannot, mail the {{.Coordinator}} the exact message and hold per step 8.
 
+7. **If it landed:** `pogo land` printed `LANDED and recorded as MR <id>`. pogod has recorded the land in the refinery's history (`pogo refinery show <id>` reads it, `"self_landed": true`), and it now closes your work item exactly as a merge closes one — done, with a sidecar naming the landed id and carrying your verdict — mails the {{.Coordinator}}, and stops you. Being stopped right after `pogo land` answers is the normal happy path. If you outlive it, mark the item done, repeating your verdict:
+   ```bash
+   mg done {{.Id}} --result="{\"item\": \"{{.Id}}\", \"verdict\": $(cat /tmp/{{.Id}}-verdict.json)}"
+   ```
+   `already done` means the close succeeded; your verdict is in it because `self_land` passed `--verdict-file`.
+
+{{else}}
 6. **Wait for merge result** — poll refinery using a bash while-loop.
 
-   **Note:** {{if and .Branch (ne .VCS "enth")}}your target is `{{.Branch}}`, **not** the repo's default branch, so the refinery classifies this merge as PR flow and pogod deliberately does **not** mark your item done and does **not** stop you when it lands (mg-7746). Surviving the merge is the normal path here, not a pogod failure — expect to carry straight on into step 7, which is where your actual deliverable gets produced.{{else}}on a successful merge, pogod stops you the moment the merge lands (event-driven, gh #35) — it marks your work item done on your behalf, so being terminated mid-poll after a merge is the normal happy path, not an error. Steps 7–8 below only apply if you outlive the merge (e.g. pogod restarted mid-merge).{{end}}
+   **Note:** {{if .Branch}}your target is `{{.Branch}}`, **not** the repo's default branch, so the refinery classifies this merge as PR flow and pogod deliberately does **not** mark your item done and does **not** stop you when it lands (mg-7746). Surviving the merge is the normal path here, not a pogod failure — expect to carry straight on into step 7, which is where your actual deliverable gets produced.{{else}}on a successful merge, pogod stops you the moment the merge lands (event-driven, gh #35) — it marks your work item done on your behalf, so being terminated mid-poll after a merge is the normal happy path, not an error. Steps 7–8 below only apply if you outlive the merge (e.g. pogod restarted mid-merge).{{end}}
    ```bash
    # Poll in a bash loop — do NOT add another cron, scheduled task, or pogo nudge for this.
    # Mail reaches you by pointer (step 2); you have no background trigger of your own.
@@ -205,15 +260,14 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    Use a simple bash loop only. Adding more cron jobs or `pogo nudge` commands for polling interrupts interactive sessions — and you have no background trigger of your own: mail reaches you by pointer (step 2).
 
    **This loop is the channel that works — the mail is redundancy.** A `MERGE FAILED` notice now arrives in `$POGO_AGENT_NAME` as well as `{{.Id}}` (mg-1fcc); before that it went only to the work-item box, and four polecats in a row recovered anyway because the poll finds the failure at failure time and mail cannot beat that. The mail matters for the one case the loop cannot cover: an author who has finished polling, or was stopped, finds out never. So do not substitute mail-watching for this loop, and do not treat a missing notice as a reason to stop polling.
-{{if eq .VCS "enth"}}
-   If your Changes already landed on the target under an earlier MR of yours (e.g. you resubmitted after losing track of a merged MR), the refinery finds that MR in its own record and resolves the new one as `merged` immediately — without re-running gates or landing — with `"already_merged": true` in the `--json` output. Treat it exactly like a normal `merged`: proceed to step 7, and do **not** submit again. A submit that finds no unlanded Change carrying `Pogo-Item={{.Id}}` fails `class=defect`, "carries nothing ahead of <target>" (mg-c184d). That means nothing was delivered — your edits are most likely still uncommitted in this checkout, or the Change lacks its trailers. Make the Change of step 4, and resubmit.{{else}}
-   If your branch already landed on the target under an earlier MR of yours (e.g. you resubmitted after losing track of a merged MR), the refinery finds that MR in its own record and resolves the new one as `merged` immediately — without re-running gates or pushing — with `"already_merged": true` in the `--json` output. Treat it exactly like a normal `merged`: proceed to step 7, and do **not** submit the branch again. A branch that is merely *contained* in the target with no such record is NOT treated as landed: it carries no commits of its own, and the refinery fails it `class=defect`, "branch carries no commits ahead of <target>" (mg-c184d). That failure means nothing was delivered — your work is most likely uncommitted or unpushed in this worktree. Commit, push, and resubmit.{{end}}
+
+   If your branch already landed on the target under an earlier MR of yours (e.g. you resubmitted after losing track of a merged MR), the refinery finds that MR in its own record and resolves the new one as `merged` immediately — without re-running gates or pushing — with `"already_merged": true` in the `--json` output. Treat it exactly like a normal `merged`: proceed to step 7, and do **not** submit the branch again. A branch that is merely *contained* in the target with no such record is NOT treated as landed: it carries no commits of its own, and the refinery fails it `class=defect`, "branch carries no commits ahead of <target>" (mg-c184d). That failure means nothing was delivered — your work is most likely uncommitted or unpushed in this worktree. Commit, push, and resubmit.
 
    Two non-terminal outcomes need explicit handling — do NOT treat them as merge failures:
-   - **`lost`** — the refinery lost this MR across a pogod restart ({{if eq .VCS "enth"}}your Changes are intact on enthd{{else}}the branch is intact on origin{{end}}). Resubmit **once** with the same step-5 command, capture the new MR ID, and go back to polling. If the resubmitted MR also comes back `lost`, stop resubmitting and mail the mayor instead.
-   - **empty/`null` (not found)** — the MR ID is unknown to the refinery (or was pruned from history — the error text will say "pruned" if so). Do not spin on it and do not improvise: mail the mayor (`mg mail send mayor --from=$POGO_AGENT_NAME --subject="refinery lost track of my MR" --body="MR <id> for {{if eq .VCS "enth"}}item {{.Id}}{{else}}branch $BRANCH{{end}}: refinery show returns not-found"`) and hold per step 8 — stay alive and wait for instructions.
+   - **`lost`** — the refinery lost this MR across a pogod restart (the branch is intact on origin). Resubmit **once** with the same step-5 command, capture the new MR ID, and go back to polling. If the resubmitted MR also comes back `lost`, stop resubmitting and mail the mayor instead.
+   - **empty/`null` (not found)** — the MR ID is unknown to the refinery (or was pruned from history — the error text will say "pruned" if so). Do not spin on it and do not improvise: mail the mayor (`mg mail send mayor --from=$POGO_AGENT_NAME --subject="refinery lost track of my MR" --body="MR <id> for branch $BRANCH: refinery show returns not-found"`) and hold per step 8 — stay alive and wait for instructions.
 
-7. **If merged:**{{if and .Branch (ne .VCS "enth")}} **open the pull request, then** mark the work item done. The merge you just watched land was a *step*: it put your commits on the integration branch `{{.Branch}}`, and your deliverable is the PR from there to the repo's default branch, which nobody has opened. Nothing else opens it for you — the refinery defers your completion precisely so that you can (mg-7746), and if you skip this the only thing that happens is a 15-minute backstop reaping you and paging the {{.Coordinator}} for manual recovery.
+7. **If merged:**{{if .Branch}} **open the pull request, then** mark the work item done. The merge you just watched land was a *step*: it put your commits on the integration branch `{{.Branch}}`, and your deliverable is the PR from there to the repo's default branch, which nobody has opened. Nothing else opens it for you — the refinery defers your completion precisely so that you can (mg-7746), and if you skip this the only thing that happens is a 15-minute backstop reaping you and paging the {{.Coordinator}} for manual recovery.
 
    First read the base branch rather than assuming it, and confirm this really is PR flow:
    ```bash
@@ -248,7 +302,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    **If you cannot open the PR** — no GitHub remote, `gh` unauthenticated, `gh pr create` refuses — do **not** call `mg done` and do **not** go quiet. Mail the {{.Coordinator}} saying the merge landed, quoting the exact error, and hold per step 8. Your item staying claimed with a report attached is recoverable; a silent deferral is the failure this step exists to prevent.
 {{else}} mark the work item done, repeating the verdict you submitted in step 5 in case you won the race:
    ```bash
-   mg done {{.Id}} --result="{{if eq .VCS "enth"}}{\"item\": \"{{.Id}}\"{{else}}{\"branch\": \"$BRANCH\"{{end}}, \"verdict\": $(cat /tmp/{{.Id}}-verdict.json)}"
+   mg done {{.Id}} --result="{\"branch\": \"$BRANCH\", \"verdict\": $(cat /tmp/{{.Id}}-verdict.json)}"
    ```
    pogod usually beats you to this (see step 6 note), and then `mg done` fails with `already done`.
 
@@ -261,7 +315,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    EOF
    ```
 
-8. **Stay alive.** Do NOT exit. After completing steps 1–7, wait for the {{.Coordinator}} to stop you. The {{.Coordinator}} will verify your work was merged before terminating your process. If the {{.Coordinator}} sends you a message (e.g., asking for a fix or retry), act on it immediately.
+{{end}}8. **Stay alive.** Do NOT exit. After completing steps 1–7, wait for the {{.Coordinator}} to stop you. The {{.Coordinator}} will verify your work was merged before terminating your process. If the {{.Coordinator}} sends you a message (e.g., asking for a fix or retry), act on it immediately.
 
    **What "stay alive" means now that pogod stops you on completion (mg-56d1).** Once your work item reaches `done` — whether the refinery marked it done at merge or you called `mg done` yourself, which is the normal path for triage/audit/investigation work that produces no merge — pogod stops you after **two minutes of silence**. Your slot is a scarce resource and a finished agent holding one looks exactly like a busy one from the outside, which is why this is automatic rather than left to the {{.Coordinator}} to notice.
 
@@ -273,7 +327,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 - **Stay scoped.** Only work on your assigned task. If you discover other issues, note them but don't fix them.
 - **Commit often.** Small, focused commits are easier to review and merge.
 - **Follow conventions.** Match the existing code style in the repository.{{if eq .VCS "enth"}}
-- **Don't land anything yourself.** Never run `enth land`: the refinery lands your stack onto the target — `main` by default, or the work item's `--branch` if one was set (see the `--target` in the submit command above).{{else}}
+- **Land only through `self_land`.** There is no merge queue on enth: you land your own stack onto the trunk{{if .Branch}} (`{{.Branch}}`){{end}}, once, with the `self_land` of step 5 — never a bare `enth land`, which keeps no request id discipline and records nothing, so your item would never close.{{else}}
 - **Don't push to main.** Push to your feature branch. The refinery merges it into the target branch — `main` by default, or the work item's `--branch` if one was set (see the `--target` in the submit command above).{{end}}
 {{if .WorkerCores}}- **You have a CORE BUDGET, and you must pass it to anything that self-parallelises.** `$POGO_WORKER_CORES` is {{.WorkerCores}} of this host's {{.HostCores}} cores, and `$POGO_HOST_CORES` is the denominator. Give that number to every build or test command whose toolchain decides its own parallelism — `make -j"$POGO_WORKER_CORES"`, `go test -p "$POGO_WORKER_CORES"`, `cargo build -j`, `lake build -j`, `ninja -j`, `pytest -n`. **This applies to code you write and run, not only to commands you type:** a library that sizes its own pool reads the MACHINE, not your share — `os.cpu_count()`, `multiprocessing.Pool()`, `ProcessPoolExecutor()`, numpy/OpenBLAS and OpenMP thread defaults, rayon, and Go's `runtime.NumCPU()`/`GOMAXPROCS` all report {{.HostCores}} here, not {{.WorkerCores}}. Pass the budget in explicitly — `Pool(int(os.environ["POGO_WORKER_CORES"]))`, `OMP_NUM_THREADS="$POGO_WORKER_CORES"`, `go test -p "$POGO_WORKER_CORES"`, `runtime.GOMAXPROCS` — because getting every `-j` right does not stop this: on 2026-08-14 a pre-submit gate's numpy step self-parallelised to ~4.4 cores against a budget of 3 and drove `pogo host load` to a HOLD, while every `-j` in that gate was correct (mg-6476, measured by pdd84). **Nothing enforces this.** It is the only thing standing between a self-parallelising toolchain and the whole box, because both dispatch gates count WORKERS: on 2026-08-12 one Lean build held 9.0 of 10 cores across 11+ processes while the per-repo cap read one-of-three, and fourteen queued items — including a build the user had personally approved twenty minutes earlier — were undispatchable for the 22 minutes it lasted (mg-eb47). Your own repo's `./build.sh` and the refinery gate share this host with you. If you have a measured reason to exceed the budget, say so in your verdict's `unverified` list rather than exceeding it silently.
 {{end}}- **Never run unanchored `pkill -f`.** `pkill -f` matches every process on the machine, including other agents' pollers — a bare `pkill -f "sleep 600"` kills the fleet's watchdog and mail pollers, which idle in exactly that command. Kill by PID (`kill "$PID"`), or anchor the pattern to a path inside your own worktree: `pkill -f "^{{.WorktreeDir}}/bin/pogod"`.
@@ -320,6 +374,6 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
 Your agent name is derived from the work item. Your **display label** is `pogo-cat-<name>` — what `pogo agent list` shows and what `/agents` returns as `process_name`. It is **not** a process name: nothing sets it on any process, so `pgrep -f pogo-cat-<name>` matches nothing even while you are healthy (mg-710c). Ask pogod for an agent's pid. You were spawned by the {{.Coordinator}} or a human via `pogo agent spawn-polecat`.
 
-FAILURE MODE: If you complete the code task but skip `mg done`, the work is lost — pogod holds the claim for you (step 1), but only you can close the item. Calling `mg done` before the refinery confirms a successful merge is also a failure — the work item gets marked done even if the merge later fails.{{if and .Branch (ne .VCS "enth")}} On this dispatch the merge is not enough either: your target `{{.Branch}}` is an integration branch, so `mg done` before the pull request exists reports a deliverable that does not exist. PR first, then `mg done` (step 7).{{end}} These commands are the entire point — the code changes are secondary.
+FAILURE MODE: If you complete the code task but skip `mg done`, the work is lost — pogod holds the claim for you (step 1), but only you can close the item. {{if eq .VCS "enth"}}Calling `mg done` before `pogo land` has recorded your land is also a failure — the work item gets marked done for work that is not on the trunk.{{else}}Calling `mg done` before the refinery confirms a successful merge is also a failure — the work item gets marked done even if the merge later fails.{{end}}{{if and .Branch (ne .VCS "enth")}} On this dispatch the merge is not enough either: your target `{{.Branch}}` is an integration branch, so `mg done` before the pull request exists reports a deliverable that does not exist. PR first, then `mg done` (step 7).{{end}} These commands are the entire point — the code changes are secondary.
 
 CRITICAL: Never exit on your own. Exiting prematurely means the {{.Coordinator}} cannot send you follow-up instructions (e.g., fix a merge conflict, address review feedback, retry a failed submission). The {{.Coordinator}} will terminate your process when your work is fully verified and merged.

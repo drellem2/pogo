@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
@@ -28,6 +29,7 @@ import (
 // The templates keep their shell until slice 11 swaps it for this line.
 func newPresubmitCmd() *cobra.Command {
 	var item, target, worker string
+	var printStack bool
 	cmd := &cobra.Command{
 		Use:   "presubmit",
 		Short: "Refuse to submit work that would deliver nothing (the polecat pre-submit check)",
@@ -51,7 +53,16 @@ In an enth checkout (a directory holding .enth/checkout) --item is required:
     nothing, and several are refused as ambiguous, naming each stack's worker;
   - that stack's top must be the checkout's base, so what is submitted is
     the work in this checkout.
+  - no Change of that stack may carry a GitHub closing keyword (Fixes #N,
+    Closes owner/repo#N, …): its message reaches the GitHub mirror verbatim
+    and would close the issue there. This is the closing-ref check the
+    refinery ran on enth work before workers landed their own (mg-5b904).
 Changes are durable on enthd when made, so there is nothing to push.
+
+--print-stack (enth only) prints the approved stack's Change ids, bottom first
+and space-separated, on stdout, and every message on stderr: what the worker's
+own land takes as its arguments (enth land $(pogo presubmit --item=X
+--print-stack) --request-id …). It prints nothing on stdout when it refuses.
 
 A check that cannot run (git, enth or worktree-dirty failing) refuses: it
 never reads as clean.`,
@@ -59,6 +70,13 @@ never reads as clean.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			if worker == "" {
 				worker = os.Getenv("POGO_AGENT_NAME")
+			}
+			if printStack {
+				ok := printPresubmitStack(context.Background(), ".", item, worker, os.Stdout, os.Stderr)
+				if !ok {
+					os.Exit(1)
+				}
+				return
 			}
 			ok := checkPresubmit(context.Background(), ".", item, target, worker, os.Stdout, os.Stderr)
 			if !ok {
@@ -69,6 +87,7 @@ never reads as clean.`,
 	cmd.Flags().StringVar(&item, "item", "", "Work item the submission is for (required on an enth repo)")
 	cmd.Flags().StringVar(&target, "target", "main", "Target ref the work will be merged into")
 	cmd.Flags().StringVar(&worker, "worker", "", "Worker whose Changes to list on enth (default $POGO_AGENT_NAME)")
+	cmd.Flags().BoolVar(&printStack, "print-stack", false, "enth: print the approved stack's Change ids (bottom first) on stdout, messages on stderr — the arguments of the worker's own enth land")
 	return cmd
 }
 
@@ -143,11 +162,43 @@ func presubmitGit(dir, target string, stdout, stderr io.Writer) bool {
 // presubmitEnth is the same question on enth (§12), asked by
 // enthvcs.Presubmit; this only prints its answer.
 func presubmitEnth(ctx context.Context, root, item, worker string, stdout io.Writer) bool {
-	msg, err := enthvcs.Presubmit(ctx, root, item, worker, "")
+	_, ok := presubmitEnthStack(ctx, root, item, worker, stdout)
+	return ok
+}
+
+// presubmitEnthStack is presubmitEnth returning the approved stack. Beyond
+// enthvcs.PresubmitStack it runs the closing-ref check on the stack's
+// messages: the worker lands its own work, so this is the last check before
+// the land (mg-5b904).
+func presubmitEnthStack(ctx context.Context, root, item, worker string, msgs io.Writer) ([]string, bool) {
+	msg, s, b, err := enthvcs.PresubmitStack(ctx, root, item, worker, "")
+	if err == nil {
+		err = refinery.EnthClosingRefs(ctx, b, s.Revs)
+	}
 	if err != nil {
-		fmt.Fprintf(stdout, "REFUSING TO SUBMIT: %v\n", err)
+		fmt.Fprintf(msgs, "REFUSING TO SUBMIT: %v\n", err)
+		return nil, false
+	}
+	fmt.Fprintln(msgs, msg)
+	return s.Revs, true
+}
+
+// printPresubmitStack is --print-stack: the check's messages on stderr, the
+// stack's ids on stdout, and nothing on stdout when it refuses.
+func printPresubmitStack(ctx context.Context, dir, item, worker string, stdout, stderr io.Writer) bool {
+	kind, root, err := enthvcs.Detect(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "REFUSING TO SUBMIT: %v\n", err)
 		return false
 	}
-	fmt.Fprintln(stdout, msg)
+	if kind != vcs.Enth {
+		fmt.Fprintln(stderr, "REFUSING TO SUBMIT: --print-stack is for an enth checkout; this is a git worktree, whose work is its branch")
+		return false
+	}
+	ids, ok := presubmitEnthStack(ctx, root, item, worker, stderr)
+	if !ok {
+		return false
+	}
+	fmt.Fprintln(stdout, strings.Join(ids, " "))
 	return true
 }
