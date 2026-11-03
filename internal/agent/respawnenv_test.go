@@ -63,7 +63,7 @@ func TestRespawnReappliesSpawnEnv(t *testing.T) {
 
 	// Polecat-shaped: the same helper the spawn-polecat route uses, with a
 	// dispatcher override of the budget (must win) and of POGO_ROLE (must not).
-	budget := WorkerBudgetFor(10, config.DefaultDispatchCapConfig())
+	budget := WorkerBudgetFor(10, config.DefaultDispatchCapConfig(), config.DefaultDispatchLoadGateConfig())
 	env := polecatSpawnEnv(budget, []string{
 		"CLAUDE_CODE_EFFORT_LEVEL=medium",
 		WorkerCoresEnv + "=7",
