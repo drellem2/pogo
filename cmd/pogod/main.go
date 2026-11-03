@@ -3549,11 +3549,6 @@ Flags:
 	defer hbCancel()
 	go hb.Run(hbCtx)
 
-	// Start the polecat git garbage collector: a startup sweep plus a
-	// periodic ticker that deletes stale polecat-* branches and reclaims
-	// leaked worktrees once their work items have concluded. mg-30d5.
-	startGitGC(hbCtx, agentRegistry, cfg.GitGC, coordinator)
-
 	// Reclaim the per-spawn prompt files of polecats a previous pogod died
 	// holding. The same gap as the git GC's startup sweep, at the same moment,
 	// and deliberately not on its ticker or behind its flag. mg-5197.
@@ -3606,6 +3601,17 @@ Flags:
 	// And so does the polecat spawn's (slice 5, mg-cc5cd): an enth repo's
 	// polecat gets an enth checkout instead of a git worktree.
 	agent.SetRepoVCS(project.VCSOf)
+
+	// Start the polecat git garbage collector: a startup sweep plus a
+	// periodic ticker that deletes stale polecat-* branches and reclaims
+	// leaked worktrees once their work items have concluded. mg-30d5.
+	//
+	// AFTER project.Init, not before it (mg-0ff9c): each sweep reads a repo's
+	// backend from its project record, and the startup sweep runs at once on
+	// its own goroutine. Started earlier, it read an empty registry, swept
+	// every enth repo as git, and raised the false "not a git repository"
+	// degraded condition on every pogod start.
+	startGitGC(hbCtx, agentRegistry, cfg.GitGC, coordinator)
 	// `pogo refinery submit --item` resolves through the spawn record: the
 	// live polecat working the item (slice 6, mg-30da0). Read at call time,
 	// because the registry is replaced when orchestration restarts.
