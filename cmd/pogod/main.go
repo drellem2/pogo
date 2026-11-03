@@ -3606,6 +3606,28 @@ Flags:
 	// And so does the polecat spawn's (slice 5, mg-cc5cd): an enth repo's
 	// polecat gets an enth checkout instead of a git worktree.
 	agent.SetRepoVCS(project.VCSOf)
+	// `pogo refinery submit --item` resolves through the spawn record: the
+	// live polecat working the item (slice 6, mg-30da0). Read at call time,
+	// because the registry is replaced when orchestration restarts.
+	refinery.SetItemResolver(func(item string) (refinery.ItemWorker, bool) {
+		reg := agentRegistry
+		if reg == nil {
+			return refinery.ItemWorker{}, false
+		}
+		// Live polecats only: a dead entry's worktree may already be gone.
+		// Two live polecats on one item resolve to neither — the enth
+		// listing then reports both stacks, and git asks for the branch.
+		var found []agent.PolecatInfo
+		for _, p := range reg.Polecats() {
+			if p.WorkItemID == item {
+				found = append(found, p)
+			}
+		}
+		if len(found) != 1 {
+			return refinery.ItemWorker{}, false
+		}
+		return refinery.ItemWorker{Name: found[0].Name, Dir: found[0].WorktreeDir}, true
+	})
 
 	// Start refinery merge queue loop
 	refineCfg := refinery.DefaultConfig()

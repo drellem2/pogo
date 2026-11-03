@@ -55,6 +55,16 @@ const defaultMaxAttempts = 7
 // non-nil error: both run after the branch has landed remotely, and the merge
 // is not unwound.
 func (r *Refinery) processMerge(mr *MergeRequest) (mergeResult, error) {
+	if len(mr.EnthSubmitted) > 0 {
+		// An enth submission cannot land until slice 7 (mg-1fe2b). Failed
+		// before any git step, recorded as infrastructure (it says nothing
+		// about the work, so it does not count against the author) and not
+		// retried. The submitted ids stay on the record.
+		err := enthLandUnsupported(mr)
+		r.recordAttemptFailure(mr, AttemptFailure{Attempt: 1, Stage: "enth-land", Time: time.Now(), RawError: err.Error(),
+			Class: ClassInfrastructure, NotRetriedReason: "not retryable: enth landing is not built yet (enth-vcs slice 7)"})
+		return mergeResult{}, err
+	}
 	wtDir, err := r.ensureGateWorktree(mr)
 	if err != nil {
 		return mergeResult{}, fmt.Errorf("worktree setup: %w", err)

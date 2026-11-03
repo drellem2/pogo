@@ -119,6 +119,16 @@ type MergeRequest struct {
 	TargetRef string      `json:"target_ref"` // e.g. "main"
 	Author    string      `json:"author"`     // agent name that submitted
 	Status    MergeStatus `json:"status"`
+	// Item is the work item the submission is for (`submit --item`, enth-vcs
+	// slice 6, mg-30da0). On enth it is the identity of the work; on git it
+	// resolved Branch through the spawn record, or was given beside it.
+	Item string `json:"item,omitempty"`
+	// EnthSubmitted is an enth MR's stack as submitted, bottom first: the
+	// Change ids the item's listing returned at submit (§5). Empty for git.
+	// It is not §7's land record, which slice 8 records under "enth".
+	EnthSubmitted []string `json:"enth_submitted,omitempty"`
+	// EnthWorker is the Pogo-Worker trailer of the submitted stack's top.
+	EnthWorker string `json:"enth_worker,omitempty"`
 	// AutoCreateTargetRef opts the request into branching the target ref off
 	// the repo's default branch when it does not yet exist on origin. Off by
 	// default — the safe behaviour (typo in target_ref → error) stays the
@@ -675,7 +685,7 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	if req.RepoPath == "" {
 		return "", fmt.Errorf("repo_path is required")
 	}
-	if req.Branch == "" {
+	if req.Branch == "" && req.Item == "" {
 		return "", fmt.Errorf("branch is required")
 	}
 	if req.TargetRef == "" {
@@ -688,6 +698,16 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	// at the prompt, rather than accepted and failed at merge.
 	if err := RefusePogoHomeRepo(req.RepoPath); err != nil {
 		return "", err
+	}
+	// The identity of the work (mg-30da0): an enth repo's item listing, or a
+	// git --item resolved to its worker's branch. Settled before anything
+	// below shells out to git, because on enth none of that applies.
+	isEnth, err := resolveSubmitIdentity(&req)
+	if err != nil {
+		return "", err
+	}
+	if !isEnth && req.Branch == "" {
+		return "", fmt.Errorf("branch is required")
 	}
 	// Reject a malformed post-merge tag now, while the submitter is still
 	// running and a retry costs nothing. The same mistake caught after the
@@ -713,6 +733,12 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	// the git-shelling checks, so a doomed submit does not get a target ref
 	// auto-created for it on the way out. See validateSubmitBranch for why the
 	// predicate is origin/<branch> by name rather than gh#134's durability one.
+	if isEnth {
+		// Nothing below applies: the branch, the target ref (checked on
+		// enthd by resolveEnthSubmission), the default branch, auto-create
+		// and PR flow are all git's.
+		return r.enqueue(req), nil
+	}
 	if err := validateSubmitBranch(req.RepoPath, req.Branch); err != nil {
 		return "", err
 	}
@@ -762,6 +788,13 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 		log.Printf("refinery: MR for branch %s targets integration branch %q (default is %q) — PR flow: the merge is an integration step, completion is the PR the author still has to open (mg-7746)", req.Branch, req.TargetRef, defaultBranch)
 	}
 
+	return r.enqueue(req), nil
+}
+
+// enqueue queues a validated request and returns its id. Split out of Submit
+// (mg-30da0) so an enth submission, which skips the git validation, is queued
+// by exactly the same code.
+func (r *Refinery) enqueue(req MergeRequest) string {
 	// Registered BEFORE the lock so it runs AFTER the unlock (defers are LIFO).
 	// Submit promises write-through: a pogod that dies right after it returns
 	// must still find the queued MR on restart. That promise is now kept out
@@ -782,7 +815,11 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 	r.saveStateLocked()
 	onSubmit := r.onSubmit
 
-	log.Printf("refinery: queued MR %s branch=%s repo=%s author=%s", req.ID, req.Branch, req.RepoPath, req.Author)
+	if len(req.EnthSubmitted) > 0 {
+		log.Printf("refinery: queued MR %s item=%s enth Changes=%d top=%s repo=%s author=%s", req.ID, req.Item, len(req.EnthSubmitted), req.EnthSubmitted[len(req.EnthSubmitted)-1], req.RepoPath, req.Author)
+	} else {
+		log.Printf("refinery: queued MR %s branch=%s repo=%s author=%s", req.ID, req.Branch, req.RepoPath, req.Author)
+	}
 
 	// Wake the queue loop so pickup doesn't wait out the poll interval.
 	r.wake()
@@ -794,7 +831,7 @@ func (r *Refinery) Submit(req MergeRequest) (string, error) {
 		r.mu.Lock()
 	}
 
-	return req.ID, nil
+	return req.ID
 }
 
 // wake signals the queue loop to run immediately instead of waiting for the

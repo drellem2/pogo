@@ -4986,8 +4986,9 @@ report; it is safe from anywhere and never acts.`,
 	var submitPostMergeTag string
 	var submitVerdict string
 	var submitVerdictFile string
+	var submitItem string
 	var cmdRefinerySubmit = &cobra.Command{
-		Use:   "submit <branch>",
+		Use:   "submit [<branch>] [--item=<id>]",
 		Short: "Submit a branch to the merge queue",
 		Long: `Submit a branch for the refinery to test and merge.
 
@@ -5105,11 +5106,30 @@ The work item itself is untouched by that record, on purpose: the drop-detector
 reads any unexpected sidecar key as "an outcome was written down", so a marker
 saying "no verdict here" would have made a verdict-free close read as answered.
 
+--item names the work item the submission is for (enth-vcs slice 6). On an
+enth repo it is REQUIRED and the branch is refused: there are no branches, and
+the work is the item's unlanded Changes, found by their Pogo-Item trailer (and
+the item's live polecat's Pogo-Worker trailer). Submit refuses an item with no
+such Changes (class=defect: it would deliver nothing) and one whose Changes
+form more than one stack (it names each stack's worker rather than guess), and
+records the submitted Change ids on the MR (enth_submitted). Landing them is
+enth-vcs slice 7; until then the MR is failed before any git step. On git
+--item is accepted too: without a branch it resolves to the branch of the
+item's live polecat, and beside a branch it must agree with it.
+
+  pogo refinery submit --item=mg-a3f --repo=/path/to/enth-repo --author=mg-a3f
+
 Example:
   pogo refinery submit polecat-a3f --repo=/path/to/repo`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			branch := args[0]
+			branch := ""
+			if len(args) == 1 {
+				branch = args[0]
+			}
+			if branch == "" && submitItem == "" {
+				cli.ExitWithError(jsonOutput, "a branch or --item is required", cli.ExitError)
+			}
 			if submitRepo == "" {
 				cli.ExitWithError(jsonOutput, "--repo is required", cli.ExitError)
 			}
@@ -5142,18 +5162,28 @@ Example:
 				DeferDone:           submitDeferDone,
 				PostMergeTag:        submitPostMergeTag,
 				Verdict:             verdict,
+				Item:                submitItem,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
+			what := branch
+			if what == "" {
+				what = submitItem
+			}
 			if jsonOutput {
-				cli.PrintJSON(map[string]string{"id": id, "branch": branch, "status": "queued"})
+				out := map[string]string{"id": id, "branch": branch, "status": "queued"}
+				if submitItem != "" {
+					out["item"] = submitItem
+				}
+				cli.PrintJSON(out)
 			} else {
-				fmt.Printf("Submitted %s to merge queue (id=%s)\n", branch, id)
+				fmt.Printf("Submitted %s to merge queue (id=%s)\n", what, id)
 			}
 		},
 	}
 	cmdRefinerySubmit.Flags().StringVar(&submitRepo, "repo", "", "Repository path (required)")
+	cmdRefinerySubmit.Flags().StringVar(&submitItem, "item", "", "Work item the submission is for: required on an enth repo (the branch is refused there); on git it resolves an omitted branch through the item's live polecat")
 	cmdRefinerySubmit.Flags().StringVar(&submitTarget, "target", "main", "Target ref to merge into")
 	cmdRefinerySubmit.Flags().StringVar(&submitAuthor, "author", "", "Author agent name")
 	cmdRefinerySubmit.Flags().BoolVar(&submitAutoCreateTarget, "auto-create-target", false, "Create the target ref from the repo's default branch if it doesn't exist (off by default; safer to fail loudly on typos)")

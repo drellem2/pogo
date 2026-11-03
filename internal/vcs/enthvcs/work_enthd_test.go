@@ -258,3 +258,19 @@ func TestPresubmitAgainstEnthd(t *testing.T) {
 		t.Errorf("filtered by worker, p1's own checkout at its top: %v (%s)", err, msg)
 	}
 }
+
+func TestRefTip(t *testing.T) {
+	e := startEnthd(t)
+	b := e.backend()
+	ctx := context.Background()
+	for _, ref := range []string{"main", "refs/heads/main", ""} {
+		if tip, err := b.RefTip(ctx, ref); err != nil || tip != e.rootID {
+			t.Errorf("RefTip(%q) = %s, %v; want %s", ref, tip, err, e.rootID)
+		}
+	}
+	_, err := b.RefTip(ctx, "nope")
+	var re *vcs.RefusedError
+	if !errors.As(err, &re) {
+		t.Errorf("RefTip(nope) = %v, want a refusal", err)
+	}
+}

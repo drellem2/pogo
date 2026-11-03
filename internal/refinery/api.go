@@ -44,6 +44,10 @@ type SubmitRequest struct {
 	// is still alive to hear about it. See MergeRequest.Verdict for why submit
 	// time is the only moment an auto-done author can record one.
 	Verdict json.RawMessage `json:"verdict,omitempty"`
+	// Item is the work item the submission is for (`submit --item`,
+	// mg-30da0). Required on an enth repo, where Branch must be empty; on git
+	// it resolves an empty Branch through the item's live polecat.
+	Item string `json:"item,omitempty"`
 }
 
 // RegisterHandlers registers refinery API endpoints on the given mux,
@@ -145,6 +149,7 @@ func (r *Refinery) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		DeferDone:           submitReq.DeferDone,
 		PostMergeTag:        submitReq.PostMergeTag,
 		Verdict:             submitReq.Verdict,
+		Item:                submitReq.Item,
 	}
 
 	id, err := r.Submit(mr)

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,5 +173,31 @@ func TestPresubmitGitEqualsTheTemplateShell(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// `pogo refinery submit --item` (mg-30da0): the item reaches pogod, a branch
+// is no longer required beside it, and neither one is refused locally.
+func TestRefinerySubmitItemFlag(t *testing.T) {
+	var body string
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":"mr-1"}`))
+	}
+	out, stderr, code := runPogo(t, handler, "refinery", "submit", "--item=mg-7", "--repo=/some/repo", "--author=mg-7")
+	if code != 0 || !strings.Contains(out, "Submitted mg-7 to merge queue (id=mr-1)") {
+		t.Fatalf("submit --item: exit %d\n%s\n%s", code, out, stderr)
+	}
+	if !strings.Contains(body, `"item":"mg-7"`) || !strings.Contains(body, `"branch":""`) {
+		t.Errorf("request body = %s; want the item and no branch", body)
+	}
+	// The git control: a branch alone is today's request, with no item key.
+	if _, _, code := runPogo(t, handler, "refinery", "submit", "polecat-x", "--repo=/some/repo"); code != 0 || strings.Contains(body, `"item"`) {
+		t.Errorf("plain submit: exit %d, body %s", code, body)
+	}
+	if _, stderr, code := runPogo(t, handler, "refinery", "submit", "--repo=/some/repo"); code == 0 || !strings.Contains(stderr, "a branch or --item is required") {
+		t.Errorf("neither branch nor item: exit %d, %s", code, stderr)
 	}
 }

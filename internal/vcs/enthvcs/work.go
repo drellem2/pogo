@@ -441,3 +441,14 @@ func (b Backend) UntrailedBase(ctx context.Context, dir, base string) error {
 
 // IsNoWork reports whether err is the empty-listing refusal.
 func IsNoWork(err error) bool { return errors.Is(err, vcs.ErrNoWork) }
+
+// RefTip is the Change ref (a bare branch name or a full ref) names on enthd
+// now: R2's "does the target exist", and the T a land is checked against.
+// A ref that does not exist is a *vcs.RefusedError (enth's not_found).
+func (b Backend) RefTip(ctx context.Context, ref string) (string, error) {
+	l, err := b.show(ctx, b.ResolveBase(ctx, vcs.Repo{}, ref))
+	if err != nil {
+		return "", err
+	}
+	return l.Change, nil
+}
