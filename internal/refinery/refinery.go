@@ -363,6 +363,17 @@ func (m *MergeRequest) LandedLabel(short int) string {
 	return vcs.LandedLabel(k, id, short)
 }
 
+// WorkRef names this MR's work where a message used to say "branch %s":
+// "branch <name>" for git, unchanged, and "enth item <id>" for an enth MR,
+// which has no branch (vcs.WorkRef, mg-4377f).
+func (m *MergeRequest) WorkRef() string { return vcs.WorkRef(m.Branch, m.Item) }
+
+// WorkField is the value for a slot already labelled as the branch.
+func (m *MergeRequest) WorkField() string { return vcs.WorkField(m.Branch, m.Item) }
+
+// WorkKV is the branch=/item= token for a key=value log line.
+func (m *MergeRequest) WorkKV() string { return vcs.WorkKV(m.Branch, m.Item) }
+
 // EnthLandedDetail is the `landed: {vcs, id}` detail for an enth MR that has
 // landed, and false for everything else. Readers that write a git MR's
 // landing as `merged_sha` add this beside it, so their git output is
@@ -1346,7 +1357,7 @@ func (r *Refinery) Cancel(id string) (CancelOutcome, error) {
 	r.history = append(r.history, mr)
 	r.saveStateLocked()
 
-	log.Printf("refinery: cancelled MR %s branch=%s author=%s", mr.ID, mr.Branch, mr.Author)
+	log.Printf("refinery: cancelled MR %s %s author=%s", mr.ID, mr.WorkKV(), mr.Author)
 	return CancelRemovedFromQueue, nil
 }
 

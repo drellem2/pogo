@@ -89,6 +89,7 @@ func mergedWorkFor(history []refinery.MergeRequest, workItemID string) (agent.Me
 		return agent.MergedWork{
 			MR:        mr.ID,
 			Branch:    mr.Branch,
+			Item:      mr.Item,
 			Target:    mr.TargetRef,
 			MergedSHA: mr.MergedSHA,
 			LandedVCS: kind,

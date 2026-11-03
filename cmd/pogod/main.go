@@ -3644,7 +3644,7 @@ Flags:
 			fmt.Printf("Warning: refinery failed to start: %v\n", refErr)
 		} else {
 			mergeQueue.SetOnMerged(func(mr *refinery.MergeRequest) {
-				log.Printf("refinery: merged %s (branch=%s, author=%s)", mr.ID, mr.Branch, mr.Author)
+				log.Printf("refinery: merged %s (%s, author=%s)", mr.ID, mr.WorkKV(), mr.Author)
 
 				// Ask the WORK ITEM whether merging completes it before
 				// acting as though it does (mg-d86e). Resolved here, once,
@@ -3669,11 +3669,7 @@ Flags:
 				// the body. The merge succeeded, so a subject-scanning reader
 				// would otherwise file this next to every other MERGED mail
 				// while the release it describes is half-finished (mg-6879).
-				subject := fmt.Sprintf("MERGED: %s (branch=%s)", mr.ID, mr.Branch)
-				if mr.PostMergeError != "" {
-					subject = fmt.Sprintf("MERGED but POST-MERGE STEP FAILED: %s (branch=%s)", mr.ID, mr.Branch)
-				}
-				body := fmt.Sprintf("Merge request %s succeeded.\nBranch: %s\nTarget: %s\nAuthor: %s", mr.ID, mr.Branch, mr.TargetRef, mr.Author)
+				subject, body := mergedNoticeHead(mr)
 				// Name the commit. Every question about a merge downstream of
 				// this mail ("was the tag on the right SHA", "what shipped")
 				// starts here, and the SHA used to be unreachable (mg-6879).
@@ -4158,4 +4154,17 @@ func promptRefreshLogLines(res *agent.InstallResult, rev string) []string {
 			c.Path, c.DistPath, c.Path, c.DistPath))
 	}
 	return lines
+}
+
+// mergedNoticeHead is the MERGED mail's subject and the first lines of its
+// body. A git MR renders exactly as it always did ("branch=<name>",
+// "Branch: <name>"); an enth MR, which has no branch, names its item instead
+// of an empty "branch=" (mg-4377f).
+func mergedNoticeHead(mr *refinery.MergeRequest) (subject, body string) {
+	subject = fmt.Sprintf("MERGED: %s (%s)", mr.ID, mr.WorkKV())
+	if mr.PostMergeError != "" {
+		subject = fmt.Sprintf("MERGED but POST-MERGE STEP FAILED: %s (%s)", mr.ID, mr.WorkKV())
+	}
+	body = fmt.Sprintf("Merge request %s succeeded.\nBranch: %s\nTarget: %s\nAuthor: %s", mr.ID, mr.WorkField(), mr.TargetRef, mr.Author)
+	return subject, body
 }

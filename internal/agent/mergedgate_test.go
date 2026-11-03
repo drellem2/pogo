@@ -235,3 +235,25 @@ func TestMergedWorkRefusalNamesAnEnthLanding(t *testing.T) {
 		t.Errorf("git refusal changed:\n%s", got)
 	}
 }
+
+// mg-4377f: an enth merge has no branch. The refusal used to read "branch  landed
+// on main"; it names the work item instead. The git fixture is the control and
+// keeps the exact old wording.
+func TestMergedWorkRefusalNamesAnEnthItemNotAnEmptyBranch(t *testing.T) {
+	m := mergedFixture()
+	m.Branch, m.Item = "", "mg-e1"
+	m.MergedSHA, m.LandedVCS, m.LandedID = "", vcs.Enth, strings.Repeat("ab", 32)
+	r := &Registry{}
+	r.SetMergedWorkGate(&stubMergedGate{merged: map[string]MergedWork{"mg-e1": m}})
+	refusal := r.mergedWorkRefusal("mg-e1")
+	if !strings.Contains(refusal, "HAS ALREADY MERGED: enth item mg-e1 landed on main as enth abababababab") ||
+		strings.Contains(refusal, "branch  ") {
+		t.Errorf("enth refusal does not name the item:\n%s", refusal)
+	}
+	g := mergedFixture()
+	g.Item = "mg-g1"
+	r.SetMergedWorkGate(&stubMergedGate{merged: map[string]MergedWork{"mg-g1": g}})
+	if got := r.mergedWorkRefusal("mg-g1"); !strings.Contains(got, "HAS ALREADY MERGED: branch polecat-ac0c landed on main as 0123456789ab ") {
+		t.Errorf("git refusal changed:\n%s", got)
+	}
+}

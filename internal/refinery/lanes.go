@@ -277,7 +277,7 @@ func (r *Refinery) runLane(ln *lane, mr *MergeRequest) {
 		// action rather than on a defect in the branch (mg-8595).
 		mr.Status = StatusCancelled
 		mr.Error = err.Error()
-		log.Printf("refinery: MR %s cancelled mid-flight branch=%s author=%s (%v)", mr.ID, mr.Branch, mr.Author, err)
+		log.Printf("refinery: MR %s cancelled mid-flight %s author=%s (%v)", mr.ID, mr.WorkKV(), mr.Author, err)
 	} else if err != nil {
 		mr.Status = StatusFailed
 		mr.Error = err.Error()
@@ -309,15 +309,15 @@ func (r *Refinery) runLane(ln *lane, mr *MergeRequest) {
 			delete(r.failureCounts, mr.Author)
 		}
 		if alreadyMerged {
-			log.Printf("refinery: MR %s resolved as already merged (no-op) branch=%s author=%s sha=%s", mr.ID, mr.Branch, mr.Author, mr.MergedSHA)
+			log.Printf("refinery: MR %s resolved as already merged (no-op) %s author=%s sha=%s", mr.ID, mr.WorkKV(), mr.Author, mr.MergedSHA)
 		} else {
-			log.Printf("refinery: MR %s merged successfully branch=%s author=%s sha=%s", mr.ID, mr.Branch, mr.Author, mr.MergedSHA)
+			log.Printf("refinery: MR %s merged successfully %s author=%s sha=%s", mr.ID, mr.WorkKV(), mr.Author, mr.MergedSHA)
 		}
 		// The merge succeeded and its declared follow-on did not. Say so at
 		// merged-level volume: the status stays "merged", so a reader keying
 		// only off status would otherwise see unqualified success (mg-6879).
 		if mr.PostMergeError != "" {
-			log.Printf("refinery: MR %s merged but its POST-MERGE STEP FAILED branch=%s author=%s: %s — the work item will NOT be marked done", mr.ID, mr.Branch, mr.Author, mr.PostMergeError)
+			log.Printf("refinery: MR %s merged but its POST-MERGE STEP FAILED %s author=%s: %s — the work item will NOT be marked done", mr.ID, mr.WorkKV(), mr.Author, mr.PostMergeError)
 		}
 	}
 	r.history = append(r.history, mr)

@@ -162,11 +162,11 @@ func reopenMailLine(failed *refinery.MergeRequest, res reopenResult) string {
 	id := failed.Author
 	switch res.Outcome {
 	case reopenDeclinedLanded:
-		return fmt.Sprintf("Work item: %s was NOT reopened. %s (branch %s) already MERGED onto %s%s, "+
+		return fmt.Sprintf("Work item: %s was NOT reopened. %s (%s) already MERGED onto %s%s, "+
 			"so this item's status rests on work that landed and a later failed branch is not evidence that it is "+
 			"unfinished (mg-4d21). If this failure really does mean more work on this item, reopen it deliberately: "+
 			"`mg reopen %s`.",
-			id, res.Landed.ID, res.Landed.Branch, res.Landed.TargetRef, landedSuffix(&res.Landed), id)
+			id, res.Landed.ID, res.Landed.WorkRef(), res.Landed.TargetRef, landedSuffix(&res.Landed), id)
 	case reopenPerformed:
 		return fmt.Sprintf("Work item: %s was REOPENED (done -> claimed) so its author can retry. NOTHING OWNS IT — "+
 			"`mg reopen` writes claimed/%s.md with no pid, no polecat is running it, and every stall check scans "+

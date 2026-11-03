@@ -94,8 +94,12 @@ type MergedWork struct {
 	// MR is the merge request id, so `pogo refinery show <id>` reaches the
 	// record this refusal was derived from.
 	MR string
-	// Branch is the branch that merged.
+	// Branch is the branch that merged. Empty for an enth merge, which has
+	// none; Item names that work instead.
 	Branch string
+	// Item is the merge request's work item, the identity of an enth
+	// submission (enth-vcs §5). The refusal names it when Branch is empty.
+	Item string
 	// Target is the ref it merged INTO. Quoted because "merged" is not one fact:
 	// landing on the repo default is completion-shaped, landing on an
 	// integration branch is not — see refineryMergedWork for which of the two
@@ -185,7 +189,7 @@ func (r *Registry) mergedWorkRefusal(workItemID string) string {
 	if !merged {
 		return ""
 	}
-	return fmt.Sprintf("work item %s HAS ALREADY MERGED: branch %s landed on %s as %s%s (%s). A worker "+
+	return fmt.Sprintf("work item %s HAS ALREADY MERGED: %s landed on %s as %s%s (%s). A worker "+
 		"dispatched here would re-derive work that is on the target right now — the item reads as "+
 		"available because something REFUSED TO CLOSE IT after the merge, not because it is unstarted. "+
 		"The usual cause is a `declares-remainder` item whose successor was never filed: `mg done` "+
@@ -193,7 +197,7 @@ func (r *Registry) mergedWorkRefusal(workItemID string) string {
 		"File the successor and close this item (`mg done %s --successor=<new id>`), or archive it if "+
 		"the remainder is already filed elsewhere. If this item genuinely has work AFTER that merge, "+
 		"dispatch anyway with --merged-override=\"<why>\"",
-		workItemID, m.Branch, m.Target, m.landedLabel(), m.age(), m.MR, workItemID)
+		workItemID, vcs.WorkRef(m.Branch, m.Item), m.Target, m.landedLabel(), m.age(), m.MR, workItemID)
 }
 
 // age renders how long ago the merge landed, or "" when the record does not say.

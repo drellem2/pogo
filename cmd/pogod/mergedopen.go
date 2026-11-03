@@ -11,6 +11,7 @@ import (
 	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/refinery"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // The addressee for a merge whose work item did NOT close (mg-9d4e).
@@ -102,8 +103,11 @@ type mergedOpenAlert struct {
 	Worker string
 	// Repo, Branch, MR, Target and MergedSHA are the merge, so the claim is
 	// checkable with one `git log` and one `pogo refinery show`.
-	Repo      string
-	Branch    string
+	Repo   string
+	Branch string
+	// Item is the MR's work item, which names an enth merge's work: enth
+	// has no branch, so Branch is empty there (mg-4377f).
+	Item      string
 	MR        string
 	Target    string
 	MergedSHA string
@@ -172,6 +176,7 @@ func reportMergedButOpen(mr *refinery.MergeRequest, worker string, closeErr erro
 		Worker:        worker,
 		Repo:          mr.RepoPath,
 		Branch:        mr.Branch,
+		Item:          mr.Item,
 		MR:            mr.ID,
 		Target:        mr.TargetRef,
 		MergedSHA:     mr.MergedSHA,
@@ -183,10 +188,10 @@ func reportMergedButOpen(mr *refinery.MergeRequest, worker string, closeErr erro
 	// "MERGED BUT NOT CLOSED" line (mg-2b71) says it, for gated items too, which do
 	// not reach here. What this line adds is that the alert was RAISED, which is a
 	// different fact and the one a reader chasing a missing mail needs.
-	log.Printf("refinery: raising merged-not-closed alert for work item %s — branch %s landed on %s as %s "+
+	log.Printf("refinery: raising merged-not-closed alert for work item %s — %s landed on %s as %s "+
 		"and the item is open with its work already on the target, which is the state priority-wake "+
 		"advertises as ready and unclaimed (mg-9d4e)",
-		a.WorkItemID, a.Branch, a.Target, a.Landed)
+		a.WorkItemID, vcs.WorkRef(a.Branch, a.Item), a.Target, a.Landed)
 	if d, ok := mr.EnthLandedDetail(); ok {
 		a.EnthLanded = d
 	}
@@ -272,7 +277,7 @@ func (a mergedOpenAlert) Message() (subject, body string) {
 		fmt.Fprintf(&b, "Worker:     none was running at merge (hand-submitted branch)\n")
 	}
 	fmt.Fprintf(&b, "Repo:       %s\n", a.Repo)
-	fmt.Fprintf(&b, "Branch:     %s\n", a.Branch)
+	fmt.Fprintf(&b, "Branch:     %s\n", vcs.WorkField(a.Branch, a.Item))
 	fmt.Fprintf(&b, "Merge:      %s -> %s as %s\n", a.MR, a.Target, a.landed())
 	fmt.Fprintf(&b, "mg said:    %s\n\n", a.CloseError)
 

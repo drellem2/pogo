@@ -5514,7 +5514,7 @@ Examples:
 				cli.PrintJSON(mr)
 			} else {
 				fmt.Printf("ID:        %s\n", mr.ID)
-				fmt.Printf("Branch:    %s\n", mr.Branch)
+				fmt.Printf("Branch:    %s\n", mr.WorkField())
 				fmt.Printf("Target:    %s\n", mr.TargetRef)
 				fmt.Printf("Author:    %s\n", mr.Author)
 				fmt.Printf("Status:    %s\n", mr.StatusLabel())

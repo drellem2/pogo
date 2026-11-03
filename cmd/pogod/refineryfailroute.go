@@ -120,8 +120,15 @@ func routeRefineryFailMail(mr *refinery.MergeRequest, registryName func(author s
 	}
 	if agent == "" {
 		route.Unrouted = true
-		route.Reason = fmt.Sprintf("no agent mailbox could be resolved for branch %q: it carries no %q prefix and pogod's registry has no live agent for author %q",
-			mr.Branch, strandedwork.BranchPrefix, author)
+		if ref := mr.WorkRef(); mr.Branch == "" && ref != "branch " {
+			// An enth MR has no branch to carry the prefix; name its item
+			// instead of quoting an empty branch (mg-4377f).
+			route.Reason = fmt.Sprintf("no agent mailbox could be resolved for %s: it has no branch to carry a %q prefix and pogod's registry has no live agent for author %q",
+				ref, strandedwork.BranchPrefix, author)
+		} else {
+			route.Reason = fmt.Sprintf("no agent mailbox could be resolved for branch %q: it carries no %q prefix and pogod's registry has no live agent for author %q",
+				mr.Branch, strandedwork.BranchPrefix, author)
+		}
 		return route
 	}
 

@@ -381,9 +381,9 @@ func reapMergedPolecat(reg polecatReaper, mr *refinery.MergeRequest, complete fu
 		// captured, formatted, printed, and then read by no control flow at all,
 		// which reads as diligent error handling right up to the next line
 		// contradicting it. Both of those now say what actually happened.
-		log.Printf("refinery: MERGED BUT NOT CLOSED — work item %s is STILL OPEN after branch %s merged as %s: %v. "+
+		log.Printf("refinery: MERGED BUT NOT CLOSED — work item %s is STILL OPEN after %s merged as %s: %v. "+
 			"No completion is being reported for it; close it by hand once you know why, or leave it open if that is "+
-			"correct (mg-2b71)", mr.Author, mr.Branch, mr.LandedLabel(0), completeErr)
+			"correct (mg-2b71)", mr.Author, mr.WorkRef(), mr.LandedLabel(0), completeErr)
 		// GIVE THE FACT AN ADDRESSEE (mg-9d4e). The line above is a log line, and
 		// a log line is exactly what this state already had: on 2026-08-12 mg-0e8c
 		// and mg-ac0c each merged, each refused to close, and each was back in

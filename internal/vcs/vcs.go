@@ -898,3 +898,47 @@ func LandedLabel(kind Kind, id string, short int) string {
 func LandedDetail(kind Kind, id string) map[string]string {
 	return map[string]string{"vcs": string(kind), "id": id}
 }
+
+// WorkRef names a submission's work in an operator-facing sentence, in the
+// slot a git message fills with "branch <name>": "branch <branch>" for git,
+// byte-for-byte what `"branch %s"` printed, and "enth item <item>" for an
+// enth submission, which has no branch and is named by its work item (the
+// Pogo-Item trailer, enth-vcs §5). Without it an enth message read
+// "branch " with nothing after it (mg-4377f).
+//
+// The rule is "no branch, but an item": a git submission always carries its
+// branch, so every git rendering is unchanged, including one that also names
+// its item.
+func WorkRef(branch, item string) string {
+	if it, ok := enthItem(branch, item); ok {
+		return "enth item " + it
+	}
+	return "branch " + branch
+}
+
+// WorkField is WorkRef for a slot a label already names as the branch
+// ("Branch:    %s", "(%s -> main)"): the branch bare for git, and for enth
+// a value that says there is none and what names the work instead.
+func WorkField(branch, item string) string {
+	if it, ok := enthItem(branch, item); ok {
+		return "(none: enth item " + it + ")"
+	}
+	return branch
+}
+
+// WorkKV is WorkRef for a key=value log line: "branch=<branch>" for git,
+// "item=<item>" for enth — the key the enth queued line already uses.
+func WorkKV(branch, item string) string {
+	if it, ok := enthItem(branch, item); ok {
+		return "item=" + it
+	}
+	return "branch=" + branch
+}
+
+func enthItem(branch, item string) (string, bool) {
+	item = strings.TrimSpace(item)
+	if branch != "" || item == "" {
+		return "", false
+	}
+	return item, true
+}

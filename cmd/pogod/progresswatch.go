@@ -263,12 +263,12 @@ func readFleetProgress(snap *progresswatch.Snapshot, queue func() *refinery.Refi
 			read = true
 			for _, mr := range q.History() {
 				if mr.Status == refinery.StatusMerged && !mr.DoneTime.IsZero() {
-					noteProgress(snap, mr.DoneTime, fmt.Sprintf("merge %s (%s) landed", mr.ID, mr.Branch))
+					noteProgress(snap, mr.DoneTime, mergeLandedNote(&mr))
 				}
-				noteProgress(snap, mr.SubmitTime, fmt.Sprintf("branch %s submitted by %s", mr.Branch, mr.Author))
+				noteProgress(snap, mr.SubmitTime, submittedNote(&mr))
 			}
 			for _, mr := range q.QueueWithProcessing() {
-				noteProgress(snap, mr.SubmitTime, fmt.Sprintf("branch %s submitted by %s", mr.Branch, mr.Author))
+				noteProgress(snap, mr.SubmitTime, submittedNote(&mr))
 			}
 			st := q.GetStatus()
 			snap.InFlight = st.Processing
@@ -317,4 +317,15 @@ func joinNonEmpty(parts []string) string {
 		out += p
 	}
 	return out
+}
+
+// mergeLandedNote and submittedNote are the progress notes readFleetProgress
+// records for a refinery MR: the branch for git, unchanged, and the work item
+// for an enth MR, which has no branch (mg-4377f).
+func mergeLandedNote(mr *refinery.MergeRequest) string {
+	return fmt.Sprintf("merge %s (%s) landed", mr.ID, mr.WorkField())
+}
+
+func submittedNote(mr *refinery.MergeRequest) string {
+	return fmt.Sprintf("%s submitted by %s", mr.WorkRef(), mr.Author)
 }

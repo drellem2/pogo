@@ -78,7 +78,7 @@ func busyFrom(repoPath string, mrs []refinery.MergeRequest, pcs []agent.PolecatI
 	var out []string
 	for _, mr := range mrs {
 		if sameRepo(mr.RepoPath, repoPath) {
-			out = append(out, fmt.Sprintf("open MR %s (%s -> %s, %s)", mr.ID, mr.Branch, mr.TargetRef, mr.Status))
+			out = append(out, fmt.Sprintf("open MR %s (%s -> %s, %s)", mr.ID, mr.WorkField(), mr.TargetRef, mr.Status))
 		}
 	}
 	for _, pc := range pcs {
