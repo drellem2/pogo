@@ -141,7 +141,9 @@ reminder path deliberately reads no item text (the same prohibition
 the body is unreadable under the carrier-block trap (mg-27d4). The precedent is
 `[dispatch_pairing] waiver_tags`.
 
-It waives a **notice**, nothing else. The item stays gated by its assignee, and
+It waives a **notice**, nothing else, and only for a reachable blocker: a waived
+item whose name is a typo still sends the coordinator its "fix the assignee"
+notice. The item stays gated by its assignee, and
 dispatch is refused at the spawn point regardless of tags. Removing the tag
 re-arms the reminder: the item's backoff key was pruned when it left the
 candidate set, so its next notice is a first notice and fires at once.
@@ -166,8 +168,14 @@ setter is anything short of certain: the log is missing or unreadable; no event
 wrote this item's assignee; the last such event recorded a different value than
 the field now holds; the last write was an unattributed one (a `work.unclaim`
 restoring an assignee); or the actor is empty. The actor is self-asserted and
-falls back to the OS user, so a match is a strong heuristic rather than proof —
-and the OS-user fallback names no agent, so it too fails toward the notice.
+falls back to the OS user, so a match is a strong heuristic rather than proof.
+
+Neither silence — self-set nor waiver — applies to a blocker **no reminder can
+reach** (a bare `blocked:`, or a name with no mailbox). That item's notice goes
+to the coordinator and says "fix the assignee", and nobody on the item can
+answer it away. This is what keeps the OS-user fallback from failing closed:
+`blocked:daniel` written by actor `daniel` (the fallback when no agent name is
+set) names no mailbox, so it still reaches the coordinator.
 
 The log grows monotonically, so it is read **incrementally**: once in full, then
 only the appended bytes on each later tick, and only on ticks that have a

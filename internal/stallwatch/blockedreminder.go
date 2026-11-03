@@ -93,9 +93,9 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 	// here would forget its count, and it would read as new next tick and start
 	// the four notices over. The cap is applied to the message below instead.
 	//
-	// Two kinds of `blocked:<agent>` item are NOT candidates, and both leave the
-	// set before selectDue so that neither draws a notice nor holds a count
-	// (drellem2/pogo#161):
+	// Two kinds of `blocked:<agent>` item whose agent is REACHABLE are NOT
+	// candidates, and both leave the set before selectDue so that neither draws
+	// a notice nor holds a count (drellem2/pogo#161):
 	//
 	//   - one carrying a waiver tag: the named agent said, in the one place this
 	//     check reads, that it knows and is waiting on purpose;
@@ -114,22 +114,32 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 		if !ok {
 			continue
 		}
+		// Neither silence applies to a blocker no reminder can reach. That
+		// item's notice goes to the COORDINATOR and says "fix the assignee",
+		// and neither the named name nor its tagger can answer for it: a
+		// typo'd name is not an agent that knows anything, and the OS-user
+		// fallback actor (macguffin writes e.g. `daniel` when no agent name is
+		// set) is unrecognised by definition — so `blocked:daniel` written by
+		// `daniel` must still reach the coordinator (fail open; review round 1).
+		who = normName(who)
+		if who == "" || !w.hasMailbox(who) {
+			blocked = append(blocked, it)
+			continue
+		}
 		if config.HasAnyTag(it.TagList(), waivers) {
 			waived = append(waived, it.ID)
 			continue
 		}
-		if who = normName(who); who != "" {
-			if !readSetters {
-				// Once per tick, and only when there is a block to ask
-				// about. A failed read leaves every setter unknown, which
-				// fails open: the notice is sent.
-				w.setters.refresh()
-				readSetters = true
-			}
-			if w.setters.setter(it.ID, it.Assignee) == who {
-				selfSet = append(selfSet, it.ID)
-				continue
-			}
+		if !readSetters {
+			// Once per tick, and only when there is a block to ask about. A
+			// failed read leaves every setter unknown, which fails open: the
+			// notice is sent.
+			w.setters.refresh()
+			readSetters = true
+		}
+		if w.setters.setter(it.ID, it.Assignee) == who {
+			selfSet = append(selfSet, it.ID)
+			continue
 		}
 		blocked = append(blocked, it)
 	}

@@ -166,6 +166,8 @@ func TestBlockedReminderSetterSuppressionFailsOpen(t *testing.T) {
 			`{"actor":"mayor","assignee_after":"blocked:mayor","fields":"title","item_id":"mg-hold","type":"work.edited"}`,
 		}},
 		{"malformed line", []string{`{"actor":"mayor","assignee_after":"blocked:mayor","item_id":"mg-hold","type":"work.edited"`}},
+		// A fallback actor that does not match the reachable name. The case
+		// where it DOES match is TestBlockedReminderUnreachableBlockerIgnoresBothSilences.
 		{"OS-user fallback actor", []string{editedAssignee("mg-hold", "daniel", "", "blocked:mayor")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -327,5 +329,45 @@ func TestBlockedReminderWaiverDoesNotUngateDispatch(t *testing.T) {
 		if strings.Contains(n.message, "mg-w") {
 			t.Errorf("a waived blocked item appeared in a notice: %+v", n)
 		}
+	}
+}
+
+// TestBlockedReminderUnreachableBlockerIgnoresBothSilences is review round 1's
+// blocking finding. macguffin's actor falls back to the OS user, and that user
+// can be the very name in the block: `blocked:daniel` written by `daniel`. That
+// name has no mailbox, so the item's notice is the coordinator's "fix the
+// assignee" — and a self-set match must not swallow it. A waiver tag on a typo'd
+// name must not either. The mayor-actor row is the positive control: the same
+// unreachable notice, reached without any silence in play.
+func TestBlockedReminderUnreachableBlockerIgnoresBothSilences(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		actor string
+		tags  []string
+	}{
+		{"self-set by the OS-user fallback", "daniel", nil},
+		{"waiver tag on an unreachable name", "mayor", config.DefaultBlockedReminderWaiverTags},
+		{"control: set by mayor, no tag", "mayor", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, rec, workRoot, mailRoot := testEnv(t, blockedCfg())
+			makeMailbox(t, mailRoot, "mayor") // the coordinator; daniel has none
+			now := time.Now()
+			writeWaiverItem(t, workRoot, "mg-hold", "blocked:daniel", tc.tags, now)
+			appendEvents(t, workRoot, editedAssignee("mg-hold", tc.actor, "", "blocked:daniel"))
+
+			w.Check(now)
+
+			got := blockedNudges(rec)
+			if len(got) != 1 || got[0].agent != "mayor" || !strings.Contains(got[0].message, "no reminder could reach") {
+				t.Fatalf("want the unreachable-blocker notice to the coordinator, got %+v", got)
+			}
+			if q := quietEvents(rec, "self_set_ids"); len(q) != 0 {
+				t.Errorf("an unreachable blocker was recorded as self-set: %v", q)
+			}
+			if q := quietEvents(rec, "waived_ids"); len(q) != 0 {
+				t.Errorf("an unreachable blocker was recorded as waived: %v", q)
+			}
+		})
 	}
 }
