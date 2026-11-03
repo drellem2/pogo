@@ -117,6 +117,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/strandedwork"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // Item is the slice of a work item this detector needs.
@@ -750,6 +751,11 @@ type Row struct {
 
 	// Error is why a KindUnjudged row could not be answered. Empty otherwise.
 	Error string `json:"error,omitempty"`
+
+	// Enth is set on a row about an enth-backed repository's work, found by its
+	// Pogo-Item trailer rather than on a branch (mg-28cbc). Branch then holds a
+	// label naming the top Change, and no git field above is populated.
+	Enth *EnthWork `json:"enth,omitempty"`
 }
 
 // Subject is what this row is ABOUT, in the words a reader can chase: the work
@@ -871,6 +877,9 @@ func withDeclaration(remedy, note string) string {
 }
 
 func (r Row) remedy() string {
+	if r.Enth != nil {
+		return r.enthRemedy()
+	}
 	switch r.Kind {
 	case KindRescueUnbuilt:
 		// NO SUBMIT LINE, AND THAT OMISSION IS THE WHOLE REPAIR (mg-aed4). Every
@@ -1135,6 +1144,14 @@ type RepoCoverage struct {
 	Error    string `json:"error,omitempty"`
 	// Worktrees is how many polecat worktrees on this host point at this repo.
 	Worktrees int `json:"worktrees"`
+	// VCS is "enth" for an enth-backed repository, whose work is listed by
+	// trailer and not by branch (mg-28cbc); empty is git.
+	VCS string `json:"vcs,omitempty"`
+	// EnthUnlanded is how many unlanded Changes an enth repository listed, and
+	// EnthUntrailed how many of those carry no Pogo-Item trailer and so could
+	// not be matched to any item.
+	EnthUnlanded  int `json:"enth_unlanded,omitempty"`
+	EnthUntrailed int `json:"enth_untrailed,omitempty"`
 	// NamedByOpenItem is false when this repository entered the sweep ONLY
 	// because a polecat worktree on this host points at it, or because --repo
 	// asked for it — i.e. when no open work item names it. Such a repository used
@@ -1248,6 +1265,15 @@ type Report struct {
 	// ReposDiscovered counts repositories that entered the sweep WITHOUT an open
 	// work item naming them.
 	ReposDiscovered int `json:"repos_discovered"`
+	// EnthConsulted is whether the enth-backed repositories were asked for at
+	// all; EnthUnreadable is set when they were and the question failed. Either
+	// way enth work is then outside this report, and the frame says so.
+	EnthConsulted  bool   `json:"enth_consulted"`
+	EnthUnreadable string `json:"enth_unreadable,omitempty"`
+	// EnthClosedItems counts items OUTSIDE the open set (done) that had
+	// unlanded enth work: the enth listing widens the join, and says by how
+	// much.
+	EnthClosedItems int `json:"enth_closed_items,omitempty"`
 	// Frame states this report's own boundary, in the report. See BuildFrame.
 	Frame []string `json:"frame"`
 }
@@ -1349,6 +1375,18 @@ type Options struct {
 	// are enumerable from disk and there were 46 of them on 2026-08-19, against
 	// 435 polecat branches in a single repository.
 	Worktrees func() ([]Worktree, error)
+
+	// Enth names the enth-backed repositories, by registered path, and how to
+	// list each one's unlanded Changes (mg-28cbc). Optional: nil means "not
+	// consulted", and every repository is then read as git. An enth repository
+	// enters the sweep whether or not an open item names it, because a DONE
+	// item's unlanded work is exactly what its listing exists to find.
+	Enth func() (map[string]EnthSource, error)
+
+	// ItemByID reads one work item the open set does not hold — the item an
+	// enth Change's Pogo-Item trailer names after it closed. Optional; without
+	// it such a Change is an unjudged row, never dropped.
+	ItemByID func(id string) (Item, error)
 
 	// Repos restricts the sweep to these repositories.
 	//
@@ -1469,6 +1507,29 @@ func Scan(opts Options) (Report, error) {
 		namedByItem[r] = true
 	}
 
+	// ENTH-BACKED REPOSITORIES (mg-28cbc) are a third source: their work is
+	// listed by trailer, so they enter the sweep whether or not an open item
+	// names them, and they are never listed as git.
+	enthSrc := map[string]EnthSource{}
+	rep.EnthConsulted = opts.Enth != nil
+	if opts.Enth != nil {
+		m, eerr := opts.Enth()
+		if eerr != nil {
+			rep.EnthUnreadable = eerr.Error()
+		}
+		for r, src := range m {
+			if len(only) > 0 && !only[r] {
+				continue
+			}
+			enthSrc[r] = src
+			addRepo(r)
+		}
+	}
+	openByID := map[string]Item{}
+	for _, it := range items {
+		openByID[it.ID] = it
+	}
+
 	// THE SECOND SOURCE OF REPOSITORIES (mg-ded2). Discovering repositories only
 	// from the open items' repo fields means a repository whose polecat work all
 	// belongs to CLOSED items produces no row at all — not in repos[], not as an
@@ -1531,6 +1592,34 @@ func Scan(opts Options) (Report, error) {
 		}
 		if !cov.NamedByOpenItem {
 			rep.ReposDiscovered++
+		}
+		if src, isEnth := enthSrc[repo]; isEnth {
+			cov.VCS = string(vcs.Enth)
+			if src.Unlanded == nil {
+				src.Unlanded = func() ([]vcs.Change, error) { return nil, fmt.Errorf("no listing configured") }
+			}
+			changes, lerr := src.Unlanded()
+			if lerr != nil {
+				// The git path's rule (mg-8baa): the failure crosses the item join.
+				cov.Error = lerr.Error()
+				rep.Repos = append(rep.Repos, cov)
+				for _, it := range byRepo[repo] {
+					rep.Rows = append(rep.Rows, Row{
+						Item: it, Kind: KindRepoUnreadable, Target: enthTarget(opts.Target, src),
+						Error: lerr.Error(), Enth: &EnthWork{Remote: src.Remote, Repo: src.Repo},
+					})
+				}
+				continue
+			}
+			es := scanEnthRepo(repo, src, changes, openByID, opts.ItemByID, live, queued, opts.Target)
+			cov.Fetched = true // enth reads are live: there is nothing to refresh
+			cov.EnthUnlanded, cov.EnthUntrailed = es.changes, es.untrailed
+			rep.ItemsChecked += len(byRepo[repo])
+			rep.EnthClosedItems += es.closedItems
+			rep.Repos = append(rep.Repos, cov)
+			rep.Rows = append(rep.Rows, es.rows...)
+			rep.Excluded = append(rep.Excluded, es.excluded...)
+			continue
 		}
 		if opts.Fetch {
 			if _, ferr := strandedwork.Fetch(repo); ferr == nil {
@@ -2084,6 +2173,30 @@ func BuildFrame(rep Report, opts Options) []string {
 				"request(s). A branch refused before that has been PRUNED and this report cannot see "+
 				"it; every row whose answer depends on that says so on its own line.",
 				floor, retention, rep.History.Records))
+	}
+	switch {
+	case !rep.EnthConsulted:
+		frame = append(frame, "Enth-backed repositories were NOT asked for on this run, so every "+
+			"repository was read as git and no enth work (found by its Pogo-Item trailer) is in this report.")
+	case rep.EnthUnreadable != "":
+		frame = append(frame, fmt.Sprintf("Enth-backed repositories COULD NOT BE LISTED (%s), so any "+
+			"repository that is enth-backed was read as git and its trailer-listed work is OUTSIDE this "+
+			"report.", rep.EnthUnreadable))
+	default:
+		n, untrailed := 0, 0
+		for _, c := range rep.Repos {
+			if c.VCS == string(vcs.Enth) {
+				n++
+				untrailed += c.EnthUntrailed
+			}
+		}
+		if n > 0 {
+			frame = append(frame, fmt.Sprintf("In %d enth-backed repo(s) the join is WIDER: every unlanded "+
+				"Change carrying a Pogo-Item trailer was listed, and %d item(s) already DONE were found "+
+				"holding unlanded work. %d unlanded Change(s) carry no Pogo-Item trailer and are matched to "+
+				"no item; a checkout based on one is reported in the worktree list.",
+				n, rep.EnthClosedItems, untrailed))
+		}
 	}
 	if len(opts.Repos) > 0 {
 		frame = append(frame,

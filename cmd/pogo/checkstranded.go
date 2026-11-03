@@ -263,6 +263,14 @@ readers to skip the line. An unreadable refinery queue is stated in the report
 rather than fatal — the queue being down is common and the rest of the answer is
 still worth having.
 
+ON AN ENTH-BACKED REPO THERE ARE NO BRANCHES (mg-28cbc). Work is the Changes
+carrying a Pogo-Item trailer, listed through enthd (` + "`enth changes --unlanded`" + `) and
+joined to each item's status. Unlanded work on an open item with no running worker
+is ` + "`stranded`" + `, and so is unlanded work on a DONE item: on enth no branch outlives
+the item, so this listing is the only place that work is visible. The remedy is
+` + "`pogo refinery submit --item=<id>`" + `. A landed Change has a land record and is not
+listed.
+
 REPORTS ONLY. It never submits and never closes. Both remedies are one command
 by hand once you know, and each is destructive in the wrong direction.
 
@@ -282,6 +290,8 @@ run measured nothing.`,
 				QueuedBranches: queuedRefineryBranches,
 				History:        refineryMergeHistory,
 				Worktrees:      polecatWorktrees,
+				Enth:           enthRepos,
+				ItemByID:       workItemByID,
 				Repos:          repos,
 				Target:         target,
 				Fetch:          !noFetch,
@@ -405,9 +415,15 @@ func queuedRefineryBranches() (map[string]strandwatch.QueuedRequest, error) {
 	}
 	out := make(map[string]strandwatch.QueuedRequest, len(queue))
 	for _, mr := range queue {
-		out[strandwatch.QueueKey(mr.RepoPath, mr.Branch)] = strandwatch.QueuedRequest{
+		q := strandwatch.QueuedRequest{
 			MR:     mr.ID,
 			Status: string(mr.Status),
+		}
+		out[strandwatch.QueueKey(mr.RepoPath, mr.Branch)] = q
+		if mr.Item != "" {
+			// An enth MR has no branch: it is submitted by its work item
+			// (mg-30da0), and the enth sweep looks it up that way (mg-28cbc).
+			out[strandwatch.ItemQueueKey(mr.RepoPath, mr.Item)] = q
 		}
 	}
 	return out, nil
@@ -598,7 +614,63 @@ func enthWorktree(path string) strandwatch.Worktree {
 	case err != nil:
 		wt.Error = fmt.Sprintf("enth checkout (base %s): could not ask %s whether its base is trailer-less stranded work: %v", base, b.Repo.Remote, err)
 	default:
-		wt.Error = fmt.Sprintf("enth checkout (base %s): no branch to measure — enth work is found by its %s trailer, and this sweep does not yet list enth items", base, vcs.TrailerItem)
+		wt.Error = fmt.Sprintf("enth checkout (base %s): no branch to measure — enth work is found by its %s trailer, and is judged in the repo's unlanded listing, not here", base, vcs.TrailerItem)
 	}
 	return wt
+}
+
+// enthProbe bounds one enth repository's unlanded listing.
+const enthProbe = 30 * time.Second
+
+// enthRepos names the enth-backed repositories pogod has records for, and
+// how to list each one's unlanded Changes (mg-28cbc): S2's candidate set on
+// enth is `enth changes --unlanded`, cross-referenced against item status.
+//
+// It asks pogod for the project records, because the record — not the
+// directory — is what makes a repository enth-backed (docs/design/enth-vcs.md
+// §2). A failure is returned and stated in the report's frame, never read as
+// "no enth repositories".
+func enthRepos() (map[string]strandwatch.EnthSource, error) {
+	projs, err := client.GetProjects()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]strandwatch.EnthSource{}
+	for _, p := range projs {
+		if p.Kind() != vcs.Enth || p.Enth == nil {
+			continue
+		}
+		b := enthvcs.Backend{Repo: *p.Enth}
+		out[p.Path] = strandwatch.EnthSource{
+			Remote: p.Enth.Remote, Repo: p.Enth.Repo, Trunk: p.Enth.Trunk,
+			Unlanded: func() ([]vcs.Change, error) {
+				ctx, cancel := context.WithTimeout(context.Background(), enthProbe)
+				defer cancel()
+				return b.ListChanges(ctx, "", "", true)
+			},
+		}
+	}
+	return out, nil
+}
+
+// workItemByID reads one work item by id through mg, for an enth Change whose
+// Pogo-Item trailer names an item outside the open set (a done one).
+func workItemByID(id string) (strandwatch.Item, error) {
+	raw, err := exec.Command("mg", "show", id, "--json").Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			msg := strings.TrimSpace(string(exitErr.Stderr))
+			if msg == "" {
+				msg = strings.TrimSpace(string(raw))
+			}
+			return strandwatch.Item{}, fmt.Errorf("mg show %s: %s", id, msg)
+		}
+		return strandwatch.Item{}, fmt.Errorf("mg show %s: %w", id, err)
+	}
+	var it strandwatch.Item
+	if err := json.Unmarshal(raw, &it); err != nil {
+		return strandwatch.Item{}, fmt.Errorf("parsing mg show %s: %w", id, err)
+	}
+	return it, nil
 }

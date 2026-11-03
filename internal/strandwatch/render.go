@@ -35,8 +35,22 @@ func Render(rep Report, all bool) string {
 		if c.Fetched {
 			fetched = "refs refreshed from origin"
 		}
+		if c.Error != "" && c.VCS == "enth" {
+			fmt.Fprintf(&b, "    %s — enth: COULD NOT LIST UNLANDED CHANGES: %s\n", c.Repo, c.Error)
+			continue
+		}
 		if c.Error != "" {
 			fmt.Fprintf(&b, "    %s — COULD NOT LIST BRANCHES: %s\n", c.Repo, c.Error)
+			continue
+		}
+		if c.VCS == "enth" {
+			named := ""
+			if !c.NamedByOpenItem {
+				named = " — no open item names this repo; it is here because it is enth-backed"
+			}
+			fmt.Fprintf(&b, "    %s — enth: %d item(s), %d unlanded Change(s) listed by trailer "+
+				"(%d with NO %s trailer), %d worktree(s)%s\n",
+				c.Repo, c.Items, c.EnthUnlanded, c.EnthUntrailed, "Pogo-Item", c.Worktrees, named)
 			continue
 		}
 		discovered := ""
@@ -179,6 +193,10 @@ func Render(rep Report, all bool) string {
 			continue
 		}
 		fmt.Fprintf(&b, "    %s\n", truncate(r.Item.Title, 96))
+		if r.Enth != nil {
+			enthRowLines(&b, r)
+			continue
+		}
 		if r.Kind == KindUnjudged {
 			fmt.Fprintf(&b, "    branch %s COULD NOT BE READ: %s\n", r.Branch, r.Error)
 			b.WriteString("    This is NOT a clean row. The branch was neither judged stranded nor judged\n" +
@@ -512,4 +530,32 @@ func wrap(s string, width int) []string {
 		cur += " " + w
 	}
 	return append(lines, cur)
+}
+
+// enthRowLines prints a row whose work is enth Changes found by trailer.
+func enthRowLines(b *strings.Builder, r Row) {
+	w := r.Enth
+	switch r.Kind {
+	case KindRepoUnreadable:
+		fmt.Fprintf(b, "    enth repo %s at %s COULD NOT BE LISTED: %s\n", w.Repo, w.Remote, r.Error)
+		b.WriteString("    NO WORK WAS LOOKED FOR on this item. It is unchecked, not clean.\n")
+	case KindUnjudged:
+		fmt.Fprintf(b, "    %d unlanded enth Change(s) in %s, NOT JUDGED: %s\n", len(w.Changes), w.Repo, r.Error)
+	default:
+		fmt.Fprintf(b, "    %d unlanded enth Change(s) in %s carry Pogo-Item=%s; %d stack(s) vs %s\n",
+			len(w.Changes), w.Repo, r.Item.ID, w.Stacks, r.Target)
+		for _, id := range w.Changes {
+			fmt.Fprintf(b, "      %s\n", id)
+		}
+		if len(w.Workers) > 0 {
+			fmt.Fprintf(b, "    worker(s): %s\n", strings.Join(w.Workers, ", "))
+		}
+		if strings.EqualFold(r.Item.Status, "done") {
+			b.WriteString("    The item is DONE and no land record names this work: it closed without it.\n")
+		}
+		if r.Kind == KindInFlight {
+			fmt.Fprintf(b, "    It is IN THE REFINERY QUEUE as %s (%s).\n", r.queuedMR(), r.queuedStatus())
+		}
+	}
+	fmt.Fprintf(b, "    -> %s\n", r.Remedy())
 }
