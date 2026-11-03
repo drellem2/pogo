@@ -554,7 +554,9 @@ var protectionSignals = []string{
 // terminal. A lock failure is the one case where the flag can carry a genuine
 // race — two pushes updating the same ref at once — and the others are the
 // remote failing to STORE the push, not deciding against it. They are matched
-// against the parenthesised reason on the same line as the flag.
+// against the parenthesised reason on the same line as the flag, and ONLY that:
+// a refname containing "lock" (feature/clock-skew) must not turn a rule decline
+// back into contention.
 var transientRemoteRejections = []string{
 	"lock",
 	"unpacker error",
@@ -581,19 +583,41 @@ func matchProtection(hay string) string {
 			if i < 0 {
 				continue
 			}
-			transient := false
-			for _, t := range transientRemoteRejections {
-				if strings.Contains(line[i:], t) {
-					transient = true
-					break
-				}
-			}
-			if !transient {
+			// The REASON only: the text inside the last parenthesised group on
+			// the flag line. Matching the whole line would let a refname such as
+			// feature/clock-skew make a rule decline look like a lock race.
+			if !isTransientRejection(rejectionReason(line[i+len(pat):])) {
 				return pat
 			}
 		}
 	}
 	return ""
+}
+
+// rejectionReason returns the text inside the LAST "(...)" group of a
+// "[remote rejected]" line's remainder — git's reason for the refusal — or ""
+// when the line carries none. Refnames precede it and are not part of it.
+func rejectionReason(rest string) string {
+	open := strings.LastIndex(rest, "(")
+	if open < 0 {
+		return ""
+	}
+	reason := rest[open+1:]
+	if end := strings.LastIndex(reason, ")"); end >= 0 {
+		reason = reason[:end]
+	}
+	return reason
+}
+
+// isTransientRejection answers whether a "[remote rejected]" reason is a lock or
+// store failure rather than a rule (see transientRemoteRejections).
+func isTransientRejection(reason string) bool {
+	for _, t := range transientRemoteRejections {
+		if strings.Contains(reason, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // refusedRef names the ref a protection refusal was about, read from the
@@ -900,14 +924,16 @@ func classifyFailure(stage string, raw string, err error) disposition {
 		}
 	}
 
-	// A push the remote refused BY RULE (drellem2/pogo#164). Judged before the
+	// A push the remote refused BY RULE (drellem2/pogo#164). Only at the push
+	// stage: the refusal is the remote's answer to a ref update, and no other
+	// step makes one. Judged before the
 	// isRetryable arm below because the post-gate git steps wrap EVERY
 	// non-credential failure in retryableError: without this, a GH013 refusal
 	// reached that arm and was recorded as contention with a race it never
 	// observed. After the network table, so a hook whose own output reports a
 	// network failure is retried as one rather than made terminal; after the
 	// conflict table, which never co-occurs with push output anyway.
-	if pat := matchProtection(hay); pat != "" {
+	if pat := matchProtection(hay); stage == "push" && pat != "" {
 		ref := refusedRef(raw)
 		if ref == "" && err != nil {
 			ref = refusedRef(err.Error())
