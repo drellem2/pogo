@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/ghpr"
 )
 
 // drellem2/pogo#147 (mg-dbb75): the stranded-push alert fired on every PR-track
@@ -158,7 +160,7 @@ func TestFoldedWorkIsNeverSubmittedUnderTheContainer(t *testing.T) {
 	// The container IS the right thing to ask GitHub about: if its PR is open,
 	// this work is tracked by it.
 	var asked string
-	f.CheckOpenPR(r.dir, func(_, b string) (int, error) { asked = b; return 0, nil })
+	f.CheckOpenPR(r.dir, func(_, b string) (ghpr.Answer, error) { asked = b; return ghpr.Answer{}, nil })
 	if asked != "polecat-p88bb" {
 		t.Errorf("PR probe asked about %q, want the container polecat-p88bb", asked)
 	}
@@ -211,9 +213,9 @@ func pushedStranded(t *testing.T) (*repo, Finding) {
 func TestCheckOpenPRMarksAwaitingReview(t *testing.T) {
 	r, f := pushedStranded(t)
 	var asked string
-	f.CheckOpenPR(r.dir, func(dir, branch string) (int, error) {
+	f.CheckOpenPR(r.dir, func(dir, branch string) (ghpr.Answer, error) {
 		asked = branch
-		return 146, nil
+		return ghpr.Answer{Number: 146, State: "OPEN"}, nil
 	})
 	if asked != "polecat-pa95f" {
 		t.Errorf("probe asked about %q, want polecat-pa95f", asked)
@@ -244,7 +246,10 @@ func TestCheckOpenPRAsksAboutTheOriginName(t *testing.T) {
 		t.Fatalf("Inspect: %v", err)
 	}
 	var asked string
-	f.CheckOpenPR(r.dir, func(_, branch string) (int, error) { asked = branch; return 30, nil })
+	f.CheckOpenPR(r.dir, func(_, branch string) (ghpr.Answer, error) {
+		asked = branch
+		return ghpr.Answer{Number: 30, State: "OPEN"}, nil
+	})
 	if asked != "cms-hotfix-no-presave" || f.Disposition != DispositionAwaitingReview {
 		t.Errorf("asked %q, disposition %q; want cms-hotfix-no-presave and awaiting_review", asked, f.Disposition)
 	}
@@ -252,7 +257,7 @@ func TestCheckOpenPRAsksAboutTheOriginName(t *testing.T) {
 
 func TestCheckOpenPRNoPRStaysStranded(t *testing.T) {
 	r, f := pushedStranded(t)
-	f.CheckOpenPR(r.dir, func(string, string) (int, error) { return 0, nil })
+	f.CheckOpenPR(r.dir, func(string, string) (ghpr.Answer, error) { return ghpr.Answer{}, nil })
 	if f.Disposition != DispositionResubmit || !f.Stranded() || f.PRProbeError != "" {
 		t.Errorf("no PR: disposition=%q probe_error=%q, want resubmit and no error", f.Disposition, f.PRProbeError)
 	}
@@ -264,8 +269,8 @@ func TestCheckOpenPRNoPRStaysStranded(t *testing.T) {
 // detector goes silently blind during every network incident. See CheckOpenPR.
 func TestCheckOpenPRProbeFailureKeepsTheAlert(t *testing.T) {
 	r, f := pushedStranded(t)
-	f.CheckOpenPR(r.dir, func(string, string) (int, error) {
-		return 0, errors.New("gh pr view polecat-pa95f: could not resolve host github.com")
+	f.CheckOpenPR(r.dir, func(string, string) (ghpr.Answer, error) {
+		return ghpr.Answer{}, errors.New("gh pr view polecat-pa95f: could not resolve host github.com")
 	})
 	if f.Disposition != DispositionResubmit || !f.Stranded() {
 		t.Fatalf("a failed PR probe changed the verdict to %q — it must alert, never suppress", f.Disposition)
@@ -304,7 +309,10 @@ func TestGitHubOpenPRFailureKeepsTheAlert(t *testing.T) {
 // suppression, and a local-only branch has no origin name to ask about.
 func TestCheckOpenPRLeavesOtherDispositionsAlone(t *testing.T) {
 	called := false
-	probe := func(string, string) (int, error) { called = true; return 1, nil }
+	probe := func(string, string) (ghpr.Answer, error) {
+		called = true
+		return ghpr.Answer{Number: 1, State: "OPEN"}, nil
+	}
 
 	r := newRepo(t)
 	r.branch("polecat-paaf6", "main")
@@ -344,4 +352,63 @@ func fakeGH(t *testing.T, script string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestCheckOpenPRRecordsTheAnswer: a probe that answers "none" leaves the alert
+// standing AND says what it asked and of which repository, so "asked pr-218,
+// GitHub said none" is read off the finding instead of inferred from an absent
+// error (drellem2/pogo#259).
+func TestCheckOpenPRRecordsTheAnswer(t *testing.T) {
+	r, f := pushedStranded(t)
+	f.CheckOpenPR(r.dir, func(string, string) (ghpr.Answer, error) {
+		return ghpr.Answer{Repo: "drellem2/pogo"}, nil
+	})
+	if f.Disposition != DispositionResubmit || f.PRProbeError != "" {
+		t.Fatalf("no PR: disposition=%q probe_error=%q, want resubmit and no error", f.Disposition, f.PRProbeError)
+	}
+	if f.PRProbeBranch != "polecat-pa95f" || f.PRProbeResult != "none repo:drellem2/pogo" {
+		t.Errorf("recorded branch=%q result=%q, want polecat-pa95f / \"none repo:drellem2/pogo\"", f.PRProbeBranch, f.PRProbeResult)
+	}
+
+	// A PR that exists but is not open is a different answer from no PR.
+	_, f = pushedStranded(t)
+	f.CheckOpenPR(r.dir, func(string, string) (ghpr.Answer, error) {
+		return ghpr.Answer{Number: 12, State: "MERGED", Unpinned: "origin host \"ghe\" is not github.com"}, nil
+	})
+	if f.Disposition != DispositionResubmit {
+		t.Fatalf("merged PR suppressed the alert: %q", f.Disposition)
+	}
+	if want := `not_open:MERGED repo:unpinned (origin host "ghe" is not github.com)`; f.PRProbeResult != want {
+		t.Errorf("result = %q, want %q", f.PRProbeResult, want)
+	}
+
+	// A failure records the branch too, and says "error" rather than "none".
+	_, f = pushedStranded(t)
+	f.CheckOpenPR(r.dir, func(string, string) (ghpr.Answer, error) {
+		return ghpr.Answer{Repo: "drellem2/pogo"}, errors.New("rate limited")
+	})
+	if f.Disposition != DispositionResubmit || f.PRProbeBranch != "polecat-pa95f" || f.PRProbeResult != "error repo:drellem2/pogo" {
+		t.Errorf("failure: disposition=%q branch=%q result=%q", f.Disposition, f.PRProbeBranch, f.PRProbeResult)
+	}
+}
+
+// TestGitHubOpenPRRecordsWhichRepoItAsked runs the production probe against a
+// fixture whose origin is a local path (unpinnable — today's call, and the
+// reason says so) and then against a github.com origin with an upstream beside
+// it (pinned to origin, not upstream).
+func TestGitHubOpenPRRecordsWhichRepoItAsked(t *testing.T) {
+	r, f := pushedStranded(t)
+	fakeGH(t, `echo 'no pull requests found for branch "polecat-pa95f"' >&2; exit 1`)
+	f.CheckOpenPR(r.dir, GitHubOpenPR)
+	if f.Disposition != DispositionResubmit || !strings.HasPrefix(f.PRProbeResult, "none repo:unpinned (") {
+		t.Errorf("local-path origin: disposition=%q result=%q, want resubmit and an unpinned none", f.Disposition, f.PRProbeResult)
+	}
+
+	r, f = pushedStranded(t)
+	r.git("remote", "set-url", "origin", "git@github.com:fork-owner/pogo.git")
+	r.git("remote", "add", "upstream", "https://github.com/drellem2/pogo.git")
+	f.CheckOpenPR(r.dir, GitHubOpenPR)
+	if f.PRProbeResult != "none repo:fork-owner/pogo" {
+		t.Errorf("github origin + upstream: result = %q, want \"none repo:fork-owner/pogo\"", f.PRProbeResult)
+	}
 }

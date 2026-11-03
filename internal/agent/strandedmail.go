@@ -359,6 +359,15 @@ func (a StrandedAlert) Message() (subject, body string) {
 		// it fails on purpose (strandedwork.Finding.CheckOpenPR). If this branch
 		// is a PR awaiting review, that is the first thing to rule out.
 		fmt.Fprintf(&b, "PR check:   could not ask GitHub whether this is an open PR (%s) — reported anyway\n", e)
+		if r := a.Finding.PRProbeResult; r != "" {
+			fmt.Fprintf(&b, "            asked about %s: %s\n", a.Finding.PRProbeBranch, r)
+		}
+	} else if a.Finding.PRProbeBranch != "" {
+		// What GitHub was asked and what it said (drellem2/pogo#259). An alert
+		// that went out because the probe answered "none" has to say which name
+		// and which repository got that answer, or a reader who can see the open
+		// PR has nothing to compare against.
+		fmt.Fprintf(&b, "PR check:   asked GitHub about %s: %s\n", a.Finding.PRProbeBranch, a.Finding.PRProbeResult)
 	}
 	fmt.Fprintf(&b, "Target:     %s\n", a.Finding.Target)
 	fmt.Fprintf(&b, "Unmerged:   %d commit(s)", len(a.Finding.Unmerged))

@@ -428,6 +428,14 @@ type Finding struct {
 	// then stays what it was — the finding is REPORTED — for the reason given on
 	// CheckOpenPR.
 	PRProbeError string `json:"pr_probe_error,omitempty"`
+	// PRProbeBranch is the branch name CheckOpenPR asked GitHub about, and
+	// PRProbeResult what came back: "open:#N", "not_open:<STATE>", "none" or
+	// "error", followed by the repository it was asked of ("repo:OWNER/REPO",
+	// or "repo:unpinned (<why>)" when gh chose). Both are set whenever the probe
+	// ran, so an alert that went out on "GitHub said no PR" says so instead of
+	// leaving it to be inferred from an absent error (drellem2/pogo#259).
+	PRProbeBranch string `json:"pr_probe_branch,omitempty"`
+	PRProbeResult string `json:"pr_probe_result,omitempty"`
 
 	// WorkItemID is the id recovered from the unmerged commit subjects, when one
 	// is present (commit convention: a trailing "(mg-xxxx)"). Best-effort: it is
@@ -894,16 +902,16 @@ func onOrigin(repo, head string) (ref string, exact bool, err error) {
 // out is a failed probe, and a failed probe keeps the alert.
 const PRProbeTimeout = 15 * time.Second
 
-// PRProbe reports the number of the open pull request whose head is branch in
-// the GitHub repository dir's origin points at: >0 for an open PR, 0 for none
-// (or one that is not open), and an error when the question could not be
-// answered.
-type PRProbe func(dir, branch string) (int, error)
+// PRProbe reports the pull request whose head is branch in the GitHub
+// repository dir's origin points at, and which repository it asked. Only an
+// Answer whose State is OPEN suppresses; an error means the question could not
+// be answered.
+type PRProbe func(dir, branch string) (ghpr.Answer, error)
 
-// GitHubOpenPR is the production PRProbe: `gh pr view`, through the same
-// helper the refinery uses to find a branch's PR (internal/ghpr).
-func GitHubOpenPR(dir, branch string) (int, error) {
-	return ghpr.OpenNumber(dir, branch, PRProbeTimeout)
+// GitHubOpenPR is the production PRProbe: `gh pr view -R <origin>`, through
+// the same helper the refinery uses to find a branch's PR (internal/ghpr).
+func GitHubOpenPR(dir, branch string) (ghpr.Answer, error) {
+	return ghpr.Ask(dir, branch, PRProbeTimeout)
 }
 
 // CheckOpenPR reclassifies a DispositionResubmit finding as
@@ -936,13 +944,22 @@ func (f *Finding) CheckOpenPR(dir string, probe PRProbe) {
 	if branch == "" {
 		return
 	}
-	num, err := probe(dir, branch)
+	ans, err := probe(dir, branch)
+	f.PRProbeBranch = branch
+	outcome := ans.Outcome()
 	if err != nil {
 		f.PRProbeError = err.Error()
+		outcome = "error"
+	}
+	f.PRProbeResult = outcome
+	if note := ans.RepoNote(); note != "" {
+		f.PRProbeResult += " " + note
+	}
+	if err != nil {
 		return
 	}
-	if num > 0 {
-		f.PR, f.PRBranch, f.Disposition = num, branch, DispositionAwaitingReview
+	if ans.Number > 0 && strings.EqualFold(ans.State, "OPEN") {
+		f.PR, f.PRBranch, f.Disposition = ans.Number, branch, DispositionAwaitingReview
 	}
 }
 

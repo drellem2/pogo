@@ -490,10 +490,12 @@ func awaitingReviewDetails(f strandedwork.Finding, reason, route string) map[str
 
 // addOriginDetails puts the two probes that can only ever REMOVE part of an
 // alert on its payload when they ran and are worth knowing: where on origin the
-// work was found, and that the open-PR check could not answer. The second is
-// the one that matters — an alert that went out because GitHub was unreachable
-// has to be tellable from one that went out because there was no PR, or the
-// fail-toward-alert direction (strandedwork.Finding.CheckOpenPR) is invisible.
+// work was found, and what the open-PR check asked and was told, or that it
+// could not answer. The second is the one that matters: an alert that went out
+// because GitHub was unreachable has to be tellable from one that went out
+// because there was no PR (and that one has to say WHICH name and repository
+// got "no PR", drellem2/pogo#259), or the fail-toward-alert direction
+// (strandedwork.Finding.CheckOpenPR) is invisible.
 func addOriginDetails(details map[string]any, f strandedwork.Finding) {
 	if f.OriginRef != "" && f.OriginRef != f.Ref {
 		details["origin_ref"] = f.OriginRef
@@ -503,6 +505,15 @@ func addOriginDetails(details map[string]any, f strandedwork.Finding) {
 	}
 	if f.PRProbeError != "" {
 		details["pr_probe_error"] = f.PRProbeError
+	}
+	// The probe's ANSWER, not only its failure (drellem2/pogo#259): which name
+	// was asked, of which repository, and what came back. Without it "asked
+	// pr-218, GitHub said none" can only be inferred from an absent error.
+	if f.PRProbeBranch != "" {
+		details["pr_probe_branch"] = f.PRProbeBranch
+	}
+	if f.PRProbeResult != "" {
+		details["pr_probe_result"] = f.PRProbeResult
 	}
 }
 
