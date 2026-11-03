@@ -1920,12 +1920,13 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	var adoption *strandedAdoption
 	var findings []strandedwork.Finding
 	var strandedRefusal string
+	var inReview []strandedwork.Finding
 	var enthUnchecked *EnthStranded
 	enthGate := enthRepoFor(spawnReq.Repo)
 	if enthGate != nil {
 		strandedRefusal, enthUnchecked = r.enthStrandedCheck(*enthGate, spawnReq.Id, spawnReq.Name, spawnReq.Repo)
 	} else {
-		findings, strandedRefusal = r.strandedWorkCheck(spawnReq.Id, spawnReq.Repo, spawnReq.Branch)
+		findings, strandedRefusal, inReview = r.strandedWorkCheck(spawnReq.Id, spawnReq.Repo, spawnReq.Branch)
 	}
 	if refusal := strandedRefusal; refusal != "" {
 		override := strings.TrimSpace(spawnReq.StrandedOverride)
@@ -1967,6 +1968,32 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
 			return
 		}
+	} else if adopt := strings.TrimSpace(spawnReq.StrandedAdopt); adopt != "" && len(inReview) > 0 {
+		// Nothing refused, because the item's only unmerged branches are the
+		// heads of open PRs (drellem2/pogo#163) — but the operator asked to
+		// CONTINUE one, and the adopt flag is honoured, never dropped (mg-64751
+		// review round 1). Dropping it here would base the worktree on the
+		// target under a flag whose name says it adopted, which is the outcome
+		// unadoptableStranded exists to refuse. The same three exits as above.
+		f, ok := adoptableFinding(inReview)
+		switch {
+		case strings.TrimSpace(spawnReq.StrandedOverride) != "":
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, conflictingStrandedExits+".\n\n"+
+				inReviewAdoptNote(spawnReq.Id, inReview[0]))
+			return
+		case !ok:
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, unadoptableStranded(spawnReq.Id, inReview))
+			return
+		}
+		adoption = &strandedAdoption{
+			Finding: f,
+			Reason:  adopt,
+			Refusal: inReviewAdoptNote(spawnReq.Id, f),
+			Others:  otherBranches(inReview, f),
+		}
+		log.Printf("dispatch stranded-work: ADOPTING %s for %s by explicit request: %s — it is the head of "+
+			"open PR #%d and refused nothing, but the worktree will be based on %s, not on the target",
+			f.Branch, spawnReq.Id, adopt, f.PR, f.Ref)
 	}
 
 	// Preserved-worktree gate: refuse to put a worker on an item whose work is

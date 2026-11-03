@@ -342,7 +342,7 @@ func TestDispatchStillRefusedForTheBranchWithoutAPR(t *testing.T) {
 		return ghpr.Answer{}, nil
 	})
 
-	findings, refusal := newDrainTestRegistry(t).strandedWorkCheck("mg-a95f", repo, "main")
+	findings, refusal, inReview := newDrainTestRegistry(t).strandedWorkCheck("mg-a95f", repo, "main")
 	if refusal == "" {
 		t.Fatal("an item with one branch in review and one stranded dispatched")
 	}
@@ -351,6 +351,70 @@ func TestDispatchStillRefusedForTheBranchWithoutAPR(t *testing.T) {
 	}
 	if !strings.Contains(refusal, "polecat-xa95f") {
 		t.Errorf("refusal does not name the stranded branch: %s", refusal)
+	}
+	if len(inReview) != 1 || inReview[0].Branch != "polecat-pa95f" || inReview[0].PR != 146 {
+		t.Errorf("inReview = %+v, want polecat-pa95f as the head of PR #146", inReview)
+	}
+}
+
+// TestStrandedAdoptContinuesABranchThatIsAnOpenPR is mg-64751 review round 1's
+// blocking finding pinned: an item whose only unmerged branch is the head of an
+// open PR refuses nothing, and an explicit --stranded-adopt must STILL base the
+// worktree on that branch — the likeliest adopt of all is continuing a PR whose
+// builder was stopped mid-review. Before the fix the flag was never consulted
+// and the worker started from the target under a flag that said it adopted.
+func TestStrandedAdoptContinuesABranchThatIsAnOpenPR(t *testing.T) {
+	logPath := useTempEventLog(t)
+	repo := strandedRepo(t)
+	sha := pushBranch(t, repo, "polecat-9a19", "audit.md", "feat(audit): finished, PR open (mg-9a19)")
+	stubPRProbe(t, func(_, branch string) (ghpr.Answer, error) {
+		if branch == "polecat-9a19" {
+			return ghpr.Answer{Number: 146, State: "OPEN"}, nil
+		}
+		return ghpr.Answer{}, nil
+	})
+
+	reg := adoptRegistry(t)
+	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "q9a19", Id: "mg-9a19", Repo: repo, Branch: "main", Template: adoptTemplate(t),
+		StrandedAdopt: "the builder was stopped mid-review; continue PR #146",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("--stranded-adopt onto an open PR's branch: status = %d, want 201: %s", rr.Code, rr.Body.String())
+	}
+	if !carriesCommit(t, repo, "polecat-q9a19", sha) {
+		t.Fatalf("the adopting worker's branch does NOT carry %s: --stranded-adopt was dropped and the "+
+			"worktree was based on the target", sha[:12])
+	}
+	ev := findEvent(readEventLines(t, logPath), "dispatch_stranded_work_adopted", "cat-q9a19")
+	if ev == nil {
+		t.Fatal("the adoption left no dispatch_stranded_work_adopted event")
+	}
+	details, _ := ev["details"].(map[string]any)
+	if got, _ := details["adopted_branch"].(string); got != "polecat-9a19" {
+		t.Errorf("adopted_branch = %q, want polecat-9a19", got)
+	}
+	if got, _ := details["refusal"].(string); !strings.Contains(got, "open PR #146") {
+		t.Errorf("the record does not say the adopted branch was an open PR: %q", got)
+	}
+}
+
+// TestStrandedAdoptAndOverrideOnAnOpenPRAreRefused: the two exits stay
+// mutually exclusive when it is the in-review branch they are about.
+func TestStrandedAdoptAndOverrideOnAnOpenPRAreRefused(t *testing.T) {
+	repo := strandedRepo(t)
+	pushBranch(t, repo, "polecat-9a19", "audit.md", "feat(audit): finished, PR open (mg-9a19)")
+	stubPRProbe(t, func(string, string) (ghpr.Answer, error) { return ghpr.Answer{Number: 146, State: "OPEN"}, nil })
+
+	rr := spawnPolecat(t, adoptRegistry(t), SpawnPolecatAPIRequest{
+		Name: "v9a19", Id: "mg-9a19", Repo: repo, Branch: "main", Template: adoptTemplate(t),
+		StrandedAdopt: "continue it", StrandedOverride: "start over",
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("adopt + override onto an open PR's branch: status = %d, want 409: %s", rr.Code, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "OPPOSITE") {
+		t.Errorf("refusal does not explain the conflict: %s", body)
 	}
 }
 
@@ -366,5 +430,31 @@ func TestDispatchStillRefusedForAPreRegistrationBranchWithAnOpenPR(t *testing.T)
 	refusal := newDrainTestRegistry(t).strandedWorkRefusal("mg-f3ff", repo, "main")
 	if !strings.Contains(refusal, "PRE-REGISTRATION") {
 		t.Fatalf("an open PR passed a pre-registration branch's dispatch; refusal = %q", refusal)
+	}
+}
+
+// TestDispatchRefusalNamesEveryFailedPRProbe: the refusal leads with one
+// branch, but a probe that failed on ANOTHER kept branch is still said — that
+// branch could be the open PR the gate could not see (mg-64751 review round 1).
+func TestDispatchRefusalNamesEveryFailedPRProbe(t *testing.T) {
+	repo := strandedRepo(t)
+	pushBranch(t, repo, "polecat-pa95f", "f.md", "feat: built (mg-a95f)")
+	pushBranch(t, repo, "polecat-xa95f", "g.md", "feat: a sibling's attempt (mg-a95f)")
+	stubPRProbe(t, func(_, branch string) (ghpr.Answer, error) {
+		if branch == "polecat-xa95f" {
+			return ghpr.Answer{}, errors.New("could not resolve host: api.github.com")
+		}
+		return ghpr.Answer{Repo: "drellem2/pogo"}, nil
+	})
+
+	findings, refusal, _ := newDrainTestRegistry(t).strandedWorkCheck("mg-a95f", repo, "main")
+	if len(findings) != 2 {
+		t.Fatalf("findings = %+v, want both branches", findings)
+	}
+	if !strings.Contains(refusal, "could not ask GitHub about polecat-xa95f (could not resolve host") {
+		t.Errorf("the refusal does not name the failed probe on the second branch: %s", refusal)
+	}
+	if strings.Contains(refusal, "about polecat-pa95f") {
+		t.Errorf("a probe that answered is worded as failed: %s", refusal)
 	}
 }
