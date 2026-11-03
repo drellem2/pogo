@@ -62,7 +62,7 @@ func (b Backend) Exclude(ctx context.Context, dir, group, relPath string) error 
 func (b Backend) Refresh(ctx context.Context, dir string) vcs.RefreshResult {
 	return vcs.RefreshResult{Path: dir, Status: vcs.RefreshFailed, Behind: -1, Ahead: -1, Detail: b.unsupported("refresh").Error()}
 }
-func (b Backend) Remove(ctx context.Context, dir string) error {
+func (b Backend) Remove(ctx context.Context, repo vcs.Repo, dir string) error {
 	return b.unsupported("remove workspace")
 }
 func (b Backend) Dirty(ctx context.Context, dir string) ([]string, error) {
@@ -70,6 +70,9 @@ func (b Backend) Dirty(ctx context.Context, dir string) ([]string, error) {
 }
 func (b Backend) Describe(ctx context.Context, dir string) (vcs.Workspace, error) {
 	return vcs.Workspace{}, b.unsupported("describe workspace")
+}
+func (b Backend) Root(ctx context.Context, dir string) (string, error) {
+	return "", b.unsupported("workspace root")
 }
 
 // Work
@@ -88,6 +91,9 @@ func (b Backend) Diff(ctx context.Context, repo vcs.Repo, s vcs.Submission) (vcs
 }
 func (b Backend) Cat(ctx context.Context, repo vcs.Repo, rev, path string) ([]byte, error) {
 	return nil, b.unsupported("cat")
+}
+func (b Backend) Fetch(ctx context.Context, repo vcs.Repo) error {
+	return b.unsupported("fetch")
 }
 
 // Lander

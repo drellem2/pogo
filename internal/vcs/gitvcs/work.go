@@ -2,8 +2,11 @@ package gitvcs
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"strings"
 
+	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/vcs"
 )
 
@@ -169,4 +172,22 @@ func (w Work) Cat(ctx context.Context, repo vcs.Repo, rev, path string) ([]byte,
 		return nil, err
 	}
 	return []byte(out), nil
+}
+
+// Fetch runs `git -C <repo> fetch --quiet origin` under ctx, with the GH_TOKEN
+// child environment an https github.com remote authenticates through
+// (ghtoken.ChildEnvContext). A failure is a *vcs.CommandError carrying git's
+// combined output, untrimmed. It is moved from internal/strandedwork's Fetch
+// (mg-afad2), which bounds ctx and words the error.
+//
+// Fetch does not go through Work.Run: it was never under gitgc's budget, and
+// it needs ctx and the credential environment, which RunFunc cannot carry.
+func (Work) Fetch(ctx context.Context, repo vcs.Repo) error {
+	args := []string{"-C", repo.Path, "fetch", "--quiet", "origin"}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = ghtoken.ChildEnvContext(ctx, os.Environ())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return &vcs.CommandError{Args: args, Output: out, Err: err}
+	}
+	return nil
 }

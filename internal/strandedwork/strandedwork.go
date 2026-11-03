@@ -62,15 +62,13 @@ package strandedwork
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/drellem2/pogo/internal/ghpr"
-	"github.com/drellem2/pogo/internal/ghtoken"
 	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/vcs/gitvcs"
 )
@@ -971,10 +969,12 @@ const FetchTimeout = 20 * time.Second
 func Fetch(repo string) (fresh bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), FetchTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", repo, "fetch", "--quiet", "origin")
-	cmd.Env = ghtoken.ChildEnvContext(ctx, os.Environ())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
+	if err := work.Fetch(ctx, vcs.Repo{Path: repo}); err != nil {
+		var out []byte
+		var ce *vcs.CommandError
+		if errors.As(err, &ce) {
+			out, err = ce.Output, ce.Err
+		}
 		return false, fmt.Errorf("fetch origin in %s: %s: %w", repo, strings.TrimSpace(string(out)), err)
 	}
 	return true, nil

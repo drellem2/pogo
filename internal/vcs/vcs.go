@@ -17,9 +17,7 @@
 // Workspaces has its signatures fixed and a git implementation
 // (gitvcs.Workspaces), called by internal/agent's polecat spawn, its rollback
 // and leftover-branch reclaim, the injected-persona exclude, and the crew
-// workspace refresh. Remove, Dirty and Describe are still placeholders
-// (gitvcs/workspaces_pending.go): slice 3 did not take them, so gitgc's
-// worktree removal and dirty check still run git through gitvcs's runners.
+// workspace refresh.
 //
 // # Slice 3 (mg-d72cb)
 //
@@ -33,6 +31,14 @@
 // `vcs` key, absent meaning git, and for enth an `enth` object (EnthRepo).
 // Selecting enth today gives internal/vcs/enthvcs, which answers
 // ErrUnsupported to everything until slices 5-7.
+//
+// # Slice 3b (mg-afad2)
+//
+// Workspaces.Remove, Dirty, Describe and Root, and Work.Fetch, have git
+// implementations. gitgc removes worktrees and judges them dirty through
+// them, `pogo check-stranded` names a polecat worktree's repo and branch with
+// Describe, `pogo worktree-dirty` resolves its root with Root, and
+// strandedwork refreshes remote refs with Fetch.
 package vcs
 
 import (
@@ -144,9 +150,9 @@ type Workspace struct {
 // Workspaces: W2–W9, P1, C1, C3, C5, C6, S10, X2, X4, O1, O3.
 //
 // Slice 2 (mg-cc7ae) fixed the signatures of what the polecat spawn path, the
-// injected-persona exclude and the crew workspace refresh use. Remove, Dirty
-// and Describe are slice 3's (gitgc, worktree-dirty) and are still the
-// sketches slice 1 declared.
+// injected-persona exclude and the crew workspace refresh use. Slice 3b
+// (mg-afad2) fixed Remove, Dirty, Describe and Root, for gitgc,
+// check-stranded and worktree-dirty.
 //
 // The methods taking ctx do not all honour it: the git backend reproduces
 // what pogo did before the seam existed, and only the base-resolution fetch
@@ -186,10 +192,23 @@ type Workspaces interface {
 	// RefreshResult, never an error, because its caller must not fail on it.
 	Refresh(ctx context.Context, dir string) RefreshResult
 
-	// Slice 3's, still sketches.
-	Remove(ctx context.Context, dir string) error
+	// Remove deletes the workspace at dir, which was cut from repo (C6, C3).
+	// It takes repo for the reason Rollback does: git removes a linked
+	// worktree through the repository that registered it. A failure is a
+	// *CommandError; whether it is fatal is the caller's call.
+	Remove(ctx context.Context, repo Repo, dir string) error
+	// Dirty lists dir's uncommitted entries, excluding the files pogod itself
+	// writes into every agent's tree (P1, R15). Empty means clean. A non-nil
+	// error means dirtiness could not be determined, never that it is clean.
 	Dirty(ctx context.Context, dir string) ([]string, error)
+	// Describe names the repo dir belongs to and the branch it has checked
+	// out, read from the tree itself (W9, S10, X4, C5). Branch is empty when
+	// there is none (git: a detached HEAD). A tree that answers but whose repo
+	// cannot be named is an *UnnamedRepoError.
 	Describe(ctx context.Context, dir string) (Workspace, error)
+	// Root resolves a path anywhere inside a workspace to the workspace's top
+	// directory (P1: worktree-dirty runs from wherever the worker's shell is).
+	Root(ctx context.Context, dir string) (string, error)
 }
 
 // RefreshStatus is the verdict of one Refresh. Exactly one is returned per
@@ -390,6 +409,10 @@ type Work interface {
 	Diff(ctx context.Context, repo Repo, s Submission) (Diff, error)
 	// Cat returns path's content at rev.
 	Cat(ctx context.Context, repo Repo, rev, path string) ([]byte, error)
+	// Fetch refreshes what Find and State read from the remote, bounded by
+	// ctx (S2). git: fetch origin. A failure is a *CommandError, and callers
+	// treat it as "answer from what is on disk", not as no answer.
+	Fetch(ctx context.Context, repo Repo) error
 }
 
 // ---- Lander (slice 1) ----
@@ -538,6 +561,16 @@ func (e *CommandError) Error() string {
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
+
+// UnnamedRepoError reports a workspace that answers but whose repo cannot be
+// named from it (git: a common dir that is not a conventional `.git`). Reason
+// is the backend's own words and is the whole message.
+type UnnamedRepoError struct {
+	Dir    string
+	Reason string
+}
+
+func (e *UnnamedRepoError) Error() string { return e.Reason }
 
 // StepError is a failed step of a land pipeline, carrying the command's
 // verbatim output so the caller can classify the failure from it.

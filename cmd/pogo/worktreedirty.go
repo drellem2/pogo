@@ -1,14 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"os/exec"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/gitvcs"
 )
 
 // newWorktreeDirtyCmd builds `pogo worktree-dirty`, the polecat templates'
@@ -74,17 +75,10 @@ as clean.`,
 // open a collapsed `?? .claude/` are both root-relative, and a polecat's shell
 // is often cd'd into a subdirectory by the time it submits.
 func worktreeRoot(dir string) (string, error) {
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
-	if err != nil {
-		msg := err.Error()
-		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-			msg = strings.TrimSpace(string(ee.Stderr))
-		}
-		return "", fmt.Errorf("%s is not inside a git worktree: %s", dir, msg)
-	}
-	root := strings.TrimSpace(string(out))
-	if root == "" {
-		return "", fmt.Errorf("%s: git rev-parse --show-toplevel printed nothing", dir)
-	}
-	return root, nil
+	return worktreeWorkspaces.Root(context.Background(), dir)
 }
+
+// worktreeWorkspaces is the backend worktree-dirty and check-stranded read
+// workspaces through. git is the only one wired here (enth-vcs slice 3b,
+// mg-afad2).
+var worktreeWorkspaces vcs.Workspaces = gitvcs.Workspaces{}

@@ -79,3 +79,8 @@ var work = gitvcs.Work{Run: func(dir, stdin string, args ...string) (string, err
 	out, err := runOutput("git", append([]string{"-C", dir}, args...)...)
 	return string(out), err
 }}
+
+// workspaces is this package's git Workspaces backend. Its RunSplit is runSplit,
+// so the `git status` behind WorktreeDirty stays under commandBudget, read at
+// call time, exactly as it was before it moved (mg-afad2).
+var workspaces = gitvcs.Workspaces{RunSplit: runSplit}
