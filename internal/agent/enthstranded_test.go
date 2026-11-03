@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/drellem2/pogo/internal/ghpr"
 	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/vcs/enthvcs/enthdtest"
 )
@@ -306,7 +307,7 @@ func TestEnthStartupSweep(t *testing.T) {
 func TestEnthStrandedGitControl(t *testing.T) {
 	useTempEventLog(t)
 	mail := captureStrandedMail(t)
-	stubPRProbe(t, func(string, string) (int, error) { return 0, nil })
+	stubPRProbe(t, func(string, string) (ghpr.Answer, error) { return ghpr.Answer{}, nil })
 	SetWorkItemStatusProbe(func(string) string { return "available" })
 	t.Cleanup(func() { SetWorkItemStatusProbe(nil) })
 	repo := strandedRepo(t)
