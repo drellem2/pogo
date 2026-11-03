@@ -47,6 +47,13 @@
 // (Dirty via `enth status`), described, refreshed and removed through it.
 // Callers pick the backend by repo at spawn and by the tree's marker
 // (enthvcs.Detect) after that. EnthRepo.WorkspacePaths narrows the checkout.
+//
+// # Slice 6 (mg-30da0)
+//
+// enthvcs implements Work: the trailer listing (Pogo-Item / Pogo-Worker),
+// Stacks and AmbiguousWorkError, State from land records (E3), and the
+// trailer-less base signal. Submission carries Item, Worker and Changes for
+// enth; the git backend answers exactly as before and leaves them empty.
 package vcs
 
 import (
@@ -396,13 +403,13 @@ func behindText(n int) string {
 
 // WorkQuery selects submissions. An empty query is every worker's work.
 type WorkQuery struct {
-	// Item selects by work item. The git backend has no item index (a git
-	// branch is named for its worker, not its item), so it answers
-	// ErrUnsupported. Callers attribute by commit subject themselves
-	// (strandedwork.ItemCandidates).
+	// Item selects by work item: on enth, the Pogo-Item trailer. The git
+	// backend has no item index (a git branch is named for its worker, not
+	// its item), so it answers ErrUnsupported. Callers attribute by commit
+	// subject themselves (strandedwork.ItemCandidates).
 	Item string
 	// Worker selects one worker's submission by agent name. For git that is
-	// the branch polecat-<Worker>.
+	// the branch polecat-<Worker>; for enth, the Pogo-Worker trailer.
 	Worker string
 }
 

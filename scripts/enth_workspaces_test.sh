@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# enth_workspaces_test.sh — enth-vcs slice 5 (mg-cc5cd), end to end: a REAL
+# enth_workspaces_test.sh — enth-vcs slices 5 and 6 (mg-cc5cd, mg-30da0), end to end: a REAL
 # pogod spawns a polecat onto an enth-native repo served by a REAL enthd, the
 # polecat's tree is edited, judged dirty, and removed (docs/design/enth-vcs.md
 # §4, §9, §16 row 5).
@@ -22,6 +22,13 @@
 #   5  REMOVE: `pogo agent stop` PRESERVES the dirty tree and REMOVES a clean
 #      one; a tree whose edits were made into a Change is clean, and the
 #      Change is on enthd after the tree is gone
+#   6b WORK (slice 6, mg-30da0): the worker is given an identity for
+#      `enth change` (and, the control, enth refuses no_identity without one);
+#      `pogo presubmit --item` refuses none, dirty and trailer-less and passes
+#      one stack; `pogo refinery submit --item` records the stack's ids (and the
+#      MR fails before any git step, landing being slice 7), refuses a branch,
+#      an empty item and two workers' stacks; check-stranded reports the
+#      trailer-less base; --stranded-adopt checks out the item's top Change
 #   6  THE GIT CONTROL: the same daemon spawns a polecat on a git repo and it
 #      is the git worktree it always was — a polecat-<name> branch, a .git
 #      pointer, no .enth, no ENTH_ variables — and stopping it reaps it.
