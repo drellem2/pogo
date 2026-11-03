@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/strandwatch"
 	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
 
 // exitStrandedUsage is `pogo check-stranded`'s exit code for a malformed
@@ -519,6 +521,13 @@ func polecatWorktrees() ([]strandwatch.Worktree, error) {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
+		// An enth checkout (enth-vcs slice 6, mg-30da0) is read through enth,
+		// never through git: run in it, git walks up to the enclosing repo
+		// (~/.pogo) and would describe THAT.
+		if enthvcs.IsCheckout(path) {
+			out = append(out, enthWorktree(path))
+			continue
+		}
 		hasGit := false
 		if _, serr := os.Stat(filepath.Join(path, ".git")); serr == nil {
 			hasGit = true
@@ -556,4 +565,40 @@ func polecatWorktrees() ([]strandwatch.Worktree, error) {
 		out = append(out, wt)
 	}
 	return out, nil
+}
+
+// enthWorktreeProbe bounds the enthd round trip one enth checkout costs the
+// sweep.
+const enthWorktreeProbe = 15 * time.Second
+
+// enthWorktree is an enth checkout as the stranded sweep sees it. It has no
+// branch, so it is never measured as one; it is STATED, with what is known
+// about it, rather than dropped (the house rule of this enumerator).
+//
+// The one stranded-work fact it can report on its own is §5's
+// trailer-independent signal: a base that is an unlanded Change with no
+// Pogo-Item trailer is work no trailer query will ever find, and it is
+// reported as stranded work with the remedy, not missed.
+func enthWorktree(path string) strandwatch.Worktree {
+	wt := strandwatch.Worktree{Path: path}
+	if rec, err := enthvcs.ReadRecord(path); err == nil {
+		wt.Repo = rec.Repo
+	}
+	b, base, err := enthvcs.WorkspaceBase(path, "")
+	if err != nil {
+		wt.Error = fmt.Sprintf("enth checkout whose base could not be read: %v", err)
+		return wt
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), enthWorktreeProbe)
+	defer cancel()
+	var ue *enthvcs.UntrailedBaseError
+	switch err := b.UntrailedBase(ctx, path, base); {
+	case errors.As(err, &ue):
+		wt.Error = "STRANDED WORK: " + ue.Error()
+	case err != nil:
+		wt.Error = fmt.Sprintf("enth checkout (base %s): could not ask %s whether its base is trailer-less stranded work: %v", base, b.Repo.Remote, err)
+	default:
+		wt.Error = fmt.Sprintf("enth checkout (base %s): no branch to measure — enth work is found by its %s trailer, and this sweep does not yet list enth items", base, vcs.TrailerItem)
+	}
+	return wt
 }

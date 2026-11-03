@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/drellem2/pogo/internal/strandedwork"
 	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
@@ -91,12 +93,68 @@ func quoted(ps []string) []string {
 	return out
 }
 
-// enthAdoptRefusal is the spawn refusal for --stranded-adopt on an enth repo.
-// Adopting enth work means checking out the stranded worker's top unlanded
-// Change, found by its Pogo-Item trailer (§4, W7) — slice 6's listing.
-func enthAdoptRefusal(repo string) string {
-	return fmt.Sprintf("--stranded-adopt is not supported on %s yet: it is an enth repo, and adopting enth work "+
-		"(checking out the stranded worker's top unlanded Change) is enth-vcs slice 6. Nothing was dispatched", repo)
+// enthAdoption is --stranded-adopt on an enth repo (§4, W7; slice 6,
+// mg-30da0): the polecat's checkout is made AT the stranded worker's top
+// unlanded Change, found by the item's Pogo-Item trailer, so its stack is the
+// tree the worker wakes up in.
+type enthAdoption struct {
+	Stack  vcs.Submission
+	Reason string
+}
+
+// enthStacks is the listing an enth adoption resolves through. A var so tests
+// can stand in for enthd.
+var enthStacks = func(e vcs.EnthRepo, item string) (vcs.Submission, error) {
+	return enthvcs.Backend{Repo: e}.FindStack(context.Background(), item, "")
+}
+
+// resolveEnthAdoption finds the one stack an adopt dispatch continues, or
+// says why there is none. Ambiguity is refused, not resolved: two workers'
+// stacks for one item are a decision for whoever dispatches, as on git.
+func resolveEnthAdoption(e vcs.EnthRepo, item, reason string) (enthAdoption, string) {
+	if item == "" {
+		// An empty item would list EVERY unlanded Change in the repo.
+		return enthAdoption{}, fmt.Sprintf("--stranded-adopt on %s needs the work item (--id): on enth the item's "+
+			"%s trailer is what names the work to adopt. Nothing was dispatched", e.Repo, vcs.TrailerItem)
+	}
+	s, err := enthStacks(e, item)
+	var amb *vcs.AmbiguousWorkError
+	switch {
+	case errors.Is(err, vcs.ErrNoWork):
+		return enthAdoption{}, fmt.Sprintf("--stranded-adopt on %s: %s has no unlanded Change carrying %s=%s, so there "+
+			"is nothing to adopt. Nothing was dispatched (dispatch without --stranded-adopt to start from the trunk)",
+			e.Repo, item, vcs.TrailerItem, item)
+	case errors.As(err, &amb):
+		return enthAdoption{}, fmt.Sprintf("--stranded-adopt on %s: %v. Nothing was dispatched", e.Repo, err)
+	case err != nil:
+		return enthAdoption{}, fmt.Sprintf("--stranded-adopt on %s: listing %s's Changes on %s failed: %v. Nothing was dispatched",
+			e.Repo, item, e.Remote, err)
+	}
+	return enthAdoption{Stack: s, Reason: reason}, ""
+}
+
+// record is the adoption as the dispatch_stranded_work_adopted event states
+// it, in the git adoption's fields: the "branch" is the stack's top.
+func (a enthAdoption) record(trunk string) strandedAdoption {
+	return strandedAdoption{
+		Finding: strandedwork.Finding{Branch: "enth stack of " + a.Stack.Item, Ref: a.Stack.Ref, Target: trunk, Pushed: true},
+		Reason:  a.Reason,
+	}
+}
+
+// enthAdoptPrelude is the prompt block that tells the worker what it is
+// standing on.
+func enthAdoptPrelude(item string, a enthAdoption) string {
+	worker := a.Stack.Worker
+	if worker == "" {
+		worker = "(no Pogo-Worker trailer)"
+	}
+	return fmt.Sprintf("# ⚠ THIS IS AN ADOPTION — your enth checkout is based on %s, NOT on the trunk\n\n"+
+		"Work item %s already had %d unlanded Change(s) by %s, and the dispatcher chose to CONTINUE them rather "+
+		"than start over. The stated reason was:\n\n    %s\n\n"+
+		"Those Changes are the work you were sent to land: do not re-derive them. A Change you make here stacks on "+
+		"top of them; make it with the same `--trailer %s=%s` so the stack stays one submission.\n\n",
+		a.Stack.Ref, item, len(a.Stack.Changes), worker, a.Reason, vcs.TrailerItem, item)
 }
 
 // createEnthPolecatWorkspace makes the enth checkout at dir for a polecat on
@@ -104,10 +162,18 @@ func enthAdoptRefusal(repo string) string {
 // spawn: enth refuses an existing directory anyway, and this refuses first so
 // the failure path has nothing to decide about removing it. A failed
 // checkout is rolled back only when the directory is the spawn's own.
-func createEnthPolecatWorkspace(e vcs.EnthRepo, sourceRepo, dir, target string, preexisted bool) (vcs.Workspace, string, error) {
+//
+// adoptAt, when set, is the Change an adoption checks out instead of target's
+// tip. The checkout is then verified to be AT it, read back from
+// .enth/checkout — the enth form of git's `merge-base --is-ancestor` check —
+// and refused, rolled back, if it is not.
+func createEnthPolecatWorkspace(e vcs.EnthRepo, sourceRepo, dir, target, adoptAt string, preexisted bool) (vcs.Workspace, string, error) {
 	b := enthvcs.Backend{Repo: e}
 	ctx := context.Background()
 	ref := b.ResolveBase(ctx, vcs.Repo{Path: sourceRepo}, target)
+	if adoptAt != "" {
+		ref = adoptAt
+	}
 	if preexisted {
 		return vcs.Workspace{}, ref, fmt.Errorf("%s already exists, and an enth checkout is made only into a new "+
 			"directory. It was not created by this spawn and was not touched; establish who owns it "+
@@ -118,6 +184,14 @@ func createEnthPolecatWorkspace(e vcs.EnthRepo, sourceRepo, dir, target string, 
 		cause, out := commandErrorParts(err)
 		_ = b.Rollback(ctx, vcs.Repo{Path: sourceRepo}, dir)
 		return vcs.Workspace{}, ref, fmt.Errorf("enth checkout of %s (%s on %s) failed: %v\n%s", ref, e.Repo, e.Remote, cause, out)
+	}
+	if adoptAt != "" {
+		st, err := enthvcs.ReadState(dir)
+		if err != nil || st.Base != adoptAt {
+			_ = b.Rollback(ctx, vcs.Repo{Path: sourceRepo}, dir)
+			return vcs.Workspace{}, ref, fmt.Errorf("adopting %s: the checkout's base reads back as %q (%v), not the adopted Change; "+
+				"rolled back, nothing was dispatched", adoptAt, st.Base, err)
+		}
 	}
 	return ws, ref, nil
 }

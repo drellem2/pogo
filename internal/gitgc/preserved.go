@@ -3,6 +3,7 @@ package gitgc
 import (
 	"errors"
 	"fmt"
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -475,14 +476,26 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 		// "uncommitted" is not a property it has. Counted, never listed:
 		// putting it in a list of trees holding uncommitted work would be a
 		// claim about it that nobody can make.
-		if _, lerr := os.Lstat(filepath.Join(path, ".git")); lerr != nil {
+		// An enth checkout (enth-vcs slice 6, mg-30da0) has no .git and is a
+		// workspace all the same: its uncommitted edits are as losable as a
+		// git tree's. Its repo comes from pogod's workspace record, and the
+		// git-only probes below are skipped for it — run in an enth tree, git
+		// walks up to the enclosing repo (~/.pogo) and answers for THAT.
+		isEnth := enthvcs.IsCheckout(path)
+		if _, lerr := os.Lstat(filepath.Join(path, ".git")); lerr != nil && !isEnth {
 			rep.NotWorktreeCount++
 			done("not-a-worktree", nil)
 			continue
 		}
 
 		tree := PreservedTree{Path: path, Owner: e.Name()}
-		if repo, rerr := WorktreeSourceRepo(path); rerr == nil {
+		if isEnth {
+			if rec, rerr := enthvcs.ReadRecord(path); rerr == nil && rec.Repo != "" {
+				tree.Repo = rec.Repo
+			} else {
+				tree.RepoError = fmt.Sprintf("enth checkout with no pogod workspace record naming its project: %v", rerr)
+			}
+		} else if repo, rerr := WorktreeSourceRepo(path); rerr == nil {
 			tree.Repo = repo
 		} else {
 			tree.RepoError = rerr.Error()
@@ -541,7 +554,10 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 			// A tracked change is never scaffolding, so a tree with one is
 			// already answered and is spared the expanded status — an
 			// --untracked-files=all walk is the cost gh #158 is about.
-			if dwe.Modified > 0 {
+			if dwe.Modified > 0 || isEnth {
+				// enth: pogod's own files are excluded from enth status by
+				// the checkout's .enth/info/exclude, so a dirty enth tree is
+				// never scaffolding only.
 				tree.ScaffoldingOnly = false
 			} else if only, serr := scaffoldingOnly(path); serr == nil {
 				tree.ScaffoldingOnly = only
@@ -571,7 +587,10 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 			tree.StatusError = chk.Refusal.Error()
 		}
 
-		if branch, berr := WorktreeBranch(path); berr == nil {
+		if isEnth {
+			// No branch (W1), and no committed work at risk: every Change is on
+			// enthd the moment it is made (§4, durability).
+		} else if branch, berr := WorktreeBranch(path); berr == nil {
 			tree.Branch = branch
 		} else {
 			tree.BranchError = berr.Error()
@@ -598,7 +617,9 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 		// and still deliberately: removing it drops the tree and the branch ref
 		// keeps the objects, so gc does not refuse it. The dispatch guard is
 		// where that tree matters and PreservedForItems reports it there.
-		if find, ferr := WorktreeCommitsAtRisk(path, tree.Repo, opts.Target); ferr != nil {
+		if isEnth {
+			// See above: nothing committed lives only in this tree.
+		} else if find, ferr := WorktreeCommitsAtRisk(path, tree.Repo, opts.Target); ferr != nil {
 			rep.Errors = append(rep.Errors, fmt.Sprintf(
 				"could not check whether %s holds commits that exist nowhere else: %v", path, ferr))
 		} else if find.AtRisk() {
@@ -621,7 +642,10 @@ func ScanPreserved(opts PreservedScanOptions) (PreservedReport, error) {
 		// branch reading "HEAD" — that string is what `rev-parse --abbrev-ref`
 		// prints, and inferring a state from it is the shape of instrument this
 		// whole ticket is about. An unreadable answer leaves the column alone.
-		detached, derr := WorktreeDetached(path)
+		detached, derr := false, error(nil)
+		if !isEnth {
+			detached, derr = WorktreeDetached(path)
+		}
 		tree.ForceReclaims = forceReclaims(rep.TicketsLoaded, tickets, tree.Owner, tree.Branch,
 			detached && derr == nil)
 		rep.Retained = append(rep.Retained, tree)

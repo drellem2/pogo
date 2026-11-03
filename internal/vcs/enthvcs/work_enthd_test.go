@@ -51,6 +51,9 @@ func TestFindStackOneNoneAmbiguous(t *testing.T) {
 	b := e.backend()
 	ctx := context.Background()
 
+	if _, err := b.FindStack(ctx, "", ""); err == nil || errors.Is(err, vcs.ErrNoWork) {
+		t.Fatalf("FindStack with no item = %v, want a refusal (not ErrNoWork)", err)
+	}
 	// NONE: an item nobody worked on is ErrNoWork, not an empty success.
 	if _, err := b.FindStack(ctx, "mg-1", ""); !errors.Is(err, vcs.ErrNoWork) {
 		t.Fatalf("FindStack with no Changes = %v, want ErrNoWork", err)

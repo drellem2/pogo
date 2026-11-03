@@ -2202,9 +2202,28 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	if createWorktree {
 		enthRepo = enthRepoFor(spawnReq.Repo)
 	}
-	if enthRepo != nil && adoption != nil {
-		failPolecatSpawn(w, spawnReq, http.StatusConflict, enthAdoptRefusal(spawnReq.Repo))
-		return
+	// --stranded-adopt on an enth repo continues the item's unlanded stack
+	// (slice 6, mg-30da0). It is resolved from the trailer listing, never
+	// from git's gate: the git gate's findings name branches, which an enth
+	// repo does not have.
+	var enthAdopt *enthAdoption
+	if enthRepo != nil {
+		if reason := strings.TrimSpace(spawnReq.StrandedAdopt); reason != "" {
+			a, refusal := resolveEnthAdoption(*enthRepo, spawnReq.Id, reason)
+			if refusal != "" {
+				failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+				return
+			}
+			enthAdopt = &a
+			adoption = nil
+			trunk := enthRepo.Trunk
+			if trunk == "" {
+				trunk = vcs.DefaultEnthTrunk
+			}
+			emitPolecatStrandedAdopted(spawnReq, a.record(trunk))
+			log.Printf("dispatch stranded-work: ADOPTING enth stack of %s (top %s, %d Change(s)) by explicit request: %s",
+				spawnReq.Id, a.Stack.Ref, len(a.Stack.Changes), reason)
+		}
 	}
 	if adoption != nil {
 		// Past every refusal that is specific to adopting, so the record is being
@@ -2286,6 +2305,9 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	if adoption != nil {
 		prelude = strandedAdoptPrelude(spawnReq.Id, *adoption) + prelude
 	}
+	if enthAdopt != nil {
+		prelude = enthAdoptPrelude(spawnReq.Id, *enthAdopt) + prelude
+	}
 	if enthRepo != nil {
 		prelude = enthSelectionPrelude(*enthRepo, workDir) + prelude
 	}
@@ -2326,7 +2348,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		}
 		_, statErr := os.Lstat(worktreeDir)
 		preexisted := !os.IsNotExist(statErr)
-		ws, ref, err := createEnthPolecatWorkspace(*enthRepo, sourceRepo, worktreeDir, spawnReq.Branch, preexisted)
+		adoptAt := ""
+		if enthAdopt != nil {
+			adoptAt = enthAdopt.Stack.Ref
+		}
+		ws, ref, err := createEnthPolecatWorkspace(*enthRepo, sourceRepo, worktreeDir, spawnReq.Branch, adoptAt, preexisted)
 		if err != nil {
 			os.Remove(promptFile)
 			status := http.StatusInternalServerError

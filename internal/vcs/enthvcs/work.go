@@ -171,6 +171,11 @@ func (b Backend) Find(ctx context.Context, _ vcs.Repo, q vcs.WorkQuery) ([]vcs.S
 // stack its unlanded Changes form. None is an error wrapping vcs.ErrNoWork;
 // more than one is a *vcs.AmbiguousWorkError naming each stack's worker.
 func (b Backend) FindStack(ctx context.Context, item, worker string) (vcs.Submission, error) {
+	if item == "" {
+		// An empty item filter lists every worker's unlanded work: never a
+		// submission.
+		return vcs.Submission{}, fmt.Errorf("enth %s: a submission is named by its work item, and none was given", b.Repo.Repo)
+	}
 	subs, err := b.Find(ctx, vcs.Repo{}, vcs.WorkQuery{Item: item, Worker: worker})
 	if err != nil {
 		return vcs.Submission{}, err

@@ -250,6 +250,105 @@ wait_gone "$D3" && ok "C6   the committed workspace was removed" || bad "C6   th
 "$EBIN/enth" --remote "$URL" --repo alice/proj changes --unlanded --trailer Pogo-Item=mg-x 2>&1 | grep -qF "\"id\":\"$CID\"" \
     && ok "S5   the Change outlives its workspace: enthd lists it unlanded" || bad "S5   the Change is not on enthd"
 
+# --- 5b. work (slice 6, mg-30da0) -------------------------------------------
+step "6b. WORK: identity, presubmit, submit --item, adopt"
+# Make a Change in DIR exactly as the worker would: with the identity pogod
+# put in ITS environment and nothing from this script's (ENV_FILE).
+worker_change() { # ENV_FILE DIR MSG [TRAILER...]
+    local envf="$1" dir="$2" msg="$3"; shift 3
+    local ident=() line tr=()
+    while IFS= read -r line; do ident+=("$line"); done < <(grep -E '^ENTH_(AUTHOR|COMMITTER)_(NAME|EMAIL)=' "$envf")
+    for t in "$@"; do tr+=(--trailer "$t"); done
+    env -u ENTH_AUTHOR_NAME -u ENTH_AUTHOR_EMAIL -u ENTH_COMMITTER_NAME -u ENTH_COMMITTER_EMAIL \
+        -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+        ${ident[@]+"${ident[@]}"} "$EBIN/enth" change -m "$msg" ${tr[@]+"${tr[@]}"} "$dir" 2>&1
+}
+change_id() { sed -n 's/.*"id":"\([0-9a-f]*\)".*/\1/p'; }
+presubmit_in() { (cd "$1" && POGO_AGENT_NAME="$2" pogo presubmit --item="$3" 2>&1); }
+
+OUT="$(spawn w1 "$PROJ")" || bad "spawn w1 failed: $OUT"
+W1="$POGO_HOME/polecats/w1"
+wait_env w1 || bad "w1 never recorded its environment"
+grep -qE '^ENTH_AUTHOR_EMAIL=.' "$S/env.w1" && grep -qE '^ENTH_COMMITTER_NAME=.' "$S/env.w1" \
+    && ok "ID   the enth worker was given an identity (no enth config, no ENTH_/GIT_ identity in pogod's env)" \
+    || bad "ID   no identity in the worker's environment: $(grep -oE '^ENTH_[A-Z_]*' "$S/env.w1" | tr '\n' ' ')"
+# Control: with no identity at all, enth itself refuses.
+echo control > "$W1/control.txt"
+NOID="$(: > "$S/empty.env"; worker_change "$S/empty.env" "$W1" "control")"
+printf '%s' "$NOID" | grep -q no_identity && ok "ID   (control) without it, enth change is refused no_identity" \
+    || bad "ID   control: enth change with no identity was not refused: $NOID"
+rm -f "$W1/control.txt"
+
+POUT="$(presubmit_in "$W1" w1 mg-y)"; PRC=$?
+[ "$PRC" != 0 ] && printf '%s' "$POUT" | grep -q 'no unlanded Change carries Pogo-Item=mg-y Pogo-Worker=w1' \
+    && ok "P2   presubmit refuses an item with no Changes (NONE)" || bad "P2   presubmit with nothing: rc $PRC $POUT"
+echo "w1 work" > "$W1/w1.txt"
+POUT="$(presubmit_in "$W1" w1 mg-y)"; PRC=$?
+[ "$PRC" != 0 ] && printf '%s' "$POUT" | grep -q 'uncommitted work in this checkout' \
+    && ok "P2   presubmit refuses uncommitted edits" || bad "P2   presubmit dirty: rc $PRC $POUT"
+C1="$(worker_change "$S/env.w1" "$W1" "feat: w1 (mg-y)" Pogo-Item=mg-y Pogo-Worker=w1 | change_id)"
+[ -n "$C1" ] && ok "P4   the worker's own identity made a Change (${C1:0:12})" || bad "P4   enth change with the worker's identity failed"
+POUT="$(presubmit_in "$W1" w1 mg-y)"; PRC=$?
+[ "$PRC" = 0 ] && printf '%s' "$POUT" | grep -q "pre-submit OK: 1 Change(s) for mg-y, top $C1" \
+    && ok "P2   presubmit passes ONE stack whose top is the checkout's base" || bad "P2   presubmit one: rc $PRC $POUT"
+
+SUB="$(pogo refinery submit --item=mg-y --repo="$PROJ" --author=mg-y --json 2>&1)"; SRC=$?
+MR="$(printf '%s' "$SUB" | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p')"
+[ "$SRC" = 0 ] && [ -n "$MR" ] && ok "R1   refinery submit --item queued $MR" || bad "R1   submit --item: rc $SRC $SUB"
+if [ -n "$MR" ]; then
+    SHOW="$(pogo refinery show "$MR" --json 2>&1)"
+    printf '%s' "$SHOW" | tr -d ' \n' | grep -qF "\"enth_submitted\":[\"$C1\"]" \
+        && ok "R1   the MR records the submitted Change ids" || bad "R1   MR record: $SHOW"
+    for _ in $(seq 1 50); do
+        ST="$(pogo refinery show "$MR" --json 2>/dev/null | sed -n 's/.*"status": *"\([a-z]*\)".*/\1/p' | head -1)"
+        [ "$ST" = failed ] && break; sleep 0.2
+    done
+    pogo refinery show "$MR" --json 2>/dev/null | grep -q 'enth-vcs slice 7' \
+        && ok "     ... and is failed before any git step: landing is slice 7" || bad "     MR $MR status $ST: $(pogo refinery show "$MR" --json 2>&1 | head -40)"
+fi
+SUB="$(pogo refinery submit polecat-w1 --item=mg-y --repo="$PROJ" 2>&1)"
+[ $? != 0 ] && printf '%s' "$SUB" | grep -q 'not a branch' && ok "R1   a branch is refused on an enth repo" || bad "R1   branch on enth: $SUB"
+SUB="$(pogo refinery submit --item=mg-none --repo="$PROJ" 2>&1)"
+[ $? != 0 ] && printf '%s' "$SUB" | grep -q 'class=defect: mg-none carries nothing' && ok "R1   an item with no Changes is refused class=defect" || bad "R1   empty item: $SUB"
+
+# TRAILER-LESS: the worker forgets the trailers on its next Change.
+echo more > "$W1/more.txt"
+C2="$(worker_change "$S/env.w1" "$W1" "forgot the trailers" | change_id)"
+POUT="$(presubmit_in "$W1" w1 mg-y)"; PRC=$?
+[ "$PRC" != 0 ] && printf '%s' "$POUT" | grep -q 'this Change has no Pogo-Item trailer' \
+    && ok "S2   presubmit names a trailer-less base (${C2:0:12}) with the remedy" || bad "S2   trailer-less: rc $PRC $POUT"
+CS="$(pogo check-stranded --json 2>&1)"
+printf '%s' "$CS" | grep -q 'STRANDED WORK: .*polecats/w1' && ok "S2   check-stranded reports it as stranded work" \
+    || bad "S2   check-stranded did not report the trailer-less base: $(printf '%s' "$CS" | grep -o 'polecats/w1[^}]*' | head -2)"
+
+# AMBIGUOUS: a second worker on the same item.
+OUT="$(spawn w2 "$PROJ")" || bad "spawn w2 failed: $OUT"
+W2="$POGO_HOME/polecats/w2"
+wait_env w2 || true
+echo w2 > "$W2/w2.txt"
+X1="$(worker_change "$S/env.w2" "$W2" "feat: w2 (mg-y)" Pogo-Item=mg-y Pogo-Worker=w2 | change_id)"
+SUB="$(pogo refinery submit --item=mg-y --repo="$PROJ" 2>&1)"
+[ $? != 0 ] && printf '%s' "$SUB" | grep -q 'form 2 stacks' && printf '%s' "$SUB" | grep -q 'worker w2' \
+    && ok "R1   two workers' stacks are refused as ambiguous, naming each worker" || bad "R1   ambiguous: $SUB"
+pogo agent stop w1 >/dev/null 2>&1; pogo agent stop w2 >/dev/null 2>&1
+wait_gone "$W2" || true
+
+# ADOPT: w2's stack is the one to continue (land w1's out of the way first).
+"$EBIN/enth" --remote "$URL" --repo alice/proj land "$C1" "$C2" >/dev/null 2>&1 || note "landing w1's stack failed"
+AGENTS+=(w3)
+OUT="$(pogo agent spawn-polecat w3a --template=polecat --task="adopt probe" --body=probe --repo="$PROJ" --branch=main \
+    --stranded-adopt="no item" 2>&1)"
+printf '%s' "$OUT" | grep -q 'needs the work item (--id)' && ok "W7   --stranded-adopt without --id is refused (an empty filter lists every Change)" \
+    || bad "W7   adopt without --id: $OUT"
+OUT="$(pogo agent spawn-polecat w3 --id=mg-y --template=polecat --task="adopt probe" --body=probe --repo="$PROJ" --branch=main \
+    --stranded-adopt="w2's work is good; land it" 2>&1)"; RC=$?
+W3="$POGO_HOME/polecats/w3"
+[ "$RC" = 0 ] && grep -qF "\"base\":\"$X1\"" "$W3/.enth/checkout" 2>/dev/null \
+    && ok "W7   --stranded-adopt checked out the item's top unlanded Change (${X1:0:12})" \
+    || bad "W7   adopt: rc $RC $OUT; base $(head -1 "$W3/.enth/checkout" 2>&1 | head -c 200)"
+[ -f "$W3/w2.txt" ] && ok "W7   ... so w2's work is in the adopting tree" || bad "W7   w2.txt missing in the adopting checkout"
+pogo agent stop w3 >/dev/null 2>&1
+
 # --- 6. the git control ------------------------------------------------------
 step "7. GIT CONTROL: the same daemon, a git repo"
 OUT="$(spawn g1 "$S/repos/gitproj")"; RC=$?

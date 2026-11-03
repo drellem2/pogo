@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,5 +104,50 @@ func TestPersonaExcludeOnAnEnthCheckout(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
 	if err := ensureWorktreeGitExcluded(dir, "other.md"); err == nil {
 		t.Error("a tree holding both .git and .enth/checkout was not refused")
+	}
+}
+
+func TestResolveEnthAdoption(t *testing.T) {
+	old := enthStacks
+	t.Cleanup(func() { enthStacks = old })
+	e := vcs.EnthRepo{Remote: "http://e", Repo: "o/r"}
+	stack := vcs.Submission{Item: "mg-1", Worker: "p1", Ref: "c2", Revs: []string{"c1", "c2"},
+		Changes: []vcs.Change{{ID: "c1"}, {ID: "c2", Base: "c1"}}}
+
+	for _, tc := range []struct {
+		name string
+		ret  vcs.Submission
+		err  error
+		want string
+	}{
+		{"none", vcs.Submission{}, fmt.Errorf("x: %w", vcs.ErrNoWork), "nothing to adopt"},
+		{"ambiguous", vcs.Submission{}, &vcs.AmbiguousWorkError{Item: "mg-1", Stacks: []vcs.Submission{{}, {}}}, "form 2 stacks"},
+		{"unreachable", vcs.Submission{}, fmt.Errorf("connection refused"), "listing mg-1's Changes on http://e failed"},
+	} {
+		enthStacks = func(vcs.EnthRepo, string) (vcs.Submission, error) { return tc.ret, tc.err }
+		if _, refusal := resolveEnthAdoption(e, "mg-1", "why"); !strings.Contains(refusal, tc.want) || !strings.Contains(refusal, "Nothing was dispatched") {
+			t.Errorf("%s: refusal = %q, want %q", tc.name, refusal, tc.want)
+		}
+	}
+
+	var asked string
+	enthStacks = func(_ vcs.EnthRepo, item string) (vcs.Submission, error) { asked = item; return stack, nil }
+	// No item: refused before any listing (an empty filter lists every Change).
+	if _, refusal := resolveEnthAdoption(e, "", "why"); !strings.Contains(refusal, "needs the work item (--id)") || asked != "" {
+		t.Errorf("no item: refusal %q, listed %q", refusal, asked)
+	}
+	a, refusal := resolveEnthAdoption(e, "mg-1", "the work is good")
+	if refusal != "" || a.Stack.Ref != "c2" || asked != "mg-1" {
+		t.Fatalf("one stack: %+v %q (asked %q)", a, refusal, asked)
+	}
+	p := enthAdoptPrelude("mg-1", a)
+	for _, want := range []string{"based on c2, NOT on the trunk", "2 unlanded Change(s) by p1", "the work is good", "--trailer Pogo-Item=mg-1"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prelude lacks %q:\n%s", want, p)
+		}
+	}
+	rec := a.record("refs/heads/main")
+	if rec.Finding.Ref != "c2" || rec.BaseRef() != "c2" || rec.Finding.Target != "refs/heads/main" || rec.Reason != "the work is good" {
+		t.Errorf("event record = %+v", rec)
 	}
 }
