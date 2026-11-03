@@ -161,6 +161,10 @@ import (
 // printing a URL and hand the conjunction back for nothing. When such a gate
 // appears on this fleet, the specimen it produces is what should extend the
 // table — the same rule gatehostresource.go applies to its own.
+//
+// The one such gate that exists today is scripts/net-control_test.sh, and it is
+// recognised not by widening the fetch table but by a line the suite prints
+// itself after proving its own probe — see gateDeclaredNetworkMarkers (mg-6914a).
 
 // gateFetchMarkers are the wordings that identify a line as the Go toolchain
 // reporting on a MODULE FETCH. One of these must be on the same line as a
@@ -217,11 +221,43 @@ func lineReportsNetworkWording(line string) string {
 	return ""
 }
 
+// gateDeclaredNetworkMarkers are lines a gate prints ITSELF to say "my own
+// network I/O failed, and I have proven it was not my probe" — the one shape the
+// module-fetch table cannot see, because the failing I/O is not Go's.
+//
+// The only one is scripts/net-control_test.sh's (mg-6914a). Its section 2c needs
+// a REAL off-box host to answer an HTTP request, and on 2026-11-03 a single
+// unanswered request failed the gate twice in 30 minutes on branches that never
+// touched it (mr-dbl1rmi among them), each classed DEFECT. The suite now tries
+// several independent hosts for a bounded number of rounds and prints
+//
+//	NET-CONTROL GATE-NETWORK: net-control_test 2c: ... the network is unreachable ...
+//
+// only when every host failed every round AND the same probe both passed its
+// loopback self-test on each try and reached a real host earlier in the same
+// run — so a broken probe cannot print it, and its failure stays a defect. The
+// suite asserts that refusal next to the case that prints the line.
+//
+// Stricter than a fetch marker in one way, on purpose: the marker must OPEN the
+// trimmed line, not merely appear in it. The suite quotes its own captured output
+// inside FAIL: messages whose continuation lines are not verdict-prefixed, and a
+// marker that counted mid-line would fire on a quotation. The network-wording
+// conjunction still applies on top of it.
+var gateDeclaredNetworkMarkers = []string{
+	"net-control gate-network:",
+}
+
 // lineReportsFetchMarker returns the module-fetch marker found on one
-// already-lowercased line, or "".
+// already-lowercased line, or the gate-declared marker that opens it, or "".
 func lineReportsFetchMarker(line string) string {
 	for _, m := range gateFetchMarkers {
 		if strings.Contains(line, m) {
+			return m
+		}
+	}
+	trimmed := strings.TrimSpace(line)
+	for _, m := range gateDeclaredNetworkMarkers {
+		if strings.HasPrefix(trimmed, m) {
 			return m
 		}
 	}

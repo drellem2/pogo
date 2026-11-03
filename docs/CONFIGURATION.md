@@ -54,7 +54,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[gitgc]` | `enabled` | on | ACTS | Once at boot, then every `interval`: acts only where no live polecat owns the branch or tree and the work item is done or archived. It force-deletes local `polecat-*` branches (`git branch -D`); a done item's branch must be merged into `main` first, while an archived item's branch is deleted even if it never merged. It removes a registered polecat worktree unless the tree is dirty or holds commits no ref reaches. It removes an orphan directory under `$POGO_HOME/polecats` (one git no longer knows as a worktree) with no dirty check, because there is no index to check against. With either removal it also deletes the polecat's harness session temp dir (for Claude Code, `${CLAUDE_CODE_TMPDIR:-/tmp}/claude-<uid>/<slug-of-workdir>`, declared by the provider), and it deletes such a dir whose polecat directory is already gone under the same live-and-concluded gate; crew and non-pogo session dirs are never candidates, and the durable transcript store (`~/.claude/projects`) is never touched. It keeps anything it cannot classify. It mails the coordinator when a sweep fails. Code: `internal/gitgc`. |
 | `[stall_watch]` | `enabled` | on | ACTS | Types a nudge into the coordinator's terminal when its unclaimed work or unread mail passes a threshold. The same switch drives the nudges about an available item a live worker is already on, an item whose work sits uncommitted in a retained worktree, and an item whose work is pushed but not merged. If the terminal is busy, it mails instead. Needs a config file. See [Stall watcher](#stall-watcher). |
 | `[stall_watch]` | `priority_wake_enabled` | on | ACTS | Sends the same nudge sooner for a high-priority available item. See [Priority wake](#priority-wake). |
-| `[stall_watch]` | `blocked_reminder_enabled` | on | ACTS | Nudges, or mails, the agent named in a `blocked:<agent>` assignee that a decision is owed. The notices stop at a cap. |
+| `[stall_watch]` | `blocked_reminder_enabled` | on | ACTS | Nudges, or mails, the agent named in a `blocked:<agent>` assignee that a decision is owed. The notices stop at a cap. Silent for a block that agent set on itself, and for an item tagged `waiting-on-purpose` (`blocked_reminder_waiver_tags`). |
 | `[stall_watch]` | `indefinite_hold_report_enabled` | on | ACTS | Types a read-only digest of holds that nothing scheduled will ever release into the coordinator's terminal, through the same nudge channel as the rows above. If the terminal is busy, it mails instead. It releases nothing. See [A hold with no driver is invisible](#a-hold-with-no-driver-is-invisible). |
 | `[dispatch]` | `max_polecats_per_repo` | on | ACTS | Refuses to spawn a worker into a repo that already has 3 live workers. While the refinery holds a merge request for that repo, it holds back 1 of the 3 slots. Default `max_polecats_per_repo = 3`; `0` turns it off. See [Dispatch cap](#dispatch-cap--how-many-workers-may-enter-one-repository). |
 | `[dispatch_pairing]` | `repos` | inert | ACTS | Once you list `repos`, it refuses to dispatch an item in those repos until its paired item is filed. See [Dispatch pairing](#dispatch-pairing--items-that-owe-a-paired-work-item). |
@@ -741,6 +741,19 @@ high_priority_wake_cooldown = "4h"      # gap before the wake names the same ite
                                         # again (was 3m doubling; mg-b12da)
 fast_priorities = ["high"]              # Priority values that trigger the wake
 
+# Blocked-reminder (mg-3844): tells the agent named in `blocked:<agent>` that a
+# decision is owed. First notice immediately, then a doubling backoff, then quiet.
+blocked_reminder_enabled = true         # default true
+blocked_reminder_cooldown = "1h"        # base of the per-item backoff
+blocked_reminder_max_notices = 4        # notices per item (negative = no cap)
+blocked_reminder_waiver_tags = ["waiting-on-purpose"]
+                                        # an item carrying one draws no reminder;
+                                        # it waives the NOTICE, the item stays
+                                        # gated (drellem2/pogo#161)
+# A block the named agent set on ITSELF draws no reminder either: the setter is
+# read from macguffin's events.jsonl, and when it cannot be read with certainty
+# the reminder is sent (fail open). See docs/design/blocked-reminder-design.md.
+
 # Indefinite-hold report (mg-f398): a read-only daily digest of holds that
 # nothing scheduled will ever open. See "A hold with no driver" below.
 indefinite_hold_report_enabled = true   # default true
@@ -1056,6 +1069,23 @@ gate that read "absent" as "unfinished" would refuse nearly every dispatch whose
 item has any dependency at all, which is how a gate gets disarmed rather than
 fixed. mg remains the authority on satisfaction; this is the subset of it pogo
 can verify without one.
+
+Stated as plainly as possible, because it is the property an adopter meets
+first (drellem2/pogo#201): **the depends refusal refuses only when a parent is
+POSITIVELY found live** in `available/`, `claimed/` or `pending/`. A parent that
+**cannot be parsed**, or **cannot be found at all**, reads as **satisfied** and
+the spawn proceeds. That is fail-open, and it is by design, not an oversight:
+pogo does not read the archive, so "not found" cannot be told apart from "done
+and archived". An unparseable parent file is skipped **silently**, exactly as
+a missing one is: no refusal and no log line. Only a status directory that
+cannot be read at all logs `dispatch gate: could not resolve dependency … treating
+it as satisfied`. One bad file never blocks a dispatch whose other parents are
+fine.
+
+The way out of a refusal is **per item**: finish the parent, or drop the edge
+with `mg edit <id> --rm-depends=<parent>`. The refusal message names that
+command. There is no config key that turns this refusal off fleet-wide; that is
+tracked in drellem2/pogo#202.
 
 **The gate's twin, which fails the other way (mg-9a04).** Sitting immediately
 beside it in `handleSpawnPolecat` is the type→template router: with no

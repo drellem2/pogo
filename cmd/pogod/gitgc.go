@@ -9,7 +9,9 @@ import (
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/gitgc"
+	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/providers"
+	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // startGitGC wires the polecat git garbage collector into pogod. It runs
@@ -60,6 +62,15 @@ func startGitGC(ctx context.Context, reg *agent.Registry, cfg config.GitGCConfig
 // Same shape as gitgc.removeWorktreeFn. Production always uses
 // gitgc.LoadTicketIndex.
 var loadTicketIndexFn = gitgc.LoadTicketIndex
+
+// gitGCRepoVCS is the backend lookup a sweep reads each repo's kind from: the
+// project record (project.VCSOf), the same lookup the refinery and the spawn
+// path are wired to. A repo with no record is git. Indirected so a test can
+// name a repo's backend without a projects.json (mg-0ff9c).
+var gitGCRepoVCS = func(repo string) vcs.Kind {
+	k, _ := project.VCSOf(repo)
+	return k
+}
 
 // runGitGCSweep performs one GC pass over every repo known to pogod:
 // repos listed in config, the source repo of every registered agent, and the
@@ -119,8 +130,15 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig, notify string) {
 	// cannot read is now refused unconditionally, and there is no verdict for
 	// this caller to supply. See gitgc.RemoveWorktree.
 	for _, repo := range repos {
+		// The sweep set is every repo a polecat was cut from, and an enth repo's
+		// polecats are cut from it too. Sweeping one as git failed "not a git
+		// repository" on every tick and held an A9 condition raised that nothing
+		// could clear (mg-0ff9c); gitgc now skips the git phases for it, and the
+		// line below says so instead of the skip being silent.
+		kind := gitGCRepoVCS(repo)
 		res, err := gitgc.Sweep(gitgc.Options{
 			Repo:         repo,
+			VCS:          kind,
 			LivePolecats: live,
 			Tickets:      tickets,
 			PolecatsDir:  polecatsDir,
@@ -147,6 +165,9 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig, notify string) {
 			continue
 		}
 		conditions.Clear(rowA9SweepFailedPrefix+repo, time.Now())
+		if res.GitSkipped != "" {
+			log.Printf("pogod: git GC %s — coverage: %s", repo, res.GitSkipped)
+		}
 		if len(res.BranchesDeleted) > 0 || len(res.WorktreesRemoved) > 0 || len(res.SessionTempRemoved) > 0 || len(res.Errors) > 0 {
 			log.Printf("pogod: git GC %s — deleted %d branches, removed %d worktrees, %d session temp dirs, %d errors",
 				repo, len(res.BranchesDeleted), len(res.WorktreesRemoved), len(res.SessionTempRemoved), len(res.Errors))

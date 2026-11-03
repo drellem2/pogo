@@ -10,6 +10,34 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The refinery classifies a push refused by branch protection as
+  `failed(protected)`, terminal at attempt 1 (drellem2/pogo#164).** The
+  post-gate git steps wrap every non-credential failure as retryable, so a
+  GH013 ruleset refusal used to be recorded as `contention` with the signal
+  "target moved during merge" — a race nobody observed — and spent the whole
+  7-attempt budget in under a minute against a rule no attempt can change.
+  The classifier now matches the remote's own refusal wording (`GH013`,
+  `repository rule violations`, `protected branch`, and git's
+  `[remote rejected]` flag, except for its lock/store-failure reasons, which
+  can carry a genuine race) ahead of the contention fallthrough. The remedy is
+  portable: target a different branch (the item's `branch:` value or
+  `--target=`), not "open a pull request". `protected` commits to an unchanged
+  resubmit repeating, so `check-stranded` prints no submit line for such a
+  branch, and it does not count against the author's failure streak.
+- **`pogo check-stranded` no longer reports landed orphan branches
+  (drellem2/pogo#160).** An `orphan_branch` row was gated only on "no remote
+  ref holds this commit", while git-gc deletes the same worktrees on
+  `gitgc.BranchDurable`, which also checks ancestry and patch-equivalence. The
+  reporter's 64 orphan rows were all landed, so the command exited 1 on every
+  run. The row now asks the reaper's verdict first. For squash merges, which
+  that verdict cannot see, it then asks for a merged GitHub PR whose head holds
+  the branch tip and whose merge commit is on the target. A settled branch
+  moves to the exclusions: it is named under `--all` and counted on the default
+  output as "N orphan branch(es), all landed". If `gh` fails or is not
+  authenticated, the row is still reported and says the test did not run.
+
 ## [0.12.0] - 2026-10-03
 
 ### Added

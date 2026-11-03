@@ -127,14 +127,6 @@ type Agent struct {
 	// Stored so Respawn can re-send it.
 	InitialNudge string `json:"-"`
 
-	// spawnEnv is the spawn's own SpawnRequest.Env, kept so that a restart
-	// re-applies it. Before it was kept, a restart rebuilt the environment
-	// from the identity catalogue alone, so an agent restarted after a crash
-	// lost every --env it was spawned with, and a polecat lost its core budget
-	// and POGO_ROLE. Unexported, like the PTY fields below, so the agents API
-	// never serializes it: an --env value can be a credential.
-	spawnEnv []string
-
 	// master is the PTY master file descriptor. Not exported (held by pogod).
 	master *os.File
 	// slave is the PTY slave, held open by pogod for as long as the child
@@ -164,6 +156,20 @@ type Agent struct {
 	// prove delivery, and the confirm nudge mode degrades to wait-idle for it.
 	// Immutable after construction; safe to read without a.mu.
 	receiptFile string
+
+	// spawnEnv is the caller-supplied SpawnRequest.Env this agent was started
+	// with, carried so Respawn re-applies it (drellem2/pogo#165). Without it a
+	// restarted agent silently shed every per-spawn variable — including the
+	// POGO_WORKER_CORES / POGO_HOST_CORES / POGO_ROLE that polecatSpawnEnv
+	// puts there — and `pogo agent env` described an environment the process
+	// no longer had.
+	//
+	// Unexported ON PURPOSE, not merely json:"-": an env can carry secrets, and
+	// a field no encoder can reach cannot leak into AgentInfo, the event
+	// stream, or the witness store. Anything that ever reports on it must print
+	// NAMES, never values. Immutable after construction (a private copy, so the
+	// caller's slice cannot alias it); safe to read without a.mu.
+	spawnEnv []string
 
 	// queuedNudge records the last delivery pogod wrote to this agent's PTY and
 	// could not prove was submitted, because the harness was mid-turn (see
@@ -1034,7 +1040,7 @@ type SpawnRequest struct {
 	Name           string
 	Type           AgentType
 	Command        []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
-	Env            []string // additional env vars
+	Env            []string // additional env vars; carried on the Agent and re-applied on Respawn (gh #165)
 	PromptFile     string   // path to prompt file (optional)
 	Dir            string   // working directory for the process (optional)
 	WorktreeDir    string   // git worktree path for polecat isolation (optional)
@@ -1235,13 +1241,13 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		WorkItemID:     req.WorkItemID,
 		Model:          req.Model,
 		ClaimedAtSpawn: req.ClaimedAtSpawn,
-		spawnEnv:       append([]string(nil), req.Env...),
 		master:         master,
 		slave:          slave,
 		cmd:            cmd,
 		nudge:          nudge,
 		provider:       provider,
 		receiptFile:    receiptFile,
+		spawnEnv:       append([]string(nil), req.Env...),
 		outputBuf:      NewRingBuffer(OutputRingBytes), // 64KB rolling buffer
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, req.Name+".sock"),
@@ -1791,10 +1797,12 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	procName := ProcessName(old.Type, old.Name)
 	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile))
 
-	// And the same layers in the same order: the configured env, then the
-	// identity, then the env the agent was spawned with. Leaving out
-	// old.spawnEnv here is the bug this replaced: every restart silently
-	// dropped the spawn's --env, and a restarted polecat its POGO_ROLE.
+	// The same layers in the same order as Spawn (processEnv): the configured
+	// env, then the injected catalogue, then the caller's spawn env re-applied
+	// last (drellem2/pogo#165). The order is load-bearing, not incidental:
+	// polecatSpawnEnv appends POGO_ROLE last inside req.Env, so it beats any
+	// dispatcher-supplied --env on spawn, and only the same order keeps that
+	// true on a restart.
 	cmd.Env = append(os.Environ(), processEnv(r.configEnvLocked(old.Type, old.Name), injectedEnv, old.spawnEnv)...)
 
 	// A restart re-resolves to the agent's OWN provider (carried on old.provider
@@ -1834,13 +1842,13 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		// Carried, not re-resolved: old.Command already carries the model argv,
 		// so a respawn must report the same model it re-execs with.
 		Model:          old.Model,
-		spawnEnv:       old.spawnEnv,
 		master:         master,
 		slave:          slave,
 		cmd:            cmd,
 		nudge:          nudge,
 		provider:       provider,
 		receiptFile:    receiptFile,
+		spawnEnv:       old.spawnEnv,
 		outputBuf:      NewRingBuffer(OutputRingBytes),
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, old.Name+".sock"),
@@ -2028,6 +2036,12 @@ func (a *Agent) ExitErr() error {
 // reproduced by making the host busy and hoping. Nil in production.
 var readOutputStartHook func()
 
+// readOutputAttachedHook, when non-nil, runs in readOutput AFTER it has
+// announced attachment and before its first Read. A test uses it to wedge a
+// reader that waitAndHandle believes is draining, which is the state of
+// mg-d7e17's CI hang. Nil in production.
+var readOutputAttachedHook func()
+
 // readOutput is the sole reader of the PTY master fd.
 // It fans out output to the ring buffer AND any active attach connections.
 func (a *Agent) readOutput() {
@@ -2038,6 +2052,9 @@ func (a *Agent) readOutput() {
 	// Announce attachment BEFORE the first Read: waitAndHandle holds the tty
 	// open until it sees this.
 	close(a.readerAttached)
+	if readOutputAttachedHook != nil {
+		readOutputAttachedHook()
+	}
 	buf := make([]byte, 4096)
 	for {
 		n, err := a.master.Read(buf)
@@ -2145,6 +2162,14 @@ func startPTY(cmd *exec.Cmd, winsize *pty.Winsize) (master, slave *os.File, err 
 // either. The bound keeps a wedged reader from stalling the exit path.
 const readerAttachTimeout = 5 * time.Second
 
+// outputDrainTimeout bounds how long waitAndHandle waits for readOutput to
+// finish once the child is reaped and the parent's slave released (mg-d7e17).
+// A healthy drain at that point takes milliseconds: the child is gone, so
+// only already-buffered output remains. The bound only matters when the reader
+// can never finish, and then it is the difference between a slow stop and a
+// stop that never returns. A var, not a const, so a test can shorten it.
+var outputDrainTimeout = 10 * time.Second
+
 // closeSlave releases the parent's slave fd. Idempotent; safe to call from
 // Cleanup and from waitAndHandle in either order.
 func (a *Agent) closeSlave() {
@@ -2195,7 +2220,24 @@ func (r *Registry) waitAndHandle(a *Agent) {
 
 	// Wait for the output reader to drain all remaining PTY output before
 	// signaling done, so callers of Done() see the complete output.
-	<-a.outputDone
+	//
+	// Bounded (mg-d7e17). The reader finishes only when its Read on the master
+	// returns EOF/EIO, and that happens only once EVERY slave descriptor is
+	// closed, not merely ours. On CI a reader sat in that read for 19 minutes
+	// after its child was reaped, and because done closes only after this, Stop
+	// and StopAll hung behind it: a fleet shutdown that never ends. The child is
+	// already reaped, so what is left to drain is what was buffered. Past the
+	// bound, give up on completeness rather than on shutdown. The reader is
+	// left parked: Cleanup's close of a blocking-mode master does not wait for
+	// it, and if its Read ever returns it exits normally.
+	select {
+	case <-a.outputDone:
+	case <-time.After(outputDrainTimeout):
+		log.Printf("agent %s: output reader still not finished %v after the child was reaped "+
+			"and the PTY slave released (its master Read has not returned EOF/EIO); "+
+			"marking the agent exited anyway, trailing output may be lost (mg-d7e17)",
+			a.Name, outputDrainTimeout)
+	}
 
 	a.mu.Lock()
 	a.Status = StatusExited

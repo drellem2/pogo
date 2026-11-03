@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	refinerypkg "github.com/drellem2/pogo/internal/refinery"
 )
 
 // The mg-441f battery: a stranded branch the refinery has ALREADY refused must
@@ -588,5 +590,103 @@ func TestMergedPriorDoesNotInventAFailure(t *testing.T) {
 	}
 	if !strings.Contains(row.Remedy(), "mg done") {
 		t.Errorf("Remedy() = %q; a landed row's remedy is unchanged by its history", row.Remedy())
+	}
+}
+
+// The mg-14462 pair: the sentence after the refinery's verbatim reason states
+// WHAT has to change, and that depends on the class. A rebase/defect refusal is
+// fixed on the branch; a `protected` refusal (drellem2/pogo#164) is fixed by
+// changing the TARGET, and a row that said "rebase" for it contradicted the
+// reason it had just quoted.
+
+// liveProtectedRefusal is the shape of the refinery's not-retried reason for a
+// branch-protection refusal: it names the target as the thing in the way.
+const liveProtectedRefusal = "the remote refused the push to main by rule (GH013: Repository rule " +
+	"violations found) — no attempt changes a rule"
+
+func protectedRefusal(repo, branch string, at time.Time) map[string]PriorSubmission {
+	recs := refused(repo, branch, at)
+	p := recs[QueueKey(repo, branch)]
+	p.Stage = "push"
+	p.Class = "protected"
+	p.Reason = liveProtectedRefusal
+	p.Triage = "PROTECTED — the remote REFUSED the push to the target by rule."
+	recs[QueueKey(repo, branch)] = p
+	return recs
+}
+
+func refusedRow(t *testing.T, record func(repo, branch string, at time.Time) map[string]PriorSubmission) Row {
+	t.Helper()
+	r := newRepo(t)
+	r.branch("polecat-p5058", "main")
+	r.commit("audit.go", "feat: the work the refinery refused")
+	r.push("polecat-p5058")
+	r.checkout("main")
+	// Built AFTER the commits, so the refusal postdates the branch tip and is
+	// about what is on the branch now.
+	recs := record(r.dir, "polecat-p5058", time.Now())
+	rep, err := Scan(Options{
+		Items:      board(Item{ID: "mg-5058", Status: "available", Repo: r.dir}),
+		LiveAgents: fleet(),
+		History:    refinery(hourAgo(t, 48), recs),
+		Target:     "main",
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	row, ok := rowFor(rep, "mg-5058")
+	if !ok || row.Kind != KindRefusedBefore {
+		t.Fatalf("want a %s row for mg-5058\n%s", KindRefusedBefore, Render(rep, true))
+	}
+	return row
+}
+
+func TestRefusedRowForADefectSaysTheBranchMustChange(t *testing.T) {
+	row := refusedRow(t, refused)
+	got := row.Remedy()
+	for _, want := range []string{"class=defect", "the branch has to CHANGE", "rebase onto "} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Remedy() = %q does not contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "TARGET has to change") {
+		t.Errorf("Remedy() = %q tells a defect refusal to change its target", got)
+	}
+}
+
+func TestRefusedRowForAProtectedRefusalSaysTheTargetMustChange(t *testing.T) {
+	row := refusedRow(t, protectedRefusal)
+	got := row.Remedy()
+	for _, want := range []string{
+		"class=protected",
+		liveProtectedRefusal, // the refinery's own reason, still verbatim
+		"TARGET has to change, not the branch",
+		"refuses pushes to main",
+		"--target=<branch>",
+		"on purpose",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Remedy() = %q does not contain %q", got, want)
+		}
+	}
+	for _, bad := range []string{
+		"rebase onto",              // the remedy that cannot help here
+		"the branch has to CHANGE", // ditto
+		"refinery submit",          // the unchanged resubmit is still withheld
+		"pull request",             // one host's answer, not portable (#69)
+		"open a PR",
+	} {
+		if strings.Contains(got, bad) {
+			t.Errorf("Remedy() = %q contains %q", got, bad)
+		}
+	}
+}
+
+// TestClassProtectedMatchesTheRefinery pins strandwatch's restated class value
+// to the refinery's constant, so a rename there cannot silently send protected
+// refusals back to the rebase remedy.
+func TestClassProtectedMatchesTheRefinery(t *testing.T) {
+	if classProtected != string(refinerypkg.ClassProtected) {
+		t.Fatalf("classProtected = %q, refinery.ClassProtected = %q", classProtected, refinerypkg.ClassProtected)
 	}
 }

@@ -94,7 +94,7 @@ GitHub operations in the refinery are listed under §9, H1.
 | S9 | `internal/strandedwork/content.go:312` | `git show T:path` | Target file content, to check whether the lines already landed. | `enth query cat <ref> <path>`. | a |
 | S10 | `cmd/pogo/checkstranded.go:523,551` | `rev-parse --git-common-dir`, `symbolic-ref --short HEAD` | Source repo and branch of a polecat tree. | `DIR/.enth/checkout` (see W9). The branch half follows W1. | b |
 
-The open-PR probe (`ghpr.Lookup` via `strandedwork.GitHubOpenPR`, `strandedwork.go:906`) is §9, H2.
+The open-PR probe (`ghpr.Ask` via `strandedwork.GitHubOpenPR`, `strandedwork.go:913`) is §9, H2.
 
 ## 5. gitgc
 

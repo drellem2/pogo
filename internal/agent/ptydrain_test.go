@@ -117,3 +117,63 @@ func TestFastExitingChildOutputSurvivesLateReader(t *testing.T) {
 			"exit=%v, complete output: %q", a.ExitErr(), got)
 	}
 }
+
+// TestStopReturnsWhenTheOutputReaderNeverFinishes is mg-d7e17's reproduction.
+// cmd/pogod's TestRequestedFleetStopRaisesNoRestartFailedCondition hung for
+// the full 20m package budget on CI (drellem2/pogo run 41695518754, linux). The
+// dump had exactly one agent left. Its child was reaped and the parent's slave
+// released, waitAndHandle was parked on `<-a.outputDone`, readOutput sat in a
+// raw read(2) on the master that never returned, and StopAll was parked on
+// `<-agent.done` behind both.
+//
+// Why that read never got its EIO is NOT established. Holding a second slave
+// descriptor does not reproduce it on darwin, because the session leader's exit
+// revokes the tty there anyway. So this test wedges the reader directly, with
+// readOutputAttachedHook: it has attached and then never returns. That is the
+// CI dump's state by construction, on any kernel.
+//
+// Before the fix, Stop never returned. After it, Stop is bounded by
+// outputDrainTimeout: the agent is reported done with whatever output was
+// drained, instead of holding a fleet shutdown forever.
+func TestStopReturnsWhenTheOutputReaderNeverFinishes(t *testing.T) {
+	prevDrain := outputDrainTimeout
+	outputDrainTimeout = 200 * time.Millisecond
+	release := make(chan struct{})
+	prevHook := readOutputAttachedHook
+	readOutputAttachedHook = func() { <-release }
+	// Release the wedged reader, so its goroutine does not outlive the test.
+	// Cleanups run LIFO, so the restore is registered first and runs after the release.
+	t.Cleanup(func() { readOutputAttachedHook = prevHook; outputDrainTimeout = prevDrain })
+	t.Cleanup(func() { close(release) })
+
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	a, err := reg.Spawn(SpawnRequest{Name: "wedged-reader", Type: TypePolecat, Command: []string{"cat"}})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- reg.Stop("wedged-reader", 2*time.Second) }()
+
+	// Bound: the SIGINT window (2s) plus the drain bound, with generous slack.
+	// The wedge this guards lasts FOREVER, so the slack costs nothing in
+	// discrimination.
+	const bound = 30 * time.Second
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(bound):
+		t.Fatalf("Stop did not return within %v with the output reader wedged: "+
+			"waitAndHandle waits on a reader that can never finish (mg-d7e17)", bound)
+	}
+	select {
+	case <-a.Done():
+	default:
+		t.Fatal("Stop returned but Done() is still open")
+	}
+}

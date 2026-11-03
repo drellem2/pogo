@@ -64,6 +64,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -428,6 +429,14 @@ type Finding struct {
 	// then stays what it was — the finding is REPORTED — for the reason given on
 	// CheckOpenPR.
 	PRProbeError string `json:"pr_probe_error,omitempty"`
+	// PRProbeBranch is the branch name CheckOpenPR asked GitHub about, and
+	// PRProbeResult what came back: "open:#N", "not_open:<STATE>", "none" or
+	// "error", followed by the repository it was asked of ("repo:OWNER/REPO",
+	// or "repo:unpinned (<why>)" when gh chose). Both are set whenever the probe
+	// ran, so an alert that went out on "GitHub said no PR" says so instead of
+	// leaving it to be inferred from an absent error (drellem2/pogo#259).
+	PRProbeBranch string `json:"pr_probe_branch,omitempty"`
+	PRProbeResult string `json:"pr_probe_result,omitempty"`
 
 	// WorkItemID is the id recovered from the unmerged commit subjects, when one
 	// is present (commit convention: a trailing "(mg-xxxx)"). Best-effort: it is
@@ -894,16 +903,16 @@ func onOrigin(repo, head string) (ref string, exact bool, err error) {
 // out is a failed probe, and a failed probe keeps the alert.
 const PRProbeTimeout = 15 * time.Second
 
-// PRProbe reports the number of the open pull request whose head is branch in
-// the GitHub repository dir's origin points at: >0 for an open PR, 0 for none
-// (or one that is not open), and an error when the question could not be
-// answered.
-type PRProbe func(dir, branch string) (int, error)
+// PRProbe reports the pull request whose head is branch in the GitHub
+// repository dir's origin points at, and which repository it asked. Only an
+// Answer whose State is OPEN suppresses; an error means the question could not
+// be answered.
+type PRProbe func(dir, branch string) (ghpr.Answer, error)
 
-// GitHubOpenPR is the production PRProbe: `gh pr view`, through the same
-// helper the refinery uses to find a branch's PR (internal/ghpr).
-func GitHubOpenPR(dir, branch string) (int, error) {
-	return ghpr.OpenNumber(dir, branch, PRProbeTimeout)
+// GitHubOpenPR is the production PRProbe: `gh pr view -R <origin>`, through
+// the same helper the refinery uses to find a branch's PR (internal/ghpr).
+func GitHubOpenPR(dir, branch string) (ghpr.Answer, error) {
+	return ghpr.Ask(dir, branch, PRProbeTimeout)
 }
 
 // CheckOpenPR reclassifies a DispositionResubmit finding as
@@ -936,13 +945,22 @@ func (f *Finding) CheckOpenPR(dir string, probe PRProbe) {
 	if branch == "" {
 		return
 	}
-	num, err := probe(dir, branch)
+	ans, err := probe(dir, branch)
+	f.PRProbeBranch = branch
+	outcome := ans.Outcome()
 	if err != nil {
 		f.PRProbeError = err.Error()
+		outcome = "error"
+	}
+	f.PRProbeResult = outcome
+	if note := ans.RepoNote(); note != "" {
+		f.PRProbeResult += " " + note
+	}
+	if err != nil {
 		return
 	}
-	if num > 0 {
-		f.PR, f.PRBranch, f.Disposition = num, branch, DispositionAwaitingReview
+	if ans.Number > 0 && strings.EqualFold(ans.State, "OPEN") {
+		f.PR, f.PRBranch, f.Disposition = ans.Number, branch, DispositionAwaitingReview
 	}
 }
 
@@ -1394,6 +1412,36 @@ func workItemID(commits []Commit) string {
 // refExists reports whether ref names a commit in repo. The runner moved to
 // internal/vcs/gitvcs (enth-vcs slice 3, mg-d72cb), unchanged.
 func refExists(repo, ref string) (bool, error) { return gitvcs.RefExists(repo, ref) }
+
+// RevParse resolves rev to the commit SHA it names in repo.
+func RevParse(repo, rev string) (string, error) {
+	out, err := git(repo, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("rev-parse %s: %w", rev, err)
+	}
+	sha := strings.TrimSpace(out)
+	if sha == "" {
+		return "", fmt.Errorf("rev-parse %s: no such commit", rev)
+	}
+	return sha, nil
+}
+
+// IsAncestor reports whether commit is an ancestor of (or equal to) ref.
+//
+// Exit 1 is git's well-defined "no"; every other failure — including a commit
+// this clone does not hold, which git reports as exit 128 — is an error, so a
+// caller that settles on a "yes" can never settle on a failure.
+func IsAncestor(repo, commit, ref string) (bool, error) {
+	_, err := git(repo, "merge-base", "--is-ancestor", commit, ref)
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("merge-base --is-ancestor %s %s: %w", commit, ref, err)
+}
 
 func git(repo string, args ...string) (string, error) {
 	return gitStdin(repo, "", args...)

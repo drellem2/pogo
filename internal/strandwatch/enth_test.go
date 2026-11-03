@@ -433,8 +433,32 @@ func TestEnthRowTypesThroughEnthd(t *testing.T) {
 	if rep.EnthClosedItems != 2 || rep.EnthDoneLandedElsewhere != 1 {
 		t.Errorf("EnthClosedItems=%d EnthDoneLandedElsewhere=%d, want 2 and 1", rep.EnthClosedItems, rep.EnthDoneLandedElsewhere)
 	}
-	if len(rep.Repos) != 1 || rep.Repos[0].EnthUnlanded != 5 || rep.Repos[0].EnthLanded != 5 {
-		t.Errorf("coverage = %+v, want 5 unlanded and 5 landed", rep.Repos)
+	// The coverage count is EXACT, but what it counts includes one Change the
+	// test did not make: the fixture's hand-stored root (enthdtest.Start), which
+	// an enth before b89e32f (mg-c964d, "a land records a change entry for a
+	// member stored without one") never listed and an enth from it on lists as
+	// landed. The host's enth is whatever was last built onto PATH, so a
+	// hardcoded total couples this test to that build: it went red at a 16:07Z
+	// rebuild with no pogo change (mg-f99ff). So the expectation is the 5
+	// Changes landed above, plus the root only when the same listing actually
+	// names it — and then it must be landed and untrailed, or it would have
+	// produced a row the table above does not expect.
+	wantLanded := 5
+	listed, err := enthdSource(s, b).Changes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range listed {
+		if c.ID != s.RootID {
+			continue
+		}
+		if c.Landed == "" || len(c.Trailers) != 0 {
+			t.Errorf("fixture root %s is listed but not as a landed, untrailed Change: %+v", s.RootID, c)
+		}
+		wantLanded++
+	}
+	if len(rep.Repos) != 1 || rep.Repos[0].EnthUnlanded != 5 || rep.Repos[0].EnthLanded != wantLanded {
+		t.Errorf("coverage = %+v, want 5 unlanded and %d landed (5 made by this test, plus the fixture root if listed)", rep.Repos, wantLanded)
 	}
 	for _, want := range []string{
 		"landed_not_closed",
@@ -442,7 +466,7 @@ func TestEnthRowTypesThroughEnthd(t *testing.T) {
 		"The work is ON the trunk and the item is still asking for it.",
 		"1 OTHER Change(s) of this item DID land (" + cAdopted + ")",
 		"(1 of them beside LANDED work of the same item",
-		"5 landed,",
+		fmt.Sprintf("%d landed,", wantLanded),
 		"1 landed-but-not-closed",
 	} {
 		if !strings.Contains(out, want) {
@@ -488,5 +512,75 @@ func TestEnthRepoUnreadableThroughEnthd(t *testing.T) {
 				t.Errorf("remedy = %s", r.Remedy())
 			}
 		})
+	}
+}
+
+// mg-69461: the enth source map is keyed by the registered project path, which
+// `pogo project add` stores WITH a trailing slash, while an mg item's Repo:
+// has none. Keyed raw, the item's repository was swept as git (a false
+// "could not list branches" row), the enth row counted 0 items and said no
+// open item named it, and a --repo sweep dropped the enth source. The item's
+// unlanded Change must be on the ENTH row, as the only row for that item.
+func TestEnthRepoKeyIgnoresTrailingSlash(t *testing.T) {
+	const registered = enthRepoPath + "/" // as projects.json stores it
+	items := []Item{{ID: "mg-s1", Status: "available", Repo: enthRepoPath, Title: "no slash"}}
+	list := func() ([]vcs.Change, error) {
+		return []vcs.Change{change("ssss1111", "root", "mg-s1", "ps1")}, nil
+	}
+	mk := func(repos []string) Options {
+		o := enthOpts(items, map[string]bool{}, list, nil)
+		o.Enth = func() (map[string]EnthSource, error) {
+			return map[string]EnthSource{registered: {
+				Remote: "http://enthd.test", Repo: "alice/proj", Trunk: vcs.DefaultEnthTrunk, Changes: list,
+			}}, nil
+		}
+		o.Repos = repos
+		return o
+	}
+	for _, tc := range []struct {
+		name  string
+		repos []string
+	}{
+		{"unscoped", nil},
+		{"--repo without slash", []string{enthRepoPath}},
+		{"--repo with slash", []string{registered}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rep, err := Scan(mk(tc.repos))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rep.Repos) != 1 {
+				t.Fatalf("repos = %+v, want ONE enth row (the slash and no-slash spellings are one repository)", rep.Repos)
+			}
+			cov := rep.Repos[0]
+			if cov.VCS != string(vcs.Enth) || cov.Items != 1 || !cov.NamedByOpenItem || cov.Error != "" {
+				t.Fatalf("enth row = %+v, want vcs=enth, 1 item, named by an open item, no error", cov)
+			}
+			if cov.EnthUnlanded != 1 {
+				t.Fatalf("enth row unlanded = %d, want 1", cov.EnthUnlanded)
+			}
+			var rows []Row
+			for _, r := range rep.Rows {
+				if r.Item.ID == "mg-s1" {
+					rows = append(rows, r)
+				}
+			}
+			if len(rows) != 1 || rows[0].Kind != KindStranded || rows[0].Enth == nil || rows[0].Unmerged != 1 {
+				t.Fatalf("rows for mg-s1 = %+v, want exactly one stranded enth row with 1 unlanded Change", rows)
+			}
+			if len(rep.ReposUnmatched) != 0 {
+				t.Fatalf("repos unmatched = %+v, want none", rep.ReposUnmatched)
+			}
+		})
+	}
+}
+
+func TestQueueKeyIgnoresTrailingSlash(t *testing.T) {
+	if QueueKey("/a/b/", "x") != QueueKey("/a/b", "x") || ItemQueueKey("/a/b/", "mg-1") != ItemQueueKey("/a/b", "mg-1") {
+		t.Fatal("queue keys differ by trailing slash")
+	}
+	if RepoKey("") != "" {
+		t.Fatalf("RepoKey(\"\") = %q, want \"\"", RepoKey(""))
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/drellem2/pogo/internal/events"
+	"github.com/drellem2/pogo/internal/ghpr"
 	"github.com/drellem2/pogo/internal/testsandbox"
 )
 
@@ -78,7 +79,7 @@ func TestMain(m *testing.M) {
 	// The open-PR probe answers "no PR" by default, so no stranded-work test
 	// shells out to the real gh — and through it to GitHub — about a fixture
 	// repository (mg-dbb75). Tests of the probe's effect install their own.
-	strandedPRProbe = func(string, string) (int, error) { return 0, nil }
+	strandedPRProbe = func(string, string) (ghpr.Answer, error) { return ghpr.Answer{}, nil }
 
 	code := m.Run()
 

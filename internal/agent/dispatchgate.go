@@ -208,7 +208,13 @@ func (m MGDispatchGate) DispatchGated(workItemID string) (Gating, bool) {
 	// rather than by a check: a parent that resolves nowhere is treated as
 	// satisfied, because pogo's store reader cannot see the archive and
 	// completed work is archived within minutes; and an unreadable store answers
-	// "not gated" like every branch above it.
+	// "not gated" like every branch above it. Put plainly (drellem2/pogo#201):
+	// this refuses ONLY when a parent is positively found live in available/,
+	// claimed/ or pending/. A parent that cannot be parsed or cannot be found
+	// reads as satisfied. That is fail-open by design, because pogo does not
+	// read the archive. The per-item way out is `mg edit <id> --rm-depends=...`,
+	// which the refusal message names. There is no fleet-wide disable; that is
+	// tracked in drellem2/pogo#202.
 	if unmet := m.unmetDepends(root, item); len(unmet) > 0 {
 		return Gating{Depends: unmet, Status: item.Status}, true
 	}

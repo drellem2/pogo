@@ -737,7 +737,12 @@ func lookupPR(wtDir, branch string) (int, string, error) {
 // this runs; a gh outage or a lost branch-delete race must never turn a
 // successful merge into a failed one, so problems are logged and skipped.
 func (r *Refinery) closePRAndReap(wtDir string, mr *MergeRequest, sha string) {
-	num, state, err := lookupPR(wtDir, mr.Branch)
+	// The close is a WRITE addressed by number, so it must go to the same
+	// repository the number was looked up in. The lookup is pinned to origin
+	// (drellem2/pogo#259); an unpinned `gh pr close N` lets gh pick its own
+	// base repo — an upstream remote or set-default — and close PR #N there.
+	ans, err := ghpr.Ask(wtDir, mr.Branch, prLookupTimeout)
+	num, state := ans.Number, ans.State
 	if err != nil {
 		log.Printf("refinery: MR %s step=pr-close skipped: gh lookup failed (%v) — a PR for %s (if any) may be left open", mr.ID, err, mr.Branch)
 		return
@@ -749,7 +754,7 @@ func (r *Refinery) closePRAndReap(wtDir string, mr *MergeRequest, sha string) {
 
 	if strings.EqualFold(state, "OPEN") {
 		log.Printf("refinery: MR %s step=pr-close branch=%s pr=#%d", mr.ID, mr.Branch, num)
-		if out, cerr := ghClosePR(wtDir, num, prClosedComment(mr, sha)); cerr != nil {
+		if out, cerr := ghClosePR(wtDir, ans.Repo, num, prClosedComment(mr, sha)); cerr != nil {
 			log.Printf("refinery: MR %s step=pr-close failed (%v: %s) — PR #%d left open; merge already landed", mr.ID, cerr, out, num)
 		}
 	} else {
@@ -784,12 +789,19 @@ func prClosedComment(mr *MergeRequest, sha string) string {
 		landed, mr.TargetRef, mr.ID, mr.TargetRef)
 }
 
-// ghClosePR closes PR number with a comment. Bounded by prCloseTimeout so a
-// hung gh call can't stall the merge pipeline after the merge has landed.
-func ghClosePR(wtDir string, number int, comment string) (string, error) {
+// ghClosePR closes PR number with a comment, in repo (OWNER/REPO, passed as
+// -R) when the lookup that found number was pinned to one; with repo "" the
+// lookup was unpinned too, and both calls let gh choose alike. Bounded by
+// prCloseTimeout so a hung gh call can't stall the merge pipeline after the
+// merge has landed.
+func ghClosePR(wtDir, repo string, number int, comment string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), prCloseTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "gh", "pr", "close", strconv.Itoa(number), "--comment", comment)
+	args := []string{"pr", "close", strconv.Itoa(number), "--comment", comment}
+	if repo != "" {
+		args = append(args, "-R", repo)
+	}
+	cmd := exec.CommandContext(ctx, "gh", args...)
 	cmd.Dir = wtDir
 	cmd.Env = ghtoken.ChildEnvContext(ctx, append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
 	out, err := cmd.CombinedOutput()
