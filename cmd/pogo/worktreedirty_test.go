@@ -10,48 +10,35 @@ import (
 	"github.com/drellem2/pogo/internal/hookarm"
 )
 
-// presubmitTemplates are the shipped prompt templates that carry the
-// pre-submit check (mg-c184d). Each must pass on pogod's own artefacts and
-// still refuse real work (mg-54263).
-var presubmitTemplates = []string{
-	"polecat.md",
-	"polecat-architect.md",
-}
+// presubmitShellPath is the pre-submit check as the polecat templates carried
+// it as shell from mg-c184d until mg-71014, when the templates' git arm became
+// `pogo presubmit --item=<id> --target=<target>`. The file is kept verbatim as
+// the reference the verb is measured against (TestPresubmitGitEqualsTheTemplateShell)
+// and as a second subject of the mg-54263 artefact test below.
+const presubmitShellPath = "testdata/presubmit_check.sh"
 
-// presubmitFunc extracts the presubmit_check shell function from a shipped
-// template, verbatim apart from its markdown indentation, so the test runs the
-// text a polecat runs rather than a copy of it.
-func presubmitFunc(t *testing.T, name string) string {
+// presubmitFunc reads the reference presubmit_check shell function.
+func presubmitFunc(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "internal", "agent", "prompts", "templates", name))
+	raw, err := os.ReadFile(presubmitShellPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(string(raw), "\n")
-	start := -1
-	for i, l := range lines {
-		if strings.TrimSpace(l) == "presubmit_check() {" {
-			start = i
-			break
-		}
+	body := string(raw)
+	if !strings.Contains(body, "presubmit_check() {") {
+		t.Fatalf("%s: no presubmit_check() function", presubmitShellPath)
 	}
-	if start < 0 {
-		t.Fatalf("%s: no presubmit_check() function", name)
+	return body
+}
+
+// presubmitSubjects are the two forms of the pre-submit check the artefact
+// test holds to the same standard: the reference shell, and the verb the
+// templates now run. Each value is a bash script run with BRANCH set.
+func presubmitSubjects(t *testing.T) map[string]string {
+	return map[string]string{
+		"reference shell": presubmitFunc(t) + "\npresubmit_check main",
+		"pogo presubmit":  "pogo presubmit --item=mg-x --target=main",
 	}
-	indent := lines[start][:len(lines[start])-len(strings.TrimLeft(lines[start], " "))]
-	var fn []string
-	for _, l := range lines[start:] {
-		fn = append(fn, strings.TrimPrefix(l, indent))
-		if l == indent+"}" {
-			body := strings.Join(fn, "\n")
-			if strings.Contains(body, "{{") {
-				t.Fatalf("%s: presubmit_check carries template actions; render it before running", name)
-			}
-			return body
-		}
-	}
-	t.Fatalf("%s: presubmit_check() is not closed", name)
-	return ""
 }
 
 // presubmitRepo is a clone with an origin, on a pushed branch one commit ahead
@@ -112,11 +99,11 @@ func writePogodArtefacts(t *testing.T, dir string) {
 	writeFile(t, dir, filepath.Join("sub", ".claude", hookarm.StampName), "")
 }
 
-// runPresubmit runs a template's presubmit_check in cwd with the freshly built
+// runPresubmit runs a pre-submit check script in cwd with the freshly built
 // pogo first on PATH, and returns its combined output and whether it passed.
-func runPresubmit(t *testing.T, fn, cwd string) (string, bool) {
+func runPresubmit(t *testing.T, script, cwd string) (string, bool) {
 	t.Helper()
-	cmd := exec.Command("bash", "-c", fn+"\npresubmit_check main")
+	cmd := exec.Command("bash", "-c", script)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(),
 		"PATH="+filepath.Dir(pogoBin)+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -143,12 +130,11 @@ func runPresubmit(t *testing.T, fn, cwd string) (string, bool) {
 // in a repo whose .gitignore lacks .claude/ must be allowed to submit, and a
 // real untracked file or tracked modification must still refuse.
 func TestPresubmitCheckPassesOnPogodArtefacts(t *testing.T) {
-	for _, name := range presubmitTemplates {
+	if strings.Contains(presubmitFunc(t), "git status --porcelain") {
+		t.Errorf("the reference presubmit_check runs a bare git status --porcelain")
+	}
+	for name, fn := range presubmitSubjects(t) {
 		t.Run(name, func(t *testing.T) {
-			fn := presubmitFunc(t, name)
-			if strings.Contains(fn, "git status --porcelain") {
-				t.Errorf("%s: presubmit_check still runs a bare git status --porcelain", name)
-			}
 
 			clone := presubmitRepo(t)
 			if out, ok := runPresubmit(t, fn, clone); !ok {

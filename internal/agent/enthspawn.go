@@ -202,7 +202,7 @@ func createEnthPolecatWorkspace(e vcs.EnthRepo, sourceRepo, dir, target, adoptAt
 // the one the worker would be rendered from — the resolved template plus its
 // drop-ins — because that is what reaches the worker, and an installed copy
 // under ~/.pogo/agents/templates can predate the enth blocks. Such a template
-// renders its git protocol (git commit, git push, presubmit_check) for a
+// renders its git protocol (git commit, git push, pogo refinery submit) for a
 // directory with no .git, so the spawn is refused before any side effect
 // rather than dispatched into a worker that cannot follow its own prompt.
 //
@@ -218,7 +218,7 @@ func enthTemplateRefusal(tmplPath string, e vcs.EnthRepo) string {
 		if err == nil {
 			return fmt.Sprintf("refusing to spawn onto enth repo %s: the template %s (with its drop-ins) never "+
 				"references .VCS, so it would hand the worker its git protocol — git commit, git push, "+
-				"presubmit_check — in an enth checkout with no .git (docs/design/enth-vcs.md §12). It is most "+
+				"pogo refinery submit — in an enth checkout with no .git (docs/design/enth-vcs.md §12). It is most "+
 				"likely an installed copy from before the enth blocks: reinstall the prompts (pogo agent prompt "+
 				"install), or add the enth blocks to a locally edited copy. Nothing was dispatched",
 				e.Repo, tmplPath)

@@ -187,31 +187,14 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    }
    self_land{{else}}
    # Pre-submit check (mg-c184d): refuse to submit a branch that would deliver nothing.
-   presubmit_check() {
-     local target="$1" dirty ahead
-     git fetch origin || { echo "REFUSING TO SUBMIT: git fetch origin failed — cannot tell what this branch carries"; return 1; }
-     dirty=$(pogo worktree-dirty) || { echo "REFUSING TO SUBMIT: pogo worktree-dirty failed — cannot tell whether this worktree holds uncommitted work"; return 1; }
-     if [ -n "$dirty" ]; then
-       echo "REFUSING TO SUBMIT: uncommitted work in this worktree — commit and push it, or discard it deliberately:"
-       echo "$dirty"; return 1
-     fi
-     ahead=$(git rev-list --count "origin/$target..HEAD") || { echo "REFUSING TO SUBMIT: git rev-list origin/$target..HEAD failed"; return 1; }
-     if [ "$ahead" -eq 0 ]; then
-       echo "REFUSING TO SUBMIT: $BRANCH carries no commits ahead of origin/$target — nothing would be delivered."
-       echo "Commit and push your work. (If an earlier MR of yours already merged this branch, do not resubmit: check it with pogo refinery show <id>.)"
-       return 1
-     fi
-     [ "$(git rev-parse HEAD)" = "$(git rev-parse -q --verify "origin/$BRANCH")" ] || { echo "REFUSING TO SUBMIT: origin/$BRANCH is not your HEAD — git push origin \"$BRANCH\" first"; return 1; }
-     echo "pre-submit OK: $ahead commit(s) ahead of origin/$target, worktree clean, branch pushed"
-   }
-   presubmit_check {{if .Branch}}{{.Branch}}{{else}}main{{end}} &&
+   pogo presubmit --item={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}} &&
    pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}} \
        --verdict-file=/tmp/{{.Id}}-verdict.json{{end}}
    ```{{if eq .VCS "enth"}}
    **`self_land` is the whole land step, and its refusals are not something to work around.** It runs `pogo presubmit`, which refuses: edits `enth status` still lists (pogod's own `.claude/` files excluded); a checkout standing on a Change with no `Pogo-Item` trailer; no unlanded Change carrying `Pogo-Item={{.Id}}` and your `Pogo-Worker`; more than one stack of them; a stack whose top is not this checkout's base; and a Change message carrying a GitHub closing keyword (`Fixes #N` would close the issue on the mirror). Each of those would land nothing, or something other than the work in this checkout — on 2026-10-01 work that delivered nothing was closed `done` with ~240 lines of it uncommitted (mg-3b86e). A check that cannot run refuses too. If it refuses: fix what it names (usually: make the Change of step 4), and run `self_land` again.
 
    Then it lands your stack with `enth land … --request-id {{.Id}}/<attempt>` and hands enth's answer to `pogo land`, which checks it against enthd and closes your item exactly as a refinery merge closes one. **Nothing tests the merged result before it lands:** you tested your own base, and `enth land` merges onto the trunk. That is the accepted trade-off (enth-vcs §6); post-land CI on the GitHub mirror is the check, so a green `./build.sh` before step 4 is not optional.{{else}}
-   **The `presubmit_check` line is not optional, and its refusal is not something to work around.** A branch that is clean but has nothing ahead of the target, or that has its work sitting uncommitted in the worktree, delivers nothing — and on 2026-10-01 exactly that branch was resolved as "already merged", the item closed `done`, and the polecat reaped with ~240 lines of work uncommitted (mg-3b86e). The refinery now refuses such a branch too (`class=defect`, "branch carries no commits ahead of <target>"), but that is the backstop; this check catches it while you can still fix it. It keys on each command's exit status, so a failed `git` or `pogo` refuses rather than reading as "nothing to report". The dirty check is `pogo worktree-dirty`, not a bare `git status --porcelain`: it is the predicate gc uses, which does not count the `.claude/` files pogod itself writes into your tree (the hook settings and mail-hook stamp) — in a repo whose `.gitignore` lacks `.claude/` those alone used to refuse every submit (gh #240, mg-54263). Every other untracked file and every tracked change still refuses. If it refuses: commit, push, and re-run step 5.{{end}}
+   **The `pogo presubmit` line is not optional, and its refusal is not something to work around.** A branch that is clean but has nothing ahead of the target, or that has its work sitting uncommitted in the worktree, delivers nothing — and on 2026-10-01 exactly that branch was resolved as "already merged", the item closed `done`, and the polecat reaped with ~240 lines of work uncommitted (mg-3b86e). The refinery now refuses such a branch too (`class=defect`, "branch carries no commits ahead of <target>"), but that is the backstop; this check catches it while you can still fix it. It keys on each command's exit status, so a failed `git` or `pogo` refuses rather than reading as "nothing to report". The dirty check is `pogo worktree-dirty`, not a bare `git status --porcelain`: it is the predicate gc uses, which does not count the `.claude/` files pogod itself writes into your tree (the hook settings and mail-hook stamp) — in a repo whose `.gitignore` lacks `.claude/` those alone used to refuse every submit (gh #240, mg-54263). Every other untracked file and every tracked change still refuses. If it refuses: commit, push, and re-run step 5.{{end}}
 
    `"verdict"` is your own word for how the work came out — `pass`, `partial`, `blocked`, whatever is true. Nothing enumerates the legal values and nothing reads the contents: this is the record of what **you** concluded, and the only reader who benefits is the one who later asks what this branch was supposed to have done. A verdict of `partial` with an honest `unverified` list is worth more than a `pass` nobody can check.
 

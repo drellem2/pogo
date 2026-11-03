@@ -24,9 +24,10 @@ import (
 // The check used to exist only as fifteen lines of shell in the polecat
 // templates (presubmit_check, mg-c184d). Duplicating it per VCS would put two
 // copies of it in each of two templates, so it becomes a verb that asks
-// through the seam. On git it is today's shell, check for check and line for
-// line (TestPresubmitGitEqualsTheTemplateShell runs both on the same trees).
-// The templates keep their shell until slice 11 swaps it for this line.
+// through the seam. On git it is that shell, check for check and line for
+// line (TestPresubmitGitEqualsTheTemplateShell runs both on the same trees;
+// the shell is kept in cmd/pogo/testdata/presubmit_check.sh). Both arms of the
+// templates now run this verb in its place (mg-71014).
 func newPresubmitCmd() *cobra.Command {
 	var item, target, worker string
 	var printStack bool
@@ -38,8 +39,8 @@ submitting it to the refinery would deliver something. Prints one
 "REFUSING TO SUBMIT: ..." explanation and exits 1 when it would not; prints
 "pre-submit OK: ..." and exits 0 when it would.
 
-In a git worktree it runs exactly the polecat template's presubmit_check, in
-its order: git fetch origin; pogo worktree-dirty must be empty; the branch must
+In a git worktree it runs exactly the presubmit_check shell the polecat
+templates carried before it, in its order: git fetch origin; pogo worktree-dirty must be empty; the branch must
 carry commits ahead of origin/<target>; and HEAD must equal origin/<branch>
 (the branch is pushed). --item is accepted and not needed.
 
@@ -104,7 +105,7 @@ func checkPresubmit(ctx context.Context, dir, item, target, worker string, stdou
 	return presubmitGit(dir, target, stdout, stderr)
 }
 
-// presubmitGit is the template's presubmit_check. Each step's refusal text is
+// presubmitGit is the former template shell's presubmit_check. Each step's refusal text is
 // the shell's, byte for byte, and git's own output goes where the shell's
 // did: fetch's to the terminal, a failed command's stderr to stderr.
 func presubmitGit(dir, target string, stdout, stderr io.Writer) bool {

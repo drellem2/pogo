@@ -130,7 +130,7 @@ func TestEmptyVCSRendersAsGit(t *testing.T) {
 func TestEnthRenderHasNoGitProtocol(t *testing.T) {
 	forbidden := []string{
 		"BRANCH=$(git rev-parse", "git push origin", "git commit -m", "git add <files>",
-		"presubmit_check", "pogo refinery submit \"$BRANCH\"", "git checkout -B", "git fetch origin",
+		"pogo refinery submit \"$BRANCH\"", "git checkout -B", "git fetch origin",
 		"gh pr comment", "git diff origin/main", "git diff main...", "is a git worktree",
 	}
 	tmpls := embeddedPolecatTemplates(t)
@@ -379,6 +379,52 @@ func TestEnthTemplateRefusalPassesABranchingTemplate(t *testing.T) {
 		if got := enthTemplateRefusal(p, e); got != "" {
 			t.Errorf("shipped %s was refused: %s", name, got)
 		}
+	}
+}
+
+// The pre-submit check is one line on both VCSs (enth-vcs §12, mg-71014): a
+// git render that submits runs `pogo presubmit --item=<id> --target=<target>`
+// on the line before `pogo refinery submit`, chained with &&, and no render of
+// any template still carries the presubmit_check shell it replaced. The verb is
+// held to that shell by cmd/pogo's TestPresubmitGitEqualsTheTemplateShell.
+func TestGitSubmitRunsPogoPresubmit(t *testing.T) {
+	submitters := 0
+	for name, body := range embeddedPolecatTemplates(t) {
+		for k, v := range varMatrix() {
+			for _, vcsName := range []string{TemplateVCSGit, TemplateVCSEnth} {
+				v.VCS = vcsName
+				out := render(t, name, body, v)
+				if strings.Contains(out, "presubmit_check") {
+					t.Errorf("%s [%s vcs=%s]: still carries the presubmit_check shell", name, k, vcsName)
+				}
+				if vcsName != TemplateVCSGit {
+					continue
+				}
+				lines := strings.Split(out, "\n")
+				for i, l := range lines {
+					if !strings.Contains(l, "pogo refinery submit \"$BRANCH\"") {
+						continue
+					}
+					submitters++
+					target := "main"
+					if v.Branch != "" {
+						target = v.Branch
+					}
+					want := "pogo presubmit --item=" + v.Id + " --target=" + target + " &&"
+					if i == 0 || strings.TrimSpace(lines[i-1]) != want {
+						prev := ""
+						if i > 0 {
+							prev = lines[i-1]
+						}
+						t.Errorf("%s [%s]: the line before the submit is %q; want %q", name, k, prev, want)
+					}
+				}
+			}
+		}
+	}
+	// Control: polecat.md and polecat-architect.md submit in every shape.
+	if submitters < 2*len(varMatrix()) {
+		t.Errorf("control: only %d git renders submit; want at least %d", submitters, 2*len(varMatrix()))
 	}
 }
 

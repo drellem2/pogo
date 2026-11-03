@@ -11,12 +11,12 @@ import (
 	"testing"
 )
 
-// The git half of `pogo presubmit` must be today's shell (enth-vcs §16 row 6:
-// "git presubmit equal to today's shell"). This test does not restate the
-// shell: it lifts presubmit_check out of the polecat templates as they are
-// today and runs it, and `pogo presubmit`, on the same trees, and requires
-// the same stdout and the same exit status in every case — each refusal, and
-// the pass.
+// The git half of `pogo presubmit` must be the shell it replaced (enth-vcs §16
+// row 6: "git presubmit equal to today's shell"). This test does not restate
+// the shell: it runs presubmit_check as the polecat templates carried it until
+// mg-71014 (kept verbatim in testdata/presubmit_check.sh), and `pogo
+// presubmit`, on the same trees, and requires the same stdout and the same
+// exit status in every case — each refusal, and the pass.
 
 type presubmitFixture struct {
 	t      *testing.T
@@ -153,26 +153,24 @@ func TestPresubmitGitEqualsTheTemplateShell(t *testing.T) {
 			f.git(f.work, "remote", "set-url", "origin", filepath.Join(f.root, "gone.git"))
 		}, false, "git fetch origin failed"},
 	}
-	for _, tmpl := range presubmitTemplates {
-		shell := presubmitFunc(t, tmpl)
-		for _, c := range cases {
-			t.Run(tmpl+"/"+c.name, func(t *testing.T) {
-				f := newPresubmitFixture(t)
-				c.setup(f)
-				script := shell + "\nBRANCH=$(git rev-parse --abbrev-ref HEAD)\npresubmit_check \"$1\""
-				sh := runIn(t, f.work, f.env, "bash", "-c", script, "presubmit", c.target)
-				// The verb never re-fetches anything the shell left: run it on
-				// the same tree straight after.
-				verb := runIn(t, f.work, f.env, pogoBin, "presubmit", "--item=mg-x", "--target="+c.target)
-				if (sh.code == 0) != c.wantOK || !strings.Contains(sh.stdout, c.want) {
-					t.Fatalf("control: the template shell itself answered exit %d:\n%s\nwant ok=%v and %q", sh.code, sh.stdout, c.wantOK, c.want)
-				}
-				if sh.stdout != verb.stdout || (sh.code == 0) != (verb.code == 0) {
-					t.Errorf("pogo presubmit differs from the template's shell.\nshell (exit %d):\n%s\npogo presubmit (exit %d):\n%s",
-						sh.code, sh.stdout, verb.code, verb.stdout)
-				}
-			})
-		}
+	shell := presubmitFunc(t)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newPresubmitFixture(t)
+			c.setup(f)
+			script := shell + "\nBRANCH=$(git rev-parse --abbrev-ref HEAD)\npresubmit_check \"$1\""
+			sh := runIn(t, f.work, f.env, "bash", "-c", script, "presubmit", c.target)
+			// The verb never re-fetches anything the shell left: run it on
+			// the same tree straight after.
+			verb := runIn(t, f.work, f.env, pogoBin, "presubmit", "--item=mg-x", "--target="+c.target)
+			if (sh.code == 0) != c.wantOK || !strings.Contains(sh.stdout, c.want) {
+				t.Fatalf("control: the template shell itself answered exit %d:\n%s\nwant ok=%v and %q", sh.code, sh.stdout, c.wantOK, c.want)
+			}
+			if sh.stdout != verb.stdout || (sh.code == 0) != (verb.code == 0) {
+				t.Errorf("pogo presubmit differs from the template's shell.\nshell (exit %d):\n%s\npogo presubmit (exit %d):\n%s",
+					sh.code, sh.stdout, verb.code, verb.stdout)
+			}
+		})
 	}
 }
 

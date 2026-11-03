@@ -243,24 +243,7 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
      git commit -m "docs: <description> ({{.Id}})"
      git push origin "$BRANCH"
      # Pre-submit check (mg-c184d): refuse to submit a branch that would deliver nothing.
-     presubmit_check() {
-       local target="$1" dirty ahead
-       git fetch origin || { echo "REFUSING TO SUBMIT: git fetch origin failed — cannot tell what this branch carries"; return 1; }
-       dirty=$(pogo worktree-dirty) || { echo "REFUSING TO SUBMIT: pogo worktree-dirty failed — cannot tell whether this worktree holds uncommitted work"; return 1; }
-       if [ -n "$dirty" ]; then
-         echo "REFUSING TO SUBMIT: uncommitted work in this worktree — commit and push it, or discard it deliberately:"
-         echo "$dirty"; return 1
-       fi
-       ahead=$(git rev-list --count "origin/$target..HEAD") || { echo "REFUSING TO SUBMIT: git rev-list origin/$target..HEAD failed"; return 1; }
-       if [ "$ahead" -eq 0 ]; then
-         echo "REFUSING TO SUBMIT: $BRANCH carries no commits ahead of origin/$target — nothing would be delivered."
-         echo "Commit and push your work. (If an earlier MR of yours already merged this branch, do not resubmit: check it with pogo refinery show <id>.)"
-         return 1
-       fi
-       [ "$(git rev-parse HEAD)" = "$(git rev-parse -q --verify "origin/$BRANCH")" ] || { echo "REFUSING TO SUBMIT: origin/$BRANCH is not your HEAD — git push origin \"$BRANCH\" first"; return 1; }
-       echo "pre-submit OK: $ahead commit(s) ahead of origin/$target, worktree clean, branch pushed"
-     }
-     presubmit_check {{if .Branch}}{{.Branch}}{{else}}main{{end}} &&
+     pogo presubmit --item={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}} &&
      pogo refinery submit "$BRANCH" --repo={{.Repo}} --author={{.Id}} --target={{if .Branch}}{{.Branch}}{{else}}main{{end}} \
          --verdict-file=/tmp/{{.Id}}-verdict.json
      ```{{end}}{{if eq .VCS "enth"}}
@@ -277,7 +260,7 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
      enth change -m "<type>: <description> ({{.Id}})" --trailer Pogo-Item={{.Id}} --trailer Pogo-Worker="$POGO_AGENT_NAME" --trailer Pogo-Supersedes="$OLD" "$REMAKE"
      self_land
      ```{{else}}
-     The `presubmit_check` refuses a dirty worktree, a branch with nothing ahead of the target, or an unpushed HEAD — any of which would submit a branch that delivers nothing (mg-c184d). Its dirty check is `pogo worktree-dirty`, gc's predicate, which does not count the `.claude/` files pogod itself writes into your tree (gh #240, mg-54263). If it refuses, fix that and re-run; do not submit around it.{{end}}
+     `pogo presubmit` refuses a dirty worktree, a branch with nothing ahead of the target, or an unpushed HEAD — any of which would submit a branch that delivers nothing (mg-c184d). Its dirty check is `pogo worktree-dirty`, gc's predicate, which does not count the `.claude/` files pogod itself writes into your tree (gh #240, mg-54263). If it refuses, fix that and re-run; do not submit around it.{{end}}
 {{if eq .VCS "enth"}}
      Write `/tmp/{{.Id}}-verdict.json` **before** running `self_land` — it is the same object step 5 hands to `mg done --result`, and it is your **only** chance to record one: pogod closes your item the instant `pogo land` records the land, and `mg` refuses your later `mg done` as already-done rather than overwriting it (mg-dfea). `pogo land` carries it verbatim into the item's result sidecar under `verdict`.
 
