@@ -183,16 +183,18 @@ func TestEnthMergeRecordAndGitControl(t *testing.T) {
 }
 
 func TestDeployEnv(t *testing.T) {
-	base := []string{"PATH=/bin", "POGO_LANDED_VCS=stale", "POGO_LANDED_ID=stale", "POGO_LANDED_IDX=keep"}
-	got := deployEnv(base, vcs.Enth, "N")
-	want := []string{"PATH=/bin", "POGO_LANDED_IDX=keep", "POGO_REFINERY=1", "POGO_LANDED_VCS=enth", "POGO_LANDED_ID=N"}
-	if !reflect.DeepEqual(got, want) {
+	if got, want := deployEnv(vcs.Enth, "N"), []string{"POGO_REFINERY=1", "POGO_LANDED_VCS=enth", "POGO_LANDED_ID=N"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("deployEnv(enth) = %v; want %v", got, want)
 	}
-	// An unknown landing leaves both unset rather than empty-but-present.
-	got = deployEnv(base, vcs.Git, "")
-	want = []string{"PATH=/bin", "POGO_LANDED_IDX=keep", "POGO_REFINERY=1"}
-	if !reflect.DeepEqual(got, want) {
+	// An unknown landing sets both empty, which overrides an inherited copy.
+	if got, want := deployEnv(vcs.Git, ""), []string{"POGO_REFINERY=1", "POGO_LANDED_VCS=", "POGO_LANDED_ID="}; !reflect.DeepEqual(got, want) {
 		t.Errorf("deployEnv(unknown) = %v; want %v", got, want)
+	}
+	// End to end: a stale inherited value never reaches the hook.
+	t.Setenv("POGO_LANDED_VCS", "stale")
+	t.Setenv("POGO_LANDED_ID", "stale")
+	out, err := runDeployHook(t.TempDir(), `printf '%s|%s' "$POGO_LANDED_VCS" "$POGO_LANDED_ID"`, vcs.Git, "")
+	if err != nil || out != "|" {
+		t.Errorf("unknown landing hook saw %q (%v); want both empty", out, err)
 	}
 }
