@@ -95,6 +95,24 @@ func wireRespawnSupervisor(reg *agent.Registry, conds conditionRaiser, backoff t
 	})
 }
 
+// waitBounded runs fn and fails the test with what if fn has not returned
+// within d, so a wedge fails fast with a name instead of hanging the package
+// to go test's -timeout with nothing but a goroutine dump (mg-d7e17). fn's
+// goroutine is abandoned on timeout; the test is failing anyway.
+func waitBounded(t *testing.T, d time.Duration, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s did not return within %v (mg-d7e17)", what, d)
+	}
+}
+
 // TestRequestedFleetStopRaisesNoRestartFailedCondition is the negative arm of
 // mg-0208, and the red demonstration architect asked for.
 //
@@ -121,7 +139,11 @@ func TestRequestedFleetStopRaisesNoRestartFailedCondition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	t.Cleanup(func() { reg.StopAll(2 * time.Second) })
+	// Bounded too: if the StopAll below wedges, this cleanup stops the same
+	// wedged agent and would otherwise hang the package exactly as before.
+	t.Cleanup(func() {
+		waitBounded(t, 2*time.Minute, "cleanup reg.StopAll", func() { reg.StopAll(2 * time.Second) })
+	})
 
 	conds := &recordingConditions{}
 	var wg sync.WaitGroup
@@ -142,8 +164,15 @@ func TestRequestedFleetStopRaisesNoRestartFailedCondition(t *testing.T) {
 		}
 	}
 
-	// The deliberate stop: `pogo server stop`'s drain, unchanged.
-	reg.StopAll(2 * time.Second)
+	// The deliberate stop: `pogo server stop`'s drain, unchanged. Bounded
+	// (mg-d7e17): on CI this call once never returned, and the test sat at the
+	// 20m package budget with nothing to say. Six agents at a 2s stop timeout
+	// plus agent's own drain bound is well under a minute; the bound only has
+	// to separate "slow" from "forever".
+	waitBounded(t, 2*time.Minute, "reg.StopAll (a fleet stop that never returns: see "+
+		"internal/agent TestStopReturnsWhenTheOutputReaderNeverFinishes)", func() {
+		reg.StopAll(2 * time.Second)
+	})
 
 	// Every agent's OnExit hook must have run before the goroutines it
 	// schedules can be waited on.
@@ -169,7 +198,7 @@ func TestRequestedFleetStopRaisesNoRestartFailedCondition(t *testing.T) {
 	// Let every scheduled respawn fire and be refused. wg covers exactly the
 	// goroutines the hook scheduled, so this waits for the real thing rather
 	// than for a guessed interval.
-	wg.Wait()
+	waitBounded(t, 30*time.Second, "the scheduled respawn goroutines", wg.Wait)
 
 	if got := conds.restartFailed(); len(got) != 0 {
 		t.Errorf("a REQUESTED fleet stop raised %d restart_failed conditions %v; want 0 — "+

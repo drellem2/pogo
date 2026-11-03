@@ -2012,6 +2012,12 @@ func (a *Agent) ExitErr() error {
 // reproduced by making the host busy and hoping. Nil in production.
 var readOutputStartHook func()
 
+// readOutputAttachedHook, when non-nil, runs in readOutput AFTER it has
+// announced attachment and before its first Read. A test uses it to wedge a
+// reader that waitAndHandle believes is draining, which is the state of
+// mg-d7e17's CI hang. Nil in production.
+var readOutputAttachedHook func()
+
 // readOutput is the sole reader of the PTY master fd.
 // It fans out output to the ring buffer AND any active attach connections.
 func (a *Agent) readOutput() {
@@ -2022,6 +2028,9 @@ func (a *Agent) readOutput() {
 	// Announce attachment BEFORE the first Read: waitAndHandle holds the tty
 	// open until it sees this.
 	close(a.readerAttached)
+	if readOutputAttachedHook != nil {
+		readOutputAttachedHook()
+	}
 	buf := make([]byte, 4096)
 	for {
 		n, err := a.master.Read(buf)
@@ -2129,6 +2138,14 @@ func startPTY(cmd *exec.Cmd, winsize *pty.Winsize) (master, slave *os.File, err 
 // either. The bound keeps a wedged reader from stalling the exit path.
 const readerAttachTimeout = 5 * time.Second
 
+// outputDrainTimeout bounds how long waitAndHandle waits for readOutput to
+// finish once the child is reaped and the parent's slave released (mg-d7e17).
+// A healthy drain at that point takes milliseconds: the child is gone, so
+// only already-buffered output remains. The bound only matters when the reader
+// can never finish, and then it is the difference between a slow stop and a
+// stop that never returns. A var, not a const, so a test can shorten it.
+var outputDrainTimeout = 10 * time.Second
+
 // closeSlave releases the parent's slave fd. Idempotent; safe to call from
 // Cleanup and from waitAndHandle in either order.
 func (a *Agent) closeSlave() {
@@ -2179,7 +2196,24 @@ func (r *Registry) waitAndHandle(a *Agent) {
 
 	// Wait for the output reader to drain all remaining PTY output before
 	// signaling done, so callers of Done() see the complete output.
-	<-a.outputDone
+	//
+	// Bounded (mg-d7e17). The reader finishes only when its Read on the master
+	// returns EOF/EIO, and that happens only once EVERY slave descriptor is
+	// closed, not merely ours. On CI a reader sat in that read for 19 minutes
+	// after its child was reaped, and because done closes only after this, Stop
+	// and StopAll hung behind it: a fleet shutdown that never ends. The child is
+	// already reaped, so what is left to drain is what was buffered. Past the
+	// bound, give up on completeness rather than on shutdown. The reader is
+	// left parked: Cleanup's close of a blocking-mode master does not wait for
+	// it, and if its Read ever returns it exits normally.
+	select {
+	case <-a.outputDone:
+	case <-time.After(outputDrainTimeout):
+		log.Printf("agent %s: output reader still not finished %v after the child was reaped "+
+			"and the PTY slave released (its master Read has not returned EOF/EIO); "+
+			"marking the agent exited anyway, trailing output may be lost (mg-d7e17)",
+			a.Name, outputDrainTimeout)
+	}
 
 	a.mu.Lock()
 	a.Status = StatusExited
