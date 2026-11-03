@@ -28,7 +28,7 @@ func TestRefineryChildrenGetAPerCallCredential(t *testing.T) {
 		{name: "closingref-lookupPRBody", bin: "gh", stdout: `{"number":7,"body":"x"}`, net: allCalls,
 			call: func(t *testing.T) { lookupPRBody(dir, "b") }},
 		{name: "ghClosePR", bin: "gh", net: allCalls,
-			call: func(t *testing.T) { ghClosePR(dir, 7, "merged") }},
+			call: func(t *testing.T) { ghClosePR(dir, "", 7, "merged") }},
 		{name: "lookupPR", bin: "gh", stdout: `{"state":"OPEN","number":7}`, net: allCalls,
 			call: func(t *testing.T) { lookupPR(dir, "b") }},
 		{name: "openPRNumber", bin: "gh", stdout: `{"state":"OPEN","number":7}`, net: allCalls,
