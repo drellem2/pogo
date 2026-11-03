@@ -13,14 +13,39 @@ import (
 func TestEnthWorkerEnv(t *testing.T) {
 	e := vcs.EnthRepo{Remote: "https://enth.example", Repo: "o/r", Trunk: "refs/heads/main"}
 	t.Setenv("ENTH_TOKEN", "")
-	got := strings.Join(enthWorkerEnv(e), " ")
+	// An identity already in the environment: none is added.
+	t.Setenv("ENTH_AUTHOR_NAME", "a")
+	t.Setenv("ENTH_AUTHOR_EMAIL", "a@x")
+	t.Setenv("ENTH_COMMITTER_NAME", "a")
+	t.Setenv("ENTH_COMMITTER_EMAIL", "a@x")
+	got := strings.Join(enthWorkerEnv(e, t.TempDir(), "p1"), " ")
 	if got != "ENTH_REMOTE=https://enth.example ENTH_REPO=o/r ENTH_TRUNK=refs/heads/main" {
 		t.Errorf("env without a token = %q", got)
 	}
 	t.Setenv("ENTH_TOKEN", "enth_test_value")
-	env := enthWorkerEnv(e)
+	env := enthWorkerEnv(e, t.TempDir(), "p1")
 	if env[len(env)-1] != "ENTH_TOKEN=enth_test_value" {
 		t.Errorf("pogod's ENTH_TOKEN is not passed through (last entry %q)", env[len(env)-1])
+	}
+}
+
+// TestEnthWorkerEnvSuppliesAnIdentity is pm-pogo's carry-over 1 (mg-30da0):
+// an environment with NO identity — the measured state of this fleet — gets
+// git's, so the worker's `enth change` is not refused no_identity.
+func TestEnthWorkerEnvSuppliesAnIdentity(t *testing.T) {
+	for _, k := range []string{"ENTH_TOKEN", "ENTH_AUTHOR_NAME", "ENTH_AUTHOR_EMAIL", "ENTH_COMMITTER_NAME", "ENTH_COMMITTER_EMAIL",
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	old := gitIdentity
+	t.Cleanup(func() { gitIdentity = old })
+	var asked string
+	gitIdentity = func(dir string) (string, string) { asked = dir; return "Dan", "dan@example.com" }
+	got := strings.Join(enthWorkerEnv(vcs.EnthRepo{Remote: "r", Repo: "o/r"}, "/src/proj", "p1"), " ")
+	if !strings.HasSuffix(got, "ENTH_AUTHOR_NAME=Dan ENTH_AUTHOR_EMAIL=dan@example.com ENTH_COMMITTER_NAME=Dan ENTH_COMMITTER_EMAIL=dan@example.com") || asked != "/src/proj" {
+		t.Errorf("env with no identity = %q (git asked in %q)", got, asked)
 	}
 }
 

@@ -2339,7 +2339,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		log.Printf("polecat %s: created enth checkout at %s (%s on %s, %s at %s)",
 			spawnReq.Name, worktreeDir, enthRepo.Repo, enthRepo.Remote, ref, ws.Base)
 		spawnBase.BaseRef = ref
-		env = append(env, enthWorkerEnv(*enthRepo)...)
+		env = append(env, enthWorkerEnv(*enthRepo, sourceRepo, spawnReq.Name)...)
 	}
 
 	// Create git worktree for polecat isolation

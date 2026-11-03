@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/drellem2/pogo/internal/vcs"
@@ -33,7 +34,13 @@ import (
 //
 // ENTH_TRUNK is the ref `enth land` defaults to. The worker does not land, but
 // a verb that reads it should read this repo's trunk, not enth's guess.
-func enthWorkerEnv(e vcs.EnthRepo) []string {
+//
+// The worker also gets an identity for `enth change` when enth would find
+// none (enthvcs.IdentityEnv, mg-30da0): enth reads no git config, so on a host
+// whose only identity is ~/.gitconfig every Change would be refused
+// no_identity. The identity is git's for the source repo — what a git
+// polecat's commits carry.
+func enthWorkerEnv(e vcs.EnthRepo, sourceRepo, worker string) []string {
 	env := []string{"ENTH_REMOTE=" + e.Remote, "ENTH_REPO=" + e.Repo}
 	if e.Trunk != "" {
 		env = append(env, "ENTH_TRUNK="+e.Trunk)
@@ -41,7 +48,23 @@ func enthWorkerEnv(e vcs.EnthRepo) []string {
 	if tok := os.Getenv("ENTH_TOKEN"); tok != "" {
 		env = append(env, "ENTH_TOKEN="+tok)
 	}
-	return env
+	name, email := gitIdentity(sourceRepo)
+	return append(env, enthvcs.IdentityEnv(os.Getenv, name, email, worker)...)
+}
+
+// gitIdentity is git's user.name / user.email as seen from dir (the repo's
+// own config, then the global one). Either is "" when unset.
+var gitIdentity = func(dir string) (name, email string) {
+	get := func(key string) string {
+		c := exec.Command("git", "config", "--get", key)
+		c.Dir = dir
+		out, err := c.Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	return get("user.name"), get("user.email")
 }
 
 // enthSelectionPrelude is the prompt block for a NARROWED enth workspace
