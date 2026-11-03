@@ -47,6 +47,14 @@ func TestProtectionRefusalIsTerminalNotContention(t *testing.T) {
 		{"gh013-develop", gh013Develop, "refs/heads/develop", "gh013"},
 		{"pre-receive", preReceiveDeclined, "main", "[remote rejected]"},
 		{"gitlab", gitlabProtected, "main", "protected branch"},
+		// Refnames carrying a transient word: the reason is a rule decline, so
+		// the refname must not make it a lock race (review round 1, mg-940ac).
+		{"lock-in-refname", " ! [remote rejected] HEAD -> feature/clock-skew (pre-receive hook declined)",
+			"feature/clock-skew", "[remote rejected]"},
+		{"unblock-in-refname", " ! [remote rejected] HEAD -> release/unblock-ci (pre-receive hook declined)",
+			"release/unblock-ci", "[remote rejected]"},
+		{"lock-in-source", " ! [remote rejected] lockfile-bump -> main (pre-receive hook declined)",
+			"main", "[remote rejected]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -156,5 +164,16 @@ func TestProtectedIsNotRetriedAtAttemptOne(t *testing.T) {
 func TestProtectedDoesNotCountAgainstAuthor(t *testing.T) {
 	if countsAgainstAuthor(ClassProtected) {
 		t.Error("a protected-target refusal counts against the author")
+	}
+}
+
+// The refusal is the remote's answer to a ref UPDATE, so only the push stage is
+// read for it. A non-push step whose output happens to carry the wording keeps
+// its existing class.
+func TestProtectionIsReadOnlyAtThePushStage(t *testing.T) {
+	err := &retryableError{gitStepFail("merge-ff-only", "merge (ff-only): "+gh013Main,
+		[]string{"merge", "--ff-only"}, gh013Main, errors.New("exit status 1"))}
+	if d := classifyFailure("rebase", rawOf(err), err); d.Class == ClassProtected {
+		t.Errorf("non-push stage classified protected: signal=%q", d.Signal)
 	}
 }
