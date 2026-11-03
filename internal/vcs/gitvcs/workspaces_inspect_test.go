@@ -28,6 +28,23 @@ func realpath(t *testing.T, p string) string {
 	return r
 }
 
+// registered reports whether clone's `git worktree list --porcelain` carries a
+// `worktree <path>` record for exactly path (already resolved by realpath).
+// It matches the whole record, not a substring of the human listing: that
+// listing also prints each worktree's abbreviated HEAD, and a substring check
+// for the worktree's name ("d3") matched the main clone's SHA whenever the
+// hex happened to contain it -- ~2% of runs, with no worktree left behind
+// (mg-c9661).
+func registered(t *testing.T, clone, path string) bool {
+	t.Helper()
+	for _, line := range strings.Split(git(t, clone, "worktree", "list", "--porcelain"), "\n") {
+		if line == "worktree "+path {
+			return true
+		}
+	}
+	return false
+}
+
 // linkedWorktree adds a linked worktree on a new branch to clone.
 func linkedWorktree(t *testing.T, clone, name string) string {
 	t.Helper()
@@ -159,6 +176,14 @@ func TestWorkspacesRemove(t *testing.T) {
 	repo := vcs.Repo{Path: clone}
 	dir := linkedWorktree(t, clone, "d3")
 	write(t, dir, "dirty.txt", "x") // --force removes a dirty tree too
+	// Resolved while dir still exists: git records the resolved path, and
+	// after Remove there is nothing left to resolve.
+	want := realpath(t, dir)
+	// Positive control: the check below must be able to see a registration.
+	if !registered(t, clone, want) {
+		t.Fatalf("%s is not registered before Remove, so the check below measures nothing:\n%s",
+			want, git(t, clone, "worktree", "list", "--porcelain"))
+	}
 
 	if err := ws.Remove(ctx, repo, dir); err != nil {
 		t.Fatalf("Remove: %v", err)
@@ -166,8 +191,9 @@ func TestWorkspacesRemove(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("Remove left %s behind (stat: %v)", dir, err)
 	}
-	if list := git(t, clone, "worktree", "list"); strings.Contains(list, "d3") {
-		t.Fatalf("Remove left the registration: %s", list)
+	if registered(t, clone, want) {
+		t.Fatalf("Remove left the registration of %s:\n%s",
+			want, git(t, clone, "worktree", "list", "--porcelain"))
 	}
 
 	// A second Remove has nothing to remove: a *vcs.CommandError with git's text.
