@@ -230,6 +230,7 @@ func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strande
 			"polecat branch, this spawn is about to re-derive it", workItemID, repo, err)
 		return nil, ""
 	}
+	findings = dropAwaitingReview(workItemID, repo, findings)
 	if len(findings) == 0 {
 		return nil, ""
 	}
@@ -270,7 +271,7 @@ func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strande
 			if note != "" {
 				msg += ". " + note
 			}
-			return findings, msg
+			return findings, msg + prProbeFailureNote(f)
 		}
 	}
 	f := findings[0]
@@ -291,7 +292,77 @@ func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strande
 	if note != "" {
 		msg += ". " + note
 	}
-	return findings, msg
+	return findings, msg + prProbeFailureNote(f)
+}
+
+// dropAwaitingReview applies the open-PR rule of drellem2/pogo#147 to the
+// dispatch refusal (drellem2/pogo#163, mg-64751): a finding whose work is the
+// head of an OPEN pull request is awaiting review, not stranded, and does not
+// refuse the dispatch. The release notice and the restart sweep have asked this
+// since mg-dbb75; the dispatch gate did not, so every spawn attributable to an
+// item with a PR in review — the reviewer of that PR above all — was refused
+// with a remedy (`pogo refinery submit`) that lands the change AROUND the review.
+//
+// THE QUESTION IS THE SAME ONE, ASKED THE SAME WAY. CheckOpenPR asks GitHub
+// about the origin branch whose tip IS (or contains) this branch's head. It does
+// NOT compare the branch against the PR's head as a new merge target: that turns
+// the guard into "is this work on its own PR branch", which is trivially true
+// for every branch that has a PR — including mg-9a19's shape — and disarms it on
+// the population it exists for (mg-3959). The target stays the default branch;
+// the PR only decides whether a finding against it is pending review.
+//
+// A PROBE FAILURE STILL REFUSES. CheckOpenPR leaves the finding as found when
+// GitHub cannot be asked, so a failed probe keeps its finding here and the
+// refusal goes out — saying so (prProbeFailureNote). This gate's own failure
+// direction is OPEN, but only for "could not read the repository"; a probe that
+// can only ever REMOVE a refusal must not pass one because the network is down,
+// which is the incident this gate was built for (see CheckOpenPR).
+//
+// Pre-registration and local-only findings are untouched — CheckOpenPR skips
+// both, for the reasons on it.
+//
+// Like every suppression in this detector, it is LOGGED AND EMITTED, never
+// silent (the mg-1af2 contract on reportStrandedWorkOnRelease).
+func dropAwaitingReview(workItemID, repo string, findings []strandedwork.Finding) []strandedwork.Finding {
+	var kept []strandedwork.Finding
+	for _, f := range findings {
+		dir := f.Repo
+		if dir == "" {
+			dir = repo
+		}
+		f.CheckOpenPR(dir, strandedPRProbe)
+		if f.Disposition != strandedwork.DispositionAwaitingReview {
+			kept = append(kept, f)
+			continue
+		}
+		log.Printf("stranded-work gate: %s: branch %s has %d commit(s) %s lacks, but they are the head of "+
+			"open PR #%d (%s) — awaiting review, NOT stranded, dispatch not refused for it (mg-64751). %s",
+			workItemID, f.Branch, len(f.Unmerged), f.Target, f.PR, f.PRBranch, f.Summary())
+		events.Emit(context.Background(), events.Event{
+			EventType: "work_item_push_awaiting_review",
+			// The gate runs before the spawned agent exists, so the actor is
+			// the daemon — as on dispatch_stranded_work_overridden for a
+			// nameless spawn.
+			Agent:      "pogod",
+			WorkItemID: workItemID,
+			Repo:       repo,
+			Details:    awaitingReviewDetails(f, "dispatch onto the work item", RouteDispatch),
+		})
+	}
+	return kept
+}
+
+// prProbeFailureNote is the sentence a refusal carries when it stands BECAUSE
+// the open-PR check could not answer, or "" when the check answered or did not
+// run. Without it a refusal beside an open PR reads as the gate ignoring the PR,
+// and the reader's next move is --stranded-override on reflex.
+func prProbeFailureNote(f strandedwork.Finding) string {
+	if f.PRProbeError == "" {
+		return ""
+	}
+	return fmt.Sprintf(". The open-PR check could not ask GitHub about %s (%s), so this refusal stands — "+
+		"a check that can only remove a refusal never passes a dispatch it could not run. If %s is the "+
+		"head of an open PR, that is the first thing to rule out", f.PRProbeBranch, f.PRProbeError, f.PRProbeBranch)
 }
 
 // strandedExits is the sentence that names BOTH ways past this gate, and it is
@@ -474,7 +545,8 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 	})
 }
 
-// strandedPRProbe is the open-PR probe both agent-driven emitters apply before
+// strandedPRProbe is the open-PR probe both agent-driven emitters, and the
+// dispatch gate (dropAwaitingReview, mg-64751), apply before refusing or
 // alerting (mg-dbb75). A variable so tests can answer for GitHub.
 var strandedPRProbe strandedwork.PRProbe = strandedwork.GitHubOpenPR
 

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -237,4 +238,133 @@ func TestStrandedAlertRecordsWhatThePRProbeAnswered(t *testing.T) {
 		}
 		check(t, logPath, "cat-pa95f", bodies)
 	})
+}
+
+// --- The dispatch gate (drellem2/pogo#163, mg-64751) -------------------------
+
+// TestDispatchAtAnItemWhoseBranchIsAnOpenPRIsNotRefused: the same open-PR rule
+// #147 gave the release notice now reaches the spawn gate. A branch that is the
+// head of an open PR is awaiting review, so a dispatch attributable to its item
+// is allowed — and the suppression is emitted, never silent.
+func TestDispatchAtAnItemWhoseBranchIsAnOpenPRIsNotRefused(t *testing.T) {
+	logPath := useTempEventLog(t)
+	logs := captureLog(t)
+	repo := strandedRepo(t)
+	pushBranch(t, repo, "polecat-pa95f", "f.md", "feat: built, PR open (mg-a95f)")
+	var asked []string
+	stubPRProbe(t, func(_, branch string) (ghpr.Answer, error) {
+		asked = append(asked, branch)
+		if branch == "polecat-pa95f" {
+			return ghpr.Answer{Number: 146, State: "OPEN"}, nil
+		}
+		return ghpr.Answer{}, nil
+	})
+
+	reg := newDrainTestRegistry(t)
+	if refusal := reg.strandedWorkRefusal("mg-a95f", repo, "main"); refusal != "" {
+		t.Fatalf("a branch that is the head of open PR #146 refused the dispatch: %s", refusal)
+	}
+	if len(asked) != 1 || asked[0] != "polecat-pa95f" {
+		t.Errorf("the probe was asked about %v, want exactly [polecat-pa95f]", asked)
+	}
+	ev := findEvent(readEventLines(t, logPath), "work_item_push_awaiting_review", "pogod")
+	if ev == nil {
+		t.Fatal("the dispatch-time suppression left no work_item_push_awaiting_review event")
+	}
+	details, _ := ev["details"].(map[string]any)
+	if got, _ := details["pr"].(float64); got != 146 {
+		t.Errorf("event details.pr = %v, want 146", details["pr"])
+	}
+	if got, _ := details["route"].(string); got != RouteDispatch {
+		t.Errorf("event details.route = %q, want %q", got, RouteDispatch)
+	}
+	if got, _ := ev["work_item_id"].(string); got != "mg-a95f" {
+		t.Errorf("event work_item_id = %q, want mg-a95f", got)
+	}
+	if out := logs(); !strings.Contains(out, "awaiting review") {
+		t.Errorf("the suppression was silent in the log; got: %s", out)
+	}
+}
+
+// TestDispatchStillRefusedWhenThePRProbeFails pins the direction at the gate:
+// GitHub unreachable is a refusal, as it was before the rule existed, and the
+// refusal says it stands because the check could not run. Daniel's GO for #163:
+// "A probe failure must still refuse, never pass."
+func TestDispatchStillRefusedWhenThePRProbeFails(t *testing.T) {
+	repo := strandedRepo(t)
+	pushBranch(t, repo, "polecat-pa95f", "f.md", "feat: built (mg-a95f)")
+	stubPRProbe(t, func(string, string) (ghpr.Answer, error) {
+		return ghpr.Answer{}, errors.New("could not resolve host: api.github.com")
+	})
+
+	reg := newDrainTestRegistry(t)
+	rr := spawnPolecat(t, reg, SpawnPolecatAPIRequest{
+		Name: "pa95f2", Id: "mg-a95f", Repo: repo, Branch: "main", Template: BuildWorkerTemplate,
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("a failed PR probe: status = %d, want 409 — it must refuse, never pass", rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{"polecat-pa95f", "PUSHED, UNMERGED", "could not ask GitHub", "api.github.com"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refusal does not mention %q; got: %s", want, body)
+		}
+	}
+}
+
+// TestDispatchRefusalCarriesNoProbeNoteWhenGitHubAnswered: "no PR" is an
+// answer, and the refusal must not claim the check failed.
+func TestDispatchRefusalCarriesNoProbeNoteWhenGitHubAnswered(t *testing.T) {
+	repo := strandedRepo(t)
+	pushBranch(t, repo, "polecat-pa95f", "f.md", "feat: built (mg-a95f)")
+	stubPRProbe(t, func(string, string) (ghpr.Answer, error) { return ghpr.Answer{Repo: "drellem2/pogo"}, nil })
+
+	refusal := newDrainTestRegistry(t).strandedWorkRefusal("mg-a95f", repo, "main")
+	if refusal == "" {
+		t.Fatal("a pushed, unmerged branch with no PR dispatched")
+	}
+	if strings.Contains(refusal, "could not ask GitHub") {
+		t.Errorf("a probe that answered \"none\" is worded as a failure: %s", refusal)
+	}
+}
+
+// TestDispatchStillRefusedForTheBranchWithoutAPR: one of the item's branches
+// being in review does not pass the dispatch while ANOTHER is stranded; the
+// refusal names the stranded one.
+func TestDispatchStillRefusedForTheBranchWithoutAPR(t *testing.T) {
+	repo := strandedRepo(t)
+	pushBranch(t, repo, "polecat-pa95f", "f.md", "feat: built, PR open (mg-a95f)")
+	pushBranch(t, repo, "polecat-xa95f", "g.md", "feat: a sibling's attempt (mg-a95f)")
+	stubPRProbe(t, func(_, branch string) (ghpr.Answer, error) {
+		if branch == "polecat-pa95f" {
+			return ghpr.Answer{Number: 146, State: "OPEN"}, nil
+		}
+		return ghpr.Answer{}, nil
+	})
+
+	findings, refusal := newDrainTestRegistry(t).strandedWorkCheck("mg-a95f", repo, "main")
+	if refusal == "" {
+		t.Fatal("an item with one branch in review and one stranded dispatched")
+	}
+	if len(findings) != 1 || findings[0].Branch != "polecat-xa95f" {
+		t.Fatalf("findings = %+v, want only polecat-xa95f (the open PR's branch is not stranded)", findings)
+	}
+	if !strings.Contains(refusal, "polecat-xa95f") {
+		t.Errorf("refusal does not name the stranded branch: %s", refusal)
+	}
+}
+
+// TestDispatchStillRefusedForAPreRegistrationBranchWithAnOpenPR: an open PR
+// does not stop a re-dispatch from writing predictions after the results, so
+// the pre-registration refusal is untouched (strandedwork.Finding.CheckOpenPR
+// skips it).
+func TestDispatchStillRefusedForAPreRegistrationBranchWithAnOpenPR(t *testing.T) {
+	repo := strandedRepo(t)
+	pushBranch(t, repo, "polecat-f3ff", "predictions.md", "predictions: three of the six checks will fail")
+	stubPRProbe(t, func(string, string) (ghpr.Answer, error) { return ghpr.Answer{Number: 9, State: "OPEN"}, nil })
+
+	refusal := newDrainTestRegistry(t).strandedWorkRefusal("mg-f3ff", repo, "main")
+	if !strings.Contains(refusal, "PRE-REGISTRATION") {
+		t.Fatalf("an open PR passed a pre-registration branch's dispatch; refusal = %q", refusal)
+	}
 }
