@@ -59,6 +59,7 @@ package driftwatch
 
 import (
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"os"
 	"strings"
@@ -290,7 +291,7 @@ func (w *Watcher) sampleNoFire(now time.Time) {
 
 	if mail {
 		subject := noFireSubject(rep)
-		if err := w.mail(w.mailTo, mailFrom, subject, noFireBody(rep, notice, w.noFireMaxNotices, w.schedule)); err != nil {
+		if err := alerts.Mail(alerts.DriftWatchNoFire, w.mail, w.mailTo, mailFrom, subject, noFireBody(rep, notice, w.noFireMaxNotices, w.schedule)); err != nil {
 			details["mail_error"] = err.Error()
 			log.Printf("pogod: no-fire notice (%s) could not be mailed: %v", rep.Summary(), err)
 		} else {

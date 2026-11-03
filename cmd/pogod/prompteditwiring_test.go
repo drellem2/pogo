@@ -1,11 +1,11 @@
 package main
 
 import (
+	"github.com/drellem2/pogo/internal/alerts"
 	"strings"
 	"testing"
 
 	"github.com/drellem2/pogo/internal/agent"
-	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/promptedit"
 )
 
@@ -20,7 +20,7 @@ func TestPromptEditSeamsFitTheRealImplementations(t *testing.T) {
 		Root:        agent.PromptDir(),
 		ShippedFS:   agent.DefaultPromptsFS(),
 		Coordinator: agent.CoordinatorName(),
-		Mail:        client.SendMGMail,
+		Mail:        alerts.Transport,
 		StatePath:   promptedit.NoticesPath(t.TempDir()),
 	})
 	if w == nil {

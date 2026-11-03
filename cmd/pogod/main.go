@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"net"
 	"net/http"
@@ -816,6 +817,7 @@ func registerHandlers() {
 	http.HandleFunc("/version", versionHandler)
 	http.HandleFunc("/status", status)
 	http.HandleFunc("/workitems", workitem.HandleWorkItems)
+	http.HandleFunc("/alerts", handleAlerts)
 
 	// Agent and refinery endpoints behind orchestration guard.
 	// When the server is in index-only mode, these return 503.
@@ -1138,7 +1140,7 @@ func newStallNudgerWithTimeoutAndDamper(reg *agent.Registry, mail func(to, from,
 						"so it was sent as mail instead. It may therefore be older than it looks — "+
 						"re-check the current state before acting on it.",
 					message, err)
-				if mailErr := mail(agentName, stallwatch.Sender, stallSubject(notice)+" (undelivered to terminal)", body); mailErr != nil {
+				if mailErr := alerts.Mail(alerts.StallWatchMailFallback, mail, agentName, stallwatch.Sender, stallSubject(notice)+" (undelivered to terminal)", body); mailErr != nil {
 					// Both channels are down. This is the genuine hard failure:
 					// nothing carried the message. Log loudly — a stall notice
 					// that reaches nobody is the failure this watcher exists to
@@ -1174,7 +1176,7 @@ func newStallNudgerWithTimeoutAndDamper(reg *agent.Registry, mail func(to, from,
 		if damper != nil {
 			damper.reset(agentName)
 		}
-		if err := mail(agentName, stallwatch.Sender, stallSubject(notice), message); err != nil {
+		if err := alerts.Mail(alerts.StallWatchMailFallback, mail, agentName, stallwatch.Sender, stallSubject(notice), message); err != nil {
 			return stallwatch.Delivery{}, err
 		}
 		return stallwatch.Delivery{Channel: stallwatch.DeliveryMail}, nil
@@ -1653,6 +1655,13 @@ Flags:
 	// the agent it is reporting as unable to read its inbox (mg-65d2).
 	escalationBox := cfg.Agents.EscalationBoxName()
 
+	// What GET /alerts lists against: the keys this daemon resolved, not a
+	// fresh read of a file that may have changed since (drellem2/pogo#262).
+	{
+		s := alertSettingsFrom(cfg)
+		alertSettings.Store(&s)
+	}
+
 	// Arm the condition annunciator (mg-342d) — rows A2..A15 of
 	// docs/investigations/pogod-log-conditions-with-no-reader-2026-07-30.md, the
 	// conditions mg-c3f0 found to have an actor who could act and no channel to
@@ -1669,7 +1678,7 @@ Flags:
 	// the emitter held, unparsed.
 	conditions = newConditionAnnunciator(
 		conditionNoticesPath(),
-		client.SendMGMail,
+		alerts.Transport,
 		func(name, message string) error {
 			if agentRegistry == nil {
 				return fmt.Errorf("no agent registry")
@@ -1811,7 +1820,7 @@ Flags:
 			"Work item: %s\nBranch: %s\nMR: %s\n\n"+
 			"The polecat never called `mg done` — verify the work item state and re-dispatch if its post-merge flow (PR creation, verify, mail) did not finish.",
 			deferDoneBackstopTimeout, mr.Author, mr.Branch, mr.ID)
-		if err := client.SendMGMail(coordinator, "refinery", subject, body); err != nil {
+		if err := alerts.Mail(alerts.RefineryDeferDoneBackstop, alerts.Transport, coordinator, "refinery", subject, body); err != nil {
 			log.Printf("refinery: failed to mail coordinator defer-done backstop escalation: %v", err)
 		}
 	})
@@ -1844,7 +1853,7 @@ Flags:
 			"%s\n\n"+
 			"Check whether the PR was opened before re-dispatching; the branch is already merged into its target.",
 			id, a.Name, branch, mrID, claimLine)
-		if err := client.SendMGMail(coordinator, "refinery", subject, body); err != nil {
+		if err := alerts.Mail(alerts.RefineryDeferredDeath, alerts.Transport, coordinator, "refinery", subject, body); err != nil {
 			log.Printf("refinery: failed to mail coordinator deferred-death escalation: %v", err)
 		}
 	}
@@ -1872,7 +1881,7 @@ Flags:
 		Home:    homeDir(),
 		Targets: func() []synthwatch.Target { return synthTargets(agentRegistry) },
 		Globs:   providers.SessionTranscriptGlobs,
-		Mail:    client.SendMGMail,
+		Mail:    alerts.Transport,
 		MailTo:  escalationBox,
 	})
 	// diagnose reports the verdict, and ShouldRespawnAgent consults it before
@@ -1946,7 +1955,7 @@ Flags:
 		// below like any finished polecat's. Say so to the coordinator
 		// (mg-c1e2 part 3, drellem2/pogo#177).
 		if e, ok := a.EarlyExit(); ok {
-			notifyEarlyExit(a.Name, a.WorkItemID, coordinator, e, client.SendMGMail)
+			notifyEarlyExit(a.Name, a.WorkItemID, coordinator, e, alerts.Transport)
 		}
 
 		// Consult the synthetic-failure-turn detector BEFORE respawning
@@ -2042,7 +2051,7 @@ Flags:
 				WorkItemID:  a.WorkItemID,
 				SourceRepo:  a.SourceRepo,
 				WorktreeDir: a.WorktreeDir,
-			}, coordinator, client.SendMGMail)
+			}, coordinator, alerts.Transport)
 			// Reap this agent's mail-check loop — eagerly, unless this was a
 			// stop someone asked for, which holds it briefly in case the agent
 			// is started straight back up: reaping it here is what left #217's
@@ -2113,7 +2122,7 @@ Flags:
 		conditions.Clear(rowA2SchedulerNoHome, time.Now())
 		deliverer := &scheduler.PogodDeliverer{
 			Registry: agentRegistry,
-			Mail:     client.SendMGMail,
+			Mail:     alerts.Transport,
 			// Same own-root events.log the scheduler's own fire events go to
 			// (mg-e06d), so a coalesced mailbox copy is readable next to the
 			// scheduler_fire_* record of the fire that produced it (mg-af83).
@@ -2129,7 +2138,7 @@ Flags:
 			//
 			// This is the one condition that asks for a WAKE as well as a mail,
 			// and the reason is the reason mg-c3f0 stopped here: mail is
-			// deliverable (client.SendMGMail shells out to `mg`, no scheduler
+			// deliverable (alerts.Transport shells out to `mg`, no scheduler
 			// involved) but the coordinator's mail-check loop is itself a
 			// schedule, so it will never be prompted to look. The nudge rides
 			// the heartbeat, which drives the scheduler rather than depending on
@@ -2196,7 +2205,7 @@ Flags:
 			// The cap is mg-61ce's damping term on the mail fallback: past it,
 			// a coordinator that has not gone idle once stops being sent more
 			// notices about being too busy to be sent notices.
-			Nudge: newStallNudger(agentRegistry, client.SendMGMail, cfg.StallWatch.MailFallbackBacklogCap),
+			Nudge: newStallNudger(agentRegistry, alerts.Transport, cfg.StallWatch.MailFallbackBacklogCap),
 			// Let a priority wake short-circuit the ~30s heartbeat poll for a
 			// prompt follow-up sweep (gh #61). hb.Nudge coalesces, so this can't
 			// storm the loop; the priority cooldown bounds it to one extra tick
@@ -2326,7 +2335,7 @@ Flags:
 			// launchctl cache, so each sample must get a fresh one or drift would
 			// freeze after the first check (see driftwatch.Options.NewDeps).
 			NewDeps:    reconcile.HostDeps,
-			Mail:       client.SendMGMail,
+			Mail:       alerts.Transport,
 			MailTo:     escalationBox,
 			Revision:   driftwatch.BuildRevision,
 			StaleAfter: cfg.DriftWatch.SelfStaleAfter,
@@ -2408,7 +2417,7 @@ Flags:
 	if cfg.CredExpiry.Enabled {
 		credWatcher = credexpiry.New(credexpiry.Options{
 			Enabled:       true,
-			Mail:          client.SendMGMail,
+			Mail:          alerts.Transport,
 			MailTo:        escalationBox,
 			Interval:      cfg.CredExpiry.Interval,
 			BlindRenotify: cfg.CredExpiry.BlindRenotify,
@@ -2484,7 +2493,7 @@ Flags:
 		reviewDeclWatcher = reviewdecl.New(reviewdecl.Options{
 			Enabled:       true,
 			Source:        src.Items,
-			Mail:          client.SendMGMail,
+			Mail:          alerts.Transport,
 			Interval:      cfg.ReviewDecl.Interval,
 			RenotifyAfter: cfg.ReviewDecl.RenotifyAfter,
 			NotifyTo:      cfg.ReviewDecl.NotifyTo,
@@ -2538,7 +2547,7 @@ Flags:
 			Root:          agent.PromptDir(),
 			ShippedFS:     agent.DefaultPromptsFS(),
 			Coordinator:   coordinator,
-			Mail:          client.SendMGMail,
+			Mail:          alerts.Transport,
 			Interval:      cfg.PromptEdit.Interval,
 			RenotifyAfter: cfg.PromptEdit.RenotifyAfter,
 			StatePath:     promptedit.NoticesPath(config.PogoHome()),
@@ -2595,7 +2604,7 @@ Flags:
 				Declared:      cfg.Lineage.PromptDeclared,
 				Root:          agent.PromptDir(),
 				Coordinator:   coordinator,
-				Mail:          client.SendMGMail,
+				Mail:          alerts.Transport,
 				Interval:      cfg.PromptStale.Interval,
 				RenotifyAfter: cfg.PromptStale.RenotifyAfter,
 				SkipRemote:    cfg.PromptStale.SkipRemote,
@@ -2671,7 +2680,7 @@ Flags:
 					RunningSince:     runningSince,
 				}, nil
 			},
-			Mail:                  client.SendMGMail,
+			Mail:                  alerts.Transport,
 			Interval:              cfg.AckWatch.Interval,
 			RenotifyAfter:         cfg.AckWatch.RenotifyAfter,
 			BlackoutRenotifyAfter: cfg.AckWatch.BlackoutRenotify,
@@ -2715,7 +2724,7 @@ Flags:
 		deafWatcher = deafwatch.New(deafwatch.Options{
 			Enabled:       true,
 			Source:        deafwatch.RegistrySource(agentRegistry),
-			Mail:          client.SendMGMail,
+			Mail:          alerts.Transport,
 			Interval:      cfg.DeafWatch.Interval,
 			HoldDown:      cfg.DeafWatch.HoldDown,
 			RenotifyAfter: cfg.DeafWatch.RenotifyAfter,
@@ -2758,7 +2767,7 @@ Flags:
 		absentWatcher = absentwatch.New(absentwatch.Options{
 			Enabled:       true,
 			Source:        absentwatch.RegistrySource(agentRegistry),
-			Mail:          client.SendMGMail,
+			Mail:          alerts.Transport,
 			Interval:      cfg.AbsentWatch.Interval,
 			HoldDown:      cfg.AbsentWatch.HoldDown,
 			DormantAfter:  cfg.AbsentWatch.DormantAfter,
@@ -2839,7 +2848,7 @@ Flags:
 			Source: fleetProgressSource(agentRegistry,
 				func() *refinery.Refinery { return mergeQueue }, startTime,
 				cfg.ProgressWatch.SkipDirs),
-			Mail:          client.SendMGMail,
+			Mail:          alerts.Transport,
 			Interval:      cfg.ProgressWatch.Interval,
 			HoldDown:      cfg.ProgressWatch.HoldDown,
 			RenotifyAfter: cfg.ProgressWatch.RenotifyAfter,
@@ -2890,7 +2899,7 @@ Flags:
 				ev, readErr := firstturn.ReadEvidence(schedulerLog, crew, now, firstturn.DefaultLookback)
 				return firstturn.Attach(crew, ev, now, scanned, firstturn.DefaultLookback, readErr)
 			},
-			Mail:     client.SendMGMail,
+			Mail:     alerts.Transport,
 			Interval: cfg.FirstTurn.Interval,
 			Params:   firstturn.Params{Grace: cfg.FirstTurn.Grace},
 			NotifyTo: cfg.FirstTurn.NotifyTo,
@@ -3003,7 +3012,7 @@ Flags:
 					},
 				})
 			},
-			Mail:        client.SendMGMail,
+			Mail:        alerts.Transport,
 			Coordinator: coordinator,
 			HumanBox:    escalationBox,
 			StartedAt:   time.Now(),
@@ -3085,7 +3094,7 @@ Flags:
 					},
 				})
 			},
-			Mail:          client.SendMGMail,
+			Mail:          alerts.Transport,
 			Interval:      cfg.HeartWatch.Interval,
 			HoldDown:      cfg.HeartWatch.HoldDown,
 			RenotifyAfter: cfg.HeartWatch.RenotifyAfter,
@@ -3172,7 +3181,7 @@ Flags:
 			Source:        midsessionwedge.RegistrySource(agentRegistry),
 			Submits:       midsessionwedge.RegistrySubmits(agentRegistry),
 			Worktree:      midsessionwedge.RegistryWorktree(agentRegistry),
-			Mail:          client.SendMGMail,
+			Mail:          alerts.Transport,
 			NotifyTo:      notifyTo,
 			EscalateTo:    escalationBox,
 			From:          "pogod",
@@ -3237,7 +3246,7 @@ Flags:
 		blindWatcher = blindwatch.New(blindwatch.Options{
 			Enabled:       true,
 			Source:        blindwatch.WedgeSource(wedgeWatcher),
-			Mail:          client.SendMGMail,
+			Mail:          alerts.Transport,
 			Interval:      cfg.BlindWatch.Interval,
 			HoldDown:      cfg.BlindWatch.HoldDown,
 			StaleAfter:    cfg.BlindWatch.StaleAfter,
@@ -3747,7 +3756,7 @@ Flags:
 						"\nDo NOT archive this item — `merged` here does not mean the deliverable exists.",
 						mr.PostMergeError)
 				}
-				if err := client.SendMGMail(coordinator, "refinery", subject, body); err != nil {
+				if err := alerts.Mail(alerts.RefineryMerged, alerts.Transport, coordinator, "refinery", subject, body); err != nil {
 					log.Printf("refinery: failed to mail coordinator: %v", err)
 				}
 			})
@@ -3820,7 +3829,7 @@ Flags:
 				})
 				var undelivered []string
 				for _, to := range route.Recipients {
-					if err := client.SendMGMail(to, "refinery", subject, body); err != nil {
+					if err := alerts.Mail(alerts.RefineryMergeFailed, alerts.Transport, to, "refinery", subject, body); err != nil {
 						log.Printf("refinery: failed to mail %s: %v", to, err)
 						undelivered = append(undelivered, to)
 					}
@@ -3834,7 +3843,7 @@ Flags:
 				}
 
 				// Mail the coordinator so they can re-dispatch if the author exited.
-				if err := client.SendMGMail(coordinator, "refinery", subject, body); err != nil {
+				if err := alerts.Mail(alerts.RefineryMergeFailed, alerts.Transport, coordinator, "refinery", subject, body); err != nil {
 					log.Printf("refinery: failed to mail coordinator: %v", err)
 				}
 
@@ -3845,7 +3854,7 @@ Flags:
 					escSubject := fmt.Sprintf("FAILURE THRESHOLD REACHED: %s (%d consecutive failures)", mr.Author, mr.FailureCount)
 					escBody := fmt.Sprintf("Author %s has failed %d consecutive merge attempts.\nLatest MR: %s\nBranch: %s\nError: %s\nConsider stopping the polecat or reassigning the work item.",
 						mr.Author, mr.FailureCount, mr.ID, mr.Branch, mr.Error)
-					if err := client.SendMGMail(coordinator, "refinery", escSubject, escBody); err != nil {
+					if err := alerts.Mail(alerts.RefineryFailureThreshold, alerts.Transport, coordinator, "refinery", escSubject, escBody); err != nil {
 						log.Printf("refinery: failed to mail coordinator escalation: %v", err)
 					}
 				}
@@ -3997,7 +4006,7 @@ Flags:
 			// this runs BEFORE the auto-start sweep below, so the notice is
 			// already in that agent's maildir when it starts.
 			notifyPromptSyncConflicts(installRes, coordinator, agent.PromptDir(),
-				promptSyncNoticesPath(), time.Now(), client.SendMGMail)
+				promptSyncNoticesPath(), time.Now(), alerts.Transport)
 		}
 
 		// The role-default pin used to live here, between prompt refresh and

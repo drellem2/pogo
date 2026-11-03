@@ -3,6 +3,7 @@ package absentwatch
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"sort"
 	"strings"
 	"sync"
@@ -376,7 +377,7 @@ func (w *Watcher) announceDeclared(snap Snapshot, declared []Finding, now time.T
 		"why":         "auto_start = false declares the absence; reported once per absence, never renotified and never escalated on age",
 	}
 	for _, to := range recipients {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.AbsentWatchDeclared, w.mail, to, mailFrom, subject, body); err != nil {
 			details["mail_error_"+to] = err.Error()
 		}
 	}
@@ -460,7 +461,7 @@ func (w *Watcher) announce(snap Snapshot, confirmed, declared []Finding, now tim
 		"coordinator": absentCoordinator,
 	}
 	for _, to := range recipients {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.AbsentWatchFinding, w.mail, to, mailFrom, subject, body); err != nil {
 			// The fault was detected and could not be reported. Record it: a
 			// notice that reaches nobody is this ticket's bug, one level up.
 			details["mail_error_"+to] = err.Error()
@@ -551,7 +552,7 @@ func (w *Watcher) closeEpisode(snap Snapshot, now time.Time) {
 		recipients = append(recipients, w.escalateTo)
 	}
 	for _, to := range recipients {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.AbsentWatchCleared, w.mail, to, mailFrom, subject, body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",

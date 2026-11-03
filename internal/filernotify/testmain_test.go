@@ -15,7 +15,7 @@ import (
 // Every seam this package has is injected — mail, the creator probe, the result
 // probe, the registry probe — so nothing in the tests here touches disk or the
 // environment today. The envelope is established anyway, and this package is a
-// sharper case for it than most: its production wiring is client.SendMGMail,
+// sharper case for it than most: its production wiring is alerts.Transport,
 // which shells out to `mg mail send` against $HOME/.macguffin/mail. A test that
 // reached the real function by accident — a nil seam falling through to a
 // default, a live-store test added later — would deliver mail into the

@@ -68,6 +68,7 @@ package filernotify
 
 import (
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"strings"
 	"sync"
@@ -159,7 +160,7 @@ func (o Outcome) Sent() bool { return o.To != "" && o.Err == nil }
 // Notifier mails the filer of a completed work item. The zero value does
 // nothing useful; use New.
 type Notifier struct {
-	// mail sends durable mail (client.SendMGMail in production).
+	// mail sends durable mail (alerts.Transport in production).
 	mail func(to, from, subject, body string) error
 	// filing returns an item's creator and title (client.MGWorkItemFiling).
 	filing func(id string) (creator, title string, err error)
@@ -521,7 +522,7 @@ func (n *Notifier) send(c Completion, res, to string, redirected bool, creator, 
 		o.Skipped = "no recipient (no coordinator configured)"
 		return n.finish(c, res, o)
 	}
-	if err := n.mail(to, mailFrom, subject, body); err != nil {
+	if err := alerts.Mail(alerts.FilerNotifyCompleted, n.mail, to, mailFrom, subject, body); err != nil {
 		o.Err = fmt.Errorf("mail %s about %s: %w", to, c.ItemID, err)
 		log.Printf("filernotify: FAILED to tell %s about %s (%s): %v — the filer has not been told and nothing else "+
 			"will tell it (mg-f120)", to, c.ItemID, strings.ToLower(headline(c)), o.Err)
@@ -540,7 +541,7 @@ func (n *Notifier) send(c Completion, res, to string, redirected bool, creator, 
 		if to != n.coordinator && n.coordinator != "" {
 			relay := fmt.Sprintf("This mail was addressed to %s and could not be delivered:\n\n  %v\n\n"+
 				"You are the coordinator; the report below has reached nobody else.\n\n%s", to, err, body)
-			if rerr := n.mail(n.coordinator, mailFrom, "UNDELIVERABLE "+subject, relay); rerr != nil {
+			if rerr := alerts.Mail(alerts.FilerNotifyUndeliverable, n.mail, n.coordinator, mailFrom, "UNDELIVERABLE "+subject, relay); rerr != nil {
 				log.Printf("filernotify: the fallback to %s also failed for %s: %v — this completion has been "+
 					"reported to nobody (mg-f120)", n.coordinator, c.ItemID, rerr)
 			} else {

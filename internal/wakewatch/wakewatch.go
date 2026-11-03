@@ -69,6 +69,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"io"
 	"os"
 	"path/filepath"
@@ -1055,7 +1056,7 @@ func (w *Watcher) bounce(ev storeEvent, tg target) {
 		if w.d.Mail == nil {
 			break
 		}
-		if err := w.d.Mail(to, Sender, subj, body); err != nil {
+		if err := alerts.Mail(alerts.WakeWatchBounce, w.d.Mail, to, Sender, subj, body); err != nil {
 			errs = append(errs, to+": "+err.Error())
 			continue
 		}
@@ -1251,7 +1252,7 @@ func (w *Watcher) recoverOne(now time.Time, agent string, t Trigger, since time.
 		d["notified"] = false
 		d["reason"] = "recipient_is_coordinator"
 	} else if w.d.Mail != nil && w.d.Coordinator != "" {
-		if err := w.d.Mail(w.d.Coordinator, Sender, "unconsumed work: "+agent, body); err != nil {
+		if err := alerts.Mail(alerts.WakeWatchUnconsumed, w.d.Mail, w.d.Coordinator, Sender, "unconsumed work: "+agent, body); err != nil {
 			d["error"] = err.Error()
 		} else {
 			d["notified"] = w.d.Coordinator

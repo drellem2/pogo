@@ -144,6 +144,7 @@ package midsessionwedge
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"sort"
 	"sync"
 	"time"
@@ -802,7 +803,7 @@ normally goes to, so it will not be read there (mg-875d).
 `, w.escalateTo, w.notifyTo)
 	}
 	for _, to := range recipients {
-		if err := w.mail(to, w.from, subject, body); err != nil {
+		if err := alerts.Mail(alerts.MidSessionWedgeExhausted, w.mail, to, w.from, subject, body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     r.Name,

@@ -3,6 +3,7 @@ package blindwatch
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"sort"
 	"strings"
 	"sync"
@@ -378,7 +379,7 @@ func (w *Watcher) clear(snap Snapshot, now time.Time) {
 			"asserted here — only that the instrument is answering.\n",
 		snap.Detector, snap.SampledAt.UTC().Format(time.RFC3339), snap.Examined)
 	for _, box := range to {
-		if err := w.mail(box, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.BlindWatchCleared, w.mail, box, mailFrom, subject, body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",
@@ -407,7 +408,7 @@ func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
 	body := renderNotice(snap, confirmed, w.coordinator, escalate, now)
 	subj := subject(snap, confirmed)
 	for _, box := range to {
-		if err := w.mail(box, mailFrom, subj, body); err != nil {
+		if err := alerts.Mail(alerts.BlindWatchFinding, w.mail, box, mailFrom, subj, body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",

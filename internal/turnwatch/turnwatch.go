@@ -94,6 +94,7 @@ package turnwatch
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"sort"
 	"strings"
 	"sync"
@@ -405,7 +406,7 @@ func (w *Watcher) announce(rep turnlog.Report, confirmed []turnlog.State, now ti
 
 	for _, to := range w.recipients(coordinatorHit) {
 		body := renderNotice(rep, confirmed, w.coordinator, to, w.humanBox, now)
-		if err := w.mail(to, "turn-watch", subject(confirmed, w.coordinator), body); err != nil {
+		if err := alerts.Mail(alerts.TurnWatchFinding, w.mail, to, "turn-watch", subject(confirmed, w.coordinator), body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",
