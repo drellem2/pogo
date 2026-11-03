@@ -86,3 +86,38 @@ func TestLookupIsBounded(t *testing.T) {
 		})
 	}
 }
+
+// TestMergedFor covers the squash test's source (drellem2/pogo#160). The
+// distinction that matters is the same as Lookup's: "no merged PR" is an
+// empty answer, and EVERY failure — the 401 a dead credential returns
+// included — is an error the caller must not read as one.
+func TestMergedFor(t *testing.T) {
+	dir := t.TempDir()
+
+	// The shape gh actually prints (measured against drellem2/pogo, 2026-11-03).
+	fakeGH(t, `echo '[{"headRefOid":"6a2d","mergeCommit":{"oid":"9f81"},"number":257}]'`)
+	prs, err := MergedFor(dir, "b", time.Minute)
+	if err != nil || len(prs) != 1 || prs[0].Number != 257 || prs[0].MergeCommit != "9f81" || prs[0].HeadCommit != "6a2d" {
+		t.Errorf("merged PR: got (%+v, %v)", prs, err)
+	}
+
+	fakeGH(t, `echo '[]'`)
+	if prs, err := MergedFor(dir, "b", time.Minute); err != nil || len(prs) != 0 {
+		t.Errorf("no merged PR: got (%+v, %v), want (empty, nil)", prs, err)
+	}
+
+	fakeGH(t, `echo '[{"headRefOid":"6a2d","mergeCommit":null,"number":3}]'`)
+	if prs, err := MergedFor(dir, "b", time.Minute); err != nil || len(prs) != 1 || prs[0].MergeCommit != "" {
+		t.Errorf("null merge commit: got (%+v, %v), want an entry with no merge commit", prs, err)
+	}
+
+	fakeGH(t, `echo 'HTTP 401: Bad credentials (https://api.github.com/graphql)' >&2; exit 1`)
+	if _, err := MergedFor(dir, "b", time.Minute); err == nil {
+		t.Error("401: want an error, got nil")
+	}
+
+	fakeGH(t, `echo 'not json'`)
+	if _, err := MergedFor(dir, "b", time.Minute); err == nil {
+		t.Error("bad JSON: want an error, got nil")
+	}
+}

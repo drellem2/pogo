@@ -64,6 +64,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -1411,6 +1412,36 @@ func workItemID(commits []Commit) string {
 // refExists reports whether ref names a commit in repo. The runner moved to
 // internal/vcs/gitvcs (enth-vcs slice 3, mg-d72cb), unchanged.
 func refExists(repo, ref string) (bool, error) { return gitvcs.RefExists(repo, ref) }
+
+// RevParse resolves rev to the commit SHA it names in repo.
+func RevParse(repo, rev string) (string, error) {
+	out, err := git(repo, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("rev-parse %s: %w", rev, err)
+	}
+	sha := strings.TrimSpace(out)
+	if sha == "" {
+		return "", fmt.Errorf("rev-parse %s: no such commit", rev)
+	}
+	return sha, nil
+}
+
+// IsAncestor reports whether commit is an ancestor of (or equal to) ref.
+//
+// Exit 1 is git's well-defined "no"; every other failure — including a commit
+// this clone does not hold, which git reports as exit 128 — is an error, so a
+// caller that settles on a "yes" can never settle on a failure.
+func IsAncestor(repo, commit, ref string) (bool, error) {
+	_, err := git(repo, "merge-base", "--is-ancestor", commit, ref)
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("merge-base --is-ancestor %s %s: %w", commit, ref, err)
+}
 
 func git(repo string, args ...string) (string, error) {
 	return gitStdin(repo, "", args...)
