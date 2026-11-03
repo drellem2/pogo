@@ -1,7 +1,6 @@
 package refinery
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -185,17 +184,19 @@ func TestSubmitEnthItem(t *testing.T) {
 	}
 }
 
-func TestProcessMergeRefusesEnthBeforeAnyGitStep(t *testing.T) {
+func TestProcessMergeRefusesEnthWorkOnARepoNoLongerEnth(t *testing.T) {
 	r, _ := newCallbackRefinery(t)
+	// No lookup says enth for this path: the MR's enth Changes cannot be
+	// placed. Refused before any git step, never handed to the git pipeline.
 	mr := &MergeRequest{ID: "mr-x", RepoPath: t.TempDir(), Item: "mg-1", TargetRef: "main", EnthSubmitted: []string{"c1"}}
 	_, err := r.processMerge(mr)
-	if !errors.Is(err, vcs.ErrUnsupported) || !strings.Contains(err.Error(), "slice 7") {
-		t.Fatalf("processMerge = %v, want ErrUnsupported naming slice 7", err)
+	if err == nil || !strings.Contains(err.Error(), "not recorded as an enth repo") {
+		t.Fatalf("processMerge = %v, want the not-enth refusal", err)
 	}
-	if mr.FailureClass != ClassInfrastructure || !strings.Contains(mr.NotRetriedReason, "not retryable") || mr.AttemptCount != 1 {
+	if mr.FailureClass != ClassInfrastructure || !strings.Contains(mr.NotRetriedReason, "not retryable") || mr.AttemptCount != 1 || mr.Attempts[0].Stage != stageEnthConfig {
 		t.Errorf("record = class %q reason %q attempts %d", mr.FailureClass, mr.NotRetriedReason, mr.AttemptCount)
 	}
 	if countsAgainstAuthor(mr.FailureClass) {
-		t.Error("an unbuilt land counted against the author")
+		t.Error("a record change counted against the author")
 	}
 }

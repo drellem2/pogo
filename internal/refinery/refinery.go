@@ -129,6 +129,20 @@ type MergeRequest struct {
 	EnthSubmitted []string `json:"enth_submitted,omitempty"`
 	// EnthWorker is the Pogo-Worker trailer of the submitted stack's top.
 	EnthWorker string `json:"enth_worker,omitempty"`
+	// Enth is an enth MR's land record (§7): enth's `landed` line, stored as
+	// given, with MergedSHA left empty so a 64-hex Change id is never read as
+	// a git sha. Written by slice 7 (mg-1fe2b) because the already-merged
+	// rule and crash recovery read it; slice 8 makes its consumers
+	// (mr.Landed(), events, the deploy-hook env) VCS-aware.
+	Enth *vcs.LandRecord `json:"enth,omitempty"`
+	// EnthPending is the enth land this MR has issued, or is about to issue,
+	// and has not yet seen answered (§6.3). It is persisted BEFORE the land is
+	// sent, so a pogod that dies mid-land finds it on restart and re-issues
+	// the same land under the same request id: enthd then replays the
+	// recorded answer if it landed, and refuses stale_tip if it did not.
+	// Re-planning under a new request id instead would land the same Changes
+	// a second time (measured: enth does not refuse that).
+	EnthPending *EnthPendingLand `json:"enth_pending,omitempty"`
 	// AutoCreateTargetRef opts the request into branching the target ref off
 	// the repo's default branch when it does not yet exist on origin. Off by
 	// default — the safe behaviour (typo in target_ref → error) stays the

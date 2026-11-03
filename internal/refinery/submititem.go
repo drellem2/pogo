@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync/atomic"
 
 	"github.com/drellem2/pogo/internal/vcs"
@@ -139,6 +140,9 @@ func resolveEnthSubmission(req *MergeRequest, e vcs.EnthRepo) error {
 	if req.PostMergeTag != "" || req.AutoCreateTargetRef {
 		return fmt.Errorf("%s is an enth repo: --post-merge-tag and --auto-create-target are not supported on enth yet (enth-vcs slice 12)", req.RepoPath)
 	}
+	if parseRefineryConfig(filepath.Join(req.RepoPath, ".pogo", "refinery.toml")).PRMode {
+		return fmt.Errorf("%s is an enth repo and its .pogo/refinery.toml sets pr_mode, which is refused on enth: there is no pull request to push back to (enth-vcs §11)", req.RepoPath)
+	}
 	b := enthWork(e)
 	ctx := context.Background()
 	if _, err := b.RefTip(ctx, req.TargetRef); err != nil {
@@ -163,12 +167,4 @@ func resolveEnthSubmission(req *MergeRequest, e vcs.EnthRepo) error {
 	req.EnthWorker = s.Worker
 	req.EnthSubmitted = append([]string(nil), s.Revs...)
 	return nil
-}
-
-// enthLandUnsupported is how the merge worker fails an enth MR until enth
-// landing exists (slice 7, mg-1fe2b): before any git step, which would act on
-// a checkout that is not where the work lands.
-func enthLandUnsupported(mr *MergeRequest) error {
-	return fmt.Errorf("MR %s is an enth submission (%s, %d Change(s)): landing through enth is enth-vcs slice 7 (mg-1fe2b), not built yet — nothing was landed: %w",
-		mr.ID, mr.Item, len(mr.EnthSubmitted), vcs.ErrUnsupported)
 }

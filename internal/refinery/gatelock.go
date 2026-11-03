@@ -133,6 +133,14 @@ func (l gateLock) describe() string {
 }
 
 func gateLockPath(wtDir string) string {
+	// An enth gate checkout has no .git; its lock lives in .enth/, which enth
+	// skips at every depth, so it is never part of a Change (enth-vcs slice
+	// 7). A git clone has no .enth, so its lock path is what it always was.
+	if fi, err := os.Stat(filepath.Join(wtDir, ".enth")); err == nil && fi.IsDir() {
+		if _, gerr := os.Stat(filepath.Join(wtDir, ".git")); gerr != nil {
+			return filepath.Join(wtDir, ".enth", gateLockFile)
+		}
+	}
 	return filepath.Join(wtDir, ".git", gateLockFile)
 }
 

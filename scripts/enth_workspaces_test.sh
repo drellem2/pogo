@@ -26,7 +26,8 @@
 #      `enth change` (and, the control, enth refuses no_identity without one);
 #      `pogo presubmit --item` refuses none, dirty and trailer-less and passes
 #      one stack; `pogo refinery submit --item` records the stack's ids (and the
-#      MR fails before any git step, landing being slice 7), refuses a branch,
+#      MR is refused by its gate, so nothing lands; landing is
+#      enth_land_test.sh's), refuses a branch,
 #      an empty item and two workers' stacks; check-stranded reports the
 #      trailer-less base; --stranded-adopt checks out the item's top Change
 #   6  THE GIT CONTROL: the same daemon spawns a polecat on a git repo and it
@@ -299,6 +300,9 @@ POUT="$(presubmit_in "$W1" w1 mg-y)"; PRC=$?
 [ "$PRC" = 0 ] && printf '%s' "$POUT" | grep -q "pre-submit OK: 1 Change(s) for mg-y, top $C1" \
     && ok "P2   presubmit passes ONE stack whose top is the checkout's base" || bad "P2   presubmit one: rc $PRC $POUT"
 
+# A refusing gate keeps C1 unlanded for the steps below: since slice 7 an
+# enth MR lands (scripts/enth_land_test.sh proves the landing itself).
+mkdir -p "$PROJ/.pogo"; printf 'quality_gate = "exit 1"\n' > "$PROJ/.pogo/refinery.toml"
 SUB="$(pogo refinery submit --item=mg-y --repo="$PROJ" --author=mg-y --json 2>&1)"; SRC=$?
 MR="$(printf '%s' "$SUB" | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p')"
 [ "$SRC" = 0 ] && [ -n "$MR" ] && ok "R1   refinery submit --item queued $MR" || bad "R1   submit --item: rc $SRC $SUB"
@@ -310,9 +314,10 @@ if [ -n "$MR" ]; then
         ST="$(pogo refinery show "$MR" --json 2>/dev/null | sed -n 's/.*"status": *"\([a-z]*\)".*/\1/p' | head -1)"
         [ "$ST" = failed ] && break; sleep 0.2
     done
-    pogo refinery show "$MR" --json 2>/dev/null | grep -q 'enth-vcs slice 7' \
-        && ok "     ... and is failed before any git step: landing is slice 7" || bad "     MR $MR status $ST: $(pogo refinery show "$MR" --json 2>&1 | head -40)"
+    pogo refinery show "$MR" --json 2>/dev/null | grep -q 'quality gate: exit 1 failed' \
+        && ok "     ... and is refused by the gate it was landed through (slice 7): nothing landed" || bad "     MR $MR status $ST: $(pogo refinery show "$MR" --json 2>&1 | head -40)"
 fi
+rm -f "$PROJ/.pogo/refinery.toml"
 SUB="$(pogo refinery submit polecat-w1 --item=mg-y --repo="$PROJ" 2>&1)"
 [ $? != 0 ] && printf '%s' "$SUB" | grep -q 'not a branch' && ok "R1   a branch is refused on an enth repo" || bad "R1   branch on enth: $SUB"
 SUB="$(pogo refinery submit --item=mg-none --repo="$PROJ" 2>&1)"

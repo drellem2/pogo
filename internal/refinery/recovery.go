@@ -62,6 +62,11 @@ func (r *Refinery) resolveRecoveredOne(mr *MergeRequest) {
 	if mr == nil {
 		return
 	}
+	if len(mr.EnthSubmitted) > 0 {
+		// No git probe for enth work: its land is a request enthd can replay.
+		r.resolveRecoveredEnth(mr)
+		return
+	}
 
 	probe, probeErr := r.probeAlreadyMerged(mr)
 	merged := probeErr == nil && probe.HeadInTarget && r.landedInCrashWindow(mr, probe)
