@@ -94,7 +94,7 @@ func (b Backend) TagChange(ctx context.Context, name, at string) (RefMove, error
 	if !strings.HasPrefix(ref, "refs/tags/") {
 		ref = "refs/tags/" + name
 	}
-	out, err := run(ctx, b.Bin, append(b.remote(), "tag", name, id)...)
+	out, err := b.run(ctx, append(b.remote(), "tag", name, id)...)
 	if err == nil {
 		return parseRefLine(out, "tag")
 	}
@@ -136,7 +136,7 @@ func (b Backend) CreateBranch(ctx context.Context, ref, at string) (RefMove, err
 		}
 		return RefMove{}, fmt.Errorf("enth ref create %s: resolve %s: %w", full, at, err)
 	}
-	out, err := run(ctx, b.Bin, append(b.remote(), "ref", "create", full, id)...)
+	out, err := b.run(ctx, append(b.remote(), "ref", "create", full, id)...)
 	if err == nil {
 		return parseRefLine(out, "ref_created")
 	}
