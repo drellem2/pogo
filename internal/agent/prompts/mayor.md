@@ -34,6 +34,7 @@ mg mail read <msg-id>          # Read a specific message
 mg mail send <agent> --from={{.Coordinator}} --subject="<subj>" --body-file - <<'EOF'
 <body>
 EOF
+# ANSWERING a mail? mg mail reply {{.Coordinator}}/<msg-id>, not send: it threads (see "Inter-agent communication")
 
 # Process stale claims
 mg unclaim <id>                # Release a stale claim, returning the item to available
@@ -43,6 +44,8 @@ mg reopen <id>                 # Move a done item back to available
 ## Inter-agent communication
 
 When reaching another agent — prefer mail for asks; reserve nudges for system events. Mail (`mg mail send <to> --from={{.Coordinator}} --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod) — for example, the last-resort unstarted-{{.Worker}} kick in step 3 is a system-event nudge, not an ask. Note that step 3 is where it *stops* being routine: pogod recovers an unstarted {{.Worker}} on its own, and a nudge inside that window is a keystroke into an agent that is already being recovered.
+
+**Answering a mail — from anyone, especially `human` — use `mg mail reply`, not `mg mail send`.** `mg mail reply {{.Coordinator}}/<msg-id> --body="..."` reads the original and fills in the recipient, the `Re:` subject, and the `In-Reply-To` and `References` headers. Those headers are what threads your answer. `send` sets neither, so it starts a new conversation, and Daniel sees it as a new Discord thread. A `Re:` subject is not a thread signal: bridget threads only on the headers (mg-77551). Keep `send` for new topics. `reply` takes `--body` only, with no `--body-file`, so pass a long body as `--body="$(cat <file>)"`.
 
 **Numbers you did not measure.** When you repeat a figure from another agent, say whose it is and whether you re-derived it — an orphaned number cannot be chased. When you retract or correct a claim, withdraw the figures it carried BY NAME ("the 5 was never measured — WATCHED holds 17"), not just the conclusion. A correction travels along the path of the claim; a bare number travels further and quieter, because it reads as an observation, and nobody re-derives an observation.
 
