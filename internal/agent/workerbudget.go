@@ -107,7 +107,7 @@ const (
 // overrides it outright with `--env POGO_WORKER_CORES=N`. What is NOT accepted
 // is the harmful direction — one worker silently taking the whole box — and
 // that is the direction a static division closes.
-func WorkerBudgetFor(hostCores int, capCfg config.DispatchCapConfig) WorkerBudget {
+func WorkerBudgetFor(hostCores int, capCfg config.DispatchCapConfig, loadCfg config.DispatchLoadGateConfig) WorkerBudget {
 	if hostCores <= 0 {
 		hostCores = runtime.NumCPU()
 	}
@@ -118,17 +118,34 @@ func WorkerBudgetFor(hostCores int, capCfg config.DispatchCapConfig) WorkerBudge
 		return WorkerBudget{Basis: "host core count unknown — no budget could be derived"}
 	}
 
-	// With no worker count enforced, hostload.FleetHeavyAt is the only control
+	// With no worker count enforced, the host gate's mark is the only control
 	// left, so the share is taken from that threshold directly rather than from
 	// a number written here — a second copy of 0.50 would go stale silently the
-	// first time the gate was recalibrated. The claim is bounded: a worker at
-	// its budget holds about half the box, which is at the gate's mark and not
+	// first time the gate was recalibrated. It is the CONFIGURED mark, `[dispatch]
+	// load_gate_fleet_share`, the same value loadGateRefusal enforces
+	// (drellem2/pogo#202). The claim is bounded: a worker at its budget holds
+	// about the mark's share of the box, which is at the gate's mark and not
 	// provably under it, because the fleet also contains pogod and every other
-	// agent. "At most half" is what this buys, not "the gate will not fire".
-	cores := int(float64(hostCores) * hostload.FleetHeavyAt)
+	// agent. "At most the mark" is what this buys, not "the gate will not fire".
+	//
+	// A DISARMED gate leaves nothing to take the share from. The budget then
+	// falls back to the shipped mark as advice and says so — not to the whole
+	// host, because "one worker should not take the box alone" is still true
+	// when nothing enforces it, and not to 0, which would floor every worker to
+	// one core on the very host the operator just unblocked.
+	share := loadCfg.FleetShare
 	basis := fmt.Sprintf("%.0f%% of %d cores: no per-repo worker cap is armed, so the host gate's "+
-		"fleet-share mark is the only control and one worker should not take the box alone",
-		hostload.FleetHeavyAt*100, hostCores)
+		"fleet-share mark ([dispatch] load_gate_fleet_share) is the only control and one worker "+
+		"should not take the box alone",
+		share*100, hostCores)
+	if !loadCfg.Armed() {
+		share = hostload.FleetHeavyAt
+		basis = fmt.Sprintf("%.0f%% of %d cores: no per-repo worker cap is armed AND the host load gate is "+
+			"DISARMED ([dispatch] load_gate_fleet_share = 0), so nothing controls this box; the shipped "+
+			"mark is used as advice so one worker does not take it alone",
+			share*100, hostCores)
+	}
+	cores := int(float64(hostCores) * share)
 	if capCfg.Armed() {
 		cores = hostCores / capCfg.MaxPolecatsPerRepo
 		basis = fmt.Sprintf("%d cores divided by the per-repo dispatch cap of %d workers",
@@ -195,5 +212,5 @@ func polecatSpawnEnv(budget WorkerBudget, reqEnv []string) []string {
 // reason is the same: an advisory number that could drift from the injected one
 // lets a coordinator plan against a fleet pogod is configuring differently.
 func (r *Registry) WorkerBudget() WorkerBudget {
-	return WorkerBudgetFor(runtime.NumCPU(), r.dispatchCapPolicy())
+	return WorkerBudgetFor(runtime.NumCPU(), r.dispatchCapPolicy(), r.loadGatePolicy())
 }
