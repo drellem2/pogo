@@ -2397,6 +2397,15 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// Create an enth checkout for an enth repo's polecat (slice 5).
 	if enthRepo != nil {
 		sourceRepo = spawnReq.Repo
+		// The project's own token, read before anything is created: an
+		// unreadable token file refuses the spawn here, naming the path
+		// (mg-3a813).
+		enthToken, err := spawnEnthToken(*enthRepo)
+		if err != nil {
+			os.Remove(promptFile)
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, err.Error())
+			return
+		}
 		if err := os.MkdirAll(filepath.Dir(worktreeDir), 0755); err != nil {
 			os.Remove(promptFile)
 			failPolecatSpawn(w, spawnReq, http.StatusInternalServerError,
@@ -2422,7 +2431,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		log.Printf("polecat %s: created enth checkout at %s (%s on %s, %s at %s)",
 			spawnReq.Name, worktreeDir, enthRepo.Repo, enthRepo.Remote, ref, ws.Base)
 		spawnBase.BaseRef = ref
-		env = append(env, enthWorkerEnv(*enthRepo, sourceRepo, spawnReq.Name)...)
+		env = append(env, enthWorkerEnv(*enthRepo, enthToken, sourceRepo, spawnReq.Name)...)
 	}
 
 	// Create git worktree for polecat isolation

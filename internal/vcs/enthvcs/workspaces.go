@@ -106,7 +106,7 @@ func (b Backend) Create(ctx context.Context, s vcs.WorkspaceSpec) (vcs.Workspace
 	}
 	args := append(remoteArgs(b.Repo.Remote, b.Repo.Repo), "checkout", ref, s.Dir)
 	args = append(args, b.Repo.WorkspacePaths...)
-	if _, err := run(ctx, b.Bin, args...); err != nil {
+	if _, err := b.run(ctx, args...); err != nil {
 		return vcs.Workspace{}, err
 	}
 	st, err := ReadState(s.Dir)
@@ -185,7 +185,7 @@ type statusOp struct {
 // cannot read — is an error, never "clean". `enth status` reads DIR alone: no
 // store, no remote, no token.
 func (b Backend) Dirty(ctx context.Context, dir string) ([]string, error) {
-	out, err := run(ctx, b.Bin, "status", dir)
+	out, err := b.run(ctx, "status", dir)
 	if err != nil {
 		var ce *vcs.CommandError
 		var re *vcs.RefusedError
@@ -440,7 +440,7 @@ func (b Backend) Refresh(ctx context.Context, dir string) vcs.RefreshResult {
 	fresh := filepath.Join(tmpParent, "co")
 	args := append(remoteArgs(remote, repo), "checkout", rec.Ref, fresh)
 	args = append(args, st.Paths...)
-	if _, err := run(ctx, b.Bin, args...); err != nil {
+	if _, err := b.run(ctx, args...); err != nil {
 		res.Status, res.Detail = vcs.RefreshFailed, err.Error()
 		return res
 	}

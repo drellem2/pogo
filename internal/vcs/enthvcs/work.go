@@ -143,7 +143,7 @@ func (b Backend) listChanges(ctx context.Context, item, worker string) ([]vcs.Ch
 	if worker != "" {
 		args = append(args, "--trailer", vcs.TrailerWorker+"="+worker)
 	}
-	out, err := run(ctx, b.Bin, args...)
+	out, err := b.run(ctx, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +265,7 @@ type showLine struct {
 }
 
 func (b Backend) show(ctx context.Context, id string) (showLine, error) {
-	out, err := run(ctx, b.Bin, append(b.remote(), "query", "show", id)...)
+	out, err := b.run(ctx, append(b.remote(), "query", "show", id)...)
 	if err != nil {
 		return showLine{}, err
 	}
@@ -316,7 +316,7 @@ type lsLine struct {
 
 // tree reads every file of rev's tree: path → mode+blob.
 func (b Backend) tree(ctx context.Context, rev string) (map[string]string, error) {
-	out, err := run(ctx, b.Bin, append(b.remote(), "query", "ls", "-r", "--rev", rev)...)
+	out, err := b.run(ctx, append(b.remote(), "query", "ls", "-r", "--rev", rev)...)
 	if err != nil {
 		return nil, err
 	}
@@ -384,7 +384,7 @@ func (b Backend) Diff(ctx context.Context, _ vcs.Repo, s vcs.Submission) (vcs.Di
 // Cat returns path's content at rev (S9): `enth query cat PATH --rev REV`.
 // A path not in rev's tree is a *vcs.RefusedError with code not_found.
 func (b Backend) Cat(ctx context.Context, _ vcs.Repo, rev, path string) ([]byte, error) {
-	out, err := run(ctx, b.Bin, append(b.remote(), "query", "cat", path, "--rev", rev)...)
+	out, err := b.run(ctx, append(b.remote(), "query", "cat", path, "--rev", rev)...)
 	if err != nil {
 		return nil, err
 	}

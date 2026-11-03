@@ -74,9 +74,13 @@ package vcs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -118,12 +122,73 @@ type EnthRepo struct {
 	// `enth checkout --add PATH DIR`, so narrowing is for a repo too large to
 	// check out whole and for nothing else.
 	WorkspacePaths []string `json:"workspace_paths,omitempty"`
+	// TokenFile names the file holding the enth token this project's polecats
+	// and pogo's own enth calls for it act as (mg-3a813). The record stores the
+	// PATH, never the value; the file is read at each use (spawn, listing,
+	// land), so rotating the token needs no record change. Empty, the default,
+	// is today's behaviour: pogod's own $ENTH_TOKEN, else the token `enth
+	// login` saved for the remote. A file that is set but unreadable is an
+	// error naming the path, never a silent fall-back to the shared login.
+	TokenFile string `json:"token_file,omitempty"`
+}
+
+// EnthTokenEnv is the environment variable enth reads its token from.
+const EnthTokenEnv = "ENTH_TOKEN"
+
+// Token reads the project's token from TokenFile. ok is false when the
+// record names no file (use the shared login, as before). An error names the
+// path and never the file's contents.
+//
+// The file is either a JSON object with a string "token" field (the shape
+// `enth` writes for a minted bot token) or plain text whose trimmed content is
+// the token.
+func (e EnthRepo) Token() (tok string, ok bool, err error) {
+	if e.TokenFile == "" {
+		return "", false, nil
+	}
+	tok, err = ReadEnthTokenFile(e.TokenFile)
+	return tok, true, err
+}
+
+// ReadEnthTokenFile reads an enth token file (see EnthRepo.Token).
+func ReadEnthTokenFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("enth token file %s is unreadable: %w", path, unwrapPathError(err))
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if strings.HasPrefix(trimmed, "{") {
+		var v struct {
+			Token *string `json:"token"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
+			return "", fmt.Errorf("enth token file %s is not valid JSON", path)
+		}
+		if v.Token == nil || strings.TrimSpace(*v.Token) == "" {
+			return "", fmt.Errorf("enth token file %s has no \"token\" field", path)
+		}
+		return strings.TrimSpace(*v.Token), nil
+	}
+	if trimmed == "" || strings.ContainsAny(trimmed, "\n\r") {
+		return "", fmt.Errorf("enth token file %s does not hold a single token", path)
+	}
+	return trimmed, nil
+}
+
+// unwrapPathError drops the *PathError's own copy of the path, which the
+// caller's message already names.
+func unwrapPathError(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }
 
 // Equal reports whether two enth settings are the same. EnthRepo holds a
 // slice, so == does not compile; a nil and an empty WorkspacePaths are equal.
 func (e EnthRepo) Equal(o EnthRepo) bool {
-	if e.Remote != o.Remote || e.Repo != o.Repo || e.Trunk != o.Trunk || len(e.WorkspacePaths) != len(o.WorkspacePaths) {
+	if e.Remote != o.Remote || e.Repo != o.Repo || e.Trunk != o.Trunk || e.TokenFile != o.TokenFile || len(e.WorkspacePaths) != len(o.WorkspacePaths) {
 		return false
 	}
 	for i := range e.WorkspacePaths {
@@ -189,6 +254,13 @@ func NormalizeSelection(kind Kind, enth *EnthRepo) (Kind, *EnthRepo, error) {
 		return "", nil, err
 	}
 	e.WorkspacePaths = paths
+	if e.TokenFile != "" {
+		e.TokenFile = strings.TrimSpace(e.TokenFile)
+		if !filepath.IsAbs(e.TokenFile) {
+			return "", nil, fmt.Errorf("vcs: enth token file %q must be an absolute path", e.TokenFile)
+		}
+		e.TokenFile = filepath.Clean(e.TokenFile)
+	}
 	return Enth, &e, nil
 }
 

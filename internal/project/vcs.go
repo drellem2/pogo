@@ -76,11 +76,27 @@ func sameEnth(a, b *vcs.EnthRepo) bool {
 	return a.Equal(*b)
 }
 
+// onlyTokenFileDiffers reports whether the change from cur to (k, e) is the
+// enth token file alone (mg-3a813). That is not a handover of backend — the
+// repo stays on the same enthd and trunk — so it is not refused while work is
+// in flight. A polecat already running keeps the token it was spawned with;
+// pogo's own enth calls read the file afresh each time.
+func onlyTokenFileDiffers(cur Project, k vcs.Kind, e *vcs.EnthRepo) bool {
+	if cur.VCS != k || cur.Enth == nil || e == nil {
+		return false
+	}
+	a, b := *cur.Enth, *e
+	a.TokenFile, b.TokenFile = "", ""
+	return a.Equal(b)
+}
+
 // SetVCS changes the backend recorded for the project at path and persists
 // it. The selection is validated and normalized first (vcs.NormalizeSelection:
 // git is stored as no key at all). Re-stating the current selection is a
 // no-op success. Any real change is refused with a *BusyError when busy
-// reports work in flight for the repo; busy may be nil only in tests.
+// reports work in flight for the repo; busy may be nil only in tests. A change
+// of the enth token file alone is not a change of backend and is never
+// refused as busy (onlyTokenFileDiffers).
 func SetVCS(path string, kind vcs.Kind, enth *vcs.EnthRepo, busy BusyFunc) (*Project, error) {
 	k, e, err := vcs.NormalizeSelection(kind, enth)
 	if err != nil {
@@ -95,7 +111,7 @@ func SetVCS(path string, kind vcs.Kind, enth *vcs.EnthRepo, busy BusyFunc) (*Pro
 		out := cur
 		return &out, nil
 	}
-	if busy != nil {
+	if busy != nil && !onlyTokenFileDiffers(cur, k, e) {
 		if reasons := busy(cur.Path); len(reasons) > 0 {
 			to := k
 			if to == "" {

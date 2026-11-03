@@ -190,3 +190,48 @@ func TestSetVCSValidates(t *testing.T) {
 		t.Errorf("unregistered path = %v, want ErrNotRegistered", err)
 	}
 }
+
+// The enth token file (mg-3a813) is set and cleared on an existing record,
+// stored as a path, and — not being a change of backend — not refused while
+// the repo is busy. A change of anything else alongside it still is.
+func TestSetVCSTokenFileOnAnExistingProject(t *testing.T) {
+	in := []byte(`{"projects":[{"id":1,"path":"/x/repo/","vcs":"enth","enth":{"remote":"https://enth.app","repo":"o/r","trunk":"refs/heads/main"}}]}`)
+	roundTrip(t, "projects-setvcs-token-test.json", in)
+	base := vcs.EnthRepo{Remote: "https://enth.app", Repo: "o/r", Trunk: vcs.DefaultEnthTrunk}
+
+	busy, asked := busyWith("live polecat cat-a")
+	withTok := base
+	withTok.TokenFile = "/secrets/bot.json"
+	if _, err := SetVCS("/x/repo", vcs.Enth, &withTok, busy); err != nil {
+		t.Fatalf("setting the token file on a busy repo: %v", err)
+	}
+	if len(*asked) != 0 {
+		t.Errorf("busy consulted for a token-only change")
+	}
+	got, _ := os.ReadFile(projectFile)
+	want := `{"projects":[{"id":1,"path":"/x/repo/","vcs":"enth","enth":{"remote":"https://enth.app","repo":"o/r","trunk":"refs/heads/main","token_file":"/secrets/bot.json"}}]}`
+	if string(got) != want {
+		t.Errorf("record with a token file:\n got: %s\nwant: %s", got, want)
+	}
+	if _, e := VCSOf("/x/repo"); e == nil || e.TokenFile != "/secrets/bot.json" {
+		t.Errorf("VCSOf does not carry the token file: %+v", e)
+	}
+
+	// Changing the remote with the token is a change of backend: refused.
+	moved := withTok
+	moved.Remote = "https://other"
+	moved.TokenFile = "/secrets/other.json"
+	var be *BusyError
+	if _, err := SetVCS("/x/repo", vcs.Enth, &moved, busy); !errors.As(err, &be) {
+		t.Errorf("remote+token change on a busy repo = %v, want a *BusyError", err)
+	}
+
+	// Clearing it restores the original bytes.
+	if _, err := SetVCS("/x/repo", vcs.Enth, &base, busy); err != nil {
+		t.Fatalf("clearing the token file: %v", err)
+	}
+	got, _ = os.ReadFile(projectFile)
+	if !bytes.Equal(got, in) {
+		t.Errorf("after clearing:\n got: %s\nwant: %s", got, in)
+	}
+}

@@ -4447,7 +4447,10 @@ The path is resolved to an absolute path and the git root is discovered automati
 --vcs selects the repo's version-control backend, as set-vcs does. Without it
 the record carries no vcs key and the repo is git, as every repo was before.
 
-    pogo project add <path> --vcs=enth --enth-remote=URL --enth-repo=NAME
+    pogo project add <path> --vcs=enth --enth-remote=URL --enth-repo=NAME [--enth-token-file=PATH]
+
+--enth-token-file names a file holding the enth token this project's polecats,
+and pogo's own enth calls for it, act as (see set-enth-token).
 
 The path of an enth repo is a read checkout pogo keeps (it holds .enth/checkout).
 Polecats on it get their own whole-repo enth checkout (enth-vcs slice 5); the
@@ -4468,7 +4471,11 @@ refinery does not land enth work yet (slices 6-7), and refuses it with
 				cli.ExitWithError(jsonOutput, "no git repository found at or above "+absPath, cli.ExitNotFound)
 			}
 			if cmd.Flags().Changed("vcs") || enthFlagsChanged(cmd) {
-				p, err := client.SetProjectVCS(resp.ParentProject.Path, vcs.Kind(projVCS.kind), enthFromFlags(cmd, projVCS))
+				enth, err := enthFromFlags(cmd, projVCS)
+				if err != nil {
+					cli.ExitWithError(jsonOutput, fmt.Sprintf("registered %s, but setting its vcs failed: %v", resp.ParentProject.Path, err), cli.ExitError)
+				}
+				p, err := client.SetProjectVCS(resp.ParentProject.Path, vcs.Kind(projVCS.kind), enth)
 				if err != nil {
 					cli.ExitWithError(jsonOutput, fmt.Sprintf("registered %s, but setting its vcs failed: %v", resp.ParentProject.Path, err), cli.ExitError)
 				}
@@ -4495,13 +4502,16 @@ not be able to change the VCS its own work is landed with. A vcs key in
 refinery.toml is ignored with a warning.
 
     pogo project set-vcs <path> --vcs=enth --enth-remote=URL --enth-repo=NAME [--enth-trunk=REF]
-                         [--enth-workspace-path=PATH ...]
+                         [--enth-workspace-path=PATH ...] [--enth-token-file=PATH]
     pogo project set-vcs <path> --vcs=git
 
 git is stored as no key at all. --enth-trunk defaults to refs/heads/main.
 --enth-workspace-path narrows every polecat checkout to the given paths; leave
 it unset unless the repo is too large to check out whole, because an edit
 outside the selection is refused until the worker runs enth checkout --add.
+--enth-token-file names the token this project acts as (see set-enth-token).
+set-vcs states the whole selection, so omitting it clears a recorded token
+file; to change only the token, use set-enth-token.
 
 REFUSED while the repo has open merge requests or live polecats: that work was
 started under the current backend, and moving a repo is a handover, not a
@@ -4519,7 +4529,11 @@ land enth work yet (slices 6-7) and refuses it with "unsupported by this backend
 			if err != nil {
 				cli.ExitWithError(jsonOutput, fmt.Sprintf("invalid path: %v", err), cli.ExitError)
 			}
-			p, err := client.SetProjectVCS(absPath, vcs.Kind(setVCS.kind), enthFromFlags(cmd, setVCS))
+			enth, err := enthFromFlags(cmd, setVCS)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			p, err := client.SetProjectVCS(absPath, vcs.Kind(setVCS.kind), enth)
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
@@ -4531,6 +4545,73 @@ land enth work yet (slices 6-7) and refuses it with "unsupported by this backend
 		},
 	}
 	addVCSFlags(cmdProjectSetVCS, &setVCS)
+
+	var setTokenFile string
+	var setTokenClear bool
+	var cmdProjectSetEnthToken = &cobra.Command{
+		Use:   "set-enth-token <path> (--file=PATH | --clear)",
+		Short: "Set or clear the enth token file of an enth project",
+		Long: `Name the file holding the enth token an enth project acts as (mg-3a813).
+
+    pogo project set-enth-token <path> --file=~/.config/enth-bots/bot.json
+    pogo project set-enth-token <path> --clear
+
+The project record stores the PATH, never the token. pogod reads the file at
+each use: when it spawns one of this project's polecats (injected as
+ENTH_TOKEN into that polecat only), and for its own enth calls for this project
+(the stranded-work listing, check-stranded, recording a land). No other agent's
+environment changes. The file is a JSON object with a "token" field (the shape
+of a minted enth bot token) or a file holding the bare token.
+
+A file that is named but unreadable REFUSES the spawn, naming the path; it never
+falls back to pogod's $ENTH_TOKEN or the shared enth login. --clear returns the
+project to that default. The file is checked here before it is recorded.
+
+A token change is not a change of backend, so unlike set-vcs it is not refused
+while the repo has open work. A polecat already running keeps the token it was
+spawned with.`,
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if cmd.Flags().Changed("file") == setTokenClear {
+				cli.ExitWithError(jsonOutput, "give exactly one of --file=PATH or --clear", cli.ExitError)
+			}
+			absPath, err := filepath.Abs(args[0])
+			if err != nil {
+				cli.ExitWithError(jsonOutput, fmt.Sprintf("invalid path: %v", err), cli.ExitError)
+			}
+			tokenFile := ""
+			if !setTokenClear {
+				if tokenFile, err = checkTokenFile(setTokenFile); err != nil {
+					cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+				}
+			}
+			projs, err := client.GetProjects()
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			cur, ok := findProject(projs, absPath)
+			if !ok {
+				cli.ExitWithError(jsonOutput, absPath+" is not a registered project", cli.ExitNotFound)
+			}
+			enth, err := withTokenFile(cur, tokenFile)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			p, err := client.SetProjectVCS(cur.Path, vcs.Enth, enth)
+			if err != nil {
+				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
+			}
+			if jsonOutput {
+				cli.PrintJSON(p)
+			} else if p.Enth != nil && p.Enth.TokenFile != "" {
+				fmt.Printf("%s: enth token file %s\n", p.Path, p.Enth.TokenFile)
+			} else {
+				fmt.Printf("%s: enth token file cleared (pogod's ENTH_TOKEN, else the shared enth login)\n", p.Path)
+			}
+		},
+	}
+	cmdProjectSetEnthToken.Flags().StringVar(&setTokenFile, "file", "", "the token file to record (an absolute path is stored)")
+	cmdProjectSetEnthToken.Flags().BoolVar(&setTokenClear, "clear", false, "remove the token file from the record")
 
 	var cmdProjectRemove = &cobra.Command{
 		Use:   "remove <path>",
@@ -4982,6 +5063,7 @@ report; it is safe from anywhere and never acts.`,
 	// Project commands
 	cmdProject.AddCommand(cmdProjectAdd)
 	cmdProject.AddCommand(cmdProjectSetVCS)
+	cmdProject.AddCommand(cmdProjectSetEnthToken)
 	cmdProject.AddCommand(cmdProjectRemove)
 	cmdProject.AddCommand(cmdProjectList)
 	rootCmd.AddCommand(cmdProject)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -47,14 +48,35 @@ func parseError(stderr []byte) (enthError, bool) {
 // its error line, Err is a *vcs.RefusedError with enth's stable code, so
 // callers branch on errors.As rather than on text.
 //
-// The environment is the process's own. That is how the token reaches enth:
-// $ENTH_TOKEN when pogod has one, else the token `enth login` saved for the
-// remote. pogo never reads, prints or stores the token itself.
-func run(ctx context.Context, bin string, args ...string) ([]byte, error) {
+// The token: when the project record names a token file (Repo.TokenFile,
+// mg-3a813), it is read now and set as $ENTH_TOKEN for this one call only,
+// overriding pogod's own. A named file that cannot be read refuses the call
+// before enth runs, naming the path; it never falls back to the shared login.
+// With no file named, the environment is the process's own: $ENTH_TOKEN when
+// pogod has one, else the token `enth login` saved for the remote. pogo never
+// prints or stores the token itself.
+func (b Backend) run(ctx context.Context, args ...string) ([]byte, error) {
+	tok, ok, err := b.Repo.Token()
+	if err != nil {
+		return nil, &vcs.CommandError{Args: args, Err: err}
+	}
+	var extra []string
+	if ok {
+		extra = []string{vcs.EnthTokenEnv + "=" + tok}
+	}
+	return run(ctx, b.Bin, extra, args...)
+}
+
+// run executes bin with the process's own environment plus extra (later
+// entries win, so extra overrides).
+func run(ctx context.Context, bin string, extra []string, args ...string) ([]byte, error) {
 	if bin == "" {
 		bin = DefaultBin
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
+	if len(extra) > 0 {
+		cmd.Env = append(os.Environ(), extra...)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

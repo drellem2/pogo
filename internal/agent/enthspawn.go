@@ -30,10 +30,16 @@ import (
 // enthWorkerEnv is what an enth polecat's environment adds (§4,
 // "Environment"): the repo's enthd endpoint and repo name, so every `enth`
 // verb the worker runs goes to enthd and every Change is durable there at
-// creation (P4), and the token pogod itself holds, when it holds one in
-// $ENTH_TOKEN. Without it enth falls back to the token `enth login` saved for
-// the remote, which the worker reads from the same HOME. The token is the
-// user's, as GH_TOKEN is today; it is passed through and never logged.
+// creation (P4), and the token the worker acts as.
+//
+// The token (mg-3a813): when the project record names a token file, tok is
+// what spawnEnthToken read from it and the worker gets exactly that — it is
+// appended after os.Environ() and so overrides any $ENTH_TOKEN pogod itself
+// holds. Only this project's polecats get it; nothing else pogod spawns does.
+// With no file named (tok == ""), the token pogod itself holds in $ENTH_TOKEN
+// is passed through, when it holds one; without that enth falls back to the
+// token `enth login` saved for the remote, which the worker reads from the
+// same HOME. Either way it is passed through and never logged.
 //
 // ENTH_TRUNK is the ref `enth land` defaults to. The worker does not land, but
 // a verb that reads it should read this repo's trunk, not enth's guess.
@@ -43,16 +49,35 @@ import (
 // whose only identity is ~/.gitconfig every Change would be refused
 // no_identity. The identity is git's for the source repo — what a git
 // polecat's commits carry.
-func enthWorkerEnv(e vcs.EnthRepo, sourceRepo, worker string) []string {
+func enthWorkerEnv(e vcs.EnthRepo, tok, sourceRepo, worker string) []string {
 	env := []string{"ENTH_REMOTE=" + e.Remote, "ENTH_REPO=" + e.Repo}
 	if e.Trunk != "" {
 		env = append(env, "ENTH_TRUNK="+e.Trunk)
 	}
-	if tok := os.Getenv("ENTH_TOKEN"); tok != "" {
-		env = append(env, "ENTH_TOKEN="+tok)
+	if tok == "" {
+		tok = os.Getenv(vcs.EnthTokenEnv)
+	}
+	if tok != "" {
+		env = append(env, vcs.EnthTokenEnv+"="+tok)
 	}
 	name, email := gitIdentity(sourceRepo)
 	return append(env, enthvcs.IdentityEnv(os.Getenv, name, email, worker)...)
+}
+
+// spawnEnthToken is the project's own token for an enth polecat spawn, read
+// from the record's token file (mg-3a813). "" with no error means the record
+// names no file: the worker gets today's token. A named file that cannot be
+// read refuses the spawn, naming the path — it never falls back to pogod's
+// token or the shared `enth login`, because that would run the worker as
+// someone the project's owner did not choose.
+func spawnEnthToken(e vcs.EnthRepo) (string, error) {
+	tok, _, err := e.Token()
+	if err != nil {
+		return "", fmt.Errorf("refusing to spawn onto enth repo %s: the project record names %v. "+
+			"Nothing was dispatched, and the shared enth login was NOT used in its place. Fix the file, or "+
+			"change the record with `pogo project set-enth-token`", e.Repo, err)
+	}
+	return tok, nil
 }
 
 // gitIdentity is git's user.name / user.email as seen from dir (the repo's

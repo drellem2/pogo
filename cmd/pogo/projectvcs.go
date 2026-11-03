@@ -1,19 +1,29 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
 	"github.com/spf13/cobra"
 
+	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/vcs"
 )
 
 // The --vcs flags shared by `pogo project add` and `pogo project set-vcs`
 // (enth-vcs §2, slice 4, mg-160e8; --enth-workspace-path is slice 5,
-// mg-cc5cd).
+// mg-cc5cd; --enth-token-file is mg-3a813).
 
 type vcsFlags struct {
-	kind, remote, repo, trunk string
-	workspacePaths            []string
+	kind, remote, repo, trunk, tokenFile string
+	workspacePaths                       []string
 }
+
+const enthTokenFileHelp = "enth: a file holding the enth token this project's polecats and pogo's enth calls for it act as " +
+	"(a JSON object with a \"token\" field, or the bare token). The record stores the PATH, never the value; " +
+	"default: pogod's $ENTH_TOKEN, else the shared `enth login`"
 
 func addVCSFlags(cmd *cobra.Command, f *vcsFlags) {
 	cmd.Flags().StringVar(&f.kind, "vcs", "", "version-control backend: git or enth")
@@ -23,10 +33,11 @@ func addVCSFlags(cmd *cobra.Command, f *vcsFlags) {
 	cmd.Flags().StringSliceVar(&f.workspacePaths, "enth-workspace-path", nil,
 		"enth: narrow every polecat checkout to this repo-relative path (repeatable; default: the whole repo). "+
 			"A worker must `enth checkout --add PATH DIR` before editing outside it")
+	cmd.Flags().StringVar(&f.tokenFile, "enth-token-file", "", enthTokenFileHelp)
 }
 
 func enthFlagsChanged(cmd *cobra.Command) bool {
-	for _, f := range []string{"enth-remote", "enth-repo", "enth-trunk", "enth-workspace-path"} {
+	for _, f := range []string{"enth-remote", "enth-repo", "enth-trunk", "enth-workspace-path", "enth-token-file"} {
 		if cmd.Flags().Changed(f) {
 			return true
 		}
@@ -37,9 +48,64 @@ func enthFlagsChanged(cmd *cobra.Command) bool {
 // enthFromFlags is the enth settings the flags give, or nil when none was
 // passed — so `--vcs=git` sends no enth object, and an enth flag given with
 // --vcs=git reaches pogod and is refused there rather than silently dropped.
-func enthFromFlags(cmd *cobra.Command, f vcsFlags) *vcs.EnthRepo {
+func enthFromFlags(cmd *cobra.Command, f vcsFlags) (*vcs.EnthRepo, error) {
 	if !enthFlagsChanged(cmd) {
-		return nil
+		return nil, nil
 	}
-	return &vcs.EnthRepo{Remote: f.remote, Repo: f.repo, Trunk: f.trunk, WorkspacePaths: f.workspacePaths}
+	e := &vcs.EnthRepo{Remote: f.remote, Repo: f.repo, Trunk: f.trunk, WorkspacePaths: f.workspacePaths}
+	if f.tokenFile != "" {
+		p, err := checkTokenFile(f.tokenFile)
+		if err != nil {
+			return nil, err
+		}
+		e.TokenFile = p
+	}
+	return e, nil
+}
+
+// checkTokenFile resolves a --enth-token-file argument to the absolute path
+// the record stores, and refuses one that cannot be read as a token now:
+// otherwise the first sign of a typo would be a refused spawn. The value is
+// read only to validate it and is never printed.
+func checkTokenFile(arg string) (string, error) {
+	p := arg
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot expand %s: %v", arg, err)
+		}
+		p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+	}
+	p, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("invalid token file path %s: %v", arg, err)
+	}
+	if _, err := vcs.ReadEnthTokenFile(p); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// findProject is the registered project at path (compared cleaned, since the
+// registry's path carries a trailing separator).
+func findProject(projs []project.Project, path string) (project.Project, bool) {
+	for _, p := range projs {
+		if filepath.Clean(p.Path) == filepath.Clean(path) {
+			return p, true
+		}
+	}
+	return project.Project{}, false
+}
+
+// withTokenFile is p's enth settings with the token file replaced (""
+// clears it), for `pogo project set-enth-token`. A project that is not enth
+// is refused: a token has nothing to act on there.
+func withTokenFile(p project.Project, tokenFile string) (*vcs.EnthRepo, error) {
+	if p.Kind() != vcs.Enth || p.Enth == nil {
+		return nil, fmt.Errorf("%s is a %s project; an enth token file applies only to an enth project (pogo project set-vcs --vcs=enth)", p.Path, p.Kind())
+	}
+	e := *p.Enth
+	e.WorkspacePaths = append([]string(nil), p.Enth.WorkspacePaths...)
+	e.TokenFile = tokenFile
+	return &e, nil
 }

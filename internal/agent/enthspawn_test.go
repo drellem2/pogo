@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,14 +20,58 @@ func TestEnthWorkerEnv(t *testing.T) {
 	t.Setenv("ENTH_AUTHOR_EMAIL", "a@x")
 	t.Setenv("ENTH_COMMITTER_NAME", "a")
 	t.Setenv("ENTH_COMMITTER_EMAIL", "a@x")
-	got := strings.Join(enthWorkerEnv(e, t.TempDir(), "p1"), " ")
+	got := strings.Join(enthWorkerEnv(e, "", t.TempDir(), "p1"), " ")
 	if got != "ENTH_REMOTE=https://enth.example ENTH_REPO=o/r ENTH_TRUNK=refs/heads/main" {
 		t.Errorf("env without a token = %q", got)
 	}
 	t.Setenv("ENTH_TOKEN", "enth_test_value")
-	env := enthWorkerEnv(e, t.TempDir(), "p1")
+	env := enthWorkerEnv(e, "", t.TempDir(), "p1")
 	if env[len(env)-1] != "ENTH_TOKEN=enth_test_value" {
 		t.Errorf("pogod's ENTH_TOKEN is not passed through (last entry %q)", env[len(env)-1])
+	}
+}
+
+// A project's own token (mg-3a813) is what its polecat gets, overriding the
+// one pogod holds: it is appended after os.Environ(), and the last entry wins.
+func TestEnthWorkerEnvCarriesTheProjectsToken(t *testing.T) {
+	t.Setenv("ENTH_TOKEN", "enth_fake_pogod")
+	e := vcs.EnthRepo{Remote: "https://enth.example", Repo: "o/r", TokenFile: "/unused/here"}
+	env := enthWorkerEnv(e, "enth_fake_bot", t.TempDir(), "p1")
+	var toks []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "ENTH_TOKEN=") {
+			toks = append(toks, kv)
+		}
+	}
+	if len(toks) != 1 || toks[0] != "ENTH_TOKEN=enth_fake_bot" {
+		t.Errorf("worker token entries = %v, want exactly the project's", toks)
+	}
+	if os.Getenv("ENTH_TOKEN") != "enth_fake_pogod" {
+		t.Error("pogod's own ENTH_TOKEN was changed: every other agent would inherit the project's token")
+	}
+}
+
+// spawnEnthToken: no file is today's behaviour; a readable file is its token;
+// a missing file refuses, naming the path and saying the shared login was not
+// used in its place.
+func TestSpawnEnthToken(t *testing.T) {
+	if tok, err := spawnEnthToken(vcs.EnthRepo{Repo: "o/r"}); tok != "" || err != nil {
+		t.Errorf("no token file = %q, %v; want (\"\", nil)", tok, err)
+	}
+	p := filepath.Join(t.TempDir(), "bot.json")
+	os.WriteFile(p, []byte(`{"token":"enth_fake_bot"}`), 0o600)
+	if tok, err := spawnEnthToken(vcs.EnthRepo{Repo: "o/r", TokenFile: p}); tok != "enth_fake_bot" || err != nil {
+		t.Errorf("readable token file = %q, %v", tok, err)
+	}
+	missing := filepath.Join(t.TempDir(), "gone.json")
+	_, err := spawnEnthToken(vcs.EnthRepo{Repo: "o/r", TokenFile: missing})
+	if err == nil {
+		t.Fatal("a missing token file did not refuse the spawn")
+	}
+	for _, want := range []string{missing, "refusing to spawn onto enth repo o/r", "NOT used"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal lacks %q: %v", want, err)
+		}
 	}
 }
 
@@ -44,7 +89,7 @@ func TestEnthWorkerEnvSuppliesAnIdentity(t *testing.T) {
 	t.Cleanup(func() { gitIdentity = old })
 	var asked string
 	gitIdentity = func(dir string) (string, string) { asked = dir; return "Dan", "dan@example.com" }
-	got := strings.Join(enthWorkerEnv(vcs.EnthRepo{Remote: "r", Repo: "o/r"}, "/src/proj", "p1"), " ")
+	got := strings.Join(enthWorkerEnv(vcs.EnthRepo{Remote: "r", Repo: "o/r"}, "", "/src/proj", "p1"), " ")
 	if !strings.HasSuffix(got, "ENTH_AUTHOR_NAME=Dan ENTH_AUTHOR_EMAIL=dan@example.com ENTH_COMMITTER_NAME=Dan ENTH_COMMITTER_EMAIL=dan@example.com") || asked != "/src/proj" {
 		t.Errorf("env with no identity = %q (git asked in %q)", got, asked)
 	}
@@ -149,5 +194,55 @@ func TestResolveEnthAdoption(t *testing.T) {
 	rec := a.record("refs/heads/main")
 	if rec.Finding.Ref != "c2" || rec.BaseRef() != "c2" || rec.Finding.Target != "refs/heads/main" || rec.Reason != "the work is good" {
 		t.Errorf("event record = %+v", rec)
+	}
+}
+
+// Through the real spawn handler (mg-3a813): an enth project whose record
+// names a missing token file is refused before any checkout, naming the path,
+// and nothing is created. The control is the same spawn with the file
+// present, which gets past the token check (it then fails at the checkout,
+// because there is no enthd here — but not on the token).
+func TestSpawnRefusesAMissingEnthTokenFile(t *testing.T) {
+	home := installPolecatTemplate(t)
+	// A template that branches on .VCS, so the §12 template gate passes.
+	tmpl := filepath.Join(home, "agents", "templates", "polecat.md")
+	if err := os.WriteFile(tmpl, []byte("task {{.Id}} {{.VCS}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo := t.TempDir()
+	tokFile := filepath.Join(t.TempDir(), "bot.json")
+	t.Cleanup(func() { SetRepoVCS(nil) })
+	SetRepoVCS(func(p string) (vcs.Kind, *vcs.EnthRepo) {
+		if p == repo {
+			return vcs.Enth, &vcs.EnthRepo{Remote: "https://e.invalid", Repo: "o/r", TokenFile: tokFile}
+		}
+		return vcs.Git, nil
+	})
+
+	rr := spawnPolecat(t, newDrainTestRegistry(t), SpawnPolecatAPIRequest{
+		Name: "q3a813a", Id: "mg-3a81a", Repo: repo, Template: BuildWorkerTemplate,
+	})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("missing token file: status = %d, want 409; body: %s", rr.Code, rr.Body.String())
+	}
+	for _, want := range []string{tokFile, "Nothing was dispatched", "NOT used"} {
+		if !strings.Contains(rr.Body.String(), want) {
+			t.Errorf("refusal does not say %q: %s", want, rr.Body.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, "polecats", "q3a813a")); !os.IsNotExist(err) {
+		t.Errorf("the refused spawn left its directory behind (%v)", err)
+	}
+
+	// Control: with the file present the token check passes.
+	if err := os.WriteFile(tokFile, []byte(`{"token":"enth_fake_bot"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rr = spawnPolecat(t, newDrainTestRegistry(t), SpawnPolecatAPIRequest{
+		Name: "q3a813b", Id: "mg-3a81b", Repo: repo, Template: BuildWorkerTemplate,
+	})
+	t.Logf("control spawn: %d %s", rr.Code, rr.Body.String())
+	if strings.Contains(rr.Body.String(), "token file") {
+		t.Errorf("control: a readable token file was refused: %s", rr.Body.String())
 	}
 }
