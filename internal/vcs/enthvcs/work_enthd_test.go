@@ -203,3 +203,58 @@ func ids(cs []vcs.Change) string {
 	}
 	return strings.Join(s, ">")
 }
+
+func TestPresubmitAgainstEnthd(t *testing.T) {
+	e := startEnthd(t)
+	b := e.backend()
+	ctx := context.Background()
+	dir := e.checkout(t, b, "p1")
+	refuses := func(what, want string) {
+		t.Helper()
+		_, err := Presubmit(ctx, dir, "mg-5", "p1", b.Bin)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s: Presubmit = %v, want a refusal containing %q", what, err, want)
+		}
+	}
+
+	if _, err := Presubmit(ctx, dir, "", "p1", b.Bin); err == nil || !strings.Contains(err.Error(), "pass --item") {
+		t.Errorf("no --item: %v", err)
+	}
+	refuses("a fresh checkout (NONE)", "no unlanded Change carries Pogo-Item=mg-5 Pogo-Worker=p1")
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("edit\n"), 0o644)
+	refuses("an uncommitted edit", "uncommitted work in this checkout")
+	c1 := e.workerChange(t, dir, "a.txt", "edit\n", "work (mg-5)", "mg-5", "p1")
+
+	// ONE stack, whose top is the base: passes.
+	msg, err := Presubmit(ctx, dir, "mg-5", "p1", b.Bin)
+	if err != nil || !strings.Contains(msg, "pre-submit OK: 1 Change(s) for mg-5, top "+c1) {
+		t.Fatalf("Presubmit = %q, %v; want OK", msg, err)
+	}
+
+	// TRAILER-LESS: a second Change without trailers is refused with the remedy.
+	e.workerChange(t, dir, "n.txt", "n\n", "forgot", "", "")
+	refuses("a trailer-less base", "this Change has no Pogo-Item trailer")
+
+	// The base is the item's work, but not the top of its stack: a fresh
+	// checkout of p1's top, then another p1 Change elsewhere.
+	d2 := filepath.Join(t.TempDir(), "p1b")
+	if _, err := b.Create(ctx, vcs.WorkspaceSpec{Dir: d2, Base: c1}); err != nil {
+		t.Fatal(err)
+	}
+	c3 := e.workerChange(t, d2, "src/b.txt", "x\n", "more (mg-5)", "mg-5", "p1")
+	dir = filepath.Join(t.TempDir(), "p1c")
+	if _, err := b.Create(ctx, vcs.WorkspaceSpec{Dir: dir, Base: c1}); err != nil {
+		t.Fatal(err)
+	}
+	refuses("a base under the top", "is not the top of mg-5's stack ("+c3+")")
+
+	// AMBIGUOUS: without a worker filter, p2's stack makes two.
+	d3 := e.checkout(t, b, "p2")
+	e.workerChange(t, d3, "z.txt", "z\n", "p2 (mg-5)", "mg-5", "p2")
+	if _, err := Presubmit(ctx, d2, "mg-5", "", b.Bin); err == nil || !strings.Contains(err.Error(), "stacks, not one") {
+		t.Errorf("two workers, no filter: Presubmit = %v, want the ambiguity refusal", err)
+	}
+	if msg, err := Presubmit(ctx, d2, "mg-5", "p1", b.Bin); err != nil {
+		t.Errorf("filtered by worker, p1's own checkout at its top: %v (%s)", err, msg)
+	}
+}
