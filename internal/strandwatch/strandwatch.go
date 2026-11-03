@@ -546,6 +546,13 @@ type QueuedRequest struct {
 	Status string `json:"status"`
 }
 
+// classProtected is refinery.ClassProtected's wire value, restated here rather
+// than imported for the reason PriorSubmission gives: this package reads the
+// refinery's record as data. TestClassProtectedMatchesTheRefinery pins the two
+// together, so a rename there fails a test instead of silently handing a
+// protected refusal the rebase remedy again (mg-14462).
+const classProtected = "protected"
+
 // PriorSubmission is one COMPLETED merge request the refinery still remembers
 // for a branch: the record that says this branch has already been through the
 // queue and how that came out.
@@ -957,6 +964,25 @@ func (r Row) remedy() string {
 		// The refinery's own not-retried reason is quoted verbatim and is the
 		// substance of this line: for a rebase conflict it already says what has to
 		// happen and says it better than a paraphrase would.
+		//
+		// THE SENTENCE AFTER THE REASON DEPENDS ON THE CLASS (mg-14462). For a
+		// rebase conflict or a gate defect the BRANCH has to change. For a
+		// `protected` refusal (drellem2/pogo#164) the remote declined the push to
+		// the TARGET by rule, and no change to the branch moves that: telling the
+		// reader to rebase would contradict the verbatim reason printed one clause
+		// earlier and send them to do work that cannot help. The wording is
+		// portable on purpose — a branch the remote lets the refinery push to —
+		// and never names one host's answer (Daniel, closing drellem2/pogo#69).
+		if r.Prior.Class == classProtected {
+			refusedTarget := orDefault(r.Prior.Target, r.Target)
+			return fmt.Sprintf("pogo refinery show %s   # ALREADY SUBMITTED and FAILED %s: %s "+
+				"No submit command is printed for this row on purpose — the TARGET has to change, "+
+				"not the branch: the remote refuses pushes to %s by rule, so rebasing or editing "+
+				"the branch changes nothing it objected to. Submit against a different branch the "+
+				"remote lets the refinery push to (the work item's `branch:` value, or "+
+				"--target=<branch>), or have the rule changed",
+				r.Prior.MR, r.priorWhere(), r.priorWhy(), refusedTarget)
+		}
 		return fmt.Sprintf("pogo refinery show %s   # ALREADY SUBMITTED and FAILED %s: %s "+
 			"No submit command is printed for this row on purpose — the branch has to CHANGE "+
 			"first (rebase onto %s, fix what that names, push), and only then is it a different "+
