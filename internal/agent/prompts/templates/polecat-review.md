@@ -115,7 +115,9 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    - `mg show <build-ticket-id>` — what the builder was asked to do.
    - Read the approved triage recommendation your work item body points to. This is the review baseline for lens 3.{{if eq .VCS "enth"}}
    - `enth changes --unlanded --trailer Pogo-Item=<build-ticket-id>` — the Changes under review, with their messages' trailers.{{else}}
-   - `gh pr view <pr-number>` — the PR title, description, and current state.{{end}}
+   - `gh pr view -R "$(pogo origin-repo)" <pr-number>` — the PR title, description, and current state.
+
+   Every `gh pr` call in this file is pinned with `-R` to what `pogo origin-repo` prints, and each code block refuses (`|| exit 1`) when it prints nothing, because gh reads `-R ""` as no `-R` at all. Unpinned, gh picks its repository from a `gh repo set-default` or an `upstream` remote ahead of origin, so in such a clone `<pr-number>` can name a different PR in a different repository — and the builder opened theirs on origin, pinned the same way (mg-42fe8). If it refuses because origin is not a github.com URL, drop the `ORIGIN_REPO=` line and the `-R`: pogod's own lookups run unpinned in that clone too.{{end}}
 {{if eq .VCS "enth"}}
 4. **Check out the builder's stack** into a scratch directory, and work there for the QA lens:
    ```bash
@@ -137,12 +139,13 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    You never make a Change from it. Your output is mail and the mg verdict.{{else}}
 4. **Put YOUR OWN branch at the PR head — you cannot check out the PR branch itself.**
    ```bash
+   ORIGIN_REPO=$(pogo origin-repo) || exit 1   # refuse: gh reads an empty -R as no -R at all
    git fetch origin
-   PR_BRANCH="$(gh pr view <pr-number> --json headRefName -q .headRefName)"
+   PR_BRANCH="$(gh pr view -R "$ORIGIN_REPO" <pr-number> --json headRefName -q .headRefName)"
    OWN_BRANCH="$(git rev-parse --abbrev-ref HEAD)"   # read it; never guess it, never take it from a message
    git checkout -B "$OWN_BRANCH" --no-track "origin/$PR_BRANCH"
    ```
-   Run the **same four lines** on every later round: `-B` is a reset, so it re-points your branch at the new head. There is no separate later-round command.
+   Run the **same lines** on every later round: `-B` is a reset, so it re-points your branch at the new head. There is no separate later-round command.
 
    Three things about this that are not style points:
 
@@ -198,7 +201,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 {{else}}
 7. **Publish findings to the PR** (human visibility — GitHub is the window, mg is the state):
    ```bash
-   gh pr comment <pr-number> --body-file - <<'EOF'
+   ORIGIN_REPO=$(pogo origin-repo) || exit 1   # refuse: gh reads an empty -R as no -R at all
+   gh pr comment -R "$ORIGIN_REPO" <pr-number> --body-file - <<'EOF'
    ## Review round <R>: PASS|FAIL
    Reviewer: {{.Id}} · build ticket: <build-ticket-id> · blocking: <n> · advisory: <n>
 

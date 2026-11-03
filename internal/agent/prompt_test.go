@@ -4742,9 +4742,9 @@ func TestBranchPolecatTemplatesInstructPRCreate(t *testing.T) {
 		}
 		// The base must be OBSERVED. Naming it would be a claim that can rot,
 		// the same defect mg-d39e fixed for the branch name.
-		if !strings.Contains(got, "gh repo view --json defaultBranchRef") {
+		if !strings.Contains(got, `gh repo view "$ORIGIN_REPO" --json defaultBranchRef`) {
 			t.Errorf("%s: must read the default branch with "+
-				"`gh repo view --json defaultBranchRef`, not assume it", tmplName)
+				"`gh repo view \"$ORIGIN_REPO\" --json defaultBranchRef` (pinned to origin, mg-42fe8), not assume it", tmplName)
 		}
 
 		noBranch := renderShippedTemplate(t, tmplName, base)

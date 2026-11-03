@@ -95,13 +95,8 @@ func Ask(dir, branch string, timeout time.Duration) (Answer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var a Answer
-	args := []string{"pr", "view", branch, "--json", "state,number"}
-	if repo, err := originRepo(ctx, dir); err != nil {
-		a.Unpinned = err.Error()
-	} else {
-		a.Repo = repo
-		args = append(args, "-R", repo)
-	}
+	var args []string
+	args, a.Repo, a.Unpinned = PinToOrigin(ctx, dir, []string{"pr", "view", branch, "--json", "state,number"})
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	cmd.Dir = dir
 	cmd.Env = ghtoken.ChildEnvContext(ctx, append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
@@ -139,6 +134,35 @@ func Ask(dir, branch string, timeout time.Duration) (Answer, error) {
 func Lookup(dir, branch string, timeout time.Duration) (int, string, error) {
 	a, err := Ask(dir, branch, timeout)
 	return a.Number, a.State, err
+}
+
+// PinToOrigin appends -R OWNER/REPO, naming dir's origin, to a gh argv, and
+// returns the argv with the repository it was pinned to. It is the one place
+// every gh pr call in pogo gets its repository from (drellem2/pogo#259,
+// mg-42fe8): two calls about one branch that chose their repositories
+// separately could ask two different repositories, and then a lookup and the
+// write that follows it — or the probe and the create a template ran — disagree.
+//
+// When origin cannot be read or parsed (no origin, an ssh alias, an Enterprise
+// host) args come back UNCHANGED, repo is "" and unpinned says why: the call
+// runs exactly as it did before pinning existed and gh chooses, as it does for
+// every other caller in that clone, so the calls still agree with each other.
+func PinToOrigin(ctx context.Context, dir string, args []string) (pinned []string, repo, unpinned string) {
+	repo, err := originRepo(ctx, dir)
+	if err != nil {
+		return args, "", err.Error()
+	}
+	return append(append([]string(nil), args...), "-R", repo), repo, ""
+}
+
+// OriginRepo returns dir's origin remote as the OWNER/REPO gh's -R takes, or
+// an error saying why it cannot (see PinToOrigin for what a caller does then).
+// It backs `pogo origin-repo`, so the polecat templates pin their gh pr calls
+// with this exact derivation rather than a shell re-spelling of it.
+func OriginRepo(dir string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return originRepo(ctx, dir)
 }
 
 // originRepo reads dir's origin URL and returns it as the OWNER/REPO gh's -R
@@ -251,15 +275,17 @@ type Merged struct {
 }
 
 // MergedFor lists the MERGED GitHub PRs whose head is branch, with each one's
-// merge commit and final head commit (drellem2/pogo#160). gh infers the GitHub
-// repo from dir's origin remote. No merged PR is (nil, nil); every failure —
-// gh not installed, unauthenticated, rate-limited, a non-GitHub remote, output
+// merge commit and final head commit (drellem2/pogo#160), in the repository
+// dir's origin points at (PinToOrigin; before mg-42fe8 gh chose, and could ask
+// an upstream remote while the stranded probe asked origin). No merged PR is
+// (nil, nil); every failure — gh not installed, unauthenticated, rate-limited, a non-GitHub remote, output
 // drift, the timeout — is an error, and the caller must not read it as "no PR".
 func MergedFor(dir, branch string, timeout time.Duration) ([]Merged, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "gh", "pr", "list", "--head", branch, "--state", "merged",
-		"--limit", "20", "--json", "number,mergeCommit,headRefOid")
+	args, _, _ := PinToOrigin(ctx, dir, []string{"pr", "list", "--head", branch, "--state", "merged",
+		"--limit", "20", "--json", "number,mergeCommit,headRefOid"})
+	cmd := exec.CommandContext(ctx, "gh", args...)
 	cmd.Dir = dir
 	cmd.Env = ghtoken.ChildEnvContext(ctx, append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
 	out, err := cmd.Output()

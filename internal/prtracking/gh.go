@@ -15,6 +15,10 @@ import (
 // returned both comments of PR #28 with their bodies). A per-PR `gh pr view`
 // loop would multiply the rate-limit cost of a sweep by the size of the repo's
 // PR list for no extra field.
+//
+// Deliberately not routed through ghpr.PinToOrigin (mg-42fe8): this call is
+// already pinned, to the explicit slug its caller names with --repo, and it
+// has no working directory whose origin could be read.
 func OpenPRs(slug string, limit int) ([]PR, error) {
 	if limit <= 0 {
 		limit = 100

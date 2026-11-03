@@ -93,3 +93,29 @@ func ambientGHToken(t *testing.T) {
 	t.Helper()
 	t.Setenv("GH_TOKEN", "ghp_prpin_test_fake_000000000000000000000")
 }
+
+// TestClosingRefPRBodyLookupIsPinnedToOrigin: the PR-body closing-keyword
+// check reads a PR before the merge, and the close acts on one after it. Both
+// must be origin's PR, or the gate passes a body the close never touches and
+// misses the one GitHub will act on (mg-42fe8).
+func TestClosingRefPRBodyLookupIsPinnedToOrigin(t *testing.T) {
+	ambientGHToken(t)
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"remote", "add", "origin", "git@github.com:fork-owner/pogo.git"},
+		{"remote", "add", "upstream", "https://github.com/drellem2/pogo.git"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	logPath := fakeGHLog(t, `echo '{"number":7,"body":"Refs o/r#1"}'`)
+	if n, body, err := lookupPRBody(dir, "polecat-x"); err != nil || n != 7 || body != "Refs o/r#1" {
+		t.Fatalf("lookupPRBody = (%d, %q, %v)", n, body, err)
+	}
+	calls := ghCalls(t, logPath)
+	if len(calls) != 1 || calls[0] != "pr view polecat-x --json number,body -R fork-owner/pogo" {
+		t.Errorf("gh calls = %q, want one pr view pinned to origin's fork-owner/pogo", calls)
+	}
+}
