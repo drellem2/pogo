@@ -12,6 +12,16 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **`spawn-polecat` is on the record from the moment it is requested
+  (drellem2/pogo#169).** The handler used to print nothing unconditional
+  before its terminal line, and its first events fired at the very end. So a
+  slow spawn, a wedged spawn and one that was never requested all looked the
+  same. pogod now logs `polecat <name>: spawn requested` and emits a new
+  `agent_spawn_requested` event before any gate. It then logs four
+  phase-boundary lines, each with the elapsed time: `gates passed`,
+  `base ref resolved`, `created worktree` and `claim step done`. Stall-watch
+  does not consume the event (see docs/event-log.md).
+
 - **The refinery classifies a push refused by branch protection as
   `failed(protected)`, terminal at attempt 1 (drellem2/pogo#164).** The
   post-gate git steps wrap every non-credential failure as retryable, so a
