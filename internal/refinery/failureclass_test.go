@@ -329,24 +329,32 @@ func TestEveryClassCarriesATriageNote(t *testing.T) {
 	}
 }
 
-// TestOnlyDefectCommitsToRepeating guards the predicate mg-441f's check-stranded
+// TestOnlyDefectAndProtectedCommitToRepeating guards the predicate mg-441f's check-stranded
 // remedy is suppressed on. A class added here without deciding this answers NO by
 // falling through the switch, which is the safe direction — a remedy printed
 // where it should not be costs a wasted gate run, while a remedy withheld where
 // it was correct leaves finished work stranded — but it must be a DECISION, so
 // the coverage assertion is on the whole table.
-func TestOnlyDefectCommitsToRepeating(t *testing.T) {
+//
+// ClassProtected is the second YES (drellem2/pogo#164): it establishes a fact
+// about the TARGET, and an unchanged resubmit against the same target meets the
+// same rule.
+func TestOnlyDefectAndProtectedCommitToRepeating(t *testing.T) {
 	if !ClassDefect.ResubmitUnchangedRepeats() {
 		t.Error("ClassDefect does not commit to repeating, yet its own triage note says " +
 			"re-running establishes the SAME fact")
 	}
+	if !ClassProtected.ResubmitUnchangedRepeats() {
+		t.Error("ClassProtected does not commit to repeating, so check-stranded would print a " +
+			"paste-ready submit against a target whose rule refuses it every time")
+	}
 	for _, c := range allFailureClasses {
-		if c == ClassDefect {
+		if c == ClassDefect || c == ClassProtected {
 			continue
 		}
 		if c.ResubmitUnchangedRepeats() {
 			t.Errorf("class %s claims an unchanged resubmit repeats; only a class that "+
-				"establishes a fact about the BRANCH may, and a caller that suppresses the "+
+				"establishes a fact the resubmit cannot change may, and a caller that suppresses the "+
 				"resubmit remedy on this would withhold the correct one", c)
 		}
 	}
