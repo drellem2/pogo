@@ -21,6 +21,10 @@ type enthError struct {
 	Code    string            `json:"code"`
 	Message string            `json:"message"`
 	Paths   []json.RawMessage `json:"paths"`
+	// Ref and Current are a ref refusal's (enth-ref: tag_exists, ref_exists,
+	// stale_tip carry the ref and its current value).
+	Ref     string `json:"ref"`
+	Current string `json:"current"`
 }
 
 // parseError finds enth's error line in stderr, if it printed one.
@@ -61,7 +65,7 @@ func run(ctx context.Context, bin string, args ...string) ([]byte, error) {
 	out := append(append([]byte(nil), stdout.Bytes()...), stderr.Bytes()...)
 	ce := &vcs.CommandError{Args: args, Output: out, Err: err}
 	if e, ok := parseError(stderr.Bytes()); ok {
-		ce.Err = &vcs.RefusedError{Code: e.Code, Msg: e.Message}
+		ce.Err = &vcs.RefusedError{Code: e.Code, Msg: e.Message, Ref: e.Ref, Current: e.Current}
 	}
 	return stdout.Bytes(), ce
 }

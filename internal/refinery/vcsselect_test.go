@@ -105,8 +105,9 @@ func TestBackendForSelectsFromTheRecord(t *testing.T) {
 	if _, err := backendFor("/x/enth").Prepare(context.Background(), vcs.MR{Changes: []string{"c1"}}); !errors.Is(err, enthvcs.ErrSelfLanded) {
 		t.Fatalf("enth Prepare = %v, want ErrSelfLanded", err)
 	}
-	// Refs is still inert (slice 12).
-	if _, err := detectDefaultBranch("/x/enth"); !errors.Is(err, vcs.ErrUnsupported) {
-		t.Errorf("detectDefaultBranch on an enth repo = %v, want ErrUnsupported", err)
+	// Refs has a body since slice 12 (mg-ae4ac): the default branch is the
+	// record's trunk, read without asking git.
+	if def, err := detectDefaultBranch("/x/enth"); err != nil || def != "main" {
+		t.Errorf("detectDefaultBranch on an enth repo = %q %v, want the record's trunk main", def, err)
 	}
 }

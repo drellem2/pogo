@@ -192,14 +192,31 @@ func emitPostMergeTagged(mr *MergeRequest, tag, sha string) {
 		Agent:      "refinery",
 		WorkItemID: workItemIDFromAuthor(mr.Author),
 		Repo:       mr.RepoPath,
-		Details: map[string]any{
+		Details: postMergeLanding(mr, map[string]any{
 			"merge_request_id": mr.ID,
 			"repo":             mr.RepoPath,
 			"tag":              tag,
 			"merged_sha":       sha,
 			"target_ref":       mr.TargetRef,
-		},
+		}),
 	})
+}
+
+// postMergeLanding keeps a Change id out of merged_sha (enth-vcs §7): for an
+// enth MR (a self-land's post-merge tag, slice 12) the id the tag was made on
+// goes under `landed: {vcs, id}` instead. A git MR's details are returned
+// untouched.
+func postMergeLanding(mr *MergeRequest, details map[string]any) map[string]any {
+	if k, _ := mr.Landed(); k != vcs.Enth {
+		return details
+	}
+	if sha, ok := details["merged_sha"].(string); ok {
+		delete(details, "merged_sha")
+		if sha != "" {
+			details["landed"] = vcs.LandedDetail(vcs.Enth, sha)
+		}
+	}
+	return details
 }
 
 // emitPostMergeTagFailed writes a refinery_post_merge_tag_failed event when a
@@ -222,7 +239,7 @@ func emitPostMergeTagFailed(mr *MergeRequest, tag, sha string, err error) {
 		Agent:      "refinery",
 		WorkItemID: workItemIDFromAuthor(mr.Author),
 		Repo:       mr.RepoPath,
-		Details:    details,
+		Details:    postMergeLanding(mr, details),
 	})
 }
 

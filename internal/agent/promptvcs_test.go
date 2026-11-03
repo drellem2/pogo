@@ -186,7 +186,11 @@ func TestEnthRenderCarriesTheEnthProtocol(t *testing.T) {
 				`stack=$(pogo presubmit --item="$item" --print-stack) || return 1`,
 				`enth land ` + ref + `$stack --request-id "$item/$n"`,
 				`pogo land --item="$item" --repo=/r` + tgt + ` --landed-file="$st.out"`,
-				`--verdict-file=/tmp/mg-9-verdict.json && return 0`,
+				`--verdict-file=/tmp/mg-9-verdict.json "$@"; rc=$?`,
+				`[ "$rc" -eq 0 ] && return 0`,
+				// Slice 12 (mg-ae4ac): self_land --post-merge-tag=… reaches pogo
+				// land, and its exit 6 (recorded, tag not made) is not "NOT RECORDED".
+				`[ "$rc" -eq 6 ] && { echo "LANDED and RECORDED, but the tag was NOT created`,
 				"   self_land\n",
 				`--trailer Pogo-Supersedes="$OLD"`,
 				"enth checkout " + target + ` "$REMAKE"`,

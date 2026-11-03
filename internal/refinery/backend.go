@@ -4,7 +4,6 @@ import (
 	"sync/atomic"
 
 	"github.com/drellem2/pogo/internal/vcs"
-	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 	"github.com/drellem2/pogo/internal/vcs/gitvcs"
 )
 
@@ -14,9 +13,11 @@ import (
 // the branch reap, the default-branch lookup and --auto-create-target goes
 // through a vcs.Lander / vcs.Refs. backendFor picks the backend from the
 // repo's project record (slice 4, mg-160e8) through the lookup pogod installs
-// with SetRepoVCS. A repo whose record says enth gets the inert enth backend,
-// which refuses every step with vcs.ErrUnsupported; every other repo — no
-// record, no vcs key, or no lookup installed — gets git, exactly as before.
+// with SetRepoVCS. A repo whose record says enth gets the enth backend
+// (enthWork): its Lander refuses (the worker self-lands, mg-5b904), and its
+// Refs tag and create release branches on enthd (slice 12, mg-ae4ac). Every
+// other repo — no record, no vcs key, or no lookup installed — gets git,
+// exactly as before.
 //
 // The refinery's other git calls (recovery, prune, gate-dirt inspection, the
 // closing-ref scan, submit validation, the source-checkout fast-forward) still
@@ -68,11 +69,11 @@ func backendFor(repoPath string) landBackend {
 	}
 	kind, enth := (*f)(repoPath)
 	if kind == vcs.Enth {
-		b := enthvcs.Backend{}
+		var e vcs.EnthRepo
 		if enth != nil {
-			b.Repo = *enth
+			e = *enth
 		}
-		return b
+		return enthWork(e)
 	}
 	return theGitBackend
 }

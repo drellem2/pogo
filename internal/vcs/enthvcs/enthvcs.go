@@ -7,8 +7,9 @@
 // (mg-30da0) gave Work one (work.go): the trailer listing, stacks, land
 // state from land records. Slice 7 (mg-1fe2b) gave Lander one (land.go): the
 // dry run, the gate checkout of its result, and the land bound to both by
-// --expect-tip/--expect-new under a replayable request id. Refs is still
-// inert until slice 12.
+// --expect-tip/--expect-new under a replayable request id. Slice 12
+// (mg-ae4ac) gave Refs one (refs.go): the trunk as the default branch,
+// `enth tag` with its idempotent retry, and `enth ref create`.
 //
 // Inert is the point for what is not built. A repo whose project record says
 // `"vcs": "enth"` must not fall through to the git backend: git would act on a
@@ -17,7 +18,6 @@
 package enthvcs
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/drellem2/pogo/internal/vcs"
@@ -42,14 +42,4 @@ func (b Backend) unsupported(op string) error {
 
 func (Backend) Kind() vcs.Kind { return vcs.Enth }
 
-// Refs
-
-func (b Backend) Default(ctx context.Context, repo vcs.Repo) (string, error) {
-	return "", b.unsupported("default branch")
-}
-func (b Backend) CreateRef(ctx context.Context, repo vcs.Repo, ref, at string) error {
-	return b.unsupported("create ref")
-}
-func (b Backend) Tag(ctx context.Context, repo vcs.Repo, name, at, msg string) (vcs.TagResult, error) {
-	return 0, b.unsupported("tag")
-}
+// Refs is refs.go (slice 12, mg-ae4ac).

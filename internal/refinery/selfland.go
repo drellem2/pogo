@@ -55,6 +55,12 @@ type SelfLandRequest struct {
 	// recorded on the land record for a reader tying it to the attempt.
 	RequestID string
 	Verdict   json.RawMessage
+	// PostMergeTag asks pogod to tag what the land landed as (enth tag on
+	// the land record's `new`), before the item is closed: the self-land form
+	// of `pogo refinery submit --post-merge-tag` (enth-vcs §8, slice 12). A
+	// tag that fails leaves the land recorded with PostMergeError, and the
+	// item is not completed, exactly as a failed git post-merge tag.
+	PostMergeTag string
 }
 
 // SelfLandResult is the recorded MR, and whether this call recorded it or an
@@ -94,6 +100,11 @@ func (r *Refinery) RecordSelfLand(req SelfLandRequest) (SelfLandResult, error) {
 	if len(req.Verdict) > 0 {
 		if err := ValidateVerdict(req.Verdict); err != nil {
 			return SelfLandResult{}, fmt.Errorf("verdict: %w", err)
+		}
+	}
+	if req.PostMergeTag != "" {
+		if ok, why := validTagName(req.PostMergeTag); !ok {
+			return SelfLandResult{}, fmt.Errorf("post_merge_tag %q is not a valid tag name: %s", req.PostMergeTag, why)
 		}
 	}
 	rec, err := enthvcs.ParseLanded(req.Landed)
@@ -167,7 +178,13 @@ func (r *Refinery) RecordSelfLand(req SelfLandRequest) (SelfLandResult, error) {
 		DoneTime:      now,
 		GateOutput: "(self-landed by the worker with `enth land`: the refinery ran no gate, and the merged result was not tested before it landed — " +
 			"the accepted trade-off of enth-vcs §6; post-land CI on the mirror is the check)",
+		PostMergeTag: req.PostMergeTag,
 	}
+	// The post-merge tag, before the record: `enth tag` is idempotent (a tag
+	// already at rec.New is success), so a re-run of `pogo land` after a
+	// crash here tags again harmlessly and then records. A failure is
+	// recorded on the MR and is not a refusal: the land happened.
+	mr.PostMergeError = r.tagSelfLanded(mr, rec.New)
 	r.mu.Lock()
 	// Checked again under the lock: two `pogo land` calls racing for the
 	// same land record it once.
@@ -197,6 +214,32 @@ func (r *Refinery) RecordSelfLand(req SelfLandRequest) (SelfLandResult, error) {
 	}
 	c := *mr
 	return SelfLandResult{MR: &c}, nil
+}
+
+// tagSelfLanded is runPostMergeSteps for a self-land: the declared tag on
+// the Change the land landed as, through the backend's Refs.Tag (enth tag),
+// with the same events and the same failure policy.
+func (r *Refinery) tagSelfLanded(mr *MergeRequest, landed string) string {
+	if mr.PostMergeTag == "" {
+		return ""
+	}
+	msg := fmt.Sprintf("%s\n\nTagged by pogo on the self-land of %s into %s.", mr.PostMergeTag, mr.Item, mr.TargetRef)
+	ctx, cancel := context.WithTimeout(context.Background(), selfLandTimeout)
+	defer cancel()
+	res, err := backendFor(mr.RepoPath).Tag(ctx, vcs.Repo{Path: mr.RepoPath}, mr.PostMergeTag, landed, msg)
+	if err != nil {
+		log.Printf("refinery: self-land %s step=post-merge-tag FAILED tag=%s landed=enth %s: %v — the land has happened; the tag has NOT. The work item will not be completed (mg-6879)",
+			mr.Item, mr.PostMergeTag, shortSHA(landed), err)
+		emitPostMergeTagFailed(mr, mr.PostMergeTag, landed, err)
+		return err.Error()
+	}
+	if res == vcs.TagAlreadyPresent {
+		log.Printf("refinery: self-land %s step=post-merge-tag tag=%s already at enth %s — nothing to do", mr.Item, mr.PostMergeTag, shortSHA(landed))
+	} else {
+		log.Printf("refinery: self-land %s step=post-merge-tag tag=%s created at enth %s", mr.Item, mr.PostMergeTag, shortSHA(landed))
+	}
+	emitPostMergeTagged(mr, mr.PostMergeTag, landed)
+	return ""
 }
 
 // priorEnthMergeCovering finds a merged MR in history for the same repo and

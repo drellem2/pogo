@@ -26,6 +26,11 @@ const (
 	// mid-turn and cannot be confirmed either way. Probably fine; resending
 	// would deliver it twice. drellem2/pogo#100.
 	ExitNudgeQueued = 5
+	// ExitPostMergeFailed: `pogo land` — the land IS recorded, and the
+	// --post-merge-tag it was asked for was not created, so the work item is
+	// deliberately left open. Re-landing is wrong; a human looks at the tag
+	// (enth-vcs slice 12, mg-ae4ac).
+	ExitPostMergeFailed = 6
 )
 
 // PrintJSON marshals v as indented JSON and writes it to stdout.

@@ -857,6 +857,11 @@ func (e *ConflictError) Error() string {
 type RefusedError struct {
 	Code string
 	Msg  string
+	// Ref and Current are what a ref refusal names (enth's tag_exists,
+	// ref_exists, stale_tip): the ref, and the value it holds now. Empty for
+	// every other refusal, and never part of Error().
+	Ref     string
+	Current string
 }
 
 func (e *RefusedError) Error() string {

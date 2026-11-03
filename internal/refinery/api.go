@@ -85,6 +85,7 @@ func RegisterHandlersFunc(mux *http.ServeMux, get func() *Refinery) {
 	mux.HandleFunc("/refinery/history", wrap((*Refinery).handleHistory))
 	mux.HandleFunc("/refinery/submit", wrap((*Refinery).handleSubmit))
 	mux.HandleFunc("/refinery/land", wrap((*Refinery).handleLand))
+	mux.HandleFunc("/refinery/ref-create", wrap((*Refinery).handleRefCreate))
 	mux.HandleFunc("/refinery/mr/{id}", wrap((*Refinery).handleMR))
 	mux.HandleFunc("/refinery/cancel", wrap((*Refinery).handleCancel))
 	mux.HandleFunc("/refinery/prune", wrap((*Refinery).handlePrune))
@@ -179,6 +180,8 @@ type LandRequest struct {
 	Landed    string          `json:"landed"`
 	RequestID string          `json:"request_id,omitempty"`
 	Verdict   json.RawMessage `json:"verdict,omitempty"`
+	// PostMergeTag: tag what the land landed as (enth tag), slice 12.
+	PostMergeTag string `json:"post_merge_tag,omitempty"`
 }
 
 // LandResponse is POST /refinery/land's answer.
@@ -190,6 +193,10 @@ type LandResponse struct {
 	AlreadyRecorded bool `json:"already_recorded,omitempty"`
 	// Landed is the land record.
 	Landed *vcs.LandRecord `json:"landed"`
+	// PostMergeTag and PostMergeError report a declared tag: made (or
+	// already there) when PostMergeError is empty.
+	PostMergeTag   string `json:"post_merge_tag,omitempty"`
+	PostMergeError string `json:"post_merge_error,omitempty"`
 }
 
 func (r *Refinery) handleLand(w http.ResponseWriter, req *http.Request) {
@@ -203,7 +210,8 @@ func (r *Refinery) handleLand(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	res, err := r.RecordSelfLand(SelfLandRequest{RepoPath: lr.RepoPath, Item: lr.Item, Author: lr.Author,
-		TargetRef: lr.TargetRef, Landed: []byte(lr.Landed), RequestID: lr.RequestID, Verdict: lr.Verdict})
+		TargetRef: lr.TargetRef, Landed: []byte(lr.Landed), RequestID: lr.RequestID, Verdict: lr.Verdict,
+		PostMergeTag: lr.PostMergeTag})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -214,7 +222,32 @@ func (r *Refinery) handleLand(w http.ResponseWriter, req *http.Request) {
 	} else {
 		w.WriteHeader(http.StatusCreated)
 	}
-	json.NewEncoder(w).Encode(LandResponse{ID: res.MR.ID, AlreadyRecorded: res.AlreadyRecorded, Landed: res.MR.Enth})
+	json.NewEncoder(w).Encode(LandResponse{ID: res.MR.ID, AlreadyRecorded: res.AlreadyRecorded, Landed: res.MR.Enth,
+		PostMergeTag: res.MR.PostMergeTag, PostMergeError: res.MR.PostMergeError})
+}
+
+func (r *Refinery) handleRefCreate(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	var rc RefCreateRequest
+	if err := json.NewDecoder(req.Body).Decode(&rc); err != nil {
+		http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+		return
+	}
+	res, err := r.CreateRef(rc)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if res.Existed {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusCreated)
+	}
+	json.NewEncoder(w).Encode(res)
 }
 
 // CancelRequest is the JSON body for POST /refinery/cancel.

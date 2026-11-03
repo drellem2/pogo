@@ -188,6 +188,39 @@ This supersedes the 2026-09-26 policy note on `mg-8382`, which said "the
 cutting polecat runs `mg done` itself". That holds only for a cut with no
 back-port, and every cut from a release branch has one (`mg-f4ea0`).
 
+## On an enth repo (enth-vcs §8, slice 12)
+
+A managed repo whose project record says `vcs = "enth"` has no merge queue:
+its worker lands its own Change (enth-vcs §6). The cut uses the same three
+moves through pogo's seam. pogo's own repo stays git and uses the steps above.
+
+```bash
+# 1. The release branch AT the candidate Change (a CAS create on enthd).
+pogo refinery ref-create release/vX.Y.Z --repo=<repo> --at=<CAND change id>
+# 2. Dispatch onto it. --branch release/<name> is allowed on enth; any other
+#    non-trunk --branch is still refused (no PR flow on enth).
+pogo agent spawn-polecat cut-XYZ --id <item> --template=polecat --branch release/vX.Y.Z ...
+#    In the body: make the bump Change, then land it and tag what it landed as:
+#      self_land --post-merge-tag=vX.Y.Z
+```
+
+- Re-running `ref-create` when the branch already names the candidate is
+  success. A branch at anything else is refused and never re-carved. With no
+  `--at` it branches from the trunk, which is what `--auto-create-target` does.
+  Do not use that form for a cut: it would ship unsoaked work.
+- `self_land` lands with `enth land --ref refs/heads/release/vX.Y.Z`, and
+  `pogo land --target=release/vX.Y.Z --post-merge-tag=vX.Y.Z` records it. pogod
+  then runs `enth tag vX.Y.Z <landed id>` before it closes the item. That land
+  is completion, so the item closes there and not at a back-port.
+- An enth tag is immutable. A retry that finds the tag at the same Change
+  succeeds. A tag at any other Change fails, and the tag is not moved. The
+  land stays recorded, but the item is **not** done, the coordinator is
+  mailed, and `self_land` prints "LANDED and RECORDED, but the tag was NOT
+  created" (`pogo land` exit 6). Do not land again.
+- Not built yet: the back-port to trunk, which is a second `enth land` of the
+  same Change onto the trunk and is recorded nowhere, and exporting the tag to
+  GitHub (enth #10). Until the export ships, push the tag to the mirror by hand.
+
 ## Rehearsing without publishing
 
 ```bash

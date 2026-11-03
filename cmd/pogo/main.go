@@ -5544,6 +5544,8 @@ Examples:
 						fmt.Printf("Tag:       %s — NOT CREATED: %s\n", mr.PostMergeTag, mr.PostMergeError)
 						fmt.Printf("           The merge landed; its deliverable did not. The work item is\n")
 						fmt.Printf("           deliberately NOT done — do not archive it on 'merged' alone.\n")
+					case mr.Status == refinery.StatusMerged && mr.SelfLanded:
+						fmt.Printf("Tag:       %s (created on enthd at %s when the land was recorded)\n", mr.PostMergeTag, mr.LandedLabel(0))
 					case mr.Status == refinery.StatusMerged:
 						fmt.Printf("Tag:       %s (created by the refinery on %s and pushed to origin)\n", mr.PostMergeTag, mr.MergedSHA)
 					default:
@@ -5667,6 +5669,7 @@ Example:
 	cmdRefinery.AddCommand(cmdRefineryShow)
 	cmdRefinery.AddCommand(cmdRefineryPrune)
 	cmdRefinery.AddCommand(cmdRefineryCancel)
+	cmdRefinery.AddCommand(newRefCreateCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdRefinery)
 
 	// Events commands

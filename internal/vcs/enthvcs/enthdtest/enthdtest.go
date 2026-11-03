@@ -242,3 +242,18 @@ func (s *Server) Tip(t testing.TB) string {
 	}
 	return m[1]
 }
+
+// RequireRef skips t unless s's enth has enth #9 item K (mg-40d5e): `enth
+// tag` and `enth ref create` through enthd. POGO_ENTH_REQUIRE=1 turns the
+// skip into a failure, as BinDir does.
+func (s *Server) RequireRef(t testing.TB) {
+	t.Helper()
+	help, _ := exec.Command(filepath.Join(s.BinDir, "enth"), "ref", "--help").CombinedOutput()
+	if _, err := os.Stat(filepath.Join(s.BinDir, "enth-ref")); err != nil || !bytes.Contains(help, []byte("create refs/heads/NAME")) {
+		why := fmt.Sprintf("%s has no enth-ref with `ref create` (enth #9 item K, mg-40d5e)", s.BinDir)
+		if os.Getenv("POGO_ENTH_REQUIRE") == "1" {
+			t.Fatalf("POGO_ENTH_REQUIRE=1: %s", why)
+		}
+		t.Skip(why)
+	}
+}

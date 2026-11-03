@@ -33,7 +33,9 @@ var prFlowTemplates = map[string]bool{
 //     no PRs to open, so the worker would land on a ref nothing ever merges
 //     onward, then fail the step its prompt calls completion.
 //
-// A --branch naming the trunk itself is not PR flow and is allowed.
+// A --branch naming the trunk itself is not PR flow and is allowed, and so
+// is a release branch (IsEnthReleaseBranch, slice 12, mg-ae4ac): the release
+// cut lands onto it and that land is completion.
 //
 // Refused at spawn rather than at the end of the worker's life: the worker
 // has not been spent yet, and a retry unchanged is refused identically, so it
@@ -53,7 +55,21 @@ func enthPRFlowRefusal(e vcs.EnthRepo, tmplName, branch string) string {
 	}
 	be := enthvcs.Backend{Repo: e}
 	trunk := be.ResolveBase(context.Background(), vcs.Repo{}, "")
-	if target := be.ResolveBase(context.Background(), vcs.Repo{}, b); target != trunk {
+	target := be.ResolveBase(context.Background(), vcs.Repo{}, b)
+	if target != trunk && IsEnthReleaseBranch(b) {
+		// A release branch (slice 12): created at the candidate with `pogo
+		// refinery ref-create`, landed onto by the worker's self_land
+		// (`enth land --ref refs/heads/<branch>`), and tagged by `pogo land
+		// --post-merge-tag`. Completion is that land, not a PR, so it is not
+		// PR flow. A branch that does not exist on enthd fails the checkout
+		// below, before the worker starts.
+		return ""
+	}
+	if target != trunk && strings.HasPrefix(b, "refs/heads/"+enthReleasePrefix) {
+		return fmt.Sprintf("--branch %q is a release branch spelled as a full ref: pass --branch %s. The worker's land "+
+			"line puts refs/heads/ in front of it. Nothing was dispatched", b, strings.TrimPrefix(b, "refs/heads/"))
+	}
+	if target != trunk {
 		return fmt.Sprintf("--branch %q targets %s, which is not this enth repo's trunk %s. On a git repo that is "+
 			"PR flow: the merge is one step and completion is a pull request from it, which an enth repo does "+
 			"not have — its GitHub repo is an export mirror that only enth writes (docs/design/enth-vcs.md "+
@@ -62,4 +78,17 @@ func enthPRFlowRefusal(e vcs.EnthRepo, tmplName, branch string) string {
 			b, target, trunk, trunk)
 	}
 	return ""
+}
+
+// enthReleasePrefix names the release branches of docs/release-process.md:
+// release/vX.Y.Z.
+const enthReleasePrefix = "release/"
+
+// IsEnthReleaseBranch reports whether a --branch names a release branch, in
+// the bare spelling the polecat template turns into `--ref refs/heads/<b>`:
+// release/<name>, with a non-empty name. Every other non-trunk branch on an
+// enth repo is still PR flow and still refused.
+func IsEnthReleaseBranch(branch string) bool {
+	name, ok := strings.CutPrefix(strings.TrimSpace(branch), enthReleasePrefix)
+	return ok && name != "" && !strings.HasPrefix(name, "/")
 }

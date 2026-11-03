@@ -3715,7 +3715,7 @@ Flags:
 				// backstop is the only other actor and it reports a stalled
 				// polecat rather than a missing tag.
 				if mr.PostMergeTag != "" && mr.PostMergeError == "" {
-					body += fmt.Sprintf("\nPost-merge tag: %s pushed to origin at %s (performed by the refinery, not the polecat).", mr.PostMergeTag, mr.MergedSHA)
+					body += postMergeTagLine(mr)
 				}
 				if mr.PostMergeError != "" {
 					body += fmt.Sprintf("\n\nPOST-MERGE STEP FAILED — %s"+

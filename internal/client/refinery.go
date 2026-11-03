@@ -183,6 +183,30 @@ func RecordLand(req refinery.LandRequest) (*refinery.LandResponse, error) {
 	return &resp, nil
 }
 
+// CreateRef creates a branch through the repo's backend (POST
+// /refinery/ref-create, enth-vcs §8): `enth ref create` on an enth repo, the
+// --auto-create-target push on git.
+func CreateRef(req refinery.RefCreateRequest) (*refinery.RefCreateResult, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	r, err := http.Post(serverURL+"/refinery/ref-create", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusCreated && r.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(r.Body)
+		return nil, fmt.Errorf("ref not created: %s", strings.TrimSpace(string(msg)))
+	}
+	var resp refinery.RefCreateResult
+	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("pogod answered, but the answer was unreadable (the ref may exist — re-run to find out): %w", err)
+	}
+	return &resp, nil
+}
+
 // SubmitMerge submits a branch to the refinery merge queue.
 // Returns a wrapped error containing refinery.DisabledMessage when the
 // daemon has refinery disabled in config.

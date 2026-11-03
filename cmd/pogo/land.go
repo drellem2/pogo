@@ -17,7 +17,7 @@ import (
 // work item closes as a refinery merge closes one (docs/design/enth-vcs.md §6,
 // mg-5b904).
 func newLandCmd(jsonOutput *bool) *cobra.Command {
-	var item, repo, landedFile, requestID, target, author, verdictInline, verdictFile string
+	var item, repo, landedFile, requestID, target, author, verdictInline, verdictFile, postMergeTag string
 	cmd := &cobra.Command{
 		Use:   "land --item=<id> --repo=<repo> --landed-file=<file>",
 		Short: "Record an enth worker's own land, closing its work item as a merge would",
@@ -51,6 +51,15 @@ again to recover a lost record.
 No refinery gate runs: the merged result is not tested before it lands. That is
 the accepted trade-off of enth-vcs §6; post-land CI on the mirror is the check.
 
+--post-merge-tag=<tag> tags what the land landed as (enth tag <tag> <new>),
+before the item is closed: the self-land form of 'pogo refinery submit
+--post-merge-tag', for a release cut onto release/<version>. An enth tag is
+immutable. A tag already at that Change is success, so a re-run converges; a
+tag at anything else fails. A failed tag does not unrecord the land, but the
+work item is NOT completed and the coordinator is mailed, as on git; this
+command then exits 6 (the land is recorded: do not land again). In the
+template, pass it to self_land: self_land --post-merge-tag=v1.2.0.
+
 --landed-file is enth land's stdout ("-" reads stdin). On a git repo this is
 refused: git work merges through 'pogo refinery submit'.`,
 		Args: cobra.NoArgs,
@@ -70,7 +79,7 @@ refused: git work merges through 'pogo refinery submit'.`,
 				cli.ExitWithError(*jsonOutput, err.Error(), cli.ExitError)
 			}
 			resp, err := client.RecordLand(refinery.LandRequest{RepoPath: repo, Item: item, Author: author,
-				TargetRef: target, Landed: landed, RequestID: requestID, Verdict: verdict})
+				TargetRef: target, Landed: landed, RequestID: requestID, Verdict: verdict, PostMergeTag: postMergeTag})
 			if err != nil {
 				cli.ExitWithError(*jsonOutput, err.Error()+
 					"\nIf enth land succeeded, the work IS landed and only this record is missing: re-run this same command. Do NOT run enth land again under a new request id — it would land the same Changes twice.",
@@ -78,6 +87,9 @@ refused: git work merges through 'pogo refinery submit'.`,
 			}
 			if *jsonOutput {
 				cli.PrintJSON(resp)
+				if resp.PostMergeError != "" {
+					os.Exit(cli.ExitPostMergeFailed)
+				}
 				return
 			}
 			again := ""
@@ -90,6 +102,14 @@ refused: git work merges through 'pogo refinery submit'.`,
 			} else {
 				fmt.Printf("LANDED and recorded as MR %s%s. pogod closes %s now.\n", resp.ID, again, item)
 			}
+			switch {
+			case resp.PostMergeError != "":
+				fmt.Fprintf(os.Stderr, "TAG NOT CREATED: %s — %s\nThe land IS recorded; the work item is deliberately NOT done, and the coordinator has been mailed.\n",
+					resp.PostMergeTag, resp.PostMergeError)
+				os.Exit(cli.ExitPostMergeFailed)
+			case resp.PostMergeTag != "":
+				fmt.Printf("Tagged %s on what the land landed as.\n", resp.PostMergeTag)
+			}
 		},
 	}
 	cmd.Flags().StringVar(&item, "item", "", "Work item the land completes (required)")
@@ -99,6 +119,7 @@ refused: git work merges through 'pogo refinery submit'.`,
 	cmd.Flags().StringVar(&target, "target", "", "Target ref the land moved (default: the repo's trunk, as its project record names it)")
 	cmd.Flags().StringVar(&author, "author", "", "Author recorded on the MR, which the reap closes (default: --item)")
 	cmd.Flags().StringVar(&verdictInline, "verdict", "", "YOUR OWN result for the work item, as a non-empty JSON object, written into the item's result sidecar under \"verdict\"")
+	cmd.Flags().StringVar(&postMergeTag, "post-merge-tag", "", "Tag what the land landed as (enth tag), before the item is closed; a failure blocks completion and mails the coordinator")
 	cmd.Flags().StringVar(&verdictFile, "verdict-file", "", "Read --verdict from this file, or from stdin when it is \"-\"")
 	return cmd
 }

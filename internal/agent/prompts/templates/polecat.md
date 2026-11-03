@@ -171,7 +171,10 @@ Follow these steps exactly, in order. Skipping any step is a failure.
          rm -f "$st.pending"
          echo "LANDED as $item/$n: $(cat "$st.out")"
          pogo land --item="$item" --repo={{.Repo}}{{if .Branch}} --target={{.Branch}}{{end}} --landed-file="$st.out" \
-             --request-id="$item/$n" --verdict-file=/tmp/{{.Id}}-verdict.json && return 0
+             --request-id="$item/$n" --verdict-file=/tmp/{{.Id}}-verdict.json "$@"; rc=$?
+         [ "$rc" -eq 0 ] && return 0
+         # 6: recorded, but a --post-merge-tag passed to self_land was not created.
+         [ "$rc" -eq 6 ] && { echo "LANDED and RECORDED, but the tag was NOT created: the item stays open on purpose. Do NOT run mg done or land again; mail the {{.Coordinator}} the error above and hold."; return 4; }
          echo "LANDED BUT NOT RECORDED. Re-run ONLY the pogo land line above (same --landed-file $st.out). Do NOT run self_land or enth land again."
          return 2
        fi
