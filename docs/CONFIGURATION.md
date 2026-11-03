@@ -1015,6 +1015,23 @@ item has any dependency at all, which is how a gate gets disarmed rather than
 fixed. mg remains the authority on satisfaction; this is the subset of it pogo
 can verify without one.
 
+Stated as plainly as possible, because it is the property an adopter meets
+first (drellem2/pogo#201): **the depends refusal refuses only when a parent is
+POSITIVELY found live** in `available/`, `claimed/` or `pending/`. A parent that
+**cannot be parsed**, or **cannot be found at all**, reads as **satisfied** and
+the spawn proceeds. That is fail-open, and it is by design, not an oversight:
+pogo does not read the archive, so "not found" cannot be told apart from "done
+and archived". An unparseable parent file is skipped **silently**, exactly as
+a missing one is: no refusal and no log line. Only a status directory that
+cannot be read at all logs `dispatch gate: could not resolve dependency … treating
+it as satisfied`. One bad file never blocks a dispatch whose other parents are
+fine.
+
+The way out of a refusal is **per item**: finish the parent, or drop the edge
+with `mg edit <id> --rm-depends=<parent>`. The refusal message names that
+command. There is no config key that turns this refusal off fleet-wide; that is
+tracked in drellem2/pogo#202.
+
 **The gate's twin, which fails the other way (mg-9a04).** Sitting immediately
 beside it in `handleSpawnPolecat` is the type→template router: with no
 `--template`, the work item's `type` selects the worker template through a
