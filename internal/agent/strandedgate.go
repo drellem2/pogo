@@ -206,7 +206,7 @@ func (r *Registry) getStrandedWorkGate() StrandedWorkGate {
 // the guard was blind here; it is not blind, it was misreporting, and a refusal
 // nobody can act on is the failure mode a blind guard would have had anyway.
 func (r *Registry) strandedWorkRefusal(workItemID, repo, target string) string {
-	_, refusal := r.strandedWorkCheck(workItemID, repo, target)
+	_, refusal, _ := r.strandedWorkCheck(workItemID, repo, target)
 	return refusal
 }
 
@@ -221,18 +221,27 @@ func (r *Registry) strandedWorkRefusal(workItemID, repo, target string) string {
 //
 // findings is non-empty exactly when refusal is non-empty; both are empty when
 // the gate allows the dispatch or could not answer.
-func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strandedwork.Finding, string) {
+//
+// inReview holds the findings dropAwaitingReview set aside as the heads of open
+// PRs, whether or not anything else refused. They do not refuse — but an
+// explicit --stranded-adopt must still be able to continue one (mg-64751 review
+// round 1): with nothing refusing, the adopt flag would otherwise never be
+// consulted and the worker would be based on the target under a flag whose name
+// says it adopted something — "an ordinary re-derivation wearing the adopt
+// flag's name" (unadoptableStranded). Continuing a PR whose builder was stopped
+// mid-review is the likeliest reason to adopt at all.
+func (r *Registry) strandedWorkCheck(workItemID, repo, target string) (findings []strandedwork.Finding, refusal string, inReview []strandedwork.Finding) {
 	findings, err := r.getStrandedWorkGate().StrandedFindings(workItemID, repo, target)
 	if err != nil {
 		// Loud but not fatal — see the fail-open rationale on StrandedFindings.
 		log.Printf("stranded-work gate: could not check work item %s in %s: %v — "+
 			"dispatching WITHOUT the stranded-work check; if this item has pushed work on a "+
 			"polecat branch, this spawn is about to re-derive it", workItemID, repo, err)
-		return nil, ""
+		return nil, "", nil
 	}
-	findings = dropAwaitingReview(workItemID, repo, findings)
+	findings, inReview = dropAwaitingReview(workItemID, repo, findings)
 	if len(findings) == 0 {
-		return nil, ""
+		return nil, "", inReview
 	}
 
 	// Pre-registration first, whatever the scan order: it is the disposition
@@ -271,7 +280,7 @@ func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strande
 			if note != "" {
 				msg += ". " + note
 			}
-			return findings, msg + prProbeFailureNote(f)
+			return findings, msg + prProbeFailureNote(findings), inReview
 		}
 	}
 	f := findings[0]
@@ -292,7 +301,7 @@ func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strande
 	if note != "" {
 		msg += ". " + note
 	}
-	return findings, msg + prProbeFailureNote(f)
+	return findings, msg + prProbeFailureNote(findings), inReview
 }
 
 // dropAwaitingReview applies the open-PR rule of drellem2/pogo#147 to the
@@ -323,8 +332,7 @@ func (r *Registry) strandedWorkCheck(workItemID, repo, target string) ([]strande
 //
 // Like every suppression in this detector, it is LOGGED AND EMITTED, never
 // silent (the mg-1af2 contract on reportStrandedWorkOnRelease).
-func dropAwaitingReview(workItemID, repo string, findings []strandedwork.Finding) []strandedwork.Finding {
-	var kept []strandedwork.Finding
+func dropAwaitingReview(workItemID, repo string, findings []strandedwork.Finding) (kept, inReview []strandedwork.Finding) {
 	for _, f := range findings {
 		dir := f.Repo
 		if dir == "" {
@@ -335,6 +343,7 @@ func dropAwaitingReview(workItemID, repo string, findings []strandedwork.Finding
 			kept = append(kept, f)
 			continue
 		}
+		inReview = append(inReview, f)
 		log.Printf("stranded-work gate: %s: branch %s has %d commit(s) %s lacks, but they are the head of "+
 			"open PR #%d (%s) — awaiting review, NOT stranded, dispatch not refused for it (mg-64751). %s",
 			workItemID, f.Branch, len(f.Unmerged), f.Target, f.PR, f.PRBranch, f.Summary())
@@ -349,20 +358,38 @@ func dropAwaitingReview(workItemID, repo string, findings []strandedwork.Finding
 			Details:    awaitingReviewDetails(f, "dispatch onto the work item", RouteDispatch),
 		})
 	}
-	return kept
+	return kept, inReview
 }
 
-// prProbeFailureNote is the sentence a refusal carries when it stands BECAUSE
-// the open-PR check could not answer, or "" when the check answered or did not
-// run. Without it a refusal beside an open PR reads as the gate ignoring the PR,
-// and the reader's next move is --stranded-override on reflex.
-func prProbeFailureNote(f strandedwork.Finding) string {
-	if f.PRProbeError == "" {
+// inReviewAdoptNote stands in for the gate's refusal on an adoption of a branch
+// that did not refuse — an open-PR head dropAwaitingReview set aside — so the
+// dispatch_stranded_work_adopted record still says what the gate saw.
+func inReviewAdoptNote(workItemID string, f strandedwork.Finding) string {
+	return fmt.Sprintf("work item %s: nothing refused the dispatch, but --stranded-adopt was given and %s "+
+		"is awaiting review as the head of open PR #%d (%s); adopting it. %s",
+		workItemID, f.Branch, f.PR, f.PRBranch, f.Summary())
+}
+
+// prProbeFailureNote is the sentence a refusal carries when it stands — wholly
+// or in part — BECAUSE the open-PR check could not answer, or "" when every
+// check answered or none ran. It names every kept finding whose probe failed,
+// not only the one the refusal leads with (mg-64751 review round 1): any of
+// them could be an open PR the gate could not see. Without it a refusal beside
+// an open PR reads as the gate ignoring the PR, and the reader's next move is
+// --stranded-override on reflex.
+func prProbeFailureNote(findings []strandedwork.Finding) string {
+	var failed []string
+	for _, f := range findings {
+		if f.PRProbeError != "" {
+			failed = append(failed, fmt.Sprintf("%s (%s)", f.PRProbeBranch, f.PRProbeError))
+		}
+	}
+	if len(failed) == 0 {
 		return ""
 	}
-	return fmt.Sprintf(". The open-PR check could not ask GitHub about %s (%s), so this refusal stands — "+
-		"a check that can only remove a refusal never passes a dispatch it could not run. If %s is the "+
-		"head of an open PR, that is the first thing to rule out", f.PRProbeBranch, f.PRProbeError, f.PRProbeBranch)
+	return fmt.Sprintf(". The open-PR check could not ask GitHub about %s, so this refusal stands — "+
+		"a check that can only remove a refusal never passes a dispatch it could not run. If any of "+
+		"those is the head of an open PR, that is the first thing to rule out", strings.Join(failed, ", "))
 }
 
 // strandedExits is the sentence that names BOTH ways past this gate, and it is
