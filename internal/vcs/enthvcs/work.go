@@ -130,13 +130,7 @@ func (b Backend) ListChanges(ctx context.Context, item, worker string, unlanded 
 	if err != nil || !unlanded {
 		return cs, err
 	}
-	var out []vcs.Change
-	for _, c := range vcs.DropSuperseded(cs) {
-		if c.Landed == "" {
-			out = append(out, c)
-		}
-	}
-	return out, nil
+	return vcs.Unlanded(cs), nil
 }
 
 // listChanges is `enth changes` with the trailer filters: every Change, landed

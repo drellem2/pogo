@@ -1152,6 +1152,9 @@ type RepoCoverage struct {
 	// not be matched to any item.
 	EnthUnlanded  int `json:"enth_unlanded,omitempty"`
 	EnthUntrailed int `json:"enth_untrailed,omitempty"`
+	// EnthLanded is how many Changes the listing names a land record for:
+	// the half landed_not_closed is judged from (mg-ca1ab).
+	EnthLanded int `json:"enth_landed,omitempty"`
 	// NamedByOpenItem is false when this repository entered the sweep ONLY
 	// because a polecat worktree on this host points at it, or because --repo
 	// asked for it — i.e. when no open work item names it. Such a repository used
@@ -1274,6 +1277,13 @@ type Report struct {
 	// unlanded enth work: the enth listing widens the join, and says by how
 	// much.
 	EnthClosedItems int `json:"enth_closed_items,omitempty"`
+	// EnthDoneLandedElsewhere counts the EnthClosedItems whose unlanded
+	// Changes sit beside LANDED Changes of the same item: the shape slice 6b
+	// flagged as likely noise (a respawn that did not adopt left its
+	// predecessor's work unlanded). Each is still a stranded row; the count
+	// exists to MEASURE how often this happens after cut-over before anyone
+	// designs a retirement path for it (mg-ca1ab).
+	EnthDoneLandedElsewhere int `json:"enth_done_landed_elsewhere,omitempty"`
 	// Frame states this report's own boundary, in the report. See BuildFrame.
 	Frame []string `json:"frame"`
 }
@@ -1595,10 +1605,10 @@ func Scan(opts Options) (Report, error) {
 		}
 		if src, isEnth := enthSrc[repo]; isEnth {
 			cov.VCS = string(vcs.Enth)
-			if src.Unlanded == nil {
-				src.Unlanded = func() ([]vcs.Change, error) { return nil, fmt.Errorf("no listing configured") }
+			if src.Changes == nil {
+				src.Changes = func() ([]vcs.Change, error) { return nil, fmt.Errorf("no listing configured") }
 			}
-			changes, lerr := src.Unlanded()
+			changes, lerr := src.Changes()
 			if lerr != nil {
 				// The git path's rule (mg-8baa): the failure crosses the item join.
 				cov.Error = lerr.Error()
@@ -1613,9 +1623,10 @@ func Scan(opts Options) (Report, error) {
 			}
 			es := scanEnthRepo(repo, src, changes, openByID, opts.ItemByID, live, queued, opts.Target)
 			cov.Fetched = true // enth reads are live: there is nothing to refresh
-			cov.EnthUnlanded, cov.EnthUntrailed = es.changes, es.untrailed
+			cov.EnthUnlanded, cov.EnthUntrailed, cov.EnthLanded = es.changes, es.untrailed, es.landed
 			rep.ItemsChecked += len(byRepo[repo])
 			rep.EnthClosedItems += es.closedItems
+			rep.EnthDoneLandedElsewhere += es.doneLandedElsewhere
 			rep.Repos = append(rep.Repos, cov)
 			rep.Rows = append(rep.Rows, es.rows...)
 			rep.Excluded = append(rep.Excluded, es.excluded...)
@@ -2193,9 +2204,10 @@ func BuildFrame(rep Report, opts Options) []string {
 		if n > 0 {
 			frame = append(frame, fmt.Sprintf("In %d enth-backed repo(s) the join is WIDER: every unlanded "+
 				"Change carrying a Pogo-Item trailer was listed, and %d item(s) already DONE were found "+
-				"holding unlanded work. %d unlanded Change(s) carry no Pogo-Item trailer and are matched to "+
+				"holding unlanded work (%d of them beside LANDED work of the same item — the abandoned-"+
+				"by-a-respawn shape). %d unlanded Change(s) carry no Pogo-Item trailer and are matched to "+
 				"no item; a checkout based on one is reported in the worktree list.",
-				n, rep.EnthClosedItems, untrailed))
+				n, rep.EnthClosedItems, rep.EnthDoneLandedElsewhere, untrailed))
 		}
 	}
 	if len(opts.Repos) > 0 {

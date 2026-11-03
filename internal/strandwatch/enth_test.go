@@ -2,6 +2,7 @@ package strandwatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -37,7 +38,7 @@ func enthOpts(items []Item, live map[string]bool, list func() ([]vcs.Change, err
 		LiveAgents: func() (map[string]bool, error) { return live, nil },
 		Enth: func() (map[string]EnthSource, error) {
 			return map[string]EnthSource{enthRepoPath: {
-				Remote: "http://enthd.test", Repo: "alice/proj", Trunk: vcs.DefaultEnthTrunk, Unlanded: list,
+				Remote: "http://enthd.test", Repo: "alice/proj", Trunk: vcs.DefaultEnthTrunk, Changes: list,
 			}}, nil
 		},
 		ItemByID: func(id string) (Item, error) {
@@ -185,7 +186,7 @@ func TestEnthListingFailureIsARowPerItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := enthRowFor(rep, "mg-a1")
-	if r == nil || r.Kind != KindRepoUnreadable || !strings.HasPrefix(r.Remedy(), "enth --remote http://enthd.test --repo alice/proj changes --unlanded") {
+	if r == nil || r.Kind != KindRepoUnreadable || !strings.HasPrefix(r.Remedy(), "enth --remote http://enthd.test --repo alice/proj changes") {
 		t.Fatalf("row = %+v", r)
 	}
 	if rep.ItemsChecked != 0 {
@@ -255,7 +256,8 @@ func TestEnthGitControl(t *testing.T) {
 
 // TestEnthStrandedThroughEnthd reads a real enthd: an unlanded trailered
 // Change whose item is done, and one whose item is available, are reported
-// stranded; once landed, neither is.
+// stranded; once landed, the done item is clean and the available one is
+// landed_not_closed (mg-ca1ab).
 func TestEnthStrandedThroughEnthd(t *testing.T) {
 	s := enthdtest.Start(t)
 	cd, _ := s.Work(t, "mg-d1", "pd1", "feat: done item's work", map[string]string{"d.txt": "d\n"})
@@ -269,12 +271,7 @@ func TestEnthStrandedThroughEnthd(t *testing.T) {
 		},
 		LiveAgents: func() (map[string]bool, error) { return map[string]bool{}, nil },
 		Enth: func() (map[string]EnthSource, error) {
-			return map[string]EnthSource{repoPath: {Remote: s.URL, Repo: s.Repo, Trunk: vcs.DefaultEnthTrunk,
-				Unlanded: func() ([]vcs.Change, error) {
-					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer cancel()
-					return b.ListChanges(ctx, "", "", true)
-				}}}, nil
+			return map[string]EnthSource{repoPath: enthdSource(s, b)}, nil
 		},
 		ItemByID: func(id string) (Item, error) {
 			if id == "mg-d1" {
@@ -299,7 +296,197 @@ func TestEnthStrandedThroughEnthd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Actionable() {
-		t.Fatalf("after landing, rows = %+v\n%s", rep.Rows, Render(rep, true))
+	if r := enthRowFor(rep, "mg-d1"); r != nil {
+		t.Errorf("done item whose work landed has a row: %+v", r)
+	}
+	r := enthRowFor(rep, "mg-a1")
+	if r == nil || r.Kind != KindLandedNotClosed || len(r.Enth.Landed) != 1 || r.Enth.Landed[0] != ca {
+		t.Fatalf("after landing, mg-a1 row = %+v, want landed_not_closed\n%s", r, Render(rep, true))
+	}
+	if len(rep.Rows) != 1 {
+		t.Fatalf("after landing, rows = %+v, want only mg-a1's landed_not_closed", rep.Rows)
+	}
+}
+
+// enthdSource is the CLI's EnthSource for a sandboxed enthd: the WHOLE
+// listing, landed Changes included.
+func enthdSource(s *enthdtest.Server, b enthvcs.Backend) EnthSource {
+	return EnthSource{Remote: s.URL, Repo: s.Repo, Trunk: vcs.DefaultEnthTrunk,
+		Changes: func() ([]vcs.Change, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			return b.ListChanges(ctx, "", "", false)
+		}}
+}
+
+// TestEnthRowTypesThroughEnthd is mg-ca1ab's acceptance: one case per enth
+// row type, each read from a real (sandboxed) enthd, with the negative
+// controls beside them. The git control is TestEnthGitControl, unchanged.
+func TestEnthRowTypesThroughEnthd(t *testing.T) {
+	s := enthdtest.Start(t)
+	// stranded, open: unlanded work, no worker running.
+	cOpen, _ := s.Work(t, "mg-so", "pso", "feat: open work", map[string]string{"so.txt": "so\n"})
+	// stranded, done: unlanded work, nothing of the item landed.
+	cDone, _ := s.Work(t, "mg-sd", "psd", "feat: lost work", map[string]string{"sd.txt": "sd\n"})
+	// stranded, done, beside LANDED work of the same item: the abandoned-by-a-
+	// respawn shape whose frequency this slice measures.
+	cAbandoned, _ := s.Work(t, "mg-ab", "pab1", "feat: first worker", map[string]string{"ab1.txt": "1\n"})
+	cAdopted, _ := s.Work(t, "mg-ab", "pab2", "feat: respawned worker", map[string]string{"ab2.txt": "2\n"})
+	// landed_not_closed: an open item every Change of which landed.
+	cLNC, _ := s.Work(t, "mg-ln", "pln", "feat: landed, never closed", map[string]string{"ln.txt": "ln\n"})
+	// control: the same, but its worker is still running (mid-close).
+	cLive, _ := s.Work(t, "mg-lv", "plv", "feat: landing right now", map[string]string{"lv.txt": "lv\n"})
+	// control: open, one Change landed and one not — stranded, never landed_not_closed.
+	cMixL, _ := s.Work(t, "mg-mx", "pmx", "feat: part one", map[string]string{"mx1.txt": "1\n"})
+	cMixU, _ := s.Work(t, "mg-mx", "pmx", "feat: part two", map[string]string{"mx2.txt": "2\n"})
+	// control: a done item every Change of which landed is the normal case.
+	cDoneLanded, _ := s.Work(t, "mg-dl", "pdl", "feat: normal close", map[string]string{"dl.txt": "dl\n"})
+	// unjudged: a trailer naming an item nobody can read.
+	cGone, _ := s.Work(t, "mg-gone", "pg", "feat: orphan trailer", map[string]string{"g.txt": "g\n"})
+	s.Land(t, cAdopted, cLNC, cLive, cMixL, cDoneLanded)
+
+	b := enthvcs.Backend{Repo: s.EnthRepo(), Bin: s.Enth()}
+	repoPath := filepath.Join(t.TempDir(), "proj")
+	open := []Item{
+		{ID: "mg-so", Status: "available", Repo: repoPath},
+		{ID: "mg-ln", Status: "available", Repo: repoPath},
+		{ID: "mg-lv", Status: "claimed", Repo: repoPath},
+		{ID: "mg-mx", Status: "available", Repo: repoPath},
+	}
+	closed := map[string]Item{
+		"mg-sd": {ID: "mg-sd", Status: "done", Repo: repoPath},
+		"mg-ab": {ID: "mg-ab", Status: "done", Repo: repoPath},
+		"mg-dl": {ID: "mg-dl", Status: "done", Repo: repoPath},
+	}
+	opts := Options{
+		Items:      func() ([]Item, error) { return open, nil },
+		LiveAgents: func() (map[string]bool, error) { return map[string]bool{"plv": true}, nil },
+		Enth: func() (map[string]EnthSource, error) {
+			return map[string]EnthSource{repoPath: enthdSource(s, b)}, nil
+		},
+		ItemByID: func(id string) (Item, error) {
+			if it, ok := closed[id]; ok {
+				return it, nil
+			}
+			return Item{}, errors.New("mg show " + id + ": no such work item")
+		},
+	}
+	rep, err := Scan(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := Render(rep, true)
+
+	for _, tc := range []struct {
+		item    string
+		kind    Kind
+		changes []string
+		landed  []string
+	}{
+		{"mg-so", KindStranded, []string{cOpen}, nil},
+		{"mg-sd", KindStranded, []string{cDone}, nil},
+		{"mg-ab", KindStranded, []string{cAbandoned}, []string{cAdopted}},
+		{"mg-ln", KindLandedNotClosed, nil, []string{cLNC}},
+		{"mg-mx", KindStranded, []string{cMixU}, []string{cMixL}},
+		{"mg-gone", KindUnjudged, []string{cGone}, nil},
+	} {
+		r := enthRowFor(rep, tc.item)
+		if r == nil || r.Kind != tc.kind || r.Enth == nil {
+			t.Errorf("%s: row %+v, want %s\n%s", tc.item, r, tc.kind, out)
+			continue
+		}
+		if fmt.Sprint(r.Enth.Changes) != fmt.Sprint(tc.changes) || fmt.Sprint(r.Enth.Landed) != fmt.Sprint(tc.landed) {
+			t.Errorf("%s: changes=%v landed=%v, want %v / %v", tc.item, r.Enth.Changes, r.Enth.Landed, tc.changes, tc.landed)
+		}
+	}
+	// The controls produce no row.
+	for _, id := range []string{"mg-lv", "mg-dl"} {
+		if r := enthRowFor(rep, id); r != nil {
+			t.Errorf("control %s has a row: %+v", id, r)
+		}
+	}
+	excludedLive := false
+	for _, e := range rep.Excluded {
+		excludedLive = excludedLive || e.ItemID == "mg-lv"
+	}
+	if !excludedLive {
+		t.Errorf("mg-lv (landed, worker running) was not excluded: %+v", rep.Excluded)
+	}
+
+	ln := enthRowFor(rep, "mg-ln")
+	if got := ln.Remedy(); !strings.HasPrefix(got, "mg done mg-ln ") || !strings.Contains(got, cLNC) ||
+		strings.Contains(got, "enth --remote") || strings.Contains(got, "pogo land") {
+		t.Errorf("landed_not_closed remedy = %s", got)
+	}
+	var result struct {
+		VCS    string   `json:"vcs"`
+		Landed []string `json:"landed"`
+	}
+	raw := ln.Remedy()
+	raw = raw[strings.Index(raw, "'")+1 : strings.LastIndex(raw, "'")]
+	if err := json.Unmarshal([]byte(raw), &result); err != nil || result.VCS != "enth" || fmt.Sprint(result.Landed) != fmt.Sprint([]string{cLNC}) {
+		t.Errorf("landed_not_closed --result is not the JSON it claims (%v): %s", err, raw)
+	}
+
+	// THE MEASUREMENT (slice 6b's noise risk): two done items hold unlanded
+	// work, and exactly one of them holds landed work beside it.
+	if rep.EnthClosedItems != 2 || rep.EnthDoneLandedElsewhere != 1 {
+		t.Errorf("EnthClosedItems=%d EnthDoneLandedElsewhere=%d, want 2 and 1", rep.EnthClosedItems, rep.EnthDoneLandedElsewhere)
+	}
+	if len(rep.Repos) != 1 || rep.Repos[0].EnthUnlanded != 5 || rep.Repos[0].EnthLanded != 5 {
+		t.Errorf("coverage = %+v, want 5 unlanded and 5 landed", rep.Repos)
+	}
+	for _, want := range []string{
+		"landed_not_closed",
+		"HAVE LANDED:",
+		"The work is ON the trunk and the item is still asking for it.",
+		"1 OTHER Change(s) of this item DID land (" + cAdopted + ")",
+		"(1 of them beside LANDED work of the same item",
+		"5 landed,",
+		"1 landed-but-not-closed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestEnthRepoUnreadableThroughEnthd: the repo_unreadable row, from a listing
+// that genuinely failed — a real enth binary against an enthd that is not
+// listening — beside the positive control of the same binary on a live one.
+func TestEnthRepoUnreadableThroughEnthd(t *testing.T) {
+	s := enthdtest.Start(t)
+	s.Work(t, "mg-a1", "pa1", "feat: work", map[string]string{"a.txt": "a\n"})
+	repoPath := filepath.Join(t.TempDir(), "proj")
+	for _, tc := range []struct {
+		name   string
+		remote string
+		want   Kind
+	}{
+		{"enthd down", "http://127.0.0.1:1", KindRepoUnreadable},
+		{"enthd up (control)", s.URL, KindStranded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			er := s.EnthRepo()
+			er.Remote = tc.remote
+			b := enthvcs.Backend{Repo: er, Bin: s.Enth()}
+			src := enthdSource(s, b)
+			src.Remote = tc.remote
+			rep, err := Scan(Options{
+				Items:      func() ([]Item, error) { return []Item{{ID: "mg-a1", Status: "available", Repo: repoPath}}, nil },
+				LiveAgents: func() (map[string]bool, error) { return map[string]bool{}, nil },
+				Enth:       func() (map[string]EnthSource, error) { return map[string]EnthSource{repoPath: src}, nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := enthRowFor(rep, "mg-a1")
+			if r == nil || r.Kind != tc.want {
+				t.Fatalf("row = %+v, want %s\n%s", r, tc.want, Render(rep, true))
+			}
+			if tc.want == KindRepoUnreadable && !strings.HasPrefix(r.Remedy(), "enth --remote "+tc.remote+" --repo "+s.Repo+" changes") {
+				t.Errorf("remedy = %s", r.Remedy())
+			}
+		})
 	}
 }

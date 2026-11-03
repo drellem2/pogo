@@ -32,9 +32,20 @@ import (
 //   - archived and shelved items are excluded and counted, as the git sweep's
 //     open-item bound excludes them.
 //
-// A landed Change is not in the listing: its land record names it (E3), and
-// that is exact where git's patch-id cherry is a heuristic. So nothing here
-// needs a second, content-level opinion.
+// A landed Change carries its land record (E3), and that is exact where git's
+// patch-id cherry is a heuristic. So nothing here needs a second, content-level
+// opinion. The sweep reads the WHOLE listing (`enth changes`, landed included)
+// once and derives the unlanded half with vcs.Unlanded, because the landed half
+// answers a question of its own (slice 6c, mg-ca1ab):
+//
+//   - an OPEN item every one of whose Changes has landed (or been superseded by
+//     one that landed) is landed_not_closed, git's row of that name: the work is
+//     on the trunk and the item is still asking for it. Its remedy is `mg done`;
+//   - a DONE item whose unlanded Changes sit beside LANDED Changes of the same
+//     item is still stranded, but it is the shape slice 6b flagged as noise (a
+//     respawn that did not adopt, its predecessor's work abandoned). It is
+//     counted separately (Report.EnthDoneLandedElsewhere) so that how often it
+//     happens after cut-over is measured before a retirement path is designed.
 //
 // A Change with NO Pogo-Item trailer cannot be matched to an item. It is
 // counted on the repo's coverage line rather than dropped; a checkout whose
@@ -50,9 +61,12 @@ type EnthSource struct {
 	// Trunk is the ref work lands on (vcs.DefaultEnthTrunk when the record
 	// names none).
 	Trunk string
-	// Unlanded lists every unlanded Change in the repository, oldest first,
-	// with its trailers: `enth changes --unlanded` with no trailer filter.
-	Unlanded func() ([]vcs.Change, error)
+	// Changes lists every Change in the repository, landed or not, oldest
+	// first, with its trailers and its landed id: `enth changes` with no
+	// trailer filter. The sweep derives the unlanded set from it
+	// (vcs.Unlanded), exactly as `enth changes --unlanded` plus supersession
+	// would, and reads the landed set for landed_not_closed (mg-ca1ab).
+	Changes func() ([]vcs.Change, error)
 }
 
 // EnthWork is the enth half of a row: the unlanded Changes one item's
@@ -70,6 +84,11 @@ type EnthWork struct {
 	Stacks int `json:"stacks"`
 	// Newest is the newest Change's committer time.
 	Newest time.Time `json:"newest,omitempty"`
+	// Landed are the Change ids carrying this item's trailer that a land
+	// record names, oldest first (mg-ca1ab). On a landed_not_closed row they
+	// are the whole of the item's work; on a stranded row of a DONE item they
+	// are the work that DID land beside the unlanded Changes above.
+	Landed []string `json:"landed,omitempty"`
 }
 
 // ItemQueueKey is the identity of an enth merge request in the queue: it has
@@ -106,17 +125,43 @@ type enthScan struct {
 	// closedItems is how many items outside the open set had unlanded work
 	// here, so the frame can say the join was widened.
 	closedItems int
+	// landed is how many Changes the listing names a land record for, and
+	// doneLandedElsewhere how many of the closedItems ALSO have landed
+	// Changes: the abandoned-by-a-respawn shape (mg-ca1ab).
+	landed              int
+	doneLandedElsewhere int
 }
 
-// scanEnthRepo turns one enth repository's unlanded listing into rows.
+// scanEnthRepo turns one enth repository's whole listing (landed Changes
+// included) into rows.
 //
 // open are the open items, by id. lookup resolves an item the open set does
 // not hold (a done item, typically); nil means closed items cannot be judged,
 // and each one becomes an unjudged row rather than a silent drop.
-func scanEnthRepo(repo string, src EnthSource, changes []vcs.Change, open map[string]Item,
+func scanEnthRepo(repo string, src EnthSource, all []vcs.Change, open map[string]Item,
 	lookup func(string) (Item, error), live map[string]bool, queued map[string]QueuedRequest, target string) enthScan {
 	var out enthScan
+	changes := vcs.Unlanded(all)
 	out.changes = len(changes)
+	// THE LANDED HALF, by item. A Change with no trailer is not counted here:
+	// it can be matched to no item, and the unlanded half already counts it.
+	landedByItem := map[string][]string{}
+	var landedIDs []string
+	for _, c := range all {
+		if c.Landed == "" {
+			continue
+		}
+		out.landed++
+		id := c.Trailer(vcs.TrailerItem)
+		if id == "" {
+			continue
+		}
+		if _, ok := landedByItem[id]; !ok {
+			landedIDs = append(landedIDs, id)
+		}
+		landedByItem[id] = append(landedByItem[id], c.ID)
+	}
+	sort.Strings(landedIDs)
 	byItem := map[string][]vcs.Change{}
 	var ids []string
 	for _, c := range changes {
@@ -136,6 +181,7 @@ func scanEnthRepo(repo string, src EnthSource, changes []vcs.Change, open map[st
 	for _, id := range ids {
 		cs := byItem[id]
 		work := NewEnthWork(src, cs)
+		work.Landed = landedByItem[id]
 		branchLabel := EnthLabel(work)
 
 		it, ok := open[id]
@@ -170,6 +216,9 @@ func scanEnthRepo(repo string, src EnthSource, changes []vcs.Change, open map[st
 				continue
 			}
 			out.closedItems++
+			if len(work.Landed) > 0 {
+				out.doneLandedElsewhere++
+			}
 		}
 
 		// A RUNNING WORKER'S CHANGES ARE WORK IN PROGRESS, exactly as a running
@@ -199,7 +248,60 @@ func scanEnthRepo(repo string, src EnthSource, changes []vcs.Change, open map[st
 		}
 		out.rows = append(out.rows, row)
 	}
+
+	// LANDED, NOT CLOSED (mg-ca1ab): an OPEN item whose Changes have ALL landed
+	// — none is left in the unlanded set, superseded ones included — and at
+	// least one land record names its work. Only the open set is asked: a done
+	// item with landed work is the normal case, and an item the open set does
+	// not hold is not looked up for this. A running worker on the item is in the
+	// middle of its own close (`enth land` answered, `pogo land` not yet), so it
+	// is excluded exactly as its unlanded work would be.
+	for _, id := range landedIDs {
+		if _, hasUnlanded := byItem[id]; hasUnlanded {
+			continue
+		}
+		it, ok := open[id]
+		if !ok {
+			continue
+		}
+		if it.Repo == "" {
+			it.Repo = repo
+		}
+		work := &EnthWork{Remote: src.Remote, Repo: src.Repo, Landed: landedByItem[id]}
+		for _, c := range all {
+			if c.Landed != "" && c.Trailer(vcs.TrailerItem) == id {
+				if w := c.Trailer(vcs.TrailerWorker); w != "" && !containsString(work.Workers, w) {
+					work.Workers = append(work.Workers, w)
+				}
+				if c.Created.After(work.Newest) {
+					work.Newest = c.Created
+				}
+			}
+		}
+		label := EnthLabel(work)
+		reason := ""
+		for _, w := range append(append([]string(nil), work.Workers...), "") {
+			if reason = excludedBecause(strandedwork.BranchPrefix+w, it, live, repo); reason != "" {
+				break
+			}
+		}
+		if reason != "" {
+			out.excluded = append(out.excluded, Excluded{ItemID: id, Branch: label, Reason: reason})
+			continue
+		}
+		out.rows = append(out.rows, Row{Item: it, Branch: label, Kind: KindLandedNotClosed,
+			Target: tgt, Enth: work, TipTime: work.Newest})
+	}
 	return out
+}
+
+func containsString(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
 }
 
 // NewEnthWork is the enth half of a row for one item's unlanded Changes cs
@@ -223,8 +325,12 @@ func NewEnthWork(src EnthSource, cs []vcs.Change) *EnthWork {
 }
 
 // EnthLabel is what an enth row prints where a git row prints its branch.
-// w must hold at least one Change.
+// w must hold at least one Change, unlanded or (on a landed_not_closed row)
+// landed.
 func EnthLabel(w *EnthWork) string {
+	if len(w.Changes) == 0 && len(w.Landed) > 0 {
+		return fmt.Sprintf("enth:%s(%d landed change(s))", short(w.Landed[len(w.Landed)-1]), len(w.Landed))
+	}
 	return fmt.Sprintf("enth:%s(%d change(s))", short(w.Changes[len(w.Changes)-1]), len(w.Changes))
 }
 
@@ -241,8 +347,14 @@ func (r Row) enthRemedy() string {
 		return fmt.Sprintf("pogo refinery show %s   # do NOT dispatch at %s — its enth work is IN THE QUEUE (%s) "+
 			"on %s; do NOT submit it again either", r.queuedMR(), r.Item.ID, r.queuedStatus(), r.Target)
 	case KindRepoUnreadable:
-		return fmt.Sprintf("enth --remote %s --repo %s changes --unlanded   # reproduce the failure; "+
+		return fmt.Sprintf("enth --remote %s --repo %s changes   # reproduce the failure; "+
 			"no trailer listing, so no work was looked for on this item", w.Remote, w.Repo)
+	case KindLandedNotClosed:
+		// NOT `pogo land`: that records a land from `enth land`'s own answer, and
+		// this sweep did not run the land. The work is on the trunk by its land
+		// record; what is out of date is the item.
+		return fmt.Sprintf(`mg done %s --result='{"vcs": "enth", "landed": ["%s"], "note": "landed before the item was closed"}'`,
+			r.Item.ID, strings.Join(w.Landed, `", "`))
 	}
 	if w.Stacks > 1 {
 		return fmt.Sprintf("%s   # %d STACKS from worker(s) %s — `pogo presubmit` refuses an ambiguous "+

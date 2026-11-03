@@ -503,6 +503,23 @@ func DropSuperseded(cs []Change) []Change {
 	return out
 }
 
+// Unlanded is the unlanded listing derived from a WHOLE one (landed Changes
+// included): every Change no land record names, less every Change a Change of
+// the same item supersedes. Supersession is read from the whole listing
+// because the superseding Change has usually landed by the time anyone asks.
+// It is what `ListChanges(..., unlanded=true)` returns, kept in one place so
+// a caller that needs the landed half too (check-stranded's landed_not_closed,
+// mg-ca1ab) reads enthd once and derives the same unlanded set.
+func Unlanded(cs []Change) []Change {
+	var out []Change
+	for _, c := range DropSuperseded(cs) {
+		if c.Landed == "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // Trailer is one key/value trailer of a Change's message.
 type Trailer struct {
 	Key   string `json:"key"`

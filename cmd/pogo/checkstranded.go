@@ -264,13 +264,17 @@ rather than fatal — the queue being down is common and the rest of the answer 
 still worth having.
 
 ON AN ENTH-BACKED REPO THERE ARE NO BRANCHES (mg-28cbc). Work is the Changes
-carrying a Pogo-Item trailer, listed through enthd (` + "`enth changes --unlanded`" + `) and
+carrying a Pogo-Item trailer, listed through enthd (` + "`enth changes`" + `) and
 joined to each item's status. Unlanded work on an open item with no running worker
 is ` + "`stranded`" + `, and so is unlanded work on a DONE item: on enth no branch outlives
-the item, so this listing is the only place that work is visible. An enth repo
-has no merge queue (mg-5b904), so the remedy is the land itself, by hand under a
-request id of its own, recorded with ` + "`pogo land --item=<id>`" + ` — untested, so build it
-first or adopt it. A landed Change has a land record and is not listed, and
+the item, so this listing is the only place that work is visible. An open item
+whose Changes have ALL landed is ` + "`landed_not_closed`" + `, as on git, and its
+remedy is ` + "`mg done`" + `. A DONE item whose unlanded work sits beside landed work of
+the same item (a respawn that did not adopt) is still ` + "`stranded`" + `, says so on its
+row, and is counted in the frame. An enth repo has no merge queue (mg-5b904),
+so the remedy for unlanded work is the land itself, by hand under a request id of
+its own, recorded with ` + "`pogo land --item=<id>`" + ` — untested, so build it first or
+adopt it. A landed Change has a land record and is never reported as unlanded, and
 neither is a Change a later Change of the same item retires with a
 Pogo-Supersedes trailer (the work a worker re-made after a conflict).
 
@@ -622,12 +626,13 @@ func enthWorktree(path string) strandwatch.Worktree {
 	return wt
 }
 
-// enthProbe bounds one enth repository's unlanded listing.
+// enthProbe bounds one enth repository's listing.
 const enthProbe = 30 * time.Second
 
 // enthRepos names the enth-backed repositories pogod has records for, and
-// how to list each one's unlanded Changes (mg-28cbc): S2's candidate set on
-// enth is `enth changes --unlanded`, cross-referenced against item status.
+// how to list each one's Changes (mg-28cbc, mg-ca1ab): S2's candidate set on
+// enth is the unlanded half of `enth changes`, cross-referenced against item
+// status, and the landed half finds landed_not_closed.
 //
 // It asks pogod for the project records, because the record — not the
 // directory — is what makes a repository enth-backed (docs/design/enth-vcs.md
@@ -646,10 +651,13 @@ func enthRepos() (map[string]strandwatch.EnthSource, error) {
 		b := enthvcs.Backend{Repo: *p.Enth}
 		out[p.Path] = strandwatch.EnthSource{
 			Remote: p.Enth.Remote, Repo: p.Enth.Repo, Trunk: p.Enth.Trunk,
-			Unlanded: func() ([]vcs.Change, error) {
+			// THE WHOLE LISTING, landed Changes included (mg-ca1ab): the sweep
+			// derives the unlanded half itself, and reads the landed half for
+			// landed_not_closed. One enthd round trip either way.
+			Changes: func() ([]vcs.Change, error) {
 				ctx, cancel := context.WithTimeout(context.Background(), enthProbe)
 				defer cancel()
-				return b.ListChanges(ctx, "", "", true)
+				return b.ListChanges(ctx, "", "", false)
 			},
 		}
 	}

@@ -36,7 +36,7 @@ func Render(rep Report, all bool) string {
 			fetched = "refs refreshed from origin"
 		}
 		if c.Error != "" && c.VCS == "enth" {
-			fmt.Fprintf(&b, "    %s — enth: COULD NOT LIST UNLANDED CHANGES: %s\n", c.Repo, c.Error)
+			fmt.Fprintf(&b, "    %s — enth: COULD NOT LIST CHANGES: %s\n", c.Repo, c.Error)
 			continue
 		}
 		if c.Error != "" {
@@ -49,8 +49,8 @@ func Render(rep Report, all bool) string {
 				named = " — no open item names this repo; it is here because it is enth-backed"
 			}
 			fmt.Fprintf(&b, "    %s — enth: %d item(s), %d unlanded Change(s) listed by trailer "+
-				"(%d with NO %s trailer), %d worktree(s)%s\n",
-				c.Repo, c.Items, c.EnthUnlanded, c.EnthUntrailed, "Pogo-Item", c.Worktrees, named)
+				"(%d with NO %s trailer), %d landed, %d worktree(s)%s\n",
+				c.Repo, c.Items, c.EnthUnlanded, c.EnthUntrailed, "Pogo-Item", c.EnthLanded, c.Worktrees, named)
 			continue
 		}
 		discovered := ""
@@ -541,6 +541,13 @@ func enthRowLines(b *strings.Builder, r Row) {
 		b.WriteString("    NO WORK WAS LOOKED FOR on this item. It is unchecked, not clean.\n")
 	case KindUnjudged:
 		fmt.Fprintf(b, "    %d unlanded enth Change(s) in %s, NOT JUDGED: %s\n", len(w.Changes), w.Repo, r.Error)
+	case KindLandedNotClosed:
+		fmt.Fprintf(b, "    0 unlanded enth Change(s) in %s; %d carrying Pogo-Item=%s HAVE LANDED:\n",
+			w.Repo, len(w.Landed), r.Item.ID)
+		for _, id := range w.Landed {
+			fmt.Fprintf(b, "      %s\n", id)
+		}
+		b.WriteString("    The work is ON the trunk and the item is still asking for it.\n")
 	default:
 		fmt.Fprintf(b, "    %d unlanded enth Change(s) in %s carry Pogo-Item=%s; %d stack(s) vs %s\n",
 			len(w.Changes), w.Repo, r.Item.ID, w.Stacks, r.Target)
@@ -552,6 +559,11 @@ func enthRowLines(b *strings.Builder, r Row) {
 		}
 		if strings.EqualFold(r.Item.Status, "done") {
 			b.WriteString("    The item is DONE and no land record names this work: it closed without it.\n")
+			if len(w.Landed) > 0 {
+				fmt.Fprintf(b, "    %d OTHER Change(s) of this item DID land (%s): this work is likely abandoned\n"+
+					"    by a worker that did not adopt it. Read it before landing it.\n",
+					len(w.Landed), strings.Join(w.Landed, ", "))
+			}
 		}
 		if r.Kind == KindInFlight {
 			fmt.Fprintf(b, "    It is IN THE REFINERY QUEUE as %s (%s).\n", r.queuedMR(), r.queuedStatus())
