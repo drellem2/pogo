@@ -62,9 +62,44 @@ Three keys worth knowing:
 | `restart_on_crash` | bool | pogod restarts the agent if it exits unexpectedly | `true` for crew, `false` for polecats |
 | `nudge_on_start` | string | Message sent to the agent's PTY immediately after spawn | empty |
 
-There are four more — `worktree` for polecat templates, `provider` /
-`model`, both covered below, and `wake` (next section) — but those three carry
-the day.
+There are five more — `worktree` for polecat templates, `provider` /
+`model`, both covered below, `wake` (next section) and `env` (crew only, the
+section after) — but those three carry the day.
+
+### Give a crew agent environment variables (`env`)
+
+A crew prompt can declare variables its agent is started with:
+
+```toml
++++
+auto_start = true
+env = ["SERVICE_URL=https://example.internal", "LOG_LEVEL=debug"]
++++
+```
+
+The array may also span lines, with a trailing comma and `#` comments:
+
+```toml
+env = [
+  "SERVICE_URL=https://example.internal",
+  "LOG_LEVEL=debug",   # noisy while we debug the sync
+]
+```
+
+- **Crew only.** Polecat templates and `pogo agent spawn` ignore it (spawn
+  takes `--env`).
+- **Beneath pogo's own variables.** `env` is applied below the identity
+  catalogue (`POGO_AGENT_NAME`, `POGO_ROLE`, …), so a prompt cannot rename its
+  agent or point it at another mailbox; such an entry is silently outranked.
+- **On every restart too.** The value is captured when the agent starts and
+  re-applied on each crash restart. An edit to the prompt takes effect at the
+  next `pogo agent start` (or `stop` + start), not on a crash restart.
+- **A mistake costs only `env`.** A malformed `env` line is skipped with a
+  warning in the pogod log, and the rest of the frontmatter (`auto_start`,
+  `restart_on_crash`, …) still applies. An entry that is not `KEY=VALUE` with
+  a valid name is skipped alone.
+- pogod logs the variable **names** (never values) at start:
+  `crew agent <name>: env from frontmatter: SERVICE_URL, LOG_LEVEL`.
 
 ### Declare how an agent is woken (`wake`)
 
