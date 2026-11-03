@@ -282,7 +282,31 @@ The deploy hook gets `POGO_LANDED_VCS` and `POGO_LANDED_ID` in its environment. 
 - **Consumers.** `emptybranch.go`'s ancestry check considers only git landings. The enth already-merged rule stays in `enthland.go`. `refinery_merged` carries `landed` for **both** kinds, as this section says (`merge_commit` is `""` for enth). The other consumers add `landed` only for enth: the merged-work dispatch gate (`refinerymerged.go`, `agent.MergedWork`), the merged-but-open alert and its gated event (`mergedopen.go`), the reopen guard's mail line and event (`reopenguard.go`), the reap sidecar and its log lines (`reap.go`), `work_item_closed_without_verdict` (`reapverdictabsent.go`), the filer completion notice and its event (`filernotify`, `filernotifywire.go`), the pogod `MERGED:` mail (`Landed: enth <id> (entry N on <ref>)`), and `pogo refinery show` (`Landed as: …`).
 - **`merged_sha` stays absent on an enth MR**, in the record (`omitempty`), the sidecar and every event. `pogo refinery show <mr> --json | jq .merged_sha` is therefore `null`, and the release-cut recipe refuses to tag. That is the safe direction until slice 12 maps tags.
 - **The deploy hook** gets `POGO_LANDED_VCS` and `POGO_LANDED_ID` on both paths (git: the merge commit; enth: `new`). Both are always set, and both are empty when the landing is unknown, so a copy inherited from pogod's own environment is overridden rather than stripped. The environment still roots in `os.Environ()`, as gitceiling's inherit check requires. No variable carries a git sha for an enth MR. This was measured end to end against a sandboxed enthd, with the git control, by `TestEnthMergeRecordAndGitControl`.
-- **Not done here:** `postmerge.go` (§8) is slice 12. An enth submit with `--post-merge-tag` is still refused at submit. Some messages name `branch %s`, which is empty for an enth MR (the merged-work refusal, the reopen line). Rewording them is left to the prompt and GitHub-boundary slices.
+- **Not done here:** `postmerge.go` (§8) is slice 12. An enth submit with `--post-merge-tag` is still refused at submit. Messages that named `branch %s` printed an empty branch for an enth MR. Slice 8b fixed them (§7.2).
+
+### 7.2 As built (slice 8b, mg-4377f, 2026-11-03): messages name the item, not an empty branch
+
+An enth MR has `branch: ""`. Its work is named by its item (`Item`, the Pogo-Item trailer, §5). `vcs.WorkRef(branch, item)` (and the `mr.WorkRef()` wrapper) fills the slot that `"branch %s"` filled. It gives `branch <name>` for git, byte-identical, and `enth item <id>` when there is no branch but there is an item. `WorkField` is for a slot already labelled as the branch (`Branch:`, `(%s -> main)`) and gives `(none: enth item <id>)`. `WorkKV` is for `key=value` log lines and gives `item=<id>`, the key the enth queued line already used. A git MR always carries its branch, so every git rendering is unchanged. Each fixed message has a test with an enth case and a git control asserted against the old format string (`cmd/pogod/workref_test.go`, `internal/agent/mergedgate_test.go`, `internal/vcs/workref_test.go`).
+
+The call sites, judged. This is `grep -rn --include='*.go' -iE 'branch %s|branch %q'` over non-test code, plus the other places that format an MR's `Branch` (`Branch: %s`, `branch=%s`, `(%s)`):
+
+| Call site | Judgment |
+|---|---|
+| `internal/agent/mergedgate.go` merged-work refusal | **fixed**: `vcs.WorkRef`. `MergedWork` gained `Item` (`refinerymerged.go`) |
+| `cmd/pogod/reopenguard.go` declined-reopen line | **fixed**: `mr.WorkRef()` |
+| `cmd/pogod/mergedopen.go` alert log line, `Branch:` body line | **fixed**: `WorkRef` / `WorkField`. The alert gained `Item`. The event `branch` key is unchanged (machine data; the record has `item`) |
+| `cmd/pogod/reap.go` MERGED BUT NOT CLOSED log | **fixed**: `mr.WorkRef()` |
+| `cmd/pogod/progresswatch.go` submitted/landed notes | **fixed**: `submittedNote` / `mergeLandedNote` |
+| `cmd/pogod/projectvcs.go` busy-repo reason | **fixed**: `mr.WorkField()` |
+| `cmd/pogod/refineryfailroute.go` unrouted reason | **fixed**: the enth form names the item and says it has no branch to carry the prefix |
+| `cmd/pogod/main.go` `MERGED:` mail subject, body, and log | **fixed**: `mergedNoticeHead` (`WorkKV` / `WorkField`) |
+| `cmd/pogo/main.go` `refinery show` `Branch:` | **fixed**: `mr.WorkField()`. The test is the `WorkField` unit test only, because the line is inside a cobra `Run` |
+| `internal/refinery/lanes.go` merged/no-op/cancelled/post-merge-failed logs; `refinery.go` cancel log | **fixed**: `mr.WorkKV()`. The test is the `WorkKV` unit test only, because these log inside the lane runner |
+| `internal/refinery/refinery.go` queued log, PR-flow log | git-only: the enth path logs its own `item=` line and returns before both |
+| `internal/refinery/merge.go`, `land.go`, `closingref_gate.go`, `recovery.go` (probe and resolve logs), `postmerge.go` tag message, `prune.go`, `submitbranch.go` | git-only: `processMerge` and `resolveRecoveredOne` send enth MRs to `processEnthMerge` / `resolveRecoveredEnth` first, and an enth post-merge tag is refused at submit (§8) |
+| `internal/refinery/submititem.go` | already enth-aware: these are the item-vs-branch refusals themselves |
+| `internal/refinery/gatelock.go` `(branch %s)` | guarded by `Branch != ""`, so it never prints empty |
+| `internal/agent/*` (`api.go`, `stranded*.go`, `liveownergate.go`, `spawntarget.go`, `enthgithub.go`), `internal/gitgc`, `internal/strandwatch`, `internal/strandedwork`, `internal/freshen`, `internal/staleness`, `internal/mgcontract` | not an MR's branch: these name a polecat worktree's git branch, a remote ref, or a `--branch` flag, which exist only on git |
 
 ## 8. Tags and release refs (decision 7)
 
