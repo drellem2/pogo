@@ -358,7 +358,13 @@ func (a StrandedAlert) Message() (subject, body string) {
 		// Sent BECAUSE the open-PR check could not answer, which is the direction
 		// it fails on purpose (strandedwork.Finding.CheckOpenPR). If this branch
 		// is a PR awaiting review, that is the first thing to rule out.
-		fmt.Fprintf(&b, "PR check:   could not ask GitHub whether this is an open PR (%s) — reported anyway\n", e)
+		if enthRepoFor(a.Repo) != nil {
+			// enth (slice 9): the probe that failed was the refinery queue's,
+			// since GitHub is never asked about an enth repo.
+			fmt.Fprintf(&b, "MR check:   could not ask the refinery whether it holds an MR for this item (%s) — reported anyway\n", e)
+		} else {
+			fmt.Fprintf(&b, "PR check:   could not ask GitHub whether this is an open PR (%s) — reported anyway\n", e)
+		}
 	}
 	fmt.Fprintf(&b, "Target:     %s\n", a.Finding.Target)
 	fmt.Fprintf(&b, "Unmerged:   %d commit(s)", len(a.Finding.Unmerged))

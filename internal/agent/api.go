@@ -2202,6 +2202,14 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	if createWorktree {
 		enthRepo = enthRepoFor(spawnReq.Repo)
 	}
+	// An enth repo has no PR flow (slice 9, mg-2e9fc; enthgithub.go). Refused
+	// here, before the adoption below and every side effect.
+	if enthRepo != nil {
+		if refusal := enthPRFlowRefusal(*enthRepo, tmplName, spawnReq.Branch); refusal != "" {
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+			return
+		}
+	}
 	// --stranded-adopt on an enth repo continues the item's unlanded stack
 	// (slice 6, mg-30da0). It is resolved from the trailer listing, never
 	// from git's gate: the git gate's findings name branches, which an enth

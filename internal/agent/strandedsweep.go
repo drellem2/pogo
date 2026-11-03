@@ -237,12 +237,19 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 		}
 		// A probe failure leaves f as it was, so the row below still reports it;
 		// see strandedwork.Finding.CheckOpenPR.
-		f.CheckOpenPR(c.SourceRepo, strandedPRProbe)
+		// An enth repo skips the open-PR probe for an open refinery MR
+		// (checkOpenReview, slice 9).
+		r.checkOpenReview(&f, c.SourceRepo, c.WorkItemID, c.Name)
 		if f.Disposition == strandedwork.DispositionAwaitingReview {
 			rep.AwaitingReview++
-			log.Printf("strandedwork: startup sweep found polecat %s's branch %s is the head of open PR #%d "+
-				"(%s) — awaiting review, NOT stranded (mg-dbb75). %s",
-				c.Name, f.Branch, f.PR, f.PRBranch, f.Summary())
+			if f.OpenMR != "" {
+				log.Printf("strandedwork: startup sweep found polecat %s's %s held by the refinery (%s) — "+
+					"NOT stranded (mg-2e9fc). %s", c.Name, f.Branch, f.OpenMR, f.Summary())
+			} else {
+				log.Printf("strandedwork: startup sweep found polecat %s's branch %s is the head of open PR #%d "+
+					"(%s) — awaiting review, NOT stranded (mg-dbb75). %s",
+					c.Name, f.Branch, f.PR, f.PRBranch, f.Summary())
+			}
 			events.Emit(context.Background(), events.Event{
 				EventType:  "work_item_push_awaiting_review",
 				Agent:      "cat-" + c.Name,

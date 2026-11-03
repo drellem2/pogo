@@ -178,6 +178,13 @@ func TestMessagesDiffCat(t *testing.T) {
 	if body := msgs[0].Body; !strings.HasPrefix(body, "Why it is.") || !strings.Contains(body, "Pogo-Item: mg-9") || strings.Contains(body, "feat: thing") {
 		t.Errorf("body = %q, want the message without its subject, trailers included", body)
 	}
+	full, err := b.FullMessages(ctx, s.Revs)
+	if err != nil || len(full) != 1 || full[0].Rev != c {
+		t.Fatalf("FullMessages = %v, %v", full, err)
+	}
+	if m := full[0].Body; !strings.HasPrefix(m, "feat: thing (mg-9)\n\nWhy it is.") || !strings.Contains(m, "Pogo-Item: mg-9") {
+		t.Errorf("full message = %q, want subject, body and trailers", m)
+	}
 	d, err := b.Diff(ctx, vcs.Repo{}, s)
 	if err != nil || strings.Join(d.Paths, ",") != "a.txt,src/b.txt" {
 		t.Errorf("Diff = %v, %v; want a.txt and the deleted src/b.txt", d.Paths, err)

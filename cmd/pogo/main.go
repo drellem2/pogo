@@ -3698,6 +3698,7 @@ The --check mode verifies:
   - Does every installed launchd plist match the plist this build renders?
   - Are required tools installed (git, go, the configured agent harness)?
   - Are repos configured?
+  - Is enth installed (only when a repo is recorded as an enth repo)?
   - Are agent prompts installed?
   - Are there stale work items?
   - Did any one-shot schedule fire with nobody ever answering it?
@@ -3984,6 +3985,18 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				warn("projects", "no repos registered (run 'pogo visit <path>')")
 			} else {
 				pass("projects", fmt.Sprintf("%d repo(s) registered", len(projs)))
+			}
+			// 4b. enth on PATH when any project is an enth repo (O4,
+			// enth-vcs slice 9). No row at all otherwise. See doctorenth.go.
+			if st, detail, applies := enthToolLine(projs, exec.LookPath, enthHelp); applies {
+				switch st {
+				case "fail":
+					fail(enthToolCheckName, detail)
+				case "warn":
+					warn(enthToolCheckName, detail)
+				default:
+					pass(enthToolCheckName, detail)
+				}
 			}
 
 			// 5. Agent prompts installed

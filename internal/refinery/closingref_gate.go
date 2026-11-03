@@ -12,6 +12,8 @@ import (
 
 	"github.com/drellem2/pogo/internal/closingref"
 	"github.com/drellem2/pogo/internal/ghtoken"
+	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
 
 // bodySeparator is a NUL byte. Commit bodies are multi-line, unbounded prose
@@ -199,4 +201,56 @@ func lookupPRBody(wtDir, branch string) (int, string, error) {
 		return 0, "", fmt.Errorf("gh pr view %s: no PR number in %q", branch, strings.TrimSpace(string(out)))
 	}
 	return pr.Number, pr.Body, nil
+}
+
+// changeMessageReader reads enth Changes' whole messages. enthvcs.Backend is
+// the production one (FullMessages).
+type changeMessageReader interface {
+	FullMessages(ctx context.Context, ids []string) ([]vcs.Message, error)
+}
+
+var _ changeMessageReader = enthvcs.Backend{}
+
+// checkEnthClosingRefs is checkClosingRefs for an enth MR (enth-vcs slice 9,
+// mg-2e9fc; docs/design/enth-vcs.md §11). The enth land pipeline (slice 7)
+// calls it on the Changes it is about to land, at the point the git pipeline
+// calls checkClosingRefs, and under the same rules: never skipped on retry,
+// never retryable.
+//
+// It reads the CHANGE MESSAGES, and only them. A message lands on the GitHub
+// mirror verbatim (enth's export writes it), so a `Fixes #N` in one still
+// closes the issue there. There is no PR body to read: an enth repo has no PR
+// flow, and the mirror's PRs are nobody's, so `gh pr view` is not run at all.
+// That is the one difference from git, and it removes a step rather than
+// weakening one.
+//
+// A message that cannot be read is an error, not a clean bill: the same
+// stance commitClosingRefs takes on unreadable history.
+func checkEnthClosingRefs(ctx context.Context, r changeMessageReader, changes []string) error {
+	if len(changes) == 0 {
+		return errors.New("closing-ref check: the MR names no Changes, so there is nothing to judge — " +
+			"refusing rather than reporting an empty stack as clean")
+	}
+	msgs, err := r.FullMessages(ctx, changes)
+	if err != nil {
+		return fmt.Errorf("could not read the messages of %d Change(s) for the closing-ref check: %w", len(changes), err)
+	}
+	if len(msgs) != len(changes) {
+		return fmt.Errorf("closing-ref check: read %d message(s) for %d Change(s) — refusing to judge a partial stack",
+			len(msgs), len(changes))
+	}
+	var report strings.Builder
+	for _, m := range msgs {
+		findings := closingref.Check(m.Body)
+		if len(findings) == 0 {
+			continue
+		}
+		report.WriteString(closingref.Report(closingref.ChangeMessage, "Change "+m.Rev, findings))
+		report.WriteString("\n")
+	}
+	if report.Len() == 0 {
+		return nil
+	}
+	return fmt.Errorf("closing-keyword reference — landing would close issues on GitHub (the Change messages "+
+		"reach the mirror verbatim):\n\n%s", report.String())
 }

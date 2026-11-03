@@ -408,7 +408,22 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 	// Is the work a PR awaiting review (drellem2/pogo#147)? A probe failure
 	// leaves f as it was and the alert below goes out — see
 	// strandedwork.Finding.CheckOpenPR for why that direction is not negotiable.
-	f.CheckOpenPR(a.SourceRepo, strandedPRProbe)
+	// On an enth repo the open-PR probe is skipped and an open refinery MR
+	// answers instead (checkOpenReview, slice 9).
+	r.checkOpenReview(&f, a.SourceRepo, a.WorkItemID, a.Name)
+	if f.Disposition == strandedwork.DispositionAwaitingReview && f.OpenMR != "" {
+		log.Printf("agent %s: %s has %d unlanded Change(s), but the refinery holds %s — awaiting the "+
+			"refinery, NOT stranded, no alert sent (mg-2e9fc). %s",
+			a.Name, f.Branch, len(f.Unmerged), f.OpenMR, f.Summary())
+		events.Emit(context.Background(), events.Event{
+			EventType:  "work_item_push_awaiting_review",
+			Agent:      a.eventAgent(),
+			WorkItemID: a.WorkItemID,
+			Repo:       a.SourceRepo,
+			Details:    awaitingReviewDetails(f, reason, RouteRelease),
+		})
+		return
+	}
 	if f.Disposition == strandedwork.DispositionAwaitingReview {
 		// Logged and emitted, never silent — the mg-1af2 contract above, for the
 		// same reason: a suppression nobody can count is indistinguishable from
@@ -474,7 +489,7 @@ var strandedPRProbe strandedwork.PRProbe = strandedwork.GitHubOpenPR
 // awaitingReviewDetails is the payload of work_item_push_awaiting_review, the
 // event that makes the open-PR suppression countable.
 func awaitingReviewDetails(f strandedwork.Finding, reason, route string) map[string]any {
-	return map[string]any{
+	d := map[string]any{
 		"branch":     f.Branch,
 		"ref":        f.Ref,
 		"origin_ref": f.OriginRef,
@@ -486,6 +501,12 @@ func awaitingReviewDetails(f strandedwork.Finding, reason, route string) map[str
 		"reason":     reason,
 		"route":      route,
 	}
+	if f.OpenMR != "" {
+		// enth only (slice 9): the review is a refinery MR, not a PR. Absent on
+		// every git payload, which is therefore unchanged.
+		d["open_mr"] = f.OpenMR
+	}
+	return d
 }
 
 // addOriginDetails puts the two probes that can only ever REMOVE part of an

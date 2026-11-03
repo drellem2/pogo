@@ -291,6 +291,27 @@ func (b Backend) Messages(ctx context.Context, _ vcs.Repo, s vcs.Submission) ([]
 	return msgs, nil
 }
 
+// FullMessages returns each Change's whole message, subject line included,
+// as git's %B is. The closing-ref gate reads these (R12, enth-vcs slice 9):
+// a GitHub closing keyword in a subject closes the issue as surely as one in
+// the body, and Messages leaves the subject out. On error it also returns
+// the messages it read before the failure.
+func (b Backend) FullMessages(ctx context.Context, ids []string) ([]vcs.Message, error) {
+	var msgs []vcs.Message
+	for _, id := range ids {
+		l, err := b.show(ctx, id)
+		if err != nil {
+			return msgs, err
+		}
+		m, err := decodeB(l.Message)
+		if err != nil {
+			return msgs, err
+		}
+		msgs = append(msgs, vcs.Message{Rev: id, Body: m})
+	}
+	return msgs, nil
+}
+
 type lsLine struct {
 	Type string          `json:"type"`
 	Path json.RawMessage `json:"path"`

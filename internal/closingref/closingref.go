@@ -129,6 +129,11 @@ const (
 	// PullRequestBody is a pull request's description — the text `gh pr create
 	// --body-file` writes and `gh pr view --json body` reads back.
 	PullRequestBody
+	// ChangeMessage is an enth Change's whole message (enth-vcs slice 9). It
+	// reaches the GitHub mirror verbatim through enth's export, so GitHub acts
+	// on it exactly as on a commit message, but it is fixed in enth, not by a
+	// git amend.
+	ChangeMessage
 )
 
 // Finding is one keyword→reference adjacency that GitHub would act on.
@@ -268,6 +273,20 @@ If the closure IS intended, say so per reference in the commit body:
 
 Then amend the message and re-push. The trailer suppresses only the reference
 it names, and stays greppable in git log forever.
+`,
+	ChangeMessage: `
+This text is an enth CHANGE MESSAGE. enth's export writes it onto the GitHub
+mirror verbatim, so GitHub closes those issues when the Change lands there.
+Reflowing the paragraph is NOT a fix — a later wrap puts the words back
+together.
+
+If the closure IS intended, say so per reference in the Change message:
+
+  ` + AckPrefix + ` drellem2/pogo#89 — intentional; <why>
+
+Then record the corrected message as a new Change of the same item (with its
+Pogo-Item trailer) and resubmit. The trailer suppresses only the reference it
+names.
 `,
 	PullRequestBody: `
 This text is a PULL REQUEST BODY. It is not in any commit, so amending and

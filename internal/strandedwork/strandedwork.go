@@ -428,6 +428,13 @@ type Finding struct {
 	// then stays what it was — the finding is REPORTED — for the reason given on
 	// CheckOpenPR.
 	PRProbeError string `json:"pr_probe_error,omitempty"`
+	// OpenMR is set, for DispositionAwaitingReview only, when the review the
+	// work is waiting on is an open merge request in pogo's refinery rather
+	// than a GitHub pull request: an enth repo has no PR flow, so that is the
+	// only place review can be waiting (docs/design/enth-vcs.md §11). It is the
+	// refinery's description of the MR. See CheckOpenMR. PR and PRBranch stay
+	// empty when it is set, and it stays empty on every git finding.
+	OpenMR string `json:"open_mr,omitempty"`
 
 	// WorkItemID is the id recovered from the unmerged commit subjects, when one
 	// is present (commit convention: a trailing "(mg-xxxx)"). Best-effort: it is
@@ -595,6 +602,12 @@ func (f Finding) SummaryIn(c Cell) string {
 				"%s's work a second time, under the wrong authorship",
 			f.Branch, len(f.Unmerged), f.Target, f.Carrier, f.WorkItemID, f.Carrier, f.Branch, f.WorkItemID)
 	case DispositionAwaitingReview:
+		if f.OpenMR != "" {
+			return fmt.Sprintf(
+				"%s has %d unlanded Change(s) on %s, and the refinery already holds them: %s. "+
+					"Nothing is stranded: that MR is what lands them. Do NOT submit them a second time",
+				f.Branch, len(f.Unmerged), f.Target, f.OpenMR)
+		}
 		return fmt.Sprintf(
 			"%s has %d commit(s) %s does not have, and they are on origin as %s, the head of OPEN "+
 				"pull request #%d. Nothing is stranded: the work is durable and awaiting review, and "+
@@ -943,6 +956,40 @@ func (f *Finding) CheckOpenPR(dir string, probe PRProbe) {
 	}
 	if num > 0 {
 		f.PR, f.PRBranch, f.Disposition = num, branch, DispositionAwaitingReview
+	}
+}
+
+// OpenMRProbe reports whether pogo's refinery holds an open merge request
+// for work item item: a non-empty description of it when it does, "" when it
+// does not, and an error when the refinery could not be asked.
+type OpenMRProbe func(item string) (string, error)
+
+// CheckOpenMR is CheckOpenPR for a repo with no pull requests (enth,
+// docs/design/enth-vcs.md §11): the open-PR probe is skipped there, because
+// the GitHub repo is an export mirror whose branches pogo never pushed, and
+// its answer is replaced by "the item has an open MR in the refinery". There
+// is no other place review can be waiting.
+//
+// It reclassifies a DispositionResubmit finding as DispositionAwaitingReview
+// when probe names an open MR for item, and touches nothing else. Unlike
+// CheckOpenPR it does not require Pushed: an enth Change is on enthd the
+// moment it exists, and there is no origin branch to look a PR up by.
+//
+// A PROBE FAILURE KEEPS THE ALERT, for CheckOpenPR's reason: the probe can
+// only ever remove an alert, so an unanswered question must not remove one.
+// The error is recorded on PRProbeError, the field every reporter of a review
+// probe failure already prints.
+func (f *Finding) CheckOpenMR(item string, probe OpenMRProbe) {
+	if f.Disposition != DispositionResubmit || probe == nil || strings.TrimSpace(item) == "" {
+		return
+	}
+	mr, err := probe(item)
+	if err != nil {
+		f.PRProbeError = err.Error()
+		return
+	}
+	if mr != "" {
+		f.OpenMR, f.Disposition = mr, DispositionAwaitingReview
 	}
 }
 
