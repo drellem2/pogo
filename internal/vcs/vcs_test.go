@@ -47,3 +47,58 @@ func TestRefreshUpdatedRendersUnknownBehind(t *testing.T) {
 		t.Errorf("enth rendering = %q", got)
 	}
 }
+
+func ids(st []Change) string {
+	var s []string
+	for _, c := range st {
+		s = append(s, c.ID)
+	}
+	return strings.Join(s, ">")
+}
+
+func TestStacks(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []Change
+		want []string
+	}{
+		{"none", nil, nil},
+		{"one change", []Change{{ID: "a", Base: "T"}}, []string{"a"}},
+		{"a stack of three, listed oldest first", []Change{{ID: "a", Base: "T"}, {ID: "b", Base: "a"}, {ID: "c", Base: "b"}}, []string{"a>b>c"}},
+		{"a stack listed out of order", []Change{{ID: "c", Base: "b"}, {ID: "a", Base: "T"}, {ID: "b", Base: "a"}}, []string{"a>b>c"}},
+		{"two workers, two stacks", []Change{{ID: "a", Base: "T"}, {ID: "x", Base: "T"}, {ID: "b", Base: "a"}}, []string{"a>b", "x"}},
+		{"a fork is two stacks sharing a prefix", []Change{{ID: "a", Base: "T"}, {ID: "b", Base: "a"}, {ID: "c", Base: "a"}}, []string{"a>b", "a>c"}},
+		{"a gap (middle Change missing) is two stacks", []Change{{ID: "a", Base: "T"}, {ID: "c", Base: "b"}}, []string{"a", "c"}},
+		{"a duplicate line is one Change", []Change{{ID: "a", Base: "T"}, {ID: "a", Base: "T"}}, []string{"a"}},
+		{"a root Change (no base)", []Change{{ID: "r"}}, []string{"r"}},
+	}
+	for _, c := range cases {
+		var got []string
+		for _, st := range Stacks(c.in) {
+			got = append(got, ids(st))
+		}
+		if strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("%s: Stacks = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestChangeTrailerIsCaseInsensitive(t *testing.T) {
+	c := Change{Trailers: []Trailer{{Key: "pogo-item", Value: "mg-1"}, {Key: "Pogo-Item", Value: "mg-2"}}}
+	if c.Trailer(TrailerItem) != "mg-1" || c.Trailer(TrailerWorker) != "" {
+		t.Errorf("Trailer = %q/%q", c.Trailer(TrailerItem), c.Trailer(TrailerWorker))
+	}
+}
+
+func TestAmbiguousWorkErrorNamesEachStacksWorker(t *testing.T) {
+	e := &AmbiguousWorkError{Item: "mg-1", Stacks: []Submission{
+		{Worker: "p1", Changes: []Change{{ID: "a"}, {ID: "b"}}},
+		{Changes: []Change{{ID: "x"}}},
+	}}
+	msg := e.Error()
+	for _, want := range []string{"mg-1", "2 stacks", "worker p1, 2 Change(s), top b", "worker (no Pogo-Worker trailer), 1 Change(s), top x"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message lacks %q:\n%s", want, msg)
+		}
+	}
+}

@@ -3,8 +3,9 @@
 // Slice 4 (mg-160e8) made selecting it real with every operation answering
 // vcs.ErrUnsupported. Slice 5 (mg-cc5cd) gave Workspaces a body
 // (workspaces.go): polecat checkouts through the repo's enthd, their excludes,
-// Dirty via `enth status`, Remove, Describe, Root and Refresh. Work, Lander and
-// Refs are still inert until slices 6-7.
+// Dirty via `enth status`, Remove, Describe, Root and Refresh. Slice 6
+// (mg-30da0) gave Work one (work.go): the trailer listing, stacks, land
+// state from land records. Lander and Refs are still inert until slice 7.
 //
 // Inert is the point for what is not built. A repo whose project record says
 // `"vcs": "enth"` must not fall through to the git backend: git would act on a
@@ -37,27 +38,6 @@ func (b Backend) unsupported(op string) error {
 }
 
 func (Backend) Kind() vcs.Kind { return vcs.Enth }
-
-// Work
-
-func (b Backend) Find(ctx context.Context, repo vcs.Repo, q vcs.WorkQuery) ([]vcs.Submission, error) {
-	return nil, b.unsupported("find work")
-}
-func (b Backend) State(ctx context.Context, repo vcs.Repo, s vcs.Submission, target string) (vcs.WorkState, error) {
-	return vcs.WorkState{}, b.unsupported("work state")
-}
-func (b Backend) Messages(ctx context.Context, repo vcs.Repo, s vcs.Submission) ([]vcs.Message, error) {
-	return nil, b.unsupported("messages")
-}
-func (b Backend) Diff(ctx context.Context, repo vcs.Repo, s vcs.Submission) (vcs.Diff, error) {
-	return vcs.Diff{}, b.unsupported("diff")
-}
-func (b Backend) Cat(ctx context.Context, repo vcs.Repo, rev, path string) ([]byte, error) {
-	return nil, b.unsupported("cat")
-}
-func (b Backend) Fetch(ctx context.Context, repo vcs.Repo) error {
-	return b.unsupported("fetch")
-}
 
 // Lander
 

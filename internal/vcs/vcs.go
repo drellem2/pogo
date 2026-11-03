@@ -55,6 +55,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 )
 
 // Kind names a backend. git is the zero value's meaning: a repo with no
@@ -407,6 +408,15 @@ type WorkQuery struct {
 
 // Submission names one worker's output, or specific revisions of it.
 type Submission struct {
+	// Item and Worker are the work item and the worker the submission belongs
+	// to, as its Pogo-Item / Pogo-Worker trailers name them (enth). git leaves
+	// both empty: its submission is named by Branch.
+	Item   string
+	Worker string
+	// Changes is an enth submission's stack, bottom first: each Change's Base
+	// is the one before it, and the last is the top (§5, "What a submission
+	// is"). git leaves it empty.
+	Changes []Change
 	// Branch is the worker's branch name (git: polecat-<name>).
 	Branch string
 	// Ref is where the backend read the submission from. For git it is a full
@@ -415,6 +425,128 @@ type Submission struct {
 	Ref string
 	// Revs names specific commits, for Messages and Diff.
 	Revs []string
+}
+
+// The trailers that tie an enth Change to pogo's work (§5). They replace the
+// polecat-<name> branch as the durable link between a worker and its output.
+const (
+	TrailerItem   = "Pogo-Item"
+	TrailerWorker = "Pogo-Worker"
+)
+
+// Trailer is one key/value trailer of a Change's message.
+type Trailer struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// Change is one enth Change as the trailer listing reports it (enth's
+// `enth changes`, mg-10079).
+type Change struct {
+	ID string `json:"id"`
+	// Base is the first parent; "" for a root Change.
+	Base string `json:"base,omitempty"`
+	// Entry is the log entry that stored the Change.
+	Entry       int    `json:"entry"`
+	AuthorName  string `json:"author_name,omitempty"`
+	AuthorEmail string `json:"author_email,omitempty"`
+	// Created is the committer's time (S6: the age of the work).
+	Created  time.Time `json:"created"`
+	Trailers []Trailer `json:"trailers,omitempty"`
+	// Landed is the id a land record says this Change landed as; "" when no
+	// land record names it. It is read from land records, never inferred
+	// from absence (E3).
+	Landed string `json:"landed,omitempty"`
+}
+
+// Trailer returns the value of the first trailer named key (ASCII
+// case-insensitive, as enth and git match trailer keys), or "".
+func (c Change) Trailer(key string) string {
+	for _, t := range c.Trailers {
+		if strings.EqualFold(t.Key, key) {
+			return t.Value
+		}
+	}
+	return ""
+}
+
+// Stacks orders a listing of Changes into stacks: chains in which each
+// Change's Base is the one before it, bottom first. A Change whose Base is
+// not in the listing starts a stack. A Change with two listed children forks,
+// and each branch of the fork is a stack of its own (sharing the prefix), so a
+// listing is ONE submission exactly when Stacks returns one stack. Order is
+// the listing's order (enth lists oldest first), so the answer is stable.
+func Stacks(cs []Change) [][]Change {
+	byID := make(map[string]int, len(cs))
+	for i, c := range cs {
+		if _, dup := byID[c.ID]; !dup {
+			byID[c.ID] = i
+		}
+	}
+	children := map[string][]int{}
+	var roots []int
+	for i, c := range cs {
+		if byID[c.ID] != i {
+			continue // a duplicate line names the same Change
+		}
+		if _, ok := byID[c.Base]; ok && c.Base != "" && c.Base != c.ID {
+			children[c.Base] = append(children[c.Base], i)
+		} else {
+			roots = append(roots, i)
+		}
+	}
+	var out [][]Change
+	var walk func(i int, prefix []Change)
+	walk = func(i int, prefix []Change) {
+		path := append(append([]Change(nil), prefix...), cs[i])
+		kids := children[cs[i].ID]
+		if len(kids) == 0 {
+			out = append(out, path)
+			return
+		}
+		for _, k := range kids {
+			walk(k, path)
+		}
+	}
+	for _, r := range roots {
+		walk(r, nil)
+	}
+	return out
+}
+
+// ErrNoWork means a listing found no unlanded work for the query: nothing
+// would be delivered (the enth form of mg-c184d's "carries no commits ahead
+// of the target").
+var ErrNoWork = errors.New("vcs: no unlanded work")
+
+// AmbiguousWorkError is a listing that forms more than one stack (§5): two
+// workers on one item both produced work, or one worker forked. pogo does
+// not guess which to land; the error names every stack so a human chooses.
+type AmbiguousWorkError struct {
+	Item   string
+	Worker string
+	Stacks []Submission
+}
+
+func (e *AmbiguousWorkError) Error() string {
+	var b strings.Builder
+	who := e.Item
+	if e.Worker != "" {
+		who += " (worker " + e.Worker + ")"
+	}
+	fmt.Fprintf(&b, "vcs: the unlanded Changes of %s form %d stacks, not one: refusing to guess which is the submission", who, len(e.Stacks))
+	for i, s := range e.Stacks {
+		worker := s.Worker
+		if worker == "" {
+			worker = "(no " + TrailerWorker + " trailer)"
+		}
+		top := ""
+		if n := len(s.Changes); n > 0 {
+			top = s.Changes[n-1].ID
+		}
+		fmt.Fprintf(&b, "\n  stack %d: worker %s, %d Change(s), top %s", i+1, worker, len(s.Changes), top)
+	}
+	return b.String()
 }
 
 // Commit is one commit of a submission as State reports it.
