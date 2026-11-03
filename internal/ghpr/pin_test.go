@@ -53,8 +53,16 @@ func TestParseGitHubRemote(t *testing.T) {
 
 // loggingGH puts a stub gh first on PATH that records its argv (one line per
 // call) and then runs script. It returns the log path.
+//
+// It also pins a fake GH_TOKEN. Without an ambient credential, ghtoken's
+// per-call fallback chain runs `gh auth token` — through THIS stub — and the
+// log gains an "auth token" line ahead of the call under test. That is the
+// refinery gate's environment (pogod holds no GH_TOKEN, mg-37183, and this
+// package's sandbox HOME hides the user shell's), so a test that passed in a
+// polecat failed at merge.
 func loggingGH(t *testing.T, script string) string {
 	t.Helper()
+	t.Setenv("GH_TOKEN", "ghp_pin_test_fake_00000000000000000000000")
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "gh.log")
 	body := "#!/bin/sh\necho \"$@\" >> '" + logPath + "'\n" + script + "\n"
