@@ -171,3 +171,36 @@ func TestAnswerOutcome(t *testing.T) {
 		}
 	}
 }
+
+// TestParseGitHubRemoteNeverQuotesCredentials: a parse error lands in
+// Answer.Unpinned, then in the stranded event log and alert mail. Token-in-URL
+// origins are the normal shape of GitHub App and CI clones, so no error may
+// carry the userinfo — whichever refusal path the URL takes.
+func TestParseGitHubRemoteNeverQuotesCredentials(t *testing.T) {
+	const secret = "FAKESECRET0000"
+	for _, url := range []string{
+		"https://x-access-token:" + secret + "@github.com/o",
+		"https://x-access-token:" + secret + "@github.com",
+		"https://x-access-token:" + secret + "@github.com/o/r/extra",
+		"https://" + secret + "@ghe.example.com/o/r.git",
+		"ssh://git:" + secret + "@github.com/o",
+		"git:" + secret + "@github-work:o/r.git",
+	} {
+		_, err := ParseGitHubRemote(url)
+		if err == nil {
+			t.Errorf("ParseGitHubRemote(%q): want an error", url)
+			continue
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error for a credentialed URL quotes the secret: %v", err)
+		}
+	}
+	// Positive control: the same URL shape with a well-formed path parses, so
+	// the cases above fail for their path and not for the userinfo.
+	if got, err := ParseGitHubRemote("https://x-access-token:" + secret + "@github.com/o/r.git"); err != nil || got != "o/r" {
+		t.Errorf("credentialed well-formed URL = (%q, %v), want o/r", got, err)
+	}
+	if got := redactURL("https://u:p@github.com/o"); got != "https://<redacted>@github.com/o" {
+		t.Errorf("redactURL = %q", got)
+	}
+}
