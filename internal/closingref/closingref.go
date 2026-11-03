@@ -273,7 +273,10 @@ it names, and stays greppable in git log forever.
 This text is a PULL REQUEST BODY. It is not in any commit, so amending and
 re-pushing changes nothing — edit the pull request itself:
 
-  gh pr edit <number> --body-file -
+  gh pr edit -R "$(pogo origin-repo)" <number> --body-file -
+
+(The -R is origin's repository, the one the refinery read this body from; an
+unpinned edit can let gh pick an upstream remote and edit a different PR.)
 
 "Refs owner/repo#N" is the safe default and costs one manual close on the days
 the PR really does discharge the whole issue. "Resolves" is unsafe in a case

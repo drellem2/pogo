@@ -122,7 +122,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 5. **Open a pull request — do NOT submit to the refinery.** This replaces the `pogo refinery submit` step from the internal track. Title comes from your ticket; the body must link the GitHub issue (from the `gh:` ref in your ticket) and the approved triage recommendation:
 
    ```bash
-   gh pr create --base {{if .Branch}}{{.Branch}}{{else}}main{{end}} --head "$BRANCH" \
+   ORIGIN_REPO=$(pogo origin-repo) || exit 1   # refuse: gh reads an empty -R as no -R at all
+   gh pr create -R "$ORIGIN_REPO" --base {{if .Branch}}{{.Branch}}{{else}}main{{end}} --head "$BRANCH" \
        --title "<work item title>" \
        --body-file - <<'EOF'
    <summary of the change>
@@ -133,6 +134,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    Work item: {{.Id}}
    EOF
    ```
+
+   **Every `gh pr` call here is pinned with `-R "$ORIGIN_REPO"`, and that is not decoration.** Left to itself, gh picks the repository from a `gh repo set-default` or an `upstream` remote ahead of origin, so in such a clone it opens — or finds, or comments on — a PR in a different repository from the one pogod asks about. pogod's own PR lookups are pinned to origin (drellem2/pogo#259) and `pogo origin-repo` prints exactly the repository they pin to, so the PR you open is the one its stranded-work check finds. The `|| exit 1` on the `ORIGIN_REPO=` line is load-bearing: gh reads `-R ""` as no `-R` at all, so without it a failed derivation would silently run the very unpinned call this replaces. If `pogo origin-repo` refuses because origin is not a github.com URL (an ssh alias such as `github-work`, an Enterprise host), pogod's own lookups run unpinned in that clone, so delete the `ORIGIN_REPO=` line and the `-R` to match them and say so in your announcement (mg-42fe8).
 
    **Cite the issue as `Refs`, not `Resolves` — and this is not a style preference.** A closing keyword (`Resolves`/`Closes`/`Fixes`) in a PR body closes the **whole** issue the moment the PR merges. GitHub has no way to close part of one. On this track, splitting an issue into a landed part and a deliberately-deferred part is routine — that is what your triage recommendation often scopes you to — and the parenthetical people reach for scopes nothing: a body reading `Resolves #N (item 1)` closed an entire issue here once already, on an external reporter's thread. `Refs` costs one manual close on the days you really did discharge the whole issue; `Resolves` costs a reopen and an explanation to a stranger on the days you did not. The asymmetry is not close.
 
@@ -146,7 +149,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 
    The refinery inspects the PR body as well as your commit messages (`internal/refinery/closingref_gate.go`), so an unacknowledged closing keyword **fails the merge** — at the {{.Coordinator}}'s submit, long after your review loop closed. The ack is not a formality that silences a check; it is the sentence a reader finds later when they ask who decided to close a stranger's issue.
 
-   Capture the PR URL/number from the output — you need it for the announcement mail and for `gh pr comment` in the review loop. If a PR for this branch already exists (`gh pr view "$BRANCH"` succeeds), do not open a second one — reuse it. To change the body later, `gh pr edit <number> --body-file -`: it is not in any commit, so amending and re-pushing does nothing to it.
+   Capture the PR URL/number from the output — you need it for the announcement mail and for `gh pr comment` in the review loop. If a PR for this branch already exists (`gh pr view -R "$(pogo origin-repo)" "$BRANCH"` succeeds), do not open a second one — reuse it. To change the body later, `gh pr edit -R "$(pogo origin-repo)" <number> --body-file -`: it is not in any commit, so amending and re-pushing does nothing to it.
 
    **Do NOT `mg done` {{.Id}} here — the item stays claimed through the whole review.** This step is where that decision gets made, because this is where closing it feels earned: the code is written, the PR exists, your deliverable is visible. Closing it now is not early bookkeeping, it is how you disappear. pogod's done-reaper stops any {{.Worker}} whose work item reads terminal once its PTY has been quiet two minutes (`cmd/pogod/donereap.go`), and a between-rounds wait is far longer than that — measured over 17 real rounds in this fleet's mail: median 8m, longest 20m, and 15 of the 17 above the two-minute grace. So a self-closed builder is gone before the first findings mail lands, the reviewer is left with no counterparty, and the round dies leaving nothing that says why. That has already happened to a review {{.Worker}} here (drellem2/pogo#131). {{.Id}} gets closed for you at merge; step 8 states the single exception.
 
@@ -169,7 +172,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
 7. **Work the modify ↔ review loop.** Stay alive; the reviewer {{.Worker}} mails you its findings directly (the step-2 pointer surfaces them). Each round:
    1. **Fix** — address every finding; for findings you believe are wrong, don't silently skip them: say why in the PR comment and the reply mail.
    2. **Push** — commit and `git push origin "$BRANCH"`; the PR updates automatically.
-   3. **Comment on the PR** — `gh pr comment <number> --body "..."` summarizing what changed per finding (with commit SHAs), so the round is visible to humans on GitHub.
+   3. **Comment on the PR** — `gh pr comment -R "$(pogo origin-repo)" <number> --body "..."` summarizing what changed per finding (with commit SHAs), so the round is visible to humans on GitHub.
    4. **Mail the reviewer back** — tell them the round is ready for re-review.
 
    Findings flow directly between you and the reviewer; **verdict transitions (pass, fail-final, escalation) flow from the reviewer to the {{.Coordinator}}** — don't announce verdicts yourself. The reviewer stops after 3 rounds without a pass and escalates through the {{.Coordinator}}; if that happens, hold and wait for instructions.

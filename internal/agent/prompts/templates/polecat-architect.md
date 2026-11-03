@@ -114,7 +114,7 @@ Shapes A/B are the common case: your worktree is a **read-only vantage point** �
 
 Your worktree at `{{.WorktreeDir}}` is a git worktree that **shares the `.git` infrastructure with the source repo at `{{.Repo}}`**. That means:
 
-- `git log main`, `git diff main..HEAD`, `git show main:path/to/file`, and `gh pr diff <n>` all work from inside your worktree. You do **not** need to `cd` to `{{.Repo}}` to look at main, other branches, or prior commits.
+- `git log main`, `git diff main..HEAD`, `git show main:path/to/file`, and `gh pr diff -R "$(pogo origin-repo)" <n>` all work from inside your worktree. You do **not** need to `cd` to `{{.Repo}}` to look at main, other branches, or prior commits.
 - **Never `cd {{.Repo}}`.** The source repo may have uncommitted user changes. Running `git stash`, `go test`, `go install`, `git pull`, or `git checkout` there can corrupt user state.
 - The `Source repo` value above is a label for `pogo refinery submit --repo=...` (shape D only). For shapes A/B you only read.
 
@@ -221,12 +221,14 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
 {{if .Branch}}
      **Your target `{{.Branch}}` is not the repo's default branch, so the merge is a step, not completion.** The refinery classifies it as PR flow: pogod will not mark your item done and will not stop you (mg-7746), because the deliverable is the pull request from `{{.Branch}}` to the default branch and nobody else opens it. Open it yourself, reusing an open one if another {{.Worker}} already landed on this branch:
      ```bash
-     BASE=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
-     gh pr list --head {{.Branch}} --base "$BASE" --state open --json url -q '.[0].url'
+     ORIGIN_REPO=$(pogo origin-repo) || exit 1   # refuse: gh reads an empty -R as no -R at all
+     BASE=$(gh repo view "$ORIGIN_REPO" --json defaultBranchRef -q .defaultBranchRef.name)
+     gh pr list -R "$ORIGIN_REPO" --head {{.Branch}} --base "$BASE" --state open --json url -q '.[0].url'
      ```
      If that prints a URL, that is your PR — reuse it, do not open a second one. If it prints nothing, open it. The body goes in on **stdin under a quoted heredoc**, never as an inline double-quoted `--body`: the shell expands that before `gh` ever sees it, and `<<'EOF'` is what keeps backticks and `$`-signs literal (mg-d91f).
      ```bash
-     gh pr create --base "$BASE" --head {{.Branch}} \
+     ORIGIN_REPO=$(pogo origin-repo) || exit 1   # refuse: gh reads an empty -R as no -R at all
+     gh pr create -R "$ORIGIN_REPO" --base "$BASE" --head {{.Branch}} \
          --title "<what the branch delivers>" \
          --body-file - <<'EOF'
      <what this branch delivers>
@@ -235,6 +237,8 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
      EOF
      ```
      Keep the `--title` plain prose — no backticks and no `$`, which the shell expands even inside double quotes. If you want either, assign the title to a single-quoted variable first and pass that.
+
+     **Every `gh` call in this step is pinned with `-R "$ORIGIN_REPO"`, and that is not decoration.** Left to itself, gh picks the repository from a `gh repo set-default` or an `upstream` remote ahead of origin, so in such a clone it opens — or finds, or comments on — a PR in a different repository from the one pogod asks about. pogod's own PR lookups are pinned to origin (drellem2/pogo#259) and `pogo origin-repo` prints exactly the repository they pin to, so the PR you open is the one its stranded-work check finds. The `|| exit 1` on the `ORIGIN_REPO=` line is load-bearing: gh reads `-R ""` as no `-R` at all, so without it a failed derivation would silently run the very unpinned call this replaces. If `pogo origin-repo` refuses because origin is not a github.com URL (an ssh alias such as `github-work`, an Enterprise host), pogod's own lookups run unpinned in that clone, so delete the `ORIGIN_REPO=` line and the `-R` to match them and say so in your mail to the {{.Coordinator}} (mg-42fe8).
 
      **Capture the URL** — the one `gh pr create` printed, or the one you reused — and set `PR=<that url>` before the `mg done` in step 5. An unset `$PR` there records `"pr": ""` on the exact path that opened a PR, which is a sidecar asserting a deliverable it does not have (the mg-c8d5 defect, one file over).
 

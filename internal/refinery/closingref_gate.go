@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/drellem2/pogo/internal/closingref"
+	"github.com/drellem2/pogo/internal/ghpr"
 	"github.com/drellem2/pogo/internal/ghtoken"
 )
 
@@ -169,7 +170,11 @@ func prBodyClosingRefs(wtDir, branch string) string {
 func lookupPRBody(wtDir, branch string) (int, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), prLookupTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch, "--json", "number,body")
+	// Pinned to origin like the refinery's other PR calls (lookupPR, the
+	// close): unpinned, gh could read the body of a PR in an upstream remote
+	// while the close after the merge acts on origin's (mg-42fe8).
+	args, _, _ := ghpr.PinToOrigin(ctx, wtDir, []string{"pr", "view", branch, "--json", "number,body"})
+	cmd := exec.CommandContext(ctx, "gh", args...)
 	cmd.Dir = wtDir
 	cmd.Env = ghtoken.ChildEnvContext(ctx, append(os.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1"))
 	out, err := cmd.Output()
