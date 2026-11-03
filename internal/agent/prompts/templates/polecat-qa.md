@@ -21,7 +21,20 @@ You are an ephemeral QA {{.Worker}} (a disposable worker agent). Your job is **v
 {{.Body}}
 
 ## Working in your worktree
+{{if eq .VCS "enth"}}
+Your workspace at `{{.WorktreeDir}}` is an **enth checkout** of `{{.EnthRepo}}` on
+`{{.EnthRemote}}`, not a git worktree. There is no `.git` here and no branch: `git`
+commands do not work in this directory. That means:
 
+- Read the trunk and its history through enthd, from this directory: `enth query log -n 20`,
+  `enth query cat <path>` and `enth query ls -r` (add `--rev <id>` for any other revision),
+  `enth query grep <pattern>`. pogod put `ENTH_REMOTE`, `ENTH_REPO` and an identity in
+  your environment, so every `enth` verb reaches `{{.EnthRepo}}` without flags.
+- **Never `cd {{.Repo}}`.** It is the user's own checkout and may hold their uncommitted
+  edits. Run everything from this workspace. To verify the implementation, check its Changes out into a scratch
+  directory (step 4 below) instead of changing into anyone else's.
+- The `Source repo` value above is for the `pogo refinery submit --repo=...`
+  argument only. Treat it as a label, not a directory to enter.{{else}}
 Your worktree at `{{.WorktreeDir}}` is a git worktree that **shares the
 `.git` infrastructure with the source repo at `{{.Repo}}`**. That means:
 
@@ -35,7 +48,7 @@ Your worktree at `{{.WorktreeDir}}` is a git worktree that **shares the
   behavior on a specific branch, fetch and check it out from this worktree
   (step 4 below) instead of changing directory.
 - The `Source repo` value above is for the `pogo refinery submit --repo=...`
-  argument only. Treat it as a label, not a directory to enter.
+  argument only. Treat it as a label, not a directory to enter.{{end}}
 
 ## Protocol
 
@@ -94,19 +107,41 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```bash
    mg show <source-work-item-id>
    ```
-
+{{if eq .VCS "enth"}}
+4. **Check out the source work.** There is no branch: the implementation is the stack of unlanded Changes carrying the source item's `Pogo-Item` trailer. Check its top out into a scratch directory and run everything below there:
+   ```bash
+   SRC=<source-work-item-id>
+   enth changes --unlanded --trailer Pogo-Item="$SRC" > /tmp/{{.Id}}-stack.jsonl
+   TOP=$(jq -rs 'map(.base) as $b | map(select(.id as $i | $b | any(.[]; . == $i) | not)) | .[].id' /tmp/{{.Id}}-stack.jsonl)
+   echo "$TOP"    # exactly ONE id
+   QA_DIR=$(mktemp -d)/src
+   enth checkout "$TOP" "$QA_DIR"
+   cd "$QA_DIR"
+   ```
+   The listing is every unlanded Change carrying `Pogo-Item=<source-work-item-id>`, oldest first, and `$TOP` is the one
+   no other listed Change is based on. **If it prints no id, or more than one, stop** — nothing is
+   submitted, or two workers' stacks exist for one item, and either way the {{.Coordinator}} has to say
+   which work you verify. Mail it the listing. An enth checkout cannot be re-pointed: on a later round, run
+   the same lines again into a new directory. `$QA_DIR` is a scratch copy outside `~/.pogo` — never edit
+   in it, and never in the builder's workspace.{{else}}
 4. **Check out the source branch.** Switch to the branch that contains the implementation you are verifying — **naming `origin/`, so the command cannot pick a different commit from the one the prose describes** (mg-7537):
    ```bash
    git fetch origin
    git checkout -B <source-branch> --no-track "origin/<source-branch>"
    ```
-   A bare `git checkout <source-branch>` resolves to a *local* branch of that name when one exists, and only falls back to origin when it does not. Your worktree shares its `.git` with the source repo, so a local branch of that name may well exist and may be behind what was pushed — in which case you verify a commit that is not the implementation, and nothing says so. `-B` resets it to origin's tip instead. Keep `--no-track` (it stops your upstream being set to somebody else's branch) and stay on a **named** branch rather than detaching: the deploy drain reads the worktree's branch name and treats `unknown` as a hold (mg-f0bf). You never push here, so overwriting the local `<source-branch>` costs nothing.
-
+   A bare `git checkout <source-branch>` resolves to a *local* branch of that name when one exists, and only falls back to origin when it does not. Your worktree shares its `.git` with the source repo, so a local branch of that name may well exist and may be behind what was pushed — in which case you verify a commit that is not the implementation, and nothing says so. `-B` resets it to origin's tip instead. Keep `--no-track` (it stops your upstream being set to somebody else's branch) and stay on a **named** branch rather than detaching: the deploy drain reads the worktree's branch name and treats `unknown` as a hold (mg-f0bf). You never push here, so overwriting the local `<source-branch>` costs nothing.{{end}}
+{{if eq .VCS "enth"}}
+5. **Review the changes.** Understand what was changed, against the trunk:
+   ```bash
+   enth query log --rev "$TOP" --since @    # the Changes the stack adds over the trunk
+   diff -ru -x .enth -x .claude {{.WorktreeDir}} "$QA_DIR"    # your checkout is the trunk as of your spawn
+   ```
+{{else}}
 5. **Review the changes.** Understand what was changed. Compare against `origin/main`, for the same reason — the local `main` in this worktree is whatever the shared repo last left it at, which is not necessarily what the branch was built on:
    ```bash
    git log --oneline origin/main..<source-branch>
    git diff origin/main...<source-branch>
-   ```
+   ```{{end}}
 
 6. **Run the test suite.** Execute the project's tests and confirm they pass:
    ```bash

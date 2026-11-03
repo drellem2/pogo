@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"text/template"
+	"text/template/parse"
 	"time"
 
 	"github.com/drellem2/pogo/internal/config"
@@ -309,7 +310,31 @@ type TemplateVars struct {
 	// claim.
 	WorkerCores int
 	HostCores   int
+
+	// VCS is the version-control system of the workspace this worker stands
+	// in: "git" or "enth" (docs/design/enth-vcs.md §12, slice 11). Templates
+	// branch on it inside themselves — `{{if eq .VCS "enth"}}…{{else}}…{{end}}`
+	// — with the git text as the else arm, so a render with VCS "" or "git" is
+	// byte-identical to the template before the enth blocks existed. Left
+	// empty by callers, it is filled with "git" at expansion time.
+	//
+	// It is set to "enth" only for a spawn that makes an enth checkout, and
+	// such a spawn is refused when the resolved template never references
+	// .VCS (TemplateBranchesOnVCS): a deployed template from before the enth
+	// blocks would hand the worker a git protocol it cannot follow.
+	VCS string
+	// EnthRemote and EnthRepo are the enthd endpoint and repo name of an enth
+	// workspace (the project record's enth block), for the enth blocks' prose.
+	// Empty for git.
+	EnthRemote string
+	EnthRepo   string
 }
+
+// VCS values for TemplateVars.VCS.
+const (
+	TemplateVCSGit  = "git"
+	TemplateVCSEnth = "enth"
+)
 
 // withDefaults returns vars with Coordinator (and CoordinatorTitle) defaulted
 // from the process-wide coordinator name, Worker (and WorkerTitle) from the
@@ -341,7 +366,81 @@ func withDefaults(vars TemplateVars) TemplateVars {
 	if vars.ClaimRestampCmd == "" {
 		vars.ClaimRestampCmd = claimRestampCmdFor(vars.Id)
 	}
+	if vars.VCS == "" {
+		vars.VCS = TemplateVCSGit
+	}
 	return vars
+}
+
+// TemplateBranchesOnVCS reports whether a template body references .VCS
+// anywhere in its actions (an `{{if eq .VCS "enth"}}` block, or any other use
+// of the field). It reads the parse tree, not the text, so the string ".VCS"
+// in prose does not count and a reference inside any action does.
+//
+// It is the spawn refusal of docs/design/enth-vcs.md §12: the templates under
+// ~/.pogo/agents/templates are installed copies that may predate the enth
+// blocks or carry local edits, and such a copy renders its git text for an
+// enth repo. pogod refuses that spawn rather than give a worker a git protocol
+// in a directory with no .git.
+func TemplateBranchesOnVCS(body string) (bool, error) {
+	tmpl, err := template.New("vcs-probe").Parse(body)
+	if err != nil {
+		return false, err
+	}
+	for _, t := range tmpl.Templates() {
+		if t.Tree != nil && nodeReferencesField(t.Tree.Root, "VCS") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func nodeReferencesField(n parse.Node, field string) bool {
+	switch n := n.(type) {
+	case nil:
+		return false
+	case *parse.ListNode:
+		if n == nil {
+			return false
+		}
+		for _, c := range n.Nodes {
+			if nodeReferencesField(c, field) {
+				return true
+			}
+		}
+	case *parse.ActionNode:
+		return nodeReferencesField(n.Pipe, field)
+	case *parse.PipeNode:
+		if n == nil {
+			return false
+		}
+		for _, c := range n.Cmds {
+			if nodeReferencesField(c, field) {
+				return true
+			}
+		}
+	case *parse.CommandNode:
+		for _, a := range n.Args {
+			if nodeReferencesField(a, field) {
+				return true
+			}
+		}
+	case *parse.FieldNode:
+		return len(n.Ident) > 0 && n.Ident[0] == field
+	case *parse.VariableNode: // $.VCS
+		return len(n.Ident) > 1 && n.Ident[0] == "$" && n.Ident[1] == field
+	case *parse.ChainNode:
+		return nodeReferencesField(n.Node, field)
+	case *parse.IfNode:
+		return nodeReferencesField(n.Pipe, field) || nodeReferencesField(n.List, field) || nodeReferencesField(n.ElseList, field)
+	case *parse.RangeNode:
+		return nodeReferencesField(n.Pipe, field) || nodeReferencesField(n.List, field) || nodeReferencesField(n.ElseList, field)
+	case *parse.WithNode:
+		return nodeReferencesField(n.Pipe, field) || nodeReferencesField(n.List, field) || nodeReferencesField(n.ElseList, field)
+	case *parse.TemplateNode:
+		return nodeReferencesField(n.Pipe, field)
+	}
+	return false
 }
 
 // ResolveCrewPrompt returns the path to a crew agent's prompt file.

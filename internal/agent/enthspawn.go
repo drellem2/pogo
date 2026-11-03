@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/drellem2/pogo/internal/strandedwork"
@@ -194,4 +195,49 @@ func createEnthPolecatWorkspace(e vcs.EnthRepo, sourceRepo, dir, target, adoptAt
 		}
 	}
 	return ws, ref, nil
+}
+
+// enthTemplateRefusal is the spawn refusal of §12 (slice 11, mg-7c936): an
+// enth workspace needs a template that branches on .VCS. The body checked is
+// the one the worker would be rendered from — the resolved template plus its
+// drop-ins — because that is what reaches the worker, and an installed copy
+// under ~/.pogo/agents/templates can predate the enth blocks. Such a template
+// renders its git protocol (git commit, git push, presubmit_check) for a
+// directory with no .git, so the spawn is refused before any side effect
+// rather than dispatched into a worker that cannot follow its own prompt.
+//
+// "" means the template branches and the spawn proceeds.
+func enthTemplateRefusal(tmplPath string, e vcs.EnthRepo) string {
+	body, err := renderableTemplateBody(tmplPath)
+	if err == nil {
+		var ok bool
+		ok, err = TemplateBranchesOnVCS(body)
+		if ok {
+			return ""
+		}
+		if err == nil {
+			return fmt.Sprintf("refusing to spawn onto enth repo %s: the template %s (with its drop-ins) never "+
+				"references .VCS, so it would hand the worker its git protocol — git commit, git push, "+
+				"presubmit_check — in an enth checkout with no .git (docs/design/enth-vcs.md §12). It is most "+
+				"likely an installed copy from before the enth blocks: reinstall the prompts (pogo agent prompt "+
+				"install), or add the enth blocks to a locally edited copy. Nothing was dispatched",
+				e.Repo, tmplPath)
+		}
+	}
+	return fmt.Sprintf("refusing to spawn onto enth repo %s: cannot tell whether the template %s branches on "+
+		".VCS: %v. Nothing was dispatched", e.Repo, tmplPath, err)
+}
+
+// renderableTemplateBody is the text ExpandTemplate parses: the template's
+// body with frontmatter stripped, plus its drop-ins.
+func renderableTemplateBody(tmplPath string) (string, error) {
+	_, body, err := ParsePromptFrontmatter(tmplPath)
+	if err != nil {
+		return "", err
+	}
+	drop, err := LoadDropIns(strings.TrimSuffix(filepath.Base(tmplPath), ".md"))
+	if err != nil {
+		return "", err
+	}
+	return appendDropIns(body, drop), nil
 }

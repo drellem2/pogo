@@ -2210,6 +2210,15 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 	}
+	// An enth workspace needs a template that branches on .VCS (§12, slice
+	// 11, mg-7c936): one that does not would render its git protocol into a
+	// directory with no .git. Refused before any side effect.
+	if enthRepo != nil {
+		if refusal := enthTemplateRefusal(tmplPath, *enthRepo); refusal != "" {
+			failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
+			return
+		}
+	}
 	// --stranded-adopt on an enth repo continues the item's unlanded stack
 	// (slice 6, mg-30da0). It is resolved from the trailer listing, never
 	// from git's gate: the git gate's findings name branches, which an enth
@@ -2333,6 +2342,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		Provider:    providerID,
 		WorkerCores: budget.Cores,
 		HostCores:   budget.HostCores,
+	}
+	if enthRepo != nil {
+		vars.VCS = TemplateVCSEnth
+		vars.EnthRemote = enthRepo.Remote
+		vars.EnthRepo = enthRepo.Repo
 	}
 	promptFile, err := ExpandTemplateToFile(tmplPath, spawnReq.Name, vars)
 	if err != nil {
