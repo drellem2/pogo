@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/drellem2/pogo/internal/closingref"
 	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
@@ -390,26 +389,12 @@ func (r *Refinery) priorEnthMergeCovering(mr *MergeRequest) *MergeRequest {
 }
 
 // checkEnthClosingRefs is checkClosingRefs for an enth submission: the whole
-// message of every submitted Change. There is no PR body on enth (§11).
+// message of every submitted Change. There is no PR body on enth (§11). The
+// judgement is enthClosingRefs (closingref_gate.go, slice 9).
 func (r *Refinery) checkEnthClosingRefs(b enthvcs.Backend, mr *MergeRequest) error {
 	ctx, cancel := enthCtx()
 	defer cancel()
-	msgs, err := b.FullMessages(ctx, mr.EnthSubmitted)
-	if err != nil {
-		// An unreadable message is not a clean one.
-		return fmt.Errorf("could not read the submitted Changes' messages: %w", err)
-	}
-	var report strings.Builder
-	for _, m := range msgs {
-		if findings := closingref.Check(m.Body); len(findings) > 0 {
-			report.WriteString(closingref.Report(closingref.CommitMessage, "Change "+shortSHA(m.Rev), findings))
-			report.WriteString("\n")
-		}
-	}
-	if report.Len() == 0 {
-		return nil
-	}
-	return fmt.Errorf("closing-keyword reference — merging would close issues on GitHub:\n\n%s", report.String())
+	return enthClosingRefs(ctx, b, mr.EnthSubmitted)
 }
 
 func prModeRefusal(repoPath string) *enthRefusal {

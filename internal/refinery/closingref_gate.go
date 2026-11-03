@@ -211,11 +211,11 @@ type changeMessageReader interface {
 
 var _ changeMessageReader = enthvcs.Backend{}
 
-// checkEnthClosingRefs is checkClosingRefs for an enth MR (enth-vcs slice 9,
-// mg-2e9fc; docs/design/enth-vcs.md §11). The enth land pipeline (slice 7)
-// calls it on the Changes it is about to land, at the point the git pipeline
-// calls checkClosingRefs, and under the same rules: never skipped on retry,
-// never retryable.
+// enthClosingRefs is checkClosingRefs for an enth MR (enth-vcs slice 9,
+// mg-2e9fc; docs/design/enth-vcs.md §11). The enth land pipeline calls it
+// through Refinery.checkEnthClosingRefs (enthland.go) on the Changes it is
+// about to land, at the point the git pipeline calls checkClosingRefs, and
+// under the same rules: never skipped on retry, never retryable.
 //
 // It reads the CHANGE MESSAGES, and only them. A message lands on the GitHub
 // mirror verbatim (enth's export writes it), so a `Fixes #N` in one still
@@ -226,7 +226,7 @@ var _ changeMessageReader = enthvcs.Backend{}
 //
 // A message that cannot be read is an error, not a clean bill: the same
 // stance commitClosingRefs takes on unreadable history.
-func checkEnthClosingRefs(ctx context.Context, r changeMessageReader, changes []string) error {
+func enthClosingRefs(ctx context.Context, r changeMessageReader, changes []string) error {
 	if len(changes) == 0 {
 		return errors.New("closing-ref check: the MR names no Changes, so there is nothing to judge — " +
 			"refusing rather than reporting an empty stack as clean")
@@ -245,7 +245,7 @@ func checkEnthClosingRefs(ctx context.Context, r changeMessageReader, changes []
 		if len(findings) == 0 {
 			continue
 		}
-		report.WriteString(closingref.Report(closingref.ChangeMessage, "Change "+m.Rev, findings))
+		report.WriteString(closingref.Report(closingref.ChangeMessage, "Change "+shortSHA(m.Rev), findings))
 		report.WriteString("\n")
 	}
 	if report.Len() == 0 {
