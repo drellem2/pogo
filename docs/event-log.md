@@ -402,6 +402,10 @@ an event. Additive — no `schema_version` bump.
   - `reason` (string, required): the claim-release reason this accompanies, e.g. `"agent_stopped"`
   - `summary` (string, required): the one-line finding, including the remedy
 
+**On an enth repo (mg-35ae4)** there is no branch. The work is the item's unlanded, non-superseded Changes, read from `enth changes --unlanded`. The payload carries `"vcs": "enth"`, `enth` (the enthd URL), `enth_repo`, `target` (the trunk), `reason`, `route` and `summary`, plus one of two shapes:
+  - stranded: `disposition` `"resubmit"`, `branch` (a label like `enth:<id>(N change(s))`), `ref` (the top Change), `changes` ([]string), `unmerged` (the Change count), `stacks`, and `workers` when the Changes carry Pogo-Worker trailers. `pushed`, `origin_ref` and the probe errors are absent: a Change is durable on enthd from the moment it is made.
+  - `disposition` `"unjudged"` with `listing_error`: enthd could not be asked. The event and the mail still go out, because an unread listing is not an empty one.
+
 ```json
 {"schema_version":1,"timestamp":"2026-08-05T09:55:02.000000000Z","event_type":"work_item_stranded_push","agent":"cat-9a19","work_item_id":"mg-9a19","repo":"/Users/daniel/dev/pogo","details":{"branch":"polecat-9a19","ref":"refs/remotes/origin/polecat-9a19","pushed":true,"target":"refs/remotes/origin/main","disposition":"resubmit","unmerged":1,"reason":"agent_stopped","summary":"polecat-9a19 has 1 unmerged commit(s) on refs/remotes/origin/main ..."}}
 ```

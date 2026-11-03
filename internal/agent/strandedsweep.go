@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sort"
 	"time"
@@ -162,6 +163,12 @@ type StrandedSweepReport struct {
 	// strandings; folding it into Stranded cries wolf on every blip. It is a
 	// third outcome (mg-b6d1).
 	Unjudged int `json:"unjudged"`
+	// InFlight is how many enth candidates had unlanded Changes that a live
+	// polecat (the swept one, still running, or another on the same item) is
+	// working: under self-landing that worker can still land them, so they are
+	// not stranded (mg-35ae4). Always zero on a git-only fleet, and then absent
+	// from the event payload, which is unchanged.
+	InFlight int `json:"in_flight,omitempty"`
 	// Err is set when the candidate population itself could not be read. Every
 	// other count is meaningless when it is non-nil.
 	Err error `json:"-"`
@@ -210,6 +217,12 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 				c.Name, c.WorkItemID)
 			continue
 		}
+		// An enth repo is judged from its trailer listing, not git (mg-35ae4,
+		// enthstranded.go).
+		if e := enthRepoFor(c.SourceRepo); e != nil {
+			r.sweepEnthCandidate(*e, c, &rep)
+			continue
+		}
 		if _, done := fetched[c.SourceRepo]; !done {
 			fetched[c.SourceRepo] = struct{}{}
 			if _, ferr := strandedwork.Fetch(c.SourceRepo); ferr != nil {
@@ -237,19 +250,12 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 		}
 		// A probe failure leaves f as it was, so the row below still reports it;
 		// see strandedwork.Finding.CheckOpenPR.
-		// An enth repo skips the open-PR probe for an open refinery MR
-		// (checkOpenReview, slice 9).
-		r.checkOpenReview(&f, c.SourceRepo, c.WorkItemID, c.Name)
+		f.CheckOpenPR(c.SourceRepo, strandedPRProbe)
 		if f.Disposition == strandedwork.DispositionAwaitingReview {
 			rep.AwaitingReview++
-			if f.OpenMR != "" {
-				log.Printf("strandedwork: startup sweep found polecat %s's %s held by the refinery (%s) — "+
-					"NOT stranded (mg-2e9fc). %s", c.Name, f.Branch, f.OpenMR, f.Summary())
-			} else {
-				log.Printf("strandedwork: startup sweep found polecat %s's branch %s is the head of open PR #%d "+
-					"(%s) — awaiting review, NOT stranded (mg-dbb75). %s",
-					c.Name, f.Branch, f.PR, f.PRBranch, f.Summary())
-			}
+			log.Printf("strandedwork: startup sweep found polecat %s's branch %s is the head of open PR #%d "+
+				"(%s) — awaiting review, NOT stranded (mg-dbb75). %s",
+				c.Name, f.Branch, f.PR, f.PRBranch, f.Summary())
 			events.Emit(context.Background(), events.Event{
 				EventType:  "work_item_push_awaiting_review",
 				Agent:      "cat-" + c.Name,
@@ -315,9 +321,13 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 		})
 	}
 
+	inFlight := ""
+	if rep.InFlight > 0 {
+		inFlight = fmt.Sprintf(", %d enth item(s) with a live polecat still on them", rep.InFlight)
+	}
 	log.Printf("strandedwork: startup sweep judged %d unadoptable polecat(s): %d stranded, %d clean, "+
-		"%d carried by another branch, %d awaiting review in an open PR, %d unjudged, %d with no repo to check",
-		rep.Candidates, rep.Stranded, rep.Clean, rep.Carried, rep.AwaitingReview, rep.Unjudged, rep.Skipped)
+		"%d carried by another branch, %d awaiting review in an open PR, %d unjudged, %d with no repo to check%s",
+		rep.Candidates, rep.Stranded, rep.Clean, rep.Carried, rep.AwaitingReview, rep.Unjudged, rep.Skipped, inFlight)
 	rep.emitRan()
 	return rep
 }
@@ -337,18 +347,22 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 // returns above log their own distinct failure, so a missing event there is
 // accurate.
 func (s StrandedSweepReport) emitRan() {
+	details := map[string]any{
+		"candidates":      s.Candidates,
+		"stranded":        s.Stranded,
+		"clean":           s.Clean,
+		"carried":         s.Carried,
+		"awaiting_review": s.AwaitingReview,
+		"unjudged":        s.Unjudged,
+		"skipped":         s.Skipped,
+		"judged":          s.Judged(),
+	}
+	if s.InFlight > 0 {
+		details["in_flight"] = s.InFlight
+	}
 	events.Emit(context.Background(), events.Event{
 		EventType: "work_item_stranded_sweep",
 		Agent:     "pogod",
-		Details: map[string]any{
-			"candidates":      s.Candidates,
-			"stranded":        s.Stranded,
-			"clean":           s.Clean,
-			"carried":         s.Carried,
-			"awaiting_review": s.AwaitingReview,
-			"unjudged":        s.Unjudged,
-			"skipped":         s.Skipped,
-			"judged":          s.Judged(),
-		},
+		Details:   details,
 	})
 }

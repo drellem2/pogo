@@ -2,13 +2,10 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log"
 	"path/filepath"
 	"strings"
 
-	"github.com/drellem2/pogo/internal/strandedwork"
 	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
@@ -65,47 +62,4 @@ func enthPRFlowRefusal(e vcs.EnthRepo, tmplName, branch string) string {
 			b, target, trunk, trunk)
 	}
 	return ""
-}
-
-// checkOpenReview asks whether the finding's work is waiting on a review, the
-// one check that can turn a stranded finding into an awaiting-review one.
-//
-// On a git repo it is exactly the open-PR probe (strandedPRProbe, mg-dbb75),
-// unchanged. On an enth repo the open-PR probe is SKIPPED: GitHub there is a
-// mirror whose refs only enth's export writes, so a PR answer would be about
-// branches pogo never pushed. Its answer is replaced by "the item has an open
-// MR in the refinery" (strandedwork.Finding.CheckOpenMR), because there is no
-// other place review can be waiting.
-func (r *Registry) checkOpenReview(f *strandedwork.Finding, repo, item, name string) {
-	if enthRepoFor(repo) == nil {
-		f.CheckOpenPR(repo, strandedPRProbe)
-		return
-	}
-	log.Printf("agent %s: %s is an enth repo — open-PR probe skipped (no PR flow, docs/design/enth-vcs.md §11); "+
-		"asking the refinery for an open MR of %s instead", name, repo, item)
-	f.CheckOpenMR(item, r.refineryOpenMRProbe(repo, name))
-}
-
-// refineryOpenMRProbe answers CheckOpenMR from the refinery's queue: an MR in
-// repo authored by the item, or by the worker's name (submitters use both,
-// see mergeQueuedPolecats). A queue that cannot be read is an error, never
-// "no MR", because the probe can only ever remove an alert.
-func (r *Registry) refineryOpenMRProbe(repo, name string) strandedwork.OpenMRProbe {
-	return func(item string) (string, error) {
-		q := r.getMergeQueue()
-		if q == nil {
-			return "", errors.New("no refinery queue is wired into this pogod, so whether an MR is open could not be asked")
-		}
-		mrs, known := q.QueuedIn(repo)
-		if !known {
-			return "", fmt.Errorf("the refinery queue for %s could not be read", repo)
-		}
-		for _, mr := range mrs {
-			a := strings.TrimSpace(mr.Author)
-			if a != "" && (a == item || (name != "" && a == name)) {
-				return fmt.Sprintf("an open MR authored by %s", a), nil
-			}
-		}
-		return "", nil
-	}
 }

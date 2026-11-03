@@ -91,6 +91,10 @@ type StrandedAlert struct {
 	// a high presence downgrades a row to check-by-hand and never to clean.
 	Presence      strandedwork.Presence
 	SecondOpinion string
+	// Enth is set when the work is unlanded enth Changes rather than a branch
+	// (mg-35ae4). The alert then renders from it (enthMessage), and Finding
+	// only names the work for the shared plumbing. Nil on every git alert.
+	Enth *EnthStranded
 }
 
 // The two routes a stranded-work alert can arrive by.
@@ -164,9 +168,19 @@ func emitStrandedMailUndelivered(a StrandedAlert, to string, cause error) {
 			"branch":    a.Finding.Branch,
 			"route":     a.Route,
 			"error":     cause.Error(),
-			"summary":   a.Finding.SummaryIn(a.cell()),
+			"summary":   a.summary(),
 		},
 	})
+}
+
+// summary is the one-line description an undelivered-mail event carries: the
+// shared table's wording for a branch, the enth summary for enth work (whose
+// remedy is a land, never a refinery submit).
+func (a StrandedAlert) summary() string {
+	if a.Enth != nil {
+		return a.Enth.summary(a.WorkItemID)
+	}
+	return a.Finding.SummaryIn(a.cell())
 }
 
 // strandedRecipients returns who is told, in delivery order: the coordinator
@@ -299,6 +313,9 @@ func (a StrandedAlert) itemIsClosed() bool {
 // them by priority-wake. Both sentences must travel, and they must travel in the
 // part that gets skimmed.
 func (a StrandedAlert) Message() (subject, body string) {
+	if a.Enth != nil {
+		return a.enthMessage()
+	}
 	item := a.WorkItemID
 	if item == "" {
 		item = "(none recorded — the branch's commits named no work item)"
@@ -358,13 +375,7 @@ func (a StrandedAlert) Message() (subject, body string) {
 		// Sent BECAUSE the open-PR check could not answer, which is the direction
 		// it fails on purpose (strandedwork.Finding.CheckOpenPR). If this branch
 		// is a PR awaiting review, that is the first thing to rule out.
-		if enthRepoFor(a.Repo) != nil {
-			// enth (slice 9): the probe that failed was the refinery queue's,
-			// since GitHub is never asked about an enth repo.
-			fmt.Fprintf(&b, "MR check:   could not ask the refinery whether it holds an MR for this item (%s) — reported anyway\n", e)
-		} else {
-			fmt.Fprintf(&b, "PR check:   could not ask GitHub whether this is an open PR (%s) — reported anyway\n", e)
-		}
+		fmt.Fprintf(&b, "PR check:   could not ask GitHub whether this is an open PR (%s) — reported anyway\n", e)
 	}
 	fmt.Fprintf(&b, "Target:     %s\n", a.Finding.Target)
 	fmt.Fprintf(&b, "Unmerged:   %d commit(s)", len(a.Finding.Unmerged))

@@ -135,19 +135,8 @@ func scanEnthRepo(repo string, src EnthSource, changes []vcs.Change, open map[st
 
 	for _, id := range ids {
 		cs := byItem[id]
-		work := &EnthWork{Remote: src.Remote, Repo: src.Repo, Stacks: len(vcs.Stacks(cs))}
-		seenWorker := map[string]bool{}
-		for _, c := range cs {
-			work.Changes = append(work.Changes, c.ID)
-			if w := c.Trailer(vcs.TrailerWorker); w != "" && !seenWorker[w] {
-				seenWorker[w] = true
-				work.Workers = append(work.Workers, w)
-			}
-			if c.Created.After(work.Newest) {
-				work.Newest = c.Created
-			}
-		}
-		branchLabel := enthLabel(work)
+		work := NewEnthWork(src, cs)
+		branchLabel := EnthLabel(work)
 
 		it, ok := open[id]
 		if !ok {
@@ -213,8 +202,29 @@ func scanEnthRepo(repo string, src EnthSource, changes []vcs.Change, open map[st
 	return out
 }
 
-// enthLabel is what an enth row prints where a git row prints its branch.
-func enthLabel(w *EnthWork) string {
+// NewEnthWork is the enth half of a row for one item's unlanded Changes cs
+// (oldest first, every one carrying that item's trailer). It is exported so
+// pogod's release reporter and restart sweep (mg-35ae4) describe enth work
+// exactly as this sweep does, rather than through a second implementation.
+func NewEnthWork(src EnthSource, cs []vcs.Change) *EnthWork {
+	work := &EnthWork{Remote: src.Remote, Repo: src.Repo, Stacks: len(vcs.Stacks(cs))}
+	seenWorker := map[string]bool{}
+	for _, c := range cs {
+		work.Changes = append(work.Changes, c.ID)
+		if w := c.Trailer(vcs.TrailerWorker); w != "" && !seenWorker[w] {
+			seenWorker[w] = true
+			work.Workers = append(work.Workers, w)
+		}
+		if c.Created.After(work.Newest) {
+			work.Newest = c.Created
+		}
+	}
+	return work
+}
+
+// EnthLabel is what an enth row prints where a git row prints its branch.
+// w must hold at least one Change.
+func EnthLabel(w *EnthWork) string {
 	return fmt.Sprintf("enth:%s(%d change(s))", short(w.Changes[len(w.Changes)-1]), len(w.Changes))
 }
 
