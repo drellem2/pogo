@@ -157,6 +157,20 @@ type Agent struct {
 	// Immutable after construction; safe to read without a.mu.
 	receiptFile string
 
+	// spawnEnv is the caller-supplied SpawnRequest.Env this agent was started
+	// with, carried so Respawn re-applies it (drellem2/pogo#165). Without it a
+	// restarted agent silently shed every per-spawn variable — including the
+	// POGO_WORKER_CORES / POGO_HOST_CORES / POGO_ROLE that polecatSpawnEnv
+	// puts there — and `pogo agent env` described an environment the process
+	// no longer had.
+	//
+	// Unexported ON PURPOSE, not merely json:"-": an env can carry secrets, and
+	// a field no encoder can reach cannot leak into AgentInfo, the event
+	// stream, or the witness store. Anything that ever reports on it must print
+	// NAMES, never values. Immutable after construction (a private copy, so the
+	// caller's slice cannot alias it); safe to read without a.mu.
+	spawnEnv []string
+
 	// queuedNudge records the last delivery pogod wrote to this agent's PTY and
 	// could not prove was submitted, because the harness was mid-turn (see
 	// queuednudge.go). nil means nothing is owed. Guarded by mu.
@@ -1026,7 +1040,7 @@ type SpawnRequest struct {
 	Name           string
 	Type           AgentType
 	Command        []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
-	Env            []string // additional env vars
+	Env            []string // additional env vars; carried on the Agent and re-applied on Respawn (gh #165)
 	PromptFile     string   // path to prompt file (optional)
 	Dir            string   // working directory for the process (optional)
 	WorktreeDir    string   // git worktree path for polecat isolation (optional)
@@ -1231,6 +1245,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		nudge:          nudge,
 		provider:       provider,
 		receiptFile:    receiptFile,
+		spawnEnv:       append([]string(nil), req.Env...),
 		outputBuf:      NewRingBuffer(OutputRingBytes), // 64KB rolling buffer
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, req.Name+".sock"),
@@ -1780,7 +1795,12 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	procName := ProcessName(old.Type, old.Name)
 	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile))
 
-	cmd.Env = append(os.Environ(), injectedEnv...)
+	// The caller's spawn env is re-applied AFTER the injected catalogue, in the
+	// same last-wins order as Spawn (drellem2/pogo#165). The order is load-
+	// bearing, not incidental: polecatSpawnEnv appends POGO_ROLE last inside
+	// req.Env, so it beats any dispatcher-supplied --env on spawn, and only the
+	// same order keeps that true on a restart.
+	cmd.Env = append(os.Environ(), append(injectedEnv, old.spawnEnv...)...)
 
 	// A restart re-resolves to the agent's OWN provider (carried on old.provider
 	// from its original spawn), never the registry default — so a Codex agent
@@ -1825,6 +1845,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		nudge:          nudge,
 		provider:       provider,
 		receiptFile:    receiptFile,
+		spawnEnv:       old.spawnEnv,
 		outputBuf:      NewRingBuffer(OutputRingBytes),
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, old.Name+".sock"),
