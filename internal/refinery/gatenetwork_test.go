@@ -275,3 +275,64 @@ func TestDefectNoteStatesItsOwnCommitment(t *testing.T) {
 		}
 	}
 }
+
+// netControlUnreachedOutput is the tail of a gate run in which
+// scripts/net-control_test.sh's section 2c found no reference host answering,
+// from a probe the same run had proven working. The first line is the one the
+// suite prints for the refinery (netc_unreached_line); the FAIL: line after it
+// is the suite's own verdict and must not be what decides anything.
+const netControlUnreachedOutput = `Testing the network positive control
+--- 2c. UP for a real host, DOWN for 192.0.2.1 (the mg-a932 pair) ---
+NET-CONTROL GATE-NETWORK: net-control_test 2c: none of the reference hosts answered an HTTP request in 6 tries, from a probe that passed its loopback self-test on every try AND reached a real off-box host earlier in this same run (section 1), so the network is unreachable from this box right now — not the branch
+  FAIL: the control did not report UP for ANY of the reference hosts (1.1.1.1:443 8.8.8.8:443 9.9.9.9:443) in 2 rounds
+=== net-control.sh: 37 passed, 1 failed ===
+`
+
+// TestNetControlDeclaredNetworkFailureIsInfrastructure is mg-6914a's refinery
+// half. On 2026-11-03 one unanswered HTTP request in net-control_test.sh 2c
+// failed the gate for mr-dbl1rmi as class=defect, "re-running establishes the
+// same fact" — false for a dropped request. When the suite has proven its own
+// probe and still reached nothing, the class is INFRASTRUCTURE, with the BOUNDED
+// gate-network retry (gateNetworkMaxAttempts), not an unbounded one.
+func TestNetControlDeclaredNetworkFailureIsInfrastructure(t *testing.T) {
+	gne := newGateNetworkError("./build.sh", netControlUnreachedOutput, errors.New("exit status 1"))
+	if gne == nil {
+		t.Fatal("net-control's declared gate-network line was not recognised")
+	}
+	if gne.Marker != "net-control gate-network:" || gne.Signal != "network is unreachable" {
+		t.Errorf("marker/signal = %q/%q, want the declared marker with its network wording", gne.Marker, gne.Signal)
+	}
+	d := classifyFailure("build", "", gne)
+	if d.Class != ClassInfrastructure || !d.Retryable || !d.GateRerun {
+		t.Fatalf("disposition = %+v, want infrastructure, retryable, GateRerun", d)
+	}
+	// The bound is named, and it is the gate-network one — not the 28-attempt
+	// fetch budget, and not open-ended.
+	if gateNetworkMaxAttempts != 4 {
+		t.Errorf("gateNetworkMaxAttempts = %d; the suite's comment and this ticket name 4 — update both together", gateNetworkMaxAttempts)
+	}
+}
+
+// TestNetControlMarkerMustOpenTheLine is the guard against the defect the
+// remedy could have: the suite embeds captured output in FAIL: messages, and
+// the continuation lines of those are NOT verdict-prefixed. A marker quoted
+// mid-line, or inside a verdict line, must not demote a red suite.
+func TestNetControlMarkerMustOpenTheLine(t *testing.T) {
+	cases := map[string]string{
+		"quoted mid-line":                "  last output was: NET-CONTROL GATE-NETWORK: ... network is unreachable\n",
+		"in a FAIL line":                 "  FAIL: got NET-CONTROL GATE-NETWORK: network is unreachable from a broken probe\n",
+		"in a PASS line":                 "  PASS: an all-DOWN from a proven probe opens with NET-CONTROL GATE-NETWORK: and network is unreachable\n",
+		"marker without network wording": "NET-CONTROL GATE-NETWORK: something else entirely\n",
+	}
+	for name, out := range cases {
+		if _, _, _, _, ok := outputReportsGateNetworkFailure(out); ok {
+			t.Errorf("%s: read as a gate-network failure — a red suite would be retried and excused", name)
+		}
+	}
+	// And the suite's failure WITHOUT the line — a broken probe, or no in-run
+	// proof the probe works — stays a defect.
+	broken := "  FAIL: the control did not report UP for ANY of the reference hosts, and nothing in this run proves the probe works\n=== net-control.sh: 30 passed, 3 failed ===\n"
+	if gne := newGateNetworkError("./build.sh", broken, errors.New("exit status 1")); gne != nil {
+		t.Fatalf("a net-control failure without the declared line was classed gate-network: %v", gne)
+	}
+}

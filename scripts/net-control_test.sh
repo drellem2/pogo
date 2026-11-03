@@ -87,9 +87,12 @@ BH_SINK_PID=""
 # MUTE_PID is section 2c's listener: it accepts TCP connections and speaks
 # nothing, which is the condition mg-a932's fix exists to discriminate.
 MUTE_PID=""
+# HTTP_PID is section 2d's loopback HTTP responder — the reachable host.
+HTTP_PID=""
 netc_teardown() {
     [ -n "$BH_SINK_PID" ] && kill "$BH_SINK_PID" 2>/dev/null
     [ -n "$MUTE_PID" ] && kill "$MUTE_PID" 2>/dev/null
+    [ -n "${HTTP_PID:-}" ] && kill "$HTTP_PID" 2>/dev/null
     # WORK (the curl-always-* stubs and every fixture below) was removed by
     # nothing and abandoned on every run (mg-b9621).
     [ -n "${WORK:-}" ] && rm -rf "$WORK"
@@ -352,11 +355,111 @@ netc_one_target() {  # TARGET -> runs the control against exactly that one targe
     bash "$LIB" 2>&1
 }
 
-PAIR_UP_OUT="$(netc_one_target 1.1.1.1:443)"; PAIR_UP_RC=$?
-if [ "$PAIR_UP_RC" -eq 0 ] && printf '%s' "$PAIR_UP_OUT" | grep -q 'POSITIVE CONTROL: UP'; then
-    pass "arm 1 of the pair: a single REAL reachable host (1.1.1.1:443) => UP"
+# ---------------------------------------------------------------------------
+# ARM 1 ASKS "IS ANY REAL HOST UP", NOT "IS 1.1.1.1 UP RIGHT NOW" (mg-6914a)
+# ---------------------------------------------------------------------------
+# Arm 1 used to be ONE single-target invocation against 1.1.1.1:443. A single
+# unanswered HTTP request therefore failed ./build.sh, and on 2026-11-03 it did
+# so twice in 30 minutes on branches that touched nothing here — once in the
+# refinery gate (mr-dbl1rmi, mg-69461) and once in a local build where section 1
+# of the SAME run had reported UP seconds earlier and a standalone re-run passed
+# 33/0. The refinery then classed it DEFECT ("re-running establishes the same
+# fact"), which is false for a dropped request, and sent agents to read code
+# that was fine.
+#
+# So arm 1 now tries several INDEPENDENT reference hosts (three operators, three
+# networks — the library's own default set and its own reasoning) for a BOUNDED
+# number of rounds, and takes UP from any of them. The invocation shape per try
+# is unchanged — one target, same knobs — so arm 2 is still "the same shape,
+# one address apart".
+#
+# WHAT THIS MUST NOT BECOME: a control that passes when the probe is broken. Any
+# number of hosts reachable does not help a probe that cannot complete a
+# request, so "any of N" cannot turn a broken probe green — and that is ASSERTED
+# below, against a probe replaced with one that always errors while every host
+# is reachable, right next to the mixed-reachability case.
+#
+# WHEN EVERY HOST FAILS EVERY ROUND, the suite still FAILS. What changes is that
+# it may also say WHY, in a line the refinery reads: `NET-CONTROL GATE-NETWORK:`
+# (internal/refinery/gatenetwork.go). That line classes the gate failure
+# INFRASTRUCTURE, which retries with the gate-network budget —
+# gateNetworkMaxAttempts = 4 attempts (3 retries, backoffs 1m/5m/10m) — and,
+# once that is spent, is still reported infrastructure rather than defect. It
+# is emitted ONLY when all three of these hold, because each one rules out a
+# way a broken probe could produce "nothing answered":
+#
+#   1. every try reached a verdict of DOWN, never `unknown` — a probe that
+#      cannot run, or that failed its own loopback self-test, lands on unknown;
+#   2. every DOWN carried `self-test: PASSED` — the primitive said yes AND no
+#      on loopback seconds before it said no to the reference host;
+#   3. section 1 reported UP in THIS run — the same probe, on the same box,
+#      completed a real off-box HTTPS request moments earlier. This is the one
+#      that matters, because 1 and 2 are both satisfied by a probe broken ABOVE
+#      what the loopback self-test exercises (TLS, say): such a probe would
+#      fail section 1 too, so it can never reach this line.
+#
+# Without 3 an all-DOWN is a broken probe or an offline box and nothing here can
+# tell which, so it stays an ordinary FAIL — a DEFECT to the refinery — and that
+# is the loud direction on purpose.
+NETC_REAL_HOSTS="${POGO_NET_CONTROL_TEST_REAL_HOSTS:-1.1.1.1:443 8.8.8.8:443 9.9.9.9:443}"
+NETC_ANYUP_ROUNDS=2
+NETC_GATE_NETWORK_MARKER="NET-CONTROL GATE-NETWORK:"
+
+# netc_any_up ROUNDS TARGET... — 0 if ANY target reports UP within ROUNDS
+# rounds. Each try is one netc_one_target invocation. ANYUP_CURL, when set, is
+# handed to the control as POGO_NET_CONTROL_CURL (the broken-probe case).
+# Sets ANYUP_WINNER, ANYUP_TRIES, ANYUP_ALL_DOWN_SELFTESTED (1 iff every try was
+# a DOWN with a passed self-test) and ANYUP_LAST_OUT.
+ANYUP_CURL=""
+netc_any_up() {
+    local rounds="$1" r t out rc
+    shift
+    ANYUP_WINNER=""; ANYUP_TRIES=0; ANYUP_ALL_DOWN_SELFTESTED=1; ANYUP_LAST_OUT=""
+    r=1
+    while [ "$r" -le "$rounds" ]; do
+        for t in "$@"; do
+            ANYUP_TRIES=$(( ANYUP_TRIES + 1 ))
+            out="$(POGO_NET_CONTROL_CURL="$ANYUP_CURL" netc_one_target "$t")"; rc=$?
+            ANYUP_LAST_OUT="$out"
+            if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'POSITIVE CONTROL: UP'; then
+                ANYUP_WINNER="$t"
+                return 0
+            fi
+            if ! { [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'POSITIVE CONTROL: DOWN' \
+                    && printf '%s' "$out" | grep -q 'self-test: PASSED'; }; then
+                ANYUP_ALL_DOWN_SELFTESTED=0
+            fi
+        done
+        r=$(( r + 1 ))
+        # A pause between rounds, not within one: the hosts in a round are
+        # independent, so it is the SAME host's second chance that needs time.
+        [ "$r" -le "$rounds" ] && sleep 1
+    done
+    return 1
+}
+
+# netc_unreached_line LIVE_UP — after a failed netc_any_up, print the refinery's
+# infrastructure line if and only if the three conditions above hold. Prints
+# nothing (and returns 1) otherwise, which leaves the failure a DEFECT.
+netc_unreached_line() {
+    [ "$ANYUP_TRIES" -gt 0 ] || return 1
+    [ "$ANYUP_ALL_DOWN_SELFTESTED" -eq 1 ] || return 1
+    [ "${1:-0}" -eq 1 ] || return 1
+    printf '%s net-control_test 2c: none of the reference hosts answered an HTTP request in %s tries, from a probe that passed its loopback self-test on every try AND reached a real off-box host earlier in this same run (section 1), so the network is unreachable from this box right now — not the branch\n' \
+        "$NETC_GATE_NETWORK_MARKER" "$ANYUP_TRIES"
+}
+
+# shellcheck disable=SC2086
+if netc_any_up "$NETC_ANYUP_ROUNDS" $NETC_REAL_HOSTS; then
+    pass "arm 1 of the pair: a REAL reachable host => UP ($ANYUP_WINNER answered, try $ANYUP_TRIES of at most $(( NETC_ANYUP_ROUNDS * $(echo $NETC_REAL_HOSTS | wc -w) )))"
 else
-    fail "the control did not report UP for a single real reachable host (exit $PAIR_UP_RC) — either this box is offline, in which case arm 2 below proves nothing, or the probe is broken. Output: $PAIR_UP_OUT"
+    # The infrastructure line goes out FIRST and on its own, never inside a
+    # FAIL: line — the refinery ignores harness verdict lines on purpose.
+    if netc_unreached_line "$LIVE_UP"; then
+        fail "the control did not report UP for ANY of the reference hosts ($NETC_REAL_HOSTS) in $NETC_ANYUP_ROUNDS rounds — the probe is proven working in this run (self-test passed on every try, and section 1 reached a real host), so this is the network, and the line above classes it infrastructure. Last output: $ANYUP_LAST_OUT"
+    else
+        fail "the control did not report UP for ANY of the reference hosts ($NETC_REAL_HOSTS) in $NETC_ANYUP_ROUNDS rounds, and nothing in this run proves the probe works (section 1 UP: $LIVE_UP; every try a self-tested DOWN: $ANYUP_ALL_DOWN_SELFTESTED) — either this box is offline, in which case arm 2 below proves nothing, or the probe is broken. Last output: $ANYUP_LAST_OUT"
+    fi
 fi
 
 PAIR_DOWN_OUT="$(netc_one_target 192.0.2.1:443)"; PAIR_DOWN_RC=$?
@@ -456,6 +559,108 @@ if [ "$MUTE_CONNECTS" -ge 2 ]; then
 else
     fail "could not stand up 2 loopback endpoints that accept a connection and speak nothing (needs python3; $MUTE_CONNECTS accepted), so mg-a932's discrimination is unproven hermetically on this host"
 fi
+
+# ---------------------------------------------------------------------------
+# 2d. mg-6914a: ANY-OF-N IS NOT A WAY AROUND A BROKEN PROBE
+# ---------------------------------------------------------------------------
+# Hermetic, so it holds whatever the network is doing. The reachable host is a
+# loopback HTTP responder; the unreachable ones are a closed loopback port and
+# section 2c's mute endpoint (connect completes, nothing speaks). They are
+# listed FIRST so arm 1's helper has to get past a failure to pass.
+#
+# The two cases sit side by side on purpose, and the second is the one that
+# keeps the first honest:
+#   MIXED     one host unreachable, another reachable, real probe => PASS
+#   BROKEN    every host reachable, probe replaced by one that always errors
+#             => FAIL, and NOT classed infrastructure even though section 1 is
+#             handed in as UP
+echo "--- 2d. any-of-N reference hosts: mixed reachability passes, a broken probe still fails ---"
+
+HTTP_PID=""
+HTTP_PORT=""
+if command -v python3 >/dev/null 2>&1; then
+    HTTP_PORTFILE="$WORK/http.port"
+    python3 - "$HTTP_PORTFILE" >/dev/null 2>&1 <<'PY' &
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
+    def log_message(self, *a):
+        pass
+srv = HTTPServer(("127.0.0.1", 0), H)
+with open(sys.argv[1], "w") as fh:
+    fh.write(str(srv.server_address[1]))
+srv.serve_forever()
+PY
+    HTTP_PID=$!
+    i=0
+    while [ ! -s "$HTTP_PORTFILE" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$(( i + 1 )); done
+    HTTP_PORT="$(cat "$HTTP_PORTFILE" 2>/dev/null)"
+fi
+
+if [ -n "$HTTP_PORT" ]; then
+    REACHABLE="127.0.0.1:$HTTP_PORT"
+    # Prove the substrate before using it: the reachable host has to be UP to
+    # the real control on its own, or the BROKEN case below fails for the wrong
+    # reason and proves nothing.
+    if netc_any_up 1 "$REACHABLE"; then
+        pass "the hermetic reachable host is PROVEN before it is used: the real control reports UP for $REACHABLE on its own"
+    else
+        fail "the loopback HTTP responder at $REACHABLE was not UP to the real control, so the cases below have no reachable host. Last output: $ANYUP_LAST_OUT"
+    fi
+
+    UNREACHABLE="127.0.0.1:1"
+    [ -n "$MUTE_TARGETS" ] && UNREACHABLE="$UNREACHABLE ${MUTE_TARGETS%% *}"
+
+    # MIXED.
+    # shellcheck disable=SC2086
+    if netc_any_up 1 $UNREACHABLE "$REACHABLE" && [ "$ANYUP_WINNER" = "$REACHABLE" ] && [ "$ANYUP_TRIES" -ge 2 ]; then
+        pass "MIXED: with $UNREACHABLE unreachable and $REACHABLE reachable, arm 1's any-of-N passes — one dead reference host no longer fails the gate"
+    else
+        fail "MIXED: one reference host unreachable and another reachable did NOT pass (winner '$ANYUP_WINNER' after $ANYUP_TRIES tries). Last output: $ANYUP_LAST_OUT"
+    fi
+
+    # BROKEN. A probe that always errors, with EVERY host reachable — the
+    # loopback responder plus the real reference set. One round, because each
+    # try of a broken probe pays the self-test's full five windows (~5s) before
+    # it lands on unknown; a second round would prove nothing the first did not.
+    cat > "$WORK/curl-always-errors" <<'EOF'
+#!/bin/sh
+printf '000'
+exit 7
+EOF
+    chmod +x "$WORK/curl-always-errors"
+    ANYUP_CURL="$WORK/curl-always-errors"
+    # shellcheck disable=SC2086
+    if netc_any_up 1 "$REACHABLE" $NETC_REAL_HOSTS; then
+        fail "BROKEN: a probe that ALWAYS ERRORS passed arm 1 because some reference host was reachable — any-of-N has turned the control into one that cannot fail. Last output: $ANYUP_LAST_OUT"
+    else
+        pass "BROKEN: with the probe replaced by one that always errors and every reference host reachable, arm 1 still FAILS ($ANYUP_TRIES tries)"
+    fi
+    BROKEN_LINE="$(netc_unreached_line 1)"
+    [ -z "$BROKEN_LINE" ] && [ "$ANYUP_ALL_DOWN_SELFTESTED" -eq 0 ] \
+        && pass "BROKEN: and it is NOT classed infrastructure, even with section 1 handed in as UP — a probe that failed its own self-test is a defect, so the refinery fails the MR instead of retrying" \
+        || fail "BROKEN: a broken probe produced the refinery's infrastructure line, which would retry a real defect and then excuse it"
+    ANYUP_CURL=""
+
+    # The classification's other two refusals, and its one acceptance, against
+    # a real probe that reports a proven DOWN (closed loopback ports).
+    netc_any_up 1 127.0.0.1:1 127.0.0.1:2 >/dev/null 2>&1
+    [ "$ANYUP_ALL_DOWN_SELFTESTED" -eq 1 ] && [ -z "$(netc_unreached_line 0)" ] \
+        && pass "an all-DOWN with no in-run UP from section 1 stays a DEFECT: a probe broken above the loopback self-test (TLS, say) looks exactly like this, so it must fail loudly" \
+        || fail "an all-DOWN without section 1's UP was classed infrastructure (or was not a self-tested DOWN: $ANYUP_ALL_DOWN_SELFTESTED)"
+    ALLDOWN_LINE="$(netc_unreached_line 1)"
+    case "$ALLDOWN_LINE" in
+        "$NETC_GATE_NETWORK_MARKER"*"network is unreachable"*)
+            pass "an all-DOWN from a self-tested probe that section 1 proved could reach a real host IS classed infrastructure — the line opens with the refinery's marker and carries its network wording" ;;
+        *)  fail "an all-DOWN from a proven probe did not produce the refinery's infrastructure line. Got: '$ALLDOWN_LINE'" ;;
+    esac
+else
+    fail "could not stand up a loopback HTTP responder (needs python3), so the any-of-N cases of mg-6914a — mixed reachability passes, a broken probe still fails — are unproven on this host"
+fi
+[ -n "$HTTP_PID" ] && kill "$HTTP_PID" 2>/dev/null
+HTTP_PID=""
 
 # ---------------------------------------------------------------------------
 # 3. THE SECOND REAL RED SHAPE: A BLACKHOLE, WHICH FAILS SLOW
