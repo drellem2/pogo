@@ -62,6 +62,14 @@
 // id. MR carries Changes and RequestID, Prepared carries Tip, New and the
 // plan, Landed carries enth's land line as a LandRecord. git leaves every one
 // of them empty and does not read them.
+//
+// # Slice 9 (mg-2e9fc)
+//
+// The GitHub boundary (§11): a PR-flow spawn on an enth repo is refused, the
+// stranded-work open-PR probe is replaced by the refinery queue there, and the
+// closing-ref check for enth Changes reads their whole messages
+// (enthvcs.Backend.FullMessages) and no PR body. `pogo doctor --check` checks
+// for enth when a project is recorded as enth.
 package vcs
 
 import (
