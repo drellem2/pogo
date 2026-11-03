@@ -46,7 +46,9 @@ uninterruptible-sleep tasks as well as runnable ones, so on an I/O-bound host
 it can read many times the core count while cores sit idle. Do not gate on it.
 
 'would_refuse_dispatch' is answered by the same gate 'pogo agent spawn-polecat'
-consults, so this command and the daemon cannot disagree.
+consults, so this command and the daemon cannot disagree. The gate's mark is
+'[dispatch] load_gate_fleet_share' (default 0.50); 0 disarms it, and this
+command says DISARMED when it is.
 
 --repo additionally reports that REPOSITORY's worker occupancy against the
 per-repo dispatch cap. That is a separate refusal from the host one and neither
@@ -69,6 +71,10 @@ so one worker whose toolchain self-parallelises can hold the box while a cap of
 				enc.SetIndent("", "  ")
 				return enc.Encode(resp)
 			}
+			// Configuration, not measurement: printed first and on both paths,
+			// because a disarmed gate is the state a reader must not miss
+			// (drellem2/pogo#202).
+			printLoadGate(os.Stdout, resp.LoadGateFleetShare, resp.LoadGateDisarmed)
 			if !resp.Measured {
 				fmt.Println("Host load: NOT MEASURED — the sample could not be taken.")
 				fmt.Println("This is missing information, not an idle host.")
@@ -113,6 +119,19 @@ so one worker whose toolchain self-parallelises can hold the box while a cap of
 	cmd.Flags().StringVar(&repo, "repo", "",
 		"also report this repository's worker occupancy against the per-repo dispatch cap")
 	return cmd
+}
+
+// printLoadGate renders the host load gate's configured mark. A disarmed gate
+// gets its own sentence rather than a "0%" — "refuses at 0%" reads as "refuses
+// everything", which is the opposite of what 0 means.
+func printLoadGate(w io.Writer, share float64, disarmed bool) {
+	if disarmed {
+		fmt.Fprintf(w, "Load gate:  DISARMED by config ([dispatch] load_gate_fleet_share = 0) — no dispatch\n"+
+			"            is refused on host load, however full this box gets.\n")
+		return
+	}
+	fmt.Fprintf(w, "Load gate:  refuses at %.0f%% fleet share ([dispatch] load_gate_fleet_share = %.2f; 0 disarms)\n",
+		share*100, share)
 }
 
 // printWorkerBudget renders the share the next worker will be told it may take.

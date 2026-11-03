@@ -213,8 +213,10 @@ func (m MGDispatchGate) DispatchGated(workItemID string) (Gating, bool) {
 	// claimed/ or pending/. A parent that cannot be parsed or cannot be found
 	// reads as satisfied. That is fail-open by design, because pogo does not
 	// read the archive. The per-item way out is `mg edit <id> --rm-depends=...`,
-	// which the refusal message names. There is no fleet-wide disable; that is
-	// tracked in drellem2/pogo#202.
+	// which the refusal message names. There is no fleet-wide disable, and by
+	// decision there will not be one (drellem2/pogo#202): a config key goes only
+	// where a refusal's failure is "no work happens", and the only gate that got
+	// one is the host load gate ([dispatch] load_gate_fleet_share).
 	if unmet := m.unmetDepends(root, item); len(unmet) > 0 {
 		return Gating{Depends: unmet, Status: item.Status}, true
 	}

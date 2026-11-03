@@ -1582,6 +1582,22 @@ Flags:
 			"nothing limits how many workers enter one repo")
 	}
 
+	// The host load gate's mark (drellem2/pogo#202), same section, same
+	// chokepoint. Logged in BOTH states, and loudly when disarmed: a disarmed
+	// load gate is the condition under which gate timeouts on a saturated host
+	// get misread as defects in the branch under test (mg-1b8c). config.toml is
+	// read at boot, so this line is the record of what the daemon enforces.
+	agentRegistry.SetDispatchLoadGate(cfg.DispatchLoadGate)
+	if cfg.DispatchLoadGate.Armed() {
+		log.Printf("host load gate armed: refuses a dispatch while the fleet holds %.0f%% or more of "+
+			"this host's cores ([dispatch] load_gate_fleet_share = %.2f)",
+			cfg.DispatchLoadGate.FleetShare*100, cfg.DispatchLoadGate.FleetShare)
+	} else {
+		log.Printf("WARNING: host load gate DISARMED by config ([dispatch] load_gate_fleet_share = 0): " +
+			"no dispatch is refused on host load, however full the box is — a gate timeout under " +
+			"saturation will read like a defect in the branch under test")
+	}
+
 	// The refinery half of that cap. The queue is reached through a THUNK, not
 	// captured by value: an orchestration restart replaces *mergeQueue
 	// (SetRefineryStarter, below), and a closure over the old pointer would

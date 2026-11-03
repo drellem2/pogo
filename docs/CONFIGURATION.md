@@ -38,7 +38,8 @@ config file, even an empty one, gets all three. Every other row is the same
 with or without a file.
 
 To turn a row off, set its key in your file: `enabled = false` under the
-section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
+section. For `[dispatch]`, set `max_polecats_per_repo = 0` for the per-repo
+cap and `load_gate_fleet_share = 0` for the host load gate.
 
 <!-- defaults-table:begin -->
 | Section | Key | Default | Kind | What it does when it fires |
@@ -57,6 +58,7 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[stall_watch]` | `blocked_reminder_enabled` | on | ACTS | Nudges, or mails, the agent named in a `blocked:<agent>` assignee that a decision is owed. The notices stop at a cap. Silent for a block that agent set on itself, and for an item tagged `waiting-on-purpose` (`blocked_reminder_waiver_tags`). |
 | `[stall_watch]` | `indefinite_hold_report_enabled` | on | ACTS | Types a read-only digest of holds that nothing scheduled will ever release into the coordinator's terminal, through the same nudge channel as the rows above. If the terminal is busy, it mails instead. It releases nothing. See [A hold with no driver is invisible](#a-hold-with-no-driver-is-invisible). |
 | `[dispatch]` | `max_polecats_per_repo` | on | ACTS | Refuses to spawn a worker into a repo that already has 3 live workers. While the refinery holds a merge request for that repo, it holds back 1 of the 3 slots. Default `max_polecats_per_repo = 3`; `0` turns it off. See [Dispatch cap](#dispatch-cap--how-many-workers-may-enter-one-repository). |
+| `[dispatch]` | `load_gate_fleet_share` | on | ACTS | Refuses to spawn any worker while the fleet holds 50% or more of this host's cores. Non-fleet CPU is not counted. Default `load_gate_fleet_share = 0.50`; `0` turns it off. See [Host load gate](#host-load-gate--load_gate_fleet_share). |
 | `[dispatch_pairing]` | `repos` | inert | ACTS | Once you list `repos`, it refuses to dispatch an item in those repos until its paired item is filed. See [Dispatch pairing](#dispatch-pairing--items-that-owe-a-paired-work-item). |
 | `[audit_successor]` | `repos` | inert | observes | Once you list `repos`, `pogo doctor` warns about merged audits that no successor answered. It runs only inside `pogo doctor`, never in pogod, and it never refuses. See [Audit successors](#audit-successors--merged-audits-that-nothing-answered). |
 | `[reaper]` | `enabled` | on | ACTS | Inert until you list `jobs`. It runs `launchctl kickstart` on a declared launchd job whose heartbeat file has gone stale, and after `max_kickstarts` tries it mails the coordinator (`[agents] coordinator`, `mayor` by default) and the [escalation box](#the-escalation-mailbox) (`human` by default). See [Heartbeat reaper](#heartbeat-reaper-tier-1). |
@@ -1393,6 +1395,96 @@ A `--no-worktree` dispatch is never capped: it runs no repository's test suite.
 
 Source of truth: `internal/config/dispatchcap.go`,
 `internal/agent/dispatchrepocap.go` and `internal/agent/dispatchreviewslot.go`.
+
+## Host load gate — `load_gate_fleet_share`
+
+**On by default, everywhere.** `pogo agent spawn-polecat` refuses with **503**
+while the fleet — pogod and every process under it — is holding at least this
+share of the host's cores. CPU used by anything else (a VPN client, the system
+indexer) is measured and reported, but it is never held against dispatch:
+pausing fleet work would not give those cores back. The refusal is a **later,
+not a no**. It applies to every repo at once, and it clears when the fleet's
+core share falls, which is not the same event as an agent exiting.
+
+```toml
+[dispatch]
+# Fraction of this host's cores the fleet must be holding before a dispatch
+# is refused. 0 = the gate is DISARMED (nothing is refused on load).
+# Values above 1 are clamped to 1. Default: 0.50.
+load_gate_fleet_share = 0.50
+```
+
+Read what the daemon enforces, and the sample it would act on:
+
+```bash
+pogo host load          # first line: "Load gate: refuses at 50% ..." or "DISARMED by config"
+pogo host load --json   # load_gate_fleet_share, load_gate_disarmed, would_refuse_dispatch
+```
+
+**The same value sizes the worker budget.** When no per-repo cap is armed
+(`max_polecats_per_repo = 0`), the `$POGO_WORKER_CORES` a new worker is given
+is this share of the host. With the cap armed, the budget is the core count
+divided by the cap, as before. If both are off, the budget falls back to the
+shipped 50% as advice and says so in its basis.
+
+**Why 0 and not `enabled = false`.** One number says where the line is and, at
+0, whether there is one: the same shape as `max_polecats_per_repo = 0`.
+
+**A disarmed gate is loud on purpose.** pogod logs a `WARNING: host load gate
+DISARMED by config` line at boot, `pogo host load` prints `DISARMED`, and the
+JSON carries `load_gate_disarmed: true`. With the gate off, nothing stops more
+fleet work being piled onto a full host, and a refinery gate that times out
+under that saturation reads like a defect in the branch under test (mg-1b8c).
+config.toml is read at boot, so a change takes effect on the next pogod start.
+
+**What it deliberately does not have.** There is no per-dispatch
+`--load-override`. A host the gate misjudges refuses *every* dispatch, so a
+reason typed on each spawn would be noise; the lever is this key.
+
+Why the shipped mark is half the host is argued at `hostload.FleetHeavyAt`.
+Source of truth: `internal/config/dispatchloadgate.go`,
+`internal/agent/dispatchload.go` and `internal/hostload/tracker.go`.
+
+## Dispatch refusals and their levers
+
+Every reason `pogo agent spawn-polecat` can refuse, in the order the spawn path
+checks them, and the way past each one. **503** is retryable unchanged once the
+condition clears. **409** is refused identically until something about the
+item, the request or the fleet changes.
+
+The rule for which refusals get a config key (drellem2/pogo#202): **a key only
+where the failure is "no work happens", never where it is "work gets
+destroyed".** A refusal that guards a running worker's tree or someone's
+unmerged work has a per-item or per-dispatch lever that records a reason, or
+no lever at all.
+
+| Refusal | Status | Way past it | Config key? |
+|---|---|---|---|
+| pogod is draining for a redeploy | 503 | Wait for the redeploy to finish, then retry. | none — it clears by itself |
+| **Live owner**: a live polecat already holds this name or work item (drellem2/pogo#167) | 409 | Stop the live worker (`pogo agent stop <name>`), or dispatch a different item. | **none, by design**. Dispatching over a live worker destroys its tree. No override flag either. |
+| **Dispatch gate, assignee**: the item's assignee is `human`, `parked` or `blocked:<agent>` | 409 | Per item: `mg edit <id> --assignee=...`. See [Ownership vs execution](#ownership-vs-execution--which-items-the-work-item-detectors-watch). | `[stall_watch] non_dispatchable_assignees` sets which values gate. It names values, not an off switch. |
+| **Dispatch gate, stage**: the item's carrier says `stage: gated` | 409 | This is the human gate. Per item: move the stage on once the decision is made. | none — per item |
+| **Dispatch gate, carrier unreadable**: `workflow:`/`stage:` lines the parser cannot reach | 409 | Per item: fix the body so the carrier is the leading block. | none — per item |
+| **Dispatch gate, depends**: a `depends:` parent is still live (drellem2/pogo#201) | 409 | Per item: `mg edit <id> --rm-depends=<parent>`, or finish the parent. | none — per item |
+| *(not a refusal)* item tagged as blocked but its assignee does not gate | — | Logged, and dispatched anyway: a tag is not a gate. | — |
+| **Target**: `--branch` contradicts the item's `branch:` field (drellem2/pogo#176) | 409 | Drop `--branch`, or fix the item's `branch:`. | none |
+| **Pairing**: the repo requires a paired item that was never filed | 409 | File the pair, or `--pairing-override="<why>"`. | `[dispatch_pairing] repos` (inert unless set) |
+| **Stranded work**: pushed, unmerged work on a polecat branch for this item | 409 | `--stranded-adopt="<why>"` to land the branch, or `--stranded-override="<why>"` to discard it. | none. The branch may be the only copy. |
+| **Preserved worktree**: uncommitted work in a retained tree for this item | 409 | Read the tree (`pogo gc --list-preserved`), then `--preserved-override="<why>"`. | none. The tree may be the only copy. |
+| **Merged work**: work for this item already merged to the target | 409 | `--merged-override="<why>"`. | none |
+| **Per-repo cap**: the repo has its share of live workers | 503 | Wait, or dispatch into another repo. | `[dispatch] max_polecats_per_repo` (`0` = off), `refinery_reserve`, `merge_queued_credit` |
+| **Host load**: the fleet holds at least the configured share of the host | 503 | Wait for the fleet's core share to fall. | `[dispatch] load_gate_fleet_share` (`0` = off) |
+| Invalid agent name | 400 | Fix the name. | none |
+| **Template routing**: the item's `type` routes to no template | 409 | `--template=<name>`, or fix the item's `type`. | none |
+| Template, provider or model problems (template not found, frontmatter or model unparseable) | 400/404 | Fix the template or the flag. | none |
+| Worktree would be cut from `$POGO_HOME` | 409 | Dispatch in place (`--no-worktree`). The refinery cannot merge `$POGO_HOME`. | none |
+| enth repos only: PR-flow template or non-trunk `--branch`; template without enth blocks; unadoptable stranded work | 409 | Use a non-PR template and the trunk or a release branch; refresh the template. | none |
+| **Claim**: the work item cannot be claimed (already claimed by someone else) | 409 | Find out who holds it (`mg show <id>`), and release it only if that owner is gone. | **none, by design**. A second claimant would run over the first worker's work. |
+
+The per-dispatch `--*-override` and `--stranded-adopt` flags each require a
+reason. The reason is recorded as an event beside the refusal it bypassed, so
+an override is cheap but never silent. Each flag clears its own gate and no
+other.
 
 ## Dispatch pairing — items that owe a paired work item
 

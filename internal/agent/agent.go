@@ -605,6 +605,14 @@ type Registry struct {
 	// dispatchrepocap.go.
 	dispatchCap config.DispatchCapConfig
 
+	// loadGateCfg is the load gate's mark, `[dispatch] load_gate_fleet_share`
+	// (drellem2/pogo#202). Read through loadGatePolicy, which returns the
+	// shipped default until loadGateCfgSet — so a Registry nobody configured
+	// keeps the gate ARMED, unlike dispatchCap, whose zero value disarms. A
+	// zero mark here disarms only when it was set on purpose.
+	loadGateCfg    config.DispatchLoadGateConfig
+	loadGateCfgSet bool
+
 	// refineryActivity is how the cap above learns whether the refinery has a
 	// merge request for a repo, so it can hold a slot back. Nil means the
 	// reserve is unenforced — the cap still caps, it simply cannot tell an idle

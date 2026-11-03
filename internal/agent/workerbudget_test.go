@@ -72,7 +72,7 @@ func TestWorkerBudgetDividesTheBoxByTheEnforcedCap(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b := WorkerBudgetFor(tc.hostCores, tc.cap)
+			b := WorkerBudgetFor(tc.hostCores, tc.cap, config.DefaultDispatchLoadGateConfig())
 			if b.Cores != tc.want {
 				t.Errorf("Cores = %d, want %d (basis: %s)", b.Cores, tc.want, b.Basis)
 			}
@@ -111,7 +111,7 @@ func TestWorkerBudgetEnvIsAbsentRatherThanZero(t *testing.T) {
 		t.Errorf("String() = %q, want it to name the underived state", s)
 	}
 
-	b := WorkerBudgetFor(10, config.DefaultDispatchCapConfig())
+	b := WorkerBudgetFor(10, config.DefaultDispatchCapConfig(), config.DefaultDispatchLoadGateConfig())
 	env := b.Env()
 	want := []string{"POGO_WORKER_CORES=3", "POGO_HOST_CORES=10"}
 	if len(env) != len(want) {
@@ -128,7 +128,7 @@ func TestWorkerBudgetEnvIsAbsentRatherThanZero(t *testing.T) {
 // core count gets this host's rather than a zero budget, because the daemon
 // deciding the share and the host it is dividing are the same machine.
 func TestWorkerBudgetFallsBackToThisHostsCoreCount(t *testing.T) {
-	b := WorkerBudgetFor(0, config.DefaultDispatchCapConfig())
+	b := WorkerBudgetFor(0, config.DefaultDispatchCapConfig(), config.DefaultDispatchLoadGateConfig())
 	if !b.Known() {
 		t.Fatalf("no budget derived from a zero core count: %+v", b)
 	}
@@ -142,7 +142,7 @@ func TestWorkerBudgetFallsBackToThisHostsCoreCount(t *testing.T) {
 // static division — a control with no override is a wedge — and must NOT be
 // able to move POGO_ROLE, which is a frozen cross-tool identifier.
 func TestPolecatSpawnEnvPrecedence(t *testing.T) {
-	budget := WorkerBudgetFor(10, config.DefaultDispatchCapConfig())
+	budget := WorkerBudgetFor(10, config.DefaultDispatchCapConfig(), config.DefaultDispatchLoadGateConfig())
 
 	plain := polecatSpawnEnv(budget, nil)
 	if got := indexOfAssignment(plain, "POGO_WORKER_CORES"); got < 0 {

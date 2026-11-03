@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/hostload"
 )
 
@@ -259,5 +260,91 @@ func TestFixedSamplerErrorPropagates(t *testing.T) {
 	want := errors.New("boom")
 	if _, err := (hostload.FixedSampler{Err: want}).Read(nil); !errors.Is(err, want) {
 		t.Errorf("err = %v, want %v", err, want)
+	}
+}
+
+// TestLoadGateAndWorkerBudgetReadOneConfiguredValue pins the requirement of
+// drellem2/pogo#202 that the gate's mark and the worker budget's share are ONE
+// value: before the key existed both read hostload.FleetHeavyAt, and a key that
+// moved only the gate would have left the budget quietly on the old number.
+func TestLoadGateAndWorkerBudgetReadOneConfiguredValue(t *testing.T) {
+	reg := newDrainTestRegistry(t)
+	reg.SetDispatchCap(config.DispatchCapConfig{}) // no cap: the budget follows the gate's mark
+	reg.SetDispatchLoadGate(config.DispatchLoadGateConfig{FleetShare: 0.3})
+	// 40% fleet share: under the shipped 50% mark, over the configured 30%.
+	reg.SetLoadGate(&fakeLoadGate{sample: hostload.Sample{
+		Cores: 10, FleetCores: 4, FleetProcs: 5, Attributed: true, Window: time.Second,
+	}, ok: true})
+
+	rr := spawnPolecatFor(t, reg, "mg-mark")
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 — the configured 30%% mark was not enforced", rr.Code)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "load_gate_fleet_share") || !strings.Contains(body, "30% mark") {
+		t.Errorf("refusal must name the key and the mark it acted on; got: %s", body)
+	}
+
+	rec := httptest.NewRecorder()
+	reg.handleHostLoad(rec, httptest.NewRequest("GET", "/agents/hostload", nil))
+	var resp HostLoadResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.WouldRefuseDispatch || resp.LoadGateFleetShare != 0.3 || resp.LoadGateDisarmed {
+		t.Errorf("endpoint disagrees with the gate: %+v", resp)
+	}
+	b := WorkerBudgetFor(10, config.DispatchCapConfig{}, reg.loadGatePolicy())
+	if want := int(10 * resp.LoadGateFleetShare); b.Cores != want {
+		t.Errorf("budget = %d cores, want %d — the budget and the gate read different marks (basis: %s)",
+			b.Cores, want, b.Basis)
+	}
+	if got := reg.WorkerBudget(); got.HostCores > 0 && got.Cores != int(float64(got.HostCores)*0.3) && got.Cores != 1 {
+		t.Errorf("Registry.WorkerBudget() = %+v, not derived from the configured mark", got)
+	}
+}
+
+// TestDisarmedLoadGateRefusesNothingAndSaysSo: `load_gate_fleet_share = 0`
+// dispatches onto a full host, never consults the sampler, and the endpoint
+// reports the disarm rather than an ordinary PROCEED (drellem2/pogo#202).
+func TestDisarmedLoadGateRefusesNothingAndSaysSo(t *testing.T) {
+	full := hostload.Sample{Cores: 10, FleetCores: 9.8, FleetProcs: 40, Attributed: true, Window: time.Second}
+
+	reg := newDrainTestRegistry(t)
+	reg.SetDispatchLoadGate(config.DispatchLoadGateConfig{FleetShare: 0})
+	gate := &fakeLoadGate{sample: full, ok: true}
+	reg.SetLoadGate(gate)
+	if rr := spawnPolecatFor(t, reg, "mg-disarmed"); rr.Code == http.StatusServiceUnavailable {
+		t.Fatalf("a disarmed load gate refused: %s", rr.Body.String())
+	}
+	if gate.calls != 0 {
+		t.Errorf("a disarmed gate sampled the host %d time(s) on the spawn path", gate.calls)
+	}
+
+	rec := httptest.NewRecorder()
+	reg.handleHostLoad(rec, httptest.NewRequest("GET", "/agents/hostload", nil))
+	var resp HostLoadResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.LoadGateDisarmed || resp.WouldRefuseDispatch || resp.FleetHeavy {
+		t.Errorf("endpoint for a disarmed gate: %+v", resp)
+	}
+	if !strings.Contains(resp.Advice, "DISARMED by config") {
+		t.Errorf("advice does not say the gate is disarmed: %q", resp.Advice)
+	}
+
+	// Positive control: the SAME sample on a registry nobody configured is
+	// refused — so the pass above is the disarm, not a sample the gate ignores.
+	ctl := newDrainTestRegistry(t)
+	ctl.SetLoadGate(&fakeLoadGate{sample: full, ok: true})
+	if rr := spawnPolecatFor(t, ctl, "mg-control"); rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("control: the default gate did not refuse a full host (status %d)", rr.Code)
+	}
+
+	// The budget falls back to the shipped mark as advice — not to the whole
+	// host, and not to a zero share floored to one core.
+	b := WorkerBudgetFor(10, config.DispatchCapConfig{}, config.DispatchLoadGateConfig{})
+	if b.Cores != int(10*hostload.FleetHeavyAt) || !strings.Contains(b.Basis, "DISARMED") {
+		t.Errorf("budget under a disarmed gate and no cap = %+v", b)
 	}
 }

@@ -1027,6 +1027,12 @@ type Config struct {
 	// see dispatchcap.go for why a per-repo bound is platform behaviour and a
 	// per-fleet count is not.
 	DispatchCap DispatchCapConfig
+	// DispatchLoadGate is the host load gate's mark, `[dispatch]
+	// load_gate_fleet_share` — 0 disarms it (drellem2/pogo#202). Ships ARMED at
+	// hostload.FleetHeavyAt. Same section as DispatchCap, separate struct,
+	// because DispatchCap's zero value is "cap disarmed" and this one's must not
+	// silently be "load gate disarmed" too. See dispatchloadgate.go.
+	DispatchLoadGate DispatchLoadGateConfig
 	// AuditSuccessor declares repos whose merged audits must be answered by a
 	// successor inside a window. Zero value = no repos = inert. This is a
 	// DETECTOR and never refuses anything — see auditsuccessor.go.
@@ -2604,6 +2610,9 @@ type parsedConfig struct {
 	// dispatchCapCreditSet: merge_queued_credit = 0 turns the credit off, which
 	// is a value, not an absence (mg-976f).
 	dispatchCapCreditSet bool
+	// dispatchLoadGateShareSet: load_gate_fleet_share = 0 disarms the host load
+	// gate, which is a value, not an absence (drellem2/pogo#202).
+	dispatchLoadGateShareSet bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -2640,6 +2649,8 @@ func Load() *Config {
 		// Ships ARMED (mg-3977). See dispatchcap.go for why a per-repo bound is
 		// platform behaviour rather than one deployment's policy.
 		DispatchCap: DefaultDispatchCapConfig(),
+		// Ships ARMED at hostload.FleetHeavyAt (drellem2/pogo#202).
+		DispatchLoadGate: DefaultDispatchLoadGateConfig(),
 		Reaper: ReaperConfig{
 			Enabled:       true,
 			Interval:      DefaultReaperInterval,
@@ -3430,6 +3441,9 @@ func Load() *Config {
 		if fileCfg.dispatchCapCreditSet {
 			cfg.DispatchCap.MergeQueuedCredit = fileCfg.DispatchCap.MergeQueuedCredit
 		}
+		if fileCfg.dispatchLoadGateShareSet {
+			cfg.DispatchLoadGate.FleetShare = fileCfg.DispatchLoadGate.FleetShare
+		}
 
 		// [audit_successor] has no code-side defaults to preserve either — the
 		// zero value is "no repos, detector inert". Window is the one exception:
@@ -4105,6 +4119,23 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 					}
 					cfg.DispatchCap.MergeQueuedCredit = n
 					cfg.dispatchCapCreditSet = true
+				}
+			case "load_gate_fleet_share":
+				// The host load gate's mark (drellem2/pogo#202). 0 disarms it.
+				// Negative clamps to 0 for the reason max_polecats_per_repo's
+				// does; above 1 clamps to 1, because a fleet share cannot exceed
+				// 1 and a larger mark would disarm the gate without the boot log
+				// or `pogo host load` saying so. Unparseable (or NaN) is ignored
+				// and the default stands.
+				if f, err := strconv.ParseFloat(unquotedVal, 64); err == nil && f == f {
+					if f < 0 {
+						f = 0
+					}
+					if f > 1 {
+						f = 1
+					}
+					cfg.DispatchLoadGate.FleetShare = f
+					cfg.dispatchLoadGateShareSet = true
 				}
 			}
 		case "dispatch_pairing":
