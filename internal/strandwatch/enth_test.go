@@ -514,3 +514,73 @@ func TestEnthRepoUnreadableThroughEnthd(t *testing.T) {
 		})
 	}
 }
+
+// mg-69461: the enth source map is keyed by the registered project path, which
+// `pogo project add` stores WITH a trailing slash, while an mg item's Repo:
+// has none. Keyed raw, the item's repository was swept as git (a false
+// "could not list branches" row), the enth row counted 0 items and said no
+// open item named it, and a --repo sweep dropped the enth source. The item's
+// unlanded Change must be on the ENTH row, as the only row for that item.
+func TestEnthRepoKeyIgnoresTrailingSlash(t *testing.T) {
+	const registered = enthRepoPath + "/" // as projects.json stores it
+	items := []Item{{ID: "mg-s1", Status: "available", Repo: enthRepoPath, Title: "no slash"}}
+	list := func() ([]vcs.Change, error) {
+		return []vcs.Change{change("ssss1111", "root", "mg-s1", "ps1")}, nil
+	}
+	mk := func(repos []string) Options {
+		o := enthOpts(items, map[string]bool{}, list, nil)
+		o.Enth = func() (map[string]EnthSource, error) {
+			return map[string]EnthSource{registered: {
+				Remote: "http://enthd.test", Repo: "alice/proj", Trunk: vcs.DefaultEnthTrunk, Changes: list,
+			}}, nil
+		}
+		o.Repos = repos
+		return o
+	}
+	for _, tc := range []struct {
+		name  string
+		repos []string
+	}{
+		{"unscoped", nil},
+		{"--repo without slash", []string{enthRepoPath}},
+		{"--repo with slash", []string{registered}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rep, err := Scan(mk(tc.repos))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rep.Repos) != 1 {
+				t.Fatalf("repos = %+v, want ONE enth row (the slash and no-slash spellings are one repository)", rep.Repos)
+			}
+			cov := rep.Repos[0]
+			if cov.VCS != string(vcs.Enth) || cov.Items != 1 || !cov.NamedByOpenItem || cov.Error != "" {
+				t.Fatalf("enth row = %+v, want vcs=enth, 1 item, named by an open item, no error", cov)
+			}
+			if cov.EnthUnlanded != 1 {
+				t.Fatalf("enth row unlanded = %d, want 1", cov.EnthUnlanded)
+			}
+			var rows []Row
+			for _, r := range rep.Rows {
+				if r.Item.ID == "mg-s1" {
+					rows = append(rows, r)
+				}
+			}
+			if len(rows) != 1 || rows[0].Kind != KindStranded || rows[0].Enth == nil || rows[0].Unmerged != 1 {
+				t.Fatalf("rows for mg-s1 = %+v, want exactly one stranded enth row with 1 unlanded Change", rows)
+			}
+			if len(rep.ReposUnmatched) != 0 {
+				t.Fatalf("repos unmatched = %+v, want none", rep.ReposUnmatched)
+			}
+		})
+	}
+}
+
+func TestQueueKeyIgnoresTrailingSlash(t *testing.T) {
+	if QueueKey("/a/b/", "x") != QueueKey("/a/b", "x") || ItemQueueKey("/a/b/", "mg-1") != ItemQueueKey("/a/b", "mg-1") {
+		t.Fatal("queue keys differ by trailing slash")
+	}
+	if RepoKey("") != "" {
+		t.Fatalf("RepoKey(\"\") = %q, want \"\"", RepoKey(""))
+	}
+}

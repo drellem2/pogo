@@ -1420,7 +1420,29 @@ type Options struct {
 
 // QueueKey is the identity of a branch awaiting merge: a branch name alone is
 // ambiguous across repositories.
-func QueueKey(repo, branch string) string { return repo + "\x00" + branch }
+//
+// The repo half goes through RepoKey, so a refinery record and a sweep that
+// spell the same repository with and without a trailing slash meet.
+func QueueKey(repo, branch string) string { return RepoKey(repo) + "\x00" + branch }
+
+// RepoKey is the identity of a repository path inside a sweep (mg-69461).
+//
+// EVERY MAP THIS PACKAGE KEYS BY REPOSITORY GOES THROUGH IT, at insert and at
+// lookup. The sources do not agree on spelling: an mg item's Repo: has no
+// trailing slash, while `pogo project add` stores one, so the enth source map
+// arrived keyed "/x/mg-enth/" and the item named "/x/mg-enth". Keyed raw, the
+// two never met: the item's repository was swept as GIT (a false "could not
+// list branches" on every enth-repo item), the enth row said no open item
+// named it, and a `--repo /x/mg-enth` sweep dropped the enth source entirely.
+// project.samePath already compared with filepath.Clean, which is why spawn
+// resolved and only this sweep did not. "" stays "" — it is "no repository",
+// not ".".
+func RepoKey(repo string) string {
+	if repo == "" {
+		return ""
+	}
+	return filepath.Clean(repo)
+}
 
 func orDefault(s, fallback string) string {
 	if s == "" {
@@ -1478,7 +1500,7 @@ func Scan(opts Options) (Report, error) {
 	// paid once, not once per item.
 	only := map[string]bool{}
 	for _, r := range opts.Repos {
-		only[r] = true
+		only[RepoKey(r)] = true
 	}
 	rep.ReposRequested = append([]string(nil), opts.Repos...)
 
@@ -1505,12 +1527,13 @@ func Scan(opts Options) (Report, error) {
 			})
 			continue
 		}
-		if len(only) > 0 && !only[it.Repo] {
+		key := RepoKey(it.Repo)
+		if len(only) > 0 && !only[key] {
 			rep.ItemsOutOfScope++
 			continue
 		}
-		addRepo(it.Repo)
-		byRepo[it.Repo] = append(byRepo[it.Repo], it)
+		addRepo(key)
+		byRepo[key] = append(byRepo[key], it)
 	}
 	namedByItem := map[string]bool{}
 	for r := range byRepo {
@@ -1527,7 +1550,8 @@ func Scan(opts Options) (Report, error) {
 		if eerr != nil {
 			rep.EnthUnreadable = eerr.Error()
 		}
-		for r, src := range m {
+		for raw, src := range m {
+			r := RepoKey(raw)
 			if len(only) > 0 && !only[r] {
 				continue
 			}
@@ -1568,12 +1592,13 @@ func Scan(opts Options) (Report, error) {
 				})
 				continue
 			}
-			if len(only) > 0 && !only[w.Repo] {
+			wkey := RepoKey(w.Repo)
+			if len(only) > 0 && !only[wkey] {
 				continue
 			}
 			rep.WorktreesInScope++
-			byWorktree[w.Repo] = append(byWorktree[w.Repo], w)
-			addRepo(w.Repo)
+			byWorktree[wkey] = append(byWorktree[wkey], w)
+			addRepo(wkey)
 		}
 	}
 
@@ -1581,12 +1606,13 @@ func Scan(opts Options) (Report, error) {
 	// so `--repo <a real repository with no open items>` is a narrower sweep and
 	// `--repo <a bare name or a typo>` is a blind one. Before this both were the
 	// same all-clear (see UnmatchedRepo).
-	for _, r := range opts.Repos {
+	for _, raw := range opts.Repos {
+		r := RepoKey(raw)
 		if inSweep[r] {
 			continue
 		}
 		if _, perr := strandedwork.PolecatBranches(r); perr != nil {
-			rep.ReposUnmatched = append(rep.ReposUnmatched, UnmatchedRepo{Repo: r, Error: perr.Error()})
+			rep.ReposUnmatched = append(rep.ReposUnmatched, UnmatchedRepo{Repo: raw, Error: perr.Error()})
 			continue
 		}
 		addRepo(r)
@@ -1956,7 +1982,7 @@ func (v historyView) forBranch(repo, branch string, tip time.Time, tipErr string
 		return nil, false, fmt.Sprintf("the refinery's merge history COULD NOT BE READ (%s), so "+
 			"whether this branch has already been submitted and refused is unknown", v.err)
 	}
-	p, found := v.h.Latest[QueueKey(repo, branch)]
+	p, found := v.h.Latest[QueueKey(repo, branch)] // QueueKey normalises repo
 
 	// A branch that cannot be DATED cannot have a record dated against it. The
 	// record is still reported — it is real and a reader wants it — but it cannot
