@@ -9,12 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/ghpr"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/strandwatch"
 	"github.com/drellem2/pogo/internal/vcs"
@@ -261,6 +263,20 @@ readers to skip the line. An unreadable refinery queue is stated in the report
 rather than fatal — the queue being down is common and the rest of the answer is
 still worth having.
 
+AN ORPHAN BRANCH IS REPORTED ONLY WHEN NOTHING SHOWS IT LANDED (drellem2/pogo#160).
+An ` + "`orphan_branch`" + ` row is a polecat worktree on this host whose branch holds commits
+on no remote ref and which no open item names. Before it is reported, two
+landedness tests run: the reaper's own durability verdict (gitgc.BranchDurable:
+some origin ref holds it, the target contains it, or every commit has a
+patch-equivalent on the target — the rebase-landed case), and, for a squash
+merge that verdict cannot see, the merged-PR test (` + "`gh pr list --head`" + `: a MERGED
+pull request whose head holds the branch's tip and whose merge commit is an
+ancestor of the target). A branch either test settles moves to the exclusions,
+named under --all and counted on the default output as "N orphan branch(es), all
+landed". A test that could not run — gh missing, unauthenticated, rate-limited, a
+non-GitHub remote — never settles a branch: the row stays, and says which test
+did not run.
+
 REPORTS ONLY. It never submits and never closes. Both remedies are one command
 by hand once you know, and each is destructive in the wrong direction.
 
@@ -280,6 +296,8 @@ run measured nothing.`,
 				QueuedBranches: queuedRefineryBranches,
 				History:        refineryMergeHistory,
 				Worktrees:      polecatWorktrees,
+				BranchDurable:  reaperDurability,
+				MergedPRs:      mergedPullRequests,
 				Repos:          repos,
 				Target:         target,
 				Fetch:          !noFetch,
@@ -322,6 +340,42 @@ run measured nothing.`,
 		return nil
 	})
 	return cmd
+}
+
+// reaperDurability is gitgc.BranchDurable — the verdict git-gc deletes
+// worktrees on — mapped onto strandwatch's own type, so an orphan branch the
+// reaper has already cleared as durable is settled rather than reported
+// (drellem2/pogo#160). NotChecked cannot come back from BranchDurable; it maps
+// to unknown, which reports, rather than to anything that settles.
+func reaperDurability(repo, branch, target string) (strandwatch.Durability, string) {
+	v, detail := gitgc.BranchDurable(repo, branch, target)
+	switch v {
+	case gitgc.DurabilityDurable:
+		return strandwatch.DurabilityDurable, detail
+	case gitgc.DurabilityLocalOnly:
+		return strandwatch.DurabilityLocalOnly, detail
+	default:
+		return strandwatch.DurabilityUnknown, detail
+	}
+}
+
+// mergedPRTimeout bounds one gh query. A query that times out is an error, and
+// an error leaves the orphan row reported.
+const mergedPRTimeout = 20 * time.Second
+
+// mergedPullRequests is the squash test's source: the MERGED GitHub PRs whose
+// head is branch, through gh (drellem2/pogo#160). Every gh failure is returned,
+// never folded into "no PR" — see strandwatch.Options.MergedPRs.
+func mergedPullRequests(repo, branch string) ([]strandwatch.MergedPR, error) {
+	prs, err := ghpr.MergedFor(repo, branch, mergedPRTimeout)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]strandwatch.MergedPR, 0, len(prs))
+	for _, p := range prs {
+		out = append(out, strandwatch.MergedPR{Number: p.Number, MergeCommit: p.MergeCommit, HeadCommit: p.HeadCommit})
+	}
+	return out, nil
 }
 
 // openWorkItems lists the work items still asking for work, by shelling out to

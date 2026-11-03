@@ -95,11 +95,27 @@ func Render(rep Report, all bool) string {
 		fmt.Fprintf(&b, "  refinery merge history: %d completed request(s), observing %s%s\n",
 			rep.History.Records, floor, retentionNote(rep.History.Retention))
 	}
-	fmt.Fprintf(&b, "  %d exclusion(s): branches of running polecats, and queued branches whose item is CLAIMED\n",
-		len(rep.Excluded))
+	fmt.Fprintf(&b, "  %d exclusion(s): branches of running polecats, queued branches whose item is CLAIMED, "+
+		"and orphan branches shown landed\n", len(rep.Excluded))
+	// THE SETTLED ORPHANS GET THEIR OWN LINE ON THE DEFAULT OUTPUT (drellem2/pogo#160).
+	// Moving a row out of the findings is a suppression, and a suppression with
+	// no count is indistinguishable from having had nothing to suppress.
+	if n := rep.OrphansLanded; n > 0 {
+		if left := rep.Count(KindOrphanBranch); left == 0 {
+			fmt.Fprintf(&b, "  %d orphan branch(es), all landed — settled by the landedness tests, not reported "+
+				"(--all names them)\n", n)
+		} else {
+			fmt.Fprintf(&b, "  %d orphan branch(es) landed and settled (--all names them); %d did NOT and are "+
+				"reported below\n", n, left)
+		}
+	}
 	if all {
 		for _, e := range rep.Excluded {
-			fmt.Fprintf(&b, "    %-14s %-24s %s\n", e.ItemID, e.Branch, e.Reason)
+			id := e.ItemID
+			if id == "" {
+				id = "(no item)"
+			}
+			fmt.Fprintf(&b, "    %-14s %-24s %s\n", id, e.Branch, e.Reason)
 		}
 	}
 	for _, e := range rep.InspectErrors {
@@ -171,6 +187,16 @@ func Render(rep Report, all bool) string {
 			fmt.Fprintf(&b, "    %d commit(s) on NO remote ref, and no OPEN work item names this branch:\n", r.Unmerged)
 			for _, s := range r.Subjects {
 				fmt.Fprintf(&b, "      %s\n", truncateSubject(s, 92))
+			}
+			if r.Durability != "" {
+				for _, line := range wrap("reaper: "+r.Durability, 84) {
+					fmt.Fprintf(&b, "    %s\n", line)
+				}
+			}
+			if r.LandedCheck != "" {
+				for _, line := range wrap("squash test: "+r.LandedCheck, 84) {
+					fmt.Fprintf(&b, "    %s\n", line)
+				}
 			}
 			b.WriteString("    This is the row the open-item join cannot produce. There is no owner to ask\n" +
 				"    and no item to submit under, so the first move is to make the object durable.\n")
