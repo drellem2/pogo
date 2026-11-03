@@ -765,6 +765,12 @@ var DefaultProgressWatchSkipDirs = []string{"node_modules", ".pnpm"}
 // treat it as read-only.
 var DefaultFastPriorities = []string{"high"}
 
+// DefaultBlockedReminderWaiverTags is the tag that tells the blocked-reminder
+// "I know, and I am waiting on purpose" (drellem2/pogo#161). Named after the
+// phrase the notice itself uses, so the reader of the notice can find it.
+// Treat it as read-only.
+var DefaultBlockedReminderWaiverTags = []string{"waiting-on-purpose"}
+
 // DefaultNonDispatchableAssignees is the set of WorkItem.Assignee values that
 // mean "the coordinator must NOT dispatch this" — an execution gate rather
 // than a statement of ownership. Two gates, and they gate for DIFFERENT
@@ -1157,6 +1163,18 @@ type StallWatchConfig struct {
 	// before the reminder goes quiet about it permanently. Zero falls back to
 	// DefaultBlockedReminderMaxNotices; a negative value means no cap.
 	BlockedReminderMaxNotices int
+	// BlockedReminderWaiverTags are the visible "I am waiting on purpose"
+	// acknowledgement (drellem2/pogo#161): a `blocked:<agent>` item carrying one
+	// of these tags draws no blocked-reminder. Empty falls back to
+	// DefaultBlockedReminderWaiverTags.
+	//
+	// It waives a NOTICE and nothing else. The item stays gated — dispatch is
+	// refused at the spawn point by its assignee, never by a tag — and the tag
+	// does not release it. It is a tag rather than a sentence in the body
+	// because nothing on the reminder path reads a body, deliberately: the
+	// notice used to say "say so in the item body", and complying changed
+	// nothing (mg-1105).
+	BlockedReminderWaiverTags []string
 
 	// IndefiniteHoldReportEnabled turns on the indefinite-hold report (mg-f398):
 	// a read-only digest telling the coordinator which items have been sitting on
@@ -2647,6 +2665,7 @@ func Load() *Config {
 			BlockedReminderEnabled:    true,
 			BlockedReminderCooldown:   DefaultBlockedReminderCooldown,
 			BlockedReminderMaxNotices: DefaultBlockedReminderMaxNotices,
+			BlockedReminderWaiverTags: DefaultBlockedReminderWaiverTags,
 
 			// Default-on (mg-f398). A reader that ships disarmed is the finding
 			// it closes, re-created one level up: a hold nothing looks at, plus
@@ -3368,6 +3387,9 @@ func Load() *Config {
 		if fileCfg.StallWatch.BlockedReminderMaxNotices != 0 {
 			cfg.StallWatch.BlockedReminderMaxNotices = fileCfg.StallWatch.BlockedReminderMaxNotices
 		}
+		if len(fileCfg.StallWatch.BlockedReminderWaiverTags) > 0 {
+			cfg.StallWatch.BlockedReminderWaiverTags = fileCfg.StallWatch.BlockedReminderWaiverTags
+		}
 		if fileCfg.indefiniteHoldEnabledSet {
 			cfg.StallWatch.IndefiniteHoldReportEnabled = fileCfg.StallWatch.IndefiniteHoldReportEnabled
 		}
@@ -4040,6 +4062,8 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				if n, err := strconv.Atoi(unquotedVal); err == nil {
 					cfg.StallWatch.BlockedReminderMaxNotices = n
 				}
+			case "blocked_reminder_waiver_tags":
+				cfg.StallWatch.BlockedReminderWaiverTags = parseStringArray(val)
 			case "indefinite_hold_report_enabled":
 				cfg.StallWatch.IndefiniteHoldReportEnabled = val == "true"
 				cfg.indefiniteHoldEnabledSet = true
