@@ -92,13 +92,49 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 	// prunes any key whose item is no longer a candidate — dropping a capped item
 	// here would forget its count, and it would read as new next tick and start
 	// the four notices over. The cap is applied to the message below instead.
+	//
+	// Two kinds of `blocked:<agent>` item are NOT candidates, and both leave the
+	// set before selectDue so that neither draws a notice nor holds a count
+	// (drellem2/pogo#161):
+	//
+	//   - one carrying a waiver tag: the named agent said, in the one place this
+	//     check reads, that it knows and is waiting on purpose;
+	//   - one whose current assignee the named agent wrote ITSELF: that value is
+	//     a statement the agent made, not a request it received.
+	//
+	// Leaving the set prunes the item's key, so if the waiver is removed or
+	// someone else re-writes the block, the item reads as new and its first
+	// notice fires immediately — exactly what either change means.
+	waivers := w.blockedReminderWaiverTags()
+	readSetters := false
 	var blocked []workitem.WorkItem
+	var waived, selfSet []string
 	for _, it := range items {
-		if _, ok := config.BlockedOn(it.Assignee); ok {
-			blocked = append(blocked, it)
+		who, ok := config.BlockedOn(it.Assignee)
+		if !ok {
+			continue
 		}
+		if config.HasAnyTag(it.TagList(), waivers) {
+			waived = append(waived, it.ID)
+			continue
+		}
+		if who = normName(who); who != "" {
+			if !readSetters {
+				// Once per tick, and only when there is a block to ask
+				// about. A failed read leaves every setter unknown, which
+				// fails open: the notice is sent.
+				w.setters.refresh()
+				readSetters = true
+			}
+			if w.setters.setter(it.ID, it.Assignee) == who {
+				selfSet = append(selfSet, it.ID)
+				continue
+			}
+		}
+		blocked = append(blocked, it)
 	}
 	sort.Slice(blocked, func(i, j int) bool { return blocked[i].ID < blocked[j].ID })
+	w.recordQuietBlocks(waived, selfSet, waivers)
 
 	due, sel := w.selectDue(categoryBlockedReminder, blocked, now, w.blockedReminderCooldown())
 
@@ -176,7 +212,7 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 				"This is NOT a dispatch request: they are gated away from automatic dispatch and stay that way "+
 				"until you act. Run `mg show <id>` for what each one is waiting on, do it, then tell whoever set "+
 				"the block (or clear it yourself with `mg edit <id> --assignee=<owner>`). "+
-				blockedReminderStopSentence(max),
+				blockedReminderStopSentence(max, waivers),
 			len(group), strings.Join(ids, ", "))
 		msg += subsetRepeatNotice(sel, ids)
 
@@ -337,21 +373,102 @@ func (w *Watcher) blockedReminderCooldown() time.Duration {
 }
 
 // blockedReminderStopSentence says, truthfully, what an agent waiting on
-// purpose can do about this notice: nothing. Nothing in this check reads an
-// item body, so there is no acknowledgment path — the cap bounds the damage
-// instead (see TestBlockedReminderStopsAtMaxNotices). The old sentence told the
+// purpose can do about this notice. Nothing in this check reads an item body,
+// and that is deliberate (indefinitehold.go states the same prohibition for the
+// sibling reader). Before drellem2/pogo#161 that left no acknowledgment path at
+// all, and only the cap bounded the damage. The original sentence told the
 // recipient to "say so in the item body", which had no effect on anything: a
 // conscientious agent wrote a body section per notice and every notice still
 // arrived unchanged (mg-1105). Do not offer an affordance the code does not
 // honour. max is the effective cap; 0 means uncapped, which the old %d
 // rendered as "stops after 0 reminders".
-func blockedReminderStopSentence(max int) string {
-	if max <= 0 {
-		return "If you are waiting on purpose, there is nothing to acknowledge — no reply or body edit " +
-			"stops this notice; it repeats on a backoff until the block clears (the notice cap is disabled)."
+//
+// Since drellem2/pogo#161 there IS an acknowledgement, and it is a tag, because
+// a tag is what this check reads: the sentence names the configured waiver tag
+// and the exact command that adds it. It still says a reply or a body edit does
+// nothing, because that is still true and is what a reader would otherwise try.
+func blockedReminderStopSentence(max int, waivers []string) string {
+	ack := "If you are waiting on purpose, a reply or a body edit will not stop this notice"
+	if tag := firstTag(waivers); tag != "" {
+		ack = fmt.Sprintf("If you are waiting on purpose, tag the item `%s` (`mg edit <id> --add-tags=%s`) "+
+			"and it stops — the item stays blocked; a reply or a body edit will not stop it", tag, tag)
 	}
-	return fmt.Sprintf("If you are waiting on purpose, there is nothing to acknowledge — no reply or body edit "+
-		"stops this notice; it stops by itself after %d reminders whether or not the block clears.", max)
+	if max <= 0 {
+		return ack + ". Otherwise it repeats on a backoff until the block clears (the notice cap is disabled)."
+	}
+	return fmt.Sprintf("%s. Otherwise it stops by itself after %d reminders whether or not the block clears.", ack, max)
+}
+
+// firstTag returns the first non-blank waiver tag, trimmed, or "".
+func firstTag(tags []string) string {
+	for _, t := range tags {
+		if t = strings.TrimSpace(t); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+func (w *Watcher) blockedReminderWaiverTags() []string {
+	if len(w.cfg.BlockedReminderWaiverTags) > 0 {
+		return w.cfg.BlockedReminderWaiverTags
+	}
+	return config.DefaultBlockedReminderWaiverTags
+}
+
+// recordQuietBlocks emits one event the first time each item is held silent by
+// a waiver tag or by having been self-set, so a block that draws no notice is
+// countable rather than merely absent (the mg-1693 lesson the cap event already
+// follows). It emits on ENTRY only — not every tick — and forgets ids that are
+// no longer quiet, so an item that goes quiet again later is recorded again.
+func (w *Watcher) recordQuietBlocks(waived, selfSet []string, waivers []string) {
+	w.mu.Lock()
+	if w.quietBlocks == nil {
+		w.quietBlocks = make(map[string]string)
+	}
+	now := make(map[string]string, len(waived)+len(selfSet))
+	for _, id := range waived {
+		now[id] = "waived"
+	}
+	for _, id := range selfSet {
+		now[id] = "self_set"
+	}
+	var newWaived, newSelf []string
+	for id, why := range now {
+		if w.quietBlocks[id] == why {
+			continue
+		}
+		if why == "waived" {
+			newWaived = append(newWaived, id)
+		} else {
+			newSelf = append(newSelf, id)
+		}
+	}
+	w.quietBlocks = now
+	w.mu.Unlock()
+
+	if len(newWaived) == 0 && len(newSelf) == 0 {
+		return
+	}
+	sort.Strings(newWaived)
+	sort.Strings(newSelf)
+	details := map[string]any{
+		"category":      categoryBlockedReminder,
+		"watched_agent": w.cfg.Agent,
+		"item_count":    0,
+	}
+	if len(newWaived) > 0 {
+		details["waived_ids"] = newWaived
+		details["waiver_tags"] = waivers
+	}
+	if len(newSelf) > 0 {
+		details["self_set_ids"] = newSelf
+	}
+	w.emit(events.Event{
+		EventType: "stall_watch_fired",
+		Agent:     "pogod",
+		Details:   details,
+	})
 }
 
 // blockedReminderMaxNotices returns the effective notice cap. A negative
