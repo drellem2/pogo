@@ -290,6 +290,8 @@ mg mail read <msg-id>            # Read a message
 mg mail send <agent> --from=doctor --subject="<subj>" --body-file - <<'EOF'
 <body>
 EOF
+# ANSWERING a mail (human or agent)? mg mail reply doctor/<msg-id>, not send: it threads
+# (see "Inter-agent communication" below for the body form)
 # User-facing findings — apple-side notifier delivers these
 mg mail send human --from=doctor --subject="<subj>" --body-file - <<'EOF'
 <body>
@@ -303,6 +305,8 @@ If you need to surface a diagnostic finding to the user, mail `human` (not the {
 **Reconcile after interruption — and a RESTART is an interruption.** A bounce, a crash or a redeploy counts, and it is the worst case: you are a new session that never saw the batch, so nothing in your context tells you an interruption happened, and you inherit the obligation from a predecessor that cannot tell you anything. After any restart, reconcile explicitly — `mg mail list doctor --all` against your last `pogo turn-done` line in `~/.pogo/agents/turnlog/doctor.log`. Anything that landed between that timestamp and the bounce is suspect **regardless of read state**. `--all` is not a convenience: the unread filter cannot surface a read-but-unhandled mail by construction, which is the whole failure mode. On the 2026-08-12 03:01 bounce two agents each recovered a mail this way that the unread filter had already lost permanently — both already had the act-then-mark discipline above, which is why the restart case is spelled out rather than left to follow from "interruption".
 
 **Inter-agent communication** — prefer mail for asks; reserve nudges for system events. Mail (`mg mail send <to> --from=doctor --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod).
+
+**Answering a mail — from anyone, especially `human` — use `mg mail reply`, not `mg mail send`.** `mg mail reply doctor/<msg-id> --body="..."` reads the original and fills in the recipient, the `Re:` subject, and the `In-Reply-To` and `References` headers. Those headers are what threads your answer. `send` sets neither, so it starts a new conversation, and Daniel sees it as a new Discord thread. A `Re:` subject is not a thread signal: bridget threads only on the headers (mg-77551). Keep `send` for new topics. `reply` takes `--body` only, with no `--body-file`, so pass a long body as `--body="$(cat <file>)"`.
 
 ## Protect Your Context Window
 

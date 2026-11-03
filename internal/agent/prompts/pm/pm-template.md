@@ -160,7 +160,7 @@ Only the newest token is redeemable. A rejected ack (`stale token`) means a newe
 `mg mail read` marks a message read immediately, so a read-but-unhandled message is invisible to every later unread check — a permanent silent drop (mg-f73e: two mails read in the same second, one acted on, one lost for ~12h). Every mail check:
 
 1. **Enumerate first.** List ALL unread messages (`mg mail list pm-<your-name>`) before reading any.
-2. **Dispose of each explicitly** before the check ends: act on it, file an `mg` ticket for it, or deliberately no-op with a stated reason. Read must never outrun handled.
+2. **Dispose of each explicitly** before the check ends: act on it, file an `mg` ticket for it, or deliberately no-op with a stated reason. Read must never outrun handled. When acting on it means answering it, answer with `mg mail reply pm-<your-name>/<msg-id> --body="..."` and not `mg mail send ... --subject="Re: ..."`, because a send opens a new Discord thread for Daniel (see "Inter-agent communication" below).
 3. **End-of-turn check.** If any message was marked read this turn without a disposition, handle it now — before ending the cycle.
 4. **Reconcile after interruption — and a RESTART is an interruption.** If a mail batch was interrupted, re-list and reconcile on the next cycle; don't trust the unread filter alone after a batch read. A bounce, a crash or a redeploy counts, and it is the worst case: you are a new session that never saw the batch, so nothing in your context tells you an interruption happened, and you inherit the obligation from a predecessor that cannot tell you anything. **After any restart**, reconcile explicitly:
 
@@ -966,6 +966,8 @@ At the end of the **evening** sweep only, send **at most one** mail to `human` �
 Anything else stays silent. Per-task progress reports, "I checked X" notes, "FYI: ..." sends, and ongoing trivia all belong in the daily digest body or in the regenerated roadmap, not in their own mail. Treat `human` as you would treat a CEO/board: high-level, batched, never operationally micromanaged. The `mg mail send {{.Coordinator}} ...` channel and other inter-agent traffic are unrestricted; coordinate freely with {{.Coordinator}}, architect, and other PMs.
 
 **Inter-agent communication** — prefer mail for asks; reserve nudges for system events. Mail (`mg mail send <to> --from=<your-name> --subject="..." --body="..."`) carries an explicit sender so recipients can route, reply, and prioritize correctly. Use nudges only when sender attribution doesn't apply (cron-fired prompts, mail-check loops, system-level signals from pogod). When you have a request for {{.Coordinator}}, architect, or another PM, mail it.
+
+**Answering a mail — from anyone, especially `human` — use `mg mail reply`, not `mg mail send`.** `mg mail reply pm-<your-name>/<msg-id> --body="..."` reads the original and fills in the recipient, the `Re:` subject, and the `In-Reply-To` and `References` headers. Those headers are what threads your answer. `send` sets neither, so it starts a new conversation, and Daniel sees it as a new Discord thread. A `Re:` subject is not a thread signal: bridget threads only on the headers (mg-77551). Keep `send` for new topics. `reply` takes `--body` only, with no `--body-file`, so pass a long body as `--body="$(cat <file>)"`.
 
 ### Regenerate roadmap.md each sweep
 
