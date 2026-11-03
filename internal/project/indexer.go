@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
 
 // fallbackDiscoveryInterval is used when StartRepoDiscovery is handed a
@@ -73,7 +75,14 @@ func scanRootForRepos(root string) {
 			continue
 		}
 		repo := filepath.Join(root, e.Name())
-		if !pathExists(filepath.Join(repo, ".git")) {
+		// .git or an enth checkout (.enth/checkout, X1, enth-vcs slice 5); a
+		// directory holding both is refused rather than guessed at (X2).
+		git, enth := pathExists(filepath.Join(repo, ".git")), enthvcs.IsCheckout(repo)
+		if git && enth {
+			logger.Warn("repo discovery: skipping a directory holding both .git and .enth/checkout", "path", repo)
+			continue
+		}
+		if !git && !enth {
 			continue
 		}
 		normalized := addSlashToPath(repo)

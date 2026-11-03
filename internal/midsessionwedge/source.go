@@ -184,6 +184,12 @@ func worktreeNewest(dir string) (time.Time, string, bool) {
 		return time.Time{}, "", false
 	}
 	newest, which := st.ModTime(), "."
+	// An enth checkout's progress signal (enth-vcs §4 O3, slice 5): `enth
+	// change` rewrites .enth/checkout when it moves the base onto the new
+	// Change, as a git commit moves HEAD and the index.
+	if fi, err := os.Stat(filepath.Join(dir, enthCheckoutFile)); err == nil && fi.ModTime().After(newest) {
+		newest, which = fi.ModTime(), enthCheckoutFile
+	}
 	if gd := gitDir(dir); gd != "" {
 		for _, f := range gitMetaFiles {
 			fi, err := os.Stat(filepath.Join(gd, f))
@@ -197,6 +203,10 @@ func worktreeNewest(dir string) (time.Time, string, bool) {
 	}
 	return newest, which, true
 }
+
+// enthCheckoutFile is an enth checkout's state file, relative to its root
+// (enthvcs.StateRelPath; spelled here so this package needs no VCS import).
+const enthCheckoutFile = ".enth/checkout"
 
 // gitDir resolves a worktree's git directory. In a LINKED worktree — which is
 // what every polecat has — `.git` is a file holding `gitdir: <path>`, not a

@@ -10,6 +10,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/freshen"
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
 
 // WorkspaceRepoDir returns the conventional long-lived repo checkout for a
@@ -53,7 +54,7 @@ func WorkspaceRepoDir(name string) string {
 // Never returns an error: a workspace problem must not block an agent start.
 // The bad news travels by event and mail instead.
 func freshenWorkspace(name string) freshen.Result {
-	res := workspaces.Refresh(context.Background(), WorkspaceRepoDir(name))
+	res := refreshWorkspaceRepo(WorkspaceRepoDir(name))
 
 	switch {
 	case res.Status == freshen.StatusSkipped:
@@ -215,4 +216,21 @@ func orNone(s string) string {
 		return "(none)"
 	}
 	return s
+}
+
+// refreshWorkspaceRepo refreshes the checkout at dir through the backend its
+// marker names (enth-vcs slice 5, mg-cc5cd). Only a checkout ROOTED at dir is
+// enth's: Detect walks up, and a crew repo/ that does not exist must stay
+// "skipped" by the git backend exactly as before, not be attributed to
+// whatever repo encloses it. Both markers at dir is a failed refresh, with
+// the reason.
+func refreshWorkspaceRepo(dir string) freshen.Result {
+	if enthvcs.IsCheckout(dir) {
+		ws, err := workspacesAt(dir)
+		if err != nil {
+			return freshen.Result{Path: dir, Status: freshen.StatusFailed, Behind: -1, Ahead: -1, Detail: err.Error()}
+		}
+		return ws.Refresh(context.Background(), dir)
+	}
+	return workspaces.Refresh(context.Background(), dir)
 }

@@ -4424,7 +4424,7 @@ binary. pogod answers the same question — "pogod version --json".`,
 		Long:  `Commands to add, remove, and list registered projects.`,
 	}
 
-	var projVCS, projEnthRemote, projEnthRepo, projEnthTrunk string
+	var projVCS vcsFlags
 	var cmdProjectAdd = &cobra.Command{
 		Use:   "add <path>",
 		Short: "Register a project directory",
@@ -4436,8 +4436,10 @@ the record carries no vcs key and the repo is git, as every repo was before.
 
     pogo project add <path> --vcs=enth --enth-remote=URL --enth-repo=NAME
 
-The enth backend is not built yet (enth-vcs slices 5-7): a repo recorded as
-enth refuses every refinery operation with "unsupported by this backend".`,
+The path of an enth repo is a read checkout pogo keeps (it holds .enth/checkout).
+Polecats on it get their own whole-repo enth checkout (enth-vcs slice 5); the
+refinery does not land enth work yet (slices 6-7), and refuses it with
+"unsupported by this backend".`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			path := args[0]
@@ -4453,7 +4455,7 @@ enth refuses every refinery operation with "unsupported by this backend".`,
 				cli.ExitWithError(jsonOutput, "no git repository found at or above "+absPath, cli.ExitNotFound)
 			}
 			if cmd.Flags().Changed("vcs") || enthFlagsChanged(cmd) {
-				p, err := client.SetProjectVCS(resp.ParentProject.Path, vcs.Kind(projVCS), enthFromFlags(cmd, projEnthRemote, projEnthRepo, projEnthTrunk))
+				p, err := client.SetProjectVCS(resp.ParentProject.Path, vcs.Kind(projVCS.kind), enthFromFlags(cmd, projVCS))
 				if err != nil {
 					cli.ExitWithError(jsonOutput, fmt.Sprintf("registered %s, but setting its vcs failed: %v", resp.ParentProject.Path, err), cli.ExitError)
 				}
@@ -4466,9 +4468,9 @@ enth refuses every refinery operation with "unsupported by this backend".`,
 			}
 		},
 	}
-	addVCSFlags(cmdProjectAdd, &projVCS, &projEnthRemote, &projEnthRepo, &projEnthTrunk)
+	addVCSFlags(cmdProjectAdd, &projVCS)
 
-	var setVCS, setEnthRemote, setEnthRepo, setEnthTrunk string
+	var setVCS vcsFlags
 	var cmdProjectSetVCS = &cobra.Command{
 		Use:   "set-vcs <path> --vcs=git|enth",
 		Short: "Change the version-control backend recorded for a project",
@@ -4480,17 +4482,21 @@ not be able to change the VCS its own work is landed with. A vcs key in
 refinery.toml is ignored with a warning.
 
     pogo project set-vcs <path> --vcs=enth --enth-remote=URL --enth-repo=NAME [--enth-trunk=REF]
+                         [--enth-workspace-path=PATH ...]
     pogo project set-vcs <path> --vcs=git
 
 git is stored as no key at all. --enth-trunk defaults to refs/heads/main.
+--enth-workspace-path narrows every polecat checkout to the given paths; leave
+it unset unless the repo is too large to check out whole, because an edit
+outside the selection is refused until the worker runs enth checkout --add.
 
 REFUSED while the repo has open merge requests or live polecats: that work was
 started under the current backend, and moving a repo is a handover, not a
 toggle. Let the queue drain and the polecats finish, then re-run. Re-stating the
 current selection is not a change and is never refused.
 
-The enth backend is not built yet (slices 5-7): a repo recorded as enth refuses
-every refinery operation with "unsupported by this backend".`,
+Polecats on an enth repo get an enth checkout (slice 5); the refinery does not
+land enth work yet (slices 6-7) and refuses it with "unsupported by this backend".`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			if !cmd.Flags().Changed("vcs") {
@@ -4500,7 +4506,7 @@ every refinery operation with "unsupported by this backend".`,
 			if err != nil {
 				cli.ExitWithError(jsonOutput, fmt.Sprintf("invalid path: %v", err), cli.ExitError)
 			}
-			p, err := client.SetProjectVCS(absPath, vcs.Kind(setVCS), enthFromFlags(cmd, setEnthRemote, setEnthRepo, setEnthTrunk))
+			p, err := client.SetProjectVCS(absPath, vcs.Kind(setVCS.kind), enthFromFlags(cmd, setVCS))
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
 			}
@@ -4511,7 +4517,7 @@ every refinery operation with "unsupported by this backend".`,
 			}
 		},
 	}
-	addVCSFlags(cmdProjectSetVCS, &setVCS, &setEnthRemote, &setEnthRepo, &setEnthTrunk)
+	addVCSFlags(cmdProjectSetVCS, &setVCS)
 
 	var cmdProjectRemove = &cobra.Command{
 		Use:   "remove <path>",

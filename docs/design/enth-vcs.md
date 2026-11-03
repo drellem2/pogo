@@ -126,6 +126,16 @@ Errors are typed so that callers branch on meaning, not on text: `ErrStale` (re-
 
 **Liveness (O3).** The wedge detector's "git activity" signal reads the mtime of `.enth/checkout`, which `enth change` rewrites.
 
+**As built (slice 5, mg-cc5cd, 2026-11-03).** Against enth `origin/main` `6488096` (#9 B–G), measured by `scripts/enth_workspaces_test.sh` (a sandboxed pogod and enthd: spawn, edit, dirty, stop, with a git control on the same daemon) and `internal/vcs/enthvcs`'s enthd tests. What differs from the text above:
+- **E6 had already shipped.** #9's `.enth/checkout` header records `"origin":{"remote":URL,"repo":NAME}`. It does not record the pogo project or the ref, so pogod still writes a record, `DIR/.enth/pogo-workspace.json` (project path, remote, repo, ref, base at checkout, selection). It lives inside `.enth/` because enth skips `.enth` at every depth, and so it dies with `rm -rf DIR`. `Describe` reads both files. A checkout with no record is an `UnnamedRepoError` that names its origin.
+- **Selection by tree, not only by repo.** The spawn picks the backend from the project record (`agent.SetRepoVCS(project.VCSOf)`), because the checkout does not exist yet. Everything after that picks it from the tree's nearest marker (`enthvcs.Detect`): the persona exclude, the failed-spawn rollback, the crew refresh, `pogo worktree-dirty`, and gitgc's dirty check and removal. The nearest marker wins, so a checkout nested in `~/.pogo` (a git repo) is enth. A level that holds both markers is refused. A tree with no marker at all is git and is handled exactly as before.
+- **`Dirty` answers in git porcelain shape.** A put of an index path is ` M`, a put of any other path is `??`, a delete is ` D`, and `outside_selection` paths are `??` (uncommitted work, not an error). That way gitgc's counts and `pogo worktree-dirty`'s output read it unchanged. The daemon-file excludes are `/.claude/settings.local.json` and `**/.claude/pogo-mailhook.stamp`, the same two files `gitvcs.IsPogodArtefact` carves out.
+- **Removal goes through gitgc's guard.** `pogo agent stop` keeps a dirty enth tree, refuses one it cannot read, and removes a clean one. The git durability arm (`checkOrphanCommits`) is skipped for enth (§4, durability). Phase 1b of the sweep used to delete a `.git`-less polecat directory with no dirty check. It now gives an enth checkout the same guard. Without that, a dirty enth tree whose item was done would have been deleted.
+- **`Refresh` does not swap the directory.** It checks out again into a temporary sibling and renames the new base's files into place, so files enth does not track (ignored files, pogod's own) survive. It declines when the tree is dirty, when there is no record, and when the base has moved off the recorded one (a Change was made there). `Behind` stays -1, because enth does not count entries between bases.
+- **`workspace_paths`** is `EnthRepo.WorkspacePaths` (`pogo project set-vcs --enth-workspace-path`). When set, the polecat's prompt gets a prelude that names the selection and `enth checkout --add`.
+- **The token.** pogod passes `ENTH_TOKEN` through only when its own environment holds one. Otherwise enth uses the token `enth login` saved, which the worker reads from the same HOME. The worker also gets `ENTH_REMOTE`, `ENTH_REPO` and `ENTH_TRUNK`.
+- **Not in this slice:** `--stranded-adopt` on enth is refused at spawn (W7, slice 6). gitgc's preserved-tree and stranded scans still count an enth checkout as "not a worktree" (reporting only, nothing is removed). A worker's `enth change` needs an identity (`ENTH_AUTHOR_*`/`GIT_AUTHOR_*` or `user.*` in enth's config), and pogod does not supply one. The prompts are still git's (slice 11).
+
 ## 5. Identity: trailers name a worker's work (decision 4)
 
 Every Change a worker produces carries two trailers:
@@ -331,7 +341,7 @@ The blocks are the load-bearing instructions the inventory names: the polecat pr
 | E3 | the landed complement of the listing: `--landed`, or a `landed` field (§5) | ask against mg-10079 | **not promised** |
 | E4 | `enth changes --unlanded --trailer K=V` through enthd | mg-10079 | placed |
 | E5 | exported git sha for a Change id (§11) | ask against #10 | **not promised** |
-| E6 | `.enth/checkout` records the remote and repo (§4) | ask against mg-2ef01 | **not promised**; pogod's spawn record covers it meanwhile |
+| E6 | `.enth/checkout` records the remote and repo (§4) | ask against mg-2ef01 | **not promised** at writing; **shipped in #9** (measured 2026-11-03, slice 5: `origin` carries both). pogod's record still carries the project and the ref |
 | E7 | `enth tag`, `enth ref create` with CAS | mg-40d5e | placed |
 | E8 | `.gitignore` semantics plus `.enth/info/exclude` | mg-2ef01 | placed |
 | E9 | `enth status`, `change --trailer`, `--remote` write routes, `--request-id` replay | mg-2ef01, mg-6ac27, mg-10079 | in #9 as designed |

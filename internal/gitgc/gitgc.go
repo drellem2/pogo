@@ -31,6 +31,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 	"github.com/drellem2/pogo/internal/vcs/gitvcs"
 )
 
@@ -711,6 +712,14 @@ func checkWorktreeRemoval(worktreeDir, repo, target string) worktreeRemovalCheck
 		}
 		// Clean by `git status`, which is silent about COMMITTED work by
 		// construction. One more question before the tree goes.
+		//
+		// Not on an enth checkout: `enth change` stores the Change on enthd
+		// before it returns, so deleting the directory cannot lose committed
+		// work, and the guard reduces to "Dirty is empty" (enth-vcs §4,
+		// durability; slice 5).
+		if isEnthTree(worktreeDir) {
+			return worktreeRemovalCheck{}
+		}
 		if orphan := checkOrphanCommits(worktreeDir, repo, target); orphan != nil {
 			return worktreeRemovalCheck{Refusal: orphan}
 		}
@@ -837,12 +846,43 @@ func (o WorktreeOwner) String() string {
 // stderr is still captured, and still reported when git FAILS — that is where
 // "which way did git break" comes from, and cannot-tell needs it. What it is
 // not is part of the file list.
+//
+// # On an enth checkout (enth-vcs slice 5, mg-cc5cd)
+//
+// A tree whose nearest repo marker is .enth/checkout is asked through
+// `enth status` instead (enthvcs.Backend.Dirty), bounded by commandBudget, and
+// its edits come back in the same porcelain shape, so every caller's counts
+// and messages read them unchanged. pogod's own files need no carve-out
+// there: the exclude list written at checkout keeps them out of status. A
+// tree carrying BOTH markers cannot be told and is reported as such.
 func WorktreeDirty(worktreeDir string) (bool, []string, error) {
-	files, err := workspaces.Dirty(context.Background(), worktreeDir)
+	var files []string
+	var err error
+	if isEnthTree(worktreeDir) {
+		ctx, cancel := context.WithTimeout(context.Background(), commandBudget)
+		files, err = enthWorkspaces.Dirty(ctx, worktreeDir)
+		cancel()
+	} else if _, _, derr := enthvcs.Detect(worktreeDir); derr != nil {
+		err = derr
+	} else {
+		files, err = workspaces.Dirty(context.Background(), worktreeDir)
+	}
 	if err != nil {
 		return false, nil, err
 	}
 	return len(files) > 0, files, nil
+}
+
+// enthWorkspaces is the enth backend for the trees gitgc judges and removes.
+// Every method it uses reads the checkout itself, so it needs no repo settings.
+var enthWorkspaces = enthvcs.Backend{}
+
+// isEnthTree reports whether dir is an enth checkout by its nearest repo
+// marker (enthvcs.Detect). Every git tree answers false, and so does a tree
+// carrying both markers, which the callers handle as their own refusal.
+func isEnthTree(dir string) bool {
+	kind, _, err := enthvcs.Detect(dir)
+	return err == nil && kind == vcs.Enth
 }
 
 // porcelainStatus runs `git status --porcelain` with extra args and returns its
@@ -1070,7 +1110,12 @@ func RemoveWorktreeForce(sourceRepo, worktreeDir string) error {
 	if worktreeDir == "" {
 		return nil
 	}
-	if sourceRepo != "" {
+	if isEnthTree(worktreeDir) {
+		// An enth checkout has no registration to drop: the directory is the
+		// checkout (enth-vcs §4, slice 5). Its Remove refuses anything that is
+		// not a checkout root; the RemoveAll below is the same backstop as git's.
+		_ = enthWorkspaces.Remove(context.Background(), vcs.Repo{Path: sourceRepo}, worktreeDir)
+	} else if sourceRepo != "" {
 		// Best-effort: ignore the error. --force handles a worktree with a
 		// dirty or locked state; an already-unlinked worktree just fails.
 		_ = workspaces.Remove(context.Background(), vcs.Repo{Path: sourceRepo}, worktreeDir)

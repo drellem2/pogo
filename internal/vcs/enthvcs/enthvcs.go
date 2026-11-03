@@ -1,11 +1,15 @@
-// Package enthvcs is the enth backend (docs/design/enth-vcs.md). It is INERT:
-// slice 4 (mg-160e8) makes selecting it real, and every operation answers
-// vcs.ErrUnsupported until slices 5-7 give it a body. It uses no enth API.
+// Package enthvcs is the enth backend (docs/design/enth-vcs.md).
 //
-// Inert is the point. A repo whose project record says `"vcs": "enth"` must
-// not fall through to the git backend: git would act on a checkout that is
-// not the thing work lands on. Refusing loudly is the safe behaviour until
-// the enth path exists end to end.
+// Slice 4 (mg-160e8) made selecting it real with every operation answering
+// vcs.ErrUnsupported. Slice 5 (mg-cc5cd) gave Workspaces a body
+// (workspaces.go): polecat checkouts through the repo's enthd, their excludes,
+// Dirty via `enth status`, Remove, Describe, Root and Refresh. Work, Lander and
+// Refs are still inert until slices 6-7.
+//
+// Inert is the point for what is not built. A repo whose project record says
+// `"vcs": "enth"` must not fall through to the git backend: git would act on a
+// checkout that is not the thing work lands on. Refusing loudly is the safe
+// behaviour until the enth path exists end to end.
 package enthvcs
 
 import (
@@ -17,9 +21,13 @@ import (
 
 // Backend is the enth backend for one repo.
 type Backend struct {
-	// Repo is the record's enth settings. Unused while the backend is inert;
-	// carried so the error names which repo was asked.
+	// Repo is the record's enth settings: where Create checks out from, and
+	// what the inert operations name in their refusals. The dir-only
+	// Workspaces methods (Dirty, Root, Describe, Remove, Exclude, Refresh)
+	// read what they need from the checkout itself and work with a zero Repo.
 	Repo vcs.EnthRepo
+	// Bin is the enth executable; empty is DefaultBin on PATH.
+	Bin string
 }
 
 var _ vcs.Backend = Backend{}
@@ -29,51 +37,6 @@ func (b Backend) unsupported(op string) error {
 }
 
 func (Backend) Kind() vcs.Kind { return vcs.Enth }
-
-// Workspaces
-//
-// Four of these are total by contract (no error result). Their inert answers
-// are the ones that make the caller do nothing: no base, no branch, never
-// "spent" (so nothing is deleted), and a Refresh that reports failure, which
-// freshen reads as UNKNOWN rather than as current.
-
-func (Backend) ResolveBase(ctx context.Context, repo vcs.Repo, target string) string { return "" }
-func (Backend) BranchExists(ctx context.Context, repo vcs.Repo, branch string) bool {
-	return false
-}
-func (Backend) BranchSpent(ctx context.Context, repo vcs.Repo, branch, base string) bool {
-	return false
-}
-func (b Backend) DeleteBranch(ctx context.Context, repo vcs.Repo, branch string) error {
-	return b.unsupported("delete branch")
-}
-func (b Backend) Create(ctx context.Context, s vcs.WorkspaceSpec) (vcs.Workspace, error) {
-	return vcs.Workspace{}, b.unsupported("create workspace")
-}
-func (b Backend) Rollback(ctx context.Context, repo vcs.Repo, dir string) error {
-	return b.unsupported("rollback workspace")
-}
-func (b Backend) Contains(ctx context.Context, repo vcs.Repo, base, branch string) error {
-	return b.unsupported("contains")
-}
-func (b Backend) Exclude(ctx context.Context, dir, group, relPath string) error {
-	return b.unsupported("exclude")
-}
-func (b Backend) Refresh(ctx context.Context, dir string) vcs.RefreshResult {
-	return vcs.RefreshResult{Path: dir, Status: vcs.RefreshFailed, Behind: -1, Ahead: -1, Detail: b.unsupported("refresh").Error()}
-}
-func (b Backend) Remove(ctx context.Context, repo vcs.Repo, dir string) error {
-	return b.unsupported("remove workspace")
-}
-func (b Backend) Dirty(ctx context.Context, dir string) ([]string, error) {
-	return nil, b.unsupported("dirty")
-}
-func (b Backend) Describe(ctx context.Context, dir string) (vcs.Workspace, error) {
-	return vcs.Workspace{}, b.unsupported("describe workspace")
-}
-func (b Backend) Root(ctx context.Context, dir string) (string, error) {
-	return "", b.unsupported("workspace root")
-}
 
 // Work
 

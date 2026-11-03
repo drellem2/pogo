@@ -184,6 +184,14 @@ gate_step "Testing the build stamp (pogo/pogod can say what they contain)" bash 
 # enth on PATH predates #9 — POGO_ENTH_REQUIRE=1 makes that a failure.
 gate_step "Testing the enth build stamp (§10 table on an enth #9 checkout)" bash scripts/tmpdir-leak-guard.sh bash scripts/enth_stamp_test.sh
 
+# enth workspaces end to end (docs/design/enth-vcs.md §4, slice 5, mg-cc5cd): a
+# sandboxed pogod spawns a polecat onto an enth-written repo on a sandboxed
+# enthd, the tree is edited, judged dirty and removed, with a git control on the
+# same daemon. ~25s with a #9 enth (POGO_ENTH_BIN_DIR, else enthd on PATH); it
+# SKIPS (exit 0, and says so) without one — POGO_ENTH_REQUIRE=1 makes that a
+# failure.
+gate_step "Testing enth workspaces (spawn, dirty, remove through a real enthd)" bash scripts/tmpdir-leak-guard.sh bash scripts/enth_workspaces_test.sh
+
 # The size-triggered module-cache reclaim (mg-b7c3). Runs here rather than only
 # in the Go suite because the decision this job exists for — fire, refuse, or
 # defer — lives in the shell script, not in the installer. Its stubs are on PATH,

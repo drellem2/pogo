@@ -20,6 +20,7 @@ import (
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/logging"
 	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
 
 type Project struct {
@@ -403,7 +404,15 @@ func searchAndCreate(path string) (*Project, error) {
 		return nil, err2
 	}
 
-	if hasGit(dirnames) {
+	git, enth := hasGit(dirnames), hasEnthCheckout(path, dirnames)
+	if git && enth {
+		// Both markers: refused rather than guessed (enth-vcs §4, X2). Not
+		// registered, and the search stops here rather than registering an
+		// enclosing repo the user did not visit.
+		logger.Warn("project: refusing to auto-register a directory holding both .git and .enth/checkout", "path", path)
+		return nil, nil
+	}
+	if git || enth {
 		repoPath := addSlashToPath(path)
 		// Index-scope control (mg-d205): never auto-register transient repos
 		// or, when an allowlist is configured, repos outside it.
@@ -449,6 +458,18 @@ func hasGit(dirnames []string) bool {
 	for _, name := range dirnames {
 		if name == ".git" {
 			return true
+		}
+	}
+	return false
+}
+
+// hasEnthCheckout reports whether dir is an enth checkout root (X1: a second
+// repo marker beside .git, enth-vcs slice 5). dirnames is dir's listing, so a
+// directory with no .enth entry costs no stat.
+func hasEnthCheckout(dir string, dirnames []string) bool {
+	for _, name := range dirnames {
+		if name == ".enth" {
+			return enthvcs.IsCheckout(dir)
 		}
 	}
 	return false

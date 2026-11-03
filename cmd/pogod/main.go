@@ -3603,6 +3603,9 @@ Flags:
 	// The refinery's backend lookup by repo reads the project record (enth-vcs
 	// §2, slice 4). A repo with no vcs key is git, as every repo was before.
 	refinery.SetRepoVCS(project.VCSOf)
+	// And so does the polecat spawn's (slice 5, mg-cc5cd): an enth repo's
+	// polecat gets an enth checkout instead of a git worktree.
+	agent.SetRepoVCS(project.VCSOf)
 
 	// Start refinery merge queue loop
 	refineCfg := refinery.DefaultConfig()

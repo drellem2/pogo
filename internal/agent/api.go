@@ -2194,6 +2194,18 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		failPolecatSpawn(w, spawnReq, http.StatusConflict, refusal)
 		return
 	}
+	// An enth repo's polecat gets an enth checkout, not a git worktree
+	// (enth-vcs slice 5, mg-cc5cd; see enthspawn.go). Decided by the project
+	// record, because the checkout does not exist yet. nil for every git repo,
+	// and then nothing below changes.
+	var enthRepo *vcs.EnthRepo
+	if createWorktree {
+		enthRepo = enthRepoFor(spawnReq.Repo)
+	}
+	if enthRepo != nil && adoption != nil {
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, enthAdoptRefusal(spawnReq.Repo))
+		return
+	}
 	if adoption != nil {
 		// Past every refusal that is specific to adopting, so the record is being
 		// written about a dispatch that is going out. Later failures — a worktree
@@ -2274,6 +2286,9 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	if adoption != nil {
 		prelude = strandedAdoptPrelude(spawnReq.Id, *adoption) + prelude
 	}
+	if enthRepo != nil {
+		prelude = enthSelectionPrelude(*enthRepo, workDir) + prelude
+	}
 
 	// Expand template to a temp file
 	vars := TemplateVars{
@@ -2300,8 +2315,35 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	// polecatSpawnEnv, which owns it so the precedence can be asserted.
 	env := polecatSpawnEnv(budget, spawnReq.Env)
 
+	// Create an enth checkout for an enth repo's polecat (slice 5).
+	if enthRepo != nil {
+		sourceRepo = spawnReq.Repo
+		if err := os.MkdirAll(filepath.Dir(worktreeDir), 0755); err != nil {
+			os.Remove(promptFile)
+			failPolecatSpawn(w, spawnReq, http.StatusInternalServerError,
+				fmt.Sprintf("failed to create polecats dir: %v", err))
+			return
+		}
+		_, statErr := os.Lstat(worktreeDir)
+		preexisted := !os.IsNotExist(statErr)
+		ws, ref, err := createEnthPolecatWorkspace(*enthRepo, sourceRepo, worktreeDir, spawnReq.Branch, preexisted)
+		if err != nil {
+			os.Remove(promptFile)
+			status := http.StatusInternalServerError
+			if preexisted {
+				status = http.StatusConflict
+			}
+			failPolecatSpawn(w, spawnReq, status, err.Error())
+			return
+		}
+		log.Printf("polecat %s: created enth checkout at %s (%s on %s, %s at %s)",
+			spawnReq.Name, worktreeDir, enthRepo.Repo, enthRepo.Remote, ref, ws.Base)
+		spawnBase.BaseRef = ref
+		env = append(env, enthWorkerEnv(*enthRepo)...)
+	}
+
 	// Create git worktree for polecat isolation
-	if createWorktree {
+	if createWorktree && enthRepo == nil {
 		sourceRepo = spawnReq.Repo
 		branchName = gitgc.BranchPrefix + spawnReq.Name
 
@@ -2777,7 +2819,12 @@ func cleanupFailedPolecatSpawn(sourceRepo, worktreeDir, branchName string, dirIs
 			"`git -C %s status`) and reclaim it by hand once nobody is working in it "+
 			"(drellem2/pogo#167)", worktreeDir, worktreeDir)
 	} else {
-		workspaces.Rollback(context.Background(), vcs.Repo{Path: sourceRepo}, worktreeDir)
+		// The backend is the tree's own (enth-vcs slice 5): an enth checkout has
+		// no git registration to drop. A tree whose marker cannot be read
+		// cleanly gets only the RemoveAll below.
+		if ws, err := workspacesAt(worktreeDir); err == nil {
+			ws.Rollback(context.Background(), vcs.Repo{Path: sourceRepo}, worktreeDir)
+		}
 		// Backstop: if git refused (e.g. files created after checkout) or the
 		// worktree was never registered, reclaim the directory anyway so no
 		// orphan is left behind (gh #31).

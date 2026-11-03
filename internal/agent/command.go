@@ -161,8 +161,15 @@ const personaExcludeComment = "# pogo injected agent persona (added automaticall
 // The exclude itself is the workspaces backend's (enth-vcs slice 2); see
 // gitvcs.Workspaces.Exclude, which also refuses to edit an enclosing repo's
 // exclude when dir is not a repo root.
+//
+// On an enth checkout (slice 5, mg-cc5cd) the same pattern goes into
+// DIR/.enth/info/exclude instead: the backend is chosen by the tree's marker.
 func ensureWorktreeGitExcluded(dir, relPath string) error {
-	return workspaces.Exclude(context.Background(), dir, personaExcludeComment, relPath)
+	ws, err := workspacesAt(dir)
+	if err != nil {
+		return err
+	}
+	return ws.Exclude(context.Background(), dir, personaExcludeComment, relPath)
 }
 
 // ValidateCommandBinary checks that the first token of the command template

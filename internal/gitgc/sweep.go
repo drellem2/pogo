@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
 
 // Options configures a single GC sweep.
@@ -620,6 +622,39 @@ func sweepOrphanDirs(opts Options, tickets TicketIndex, registered map[string]bo
 			res.WorktreesKept = append(res.WorktreesKept, WorktreeAction{
 				Path: path, Owner: name, Branch: branch, Reason: "orphan dir, owner's ticket " + state.String(),
 			})
+			continue
+		}
+		// AN ENTH CHECKOUT IS NOT AN ORPHAN (enth-vcs slice 5, mg-cc5cd). It has
+		// no .git, which is all that got it here, but it does have an index:
+		// `enth status` can say whether it holds uncommitted edits, and the
+		// blind RemoveAll below would destroy them. So it gets RemoveWorktree's
+		// guard, exactly as a registered worktree does in phase 1 — the same
+		// function, so the two cannot drift.
+		if enthvcs.IsCheckout(path) {
+			action := WorktreeAction{Path: path, Owner: name, Reason: "enth checkout, owner's ticket " + state.String()}
+			chk := checkWorktreeRemoval(path, opts.Repo, opts.TargetBranch)
+			if chk.Refusal != nil && !opts.Force {
+				kept := action
+				var named bool
+				if kept.Reason, named = refusalReason(chk.Refusal); !named {
+					kept.Reason = chk.Refusal.Error()
+				}
+				res.WorktreesKept = append(res.WorktreesKept, kept)
+				opts.logf("kept enth checkout %s", kept.String())
+				continue
+			}
+			action.Reason = removalReason("enth checkout, owner's ticket "+state.String(), chk.StatusErr, opts.Force)
+			if opts.DryRun {
+				opts.logf("would remove enth checkout %s", action.String())
+			} else {
+				if err := removeWorktreeFn(opts.Repo, path); err != nil {
+					res.Errors = append(res.Errors, fmt.Sprintf("remove enth checkout %s: %v", path, err))
+					continue
+				}
+				opts.logf("removed enth checkout %s", action.String())
+			}
+			reclaimSessionTemp(opts, name, path, action.Reason, res)
+			res.WorktreesRemoved = append(res.WorktreesRemoved, action)
 			continue
 		}
 		action := WorktreeAction{Path: path, Owner: name, Branch: branch, Reason: "orphan dir, owner's ticket " + state.String()}

@@ -9,6 +9,7 @@ import (
 	"github.com/drellem2/pogo/internal/cli"
 	"github.com/drellem2/pogo/internal/gitgc"
 	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 	"github.com/drellem2/pogo/internal/vcs/gitvcs"
 )
 
@@ -27,7 +28,7 @@ import (
 func newWorktreeDirtyCmd(jsonOutput *bool) *cobra.Command {
 	return &cobra.Command{
 		Use:   "worktree-dirty [dir]",
-		Short: "Print uncommitted work in a git worktree, ignoring pogod's own .claude files",
+		Short: "Print uncommitted work in a git worktree or enth checkout, ignoring pogod's own .claude files",
 		Long: `Print the uncommitted entries in the git worktree containing dir (default:
 the current directory), one git status --porcelain line each. No output means
 the tree holds no uncommitted work.
@@ -39,9 +40,15 @@ worktree root, and the mail-hook stamp .claude/pogo-mailhook.stamp at any
 depth. Any other untracked file counts, including other files under .claude/,
 and so does any change to a tracked file whatever its name.
 
+In an enth checkout (a directory holding .enth/checkout) the same question is
+asked of ` + "`enth status`" + `, and its edits are printed in the same shape: " M path"
+for a changed file, "?? path" for a new one (including one outside a narrowed
+checkout's selection), " D path" for a deletion. pogod's own files are kept out
+of enth status by the checkout's .enth/info/exclude.
+
 Exits non-zero, with nothing on stdout, when dirtiness cannot be determined
-(not a git worktree, git failed). A caller must treat that as a refusal, not
-as clean.`,
+(not a git worktree or enth checkout, git or enth failed, or a directory
+carrying both markers). A caller must treat that as a refusal, not as clean.`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			dir := "."
@@ -74,7 +81,18 @@ as clean.`,
 // handed the root: the root-only settings exclusion and the pathspec it uses to
 // open a collapsed `?? .claude/` are both root-relative, and a polecat's shell
 // is often cd'd into a subdirectory by the time it submits.
+//
+// An enth checkout (enth-vcs slice 5, mg-cc5cd) resolves to its own root, the
+// nearest directory holding .enth/checkout; gitgc.WorktreeDirty then asks
+// `enth status` there. A directory carrying both markers is refused.
 func worktreeRoot(dir string) (string, error) {
+	kind, root, err := enthvcs.Detect(dir)
+	if err != nil {
+		return "", err
+	}
+	if kind == vcs.Enth {
+		return root, nil
+	}
 	return worktreeWorkspaces.Root(context.Background(), dir)
 }
 

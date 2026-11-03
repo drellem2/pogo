@@ -39,12 +39,21 @@
 // them, `pogo check-stranded` names a polecat worktree's repo and branch with
 // Describe, `pogo worktree-dirty` resolves its root with Root, and
 // strandedwork refreshes remote refs with Fetch.
+//
+// # Slice 5 (mg-cc5cd)
+//
+// enthvcs implements Workspaces: a polecat on an enth repo gets an
+// `enth --remote checkout` instead of a git worktree, and its tree is judged
+// (Dirty via `enth status`), described, refreshed and removed through it.
+// Callers pick the backend by repo at spawn and by the tree's marker
+// (enthvcs.Detect) after that. EnthRepo.WorkspacePaths narrows the checkout.
 package vcs
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -78,6 +87,54 @@ type EnthRepo struct {
 	Remote string `json:"remote"`
 	Repo   string `json:"repo"`
 	Trunk  string `json:"trunk,omitempty"`
+	// WorkspacePaths narrows every workspace pogo checks out of this repo to
+	// these repo-relative paths (§4, "the escape hatch"). Empty, the default,
+	// is the whole repo: an edit outside a narrowed selection is refused by
+	// enth (outside_selection) and the worker must widen it with
+	// `enth checkout --add PATH DIR`, so narrowing is for a repo too large to
+	// check out whole and for nothing else.
+	WorkspacePaths []string `json:"workspace_paths,omitempty"`
+}
+
+// Equal reports whether two enth settings are the same. EnthRepo holds a
+// slice, so == does not compile; a nil and an empty WorkspacePaths are equal.
+func (e EnthRepo) Equal(o EnthRepo) bool {
+	if e.Remote != o.Remote || e.Repo != o.Repo || e.Trunk != o.Trunk || len(e.WorkspacePaths) != len(o.WorkspacePaths) {
+		return false
+	}
+	for i := range e.WorkspacePaths {
+		if e.WorkspacePaths[i] != o.WorkspacePaths[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// IsZero reports whether no enth setting is given at all.
+func (e EnthRepo) IsZero() bool { return e.Equal(EnthRepo{}) }
+
+// normalizeWorkspacePaths validates the narrowing list: each entry must be a
+// clean, repo-relative path inside the repo. Duplicates are dropped, order is
+// kept, and an empty result is nil (the whole repo, stored as no key).
+func normalizeWorkspacePaths(in []string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range in {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		c := path.Clean(strings.ReplaceAll(p, "\\", "/"))
+		if path.IsAbs(c) || c == "." || c == ".." || strings.HasPrefix(c, "../") {
+			return nil, fmt.Errorf("vcs: workspace path %q must be a path inside the repo, relative to its root", p)
+		}
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	return out, nil
 }
 
 // NormalizeSelection validates a (kind, enth) pair for a project record and
@@ -91,7 +148,7 @@ func NormalizeSelection(kind Kind, enth *EnthRepo) (Kind, *EnthRepo, error) {
 		return "", nil, err
 	}
 	if k == Git {
-		if enth != nil && (*enth != EnthRepo{}) {
+		if enth != nil && !enth.IsZero() {
 			return "", nil, fmt.Errorf("vcs: enth settings given for a git repo")
 		}
 		return "", nil, nil
@@ -103,6 +160,11 @@ func NormalizeSelection(kind Kind, enth *EnthRepo) (Kind, *EnthRepo, error) {
 	if e.Trunk == "" {
 		e.Trunk = DefaultEnthTrunk
 	}
+	paths, err := normalizeWorkspacePaths(e.WorkspacePaths)
+	if err != nil {
+		return "", nil, err
+	}
+	e.WorkspacePaths = paths
 	return Enth, &e, nil
 }
 
@@ -292,8 +354,8 @@ func (r RefreshResult) Declined() bool {
 func (r RefreshResult) String() string {
 	switch r.Status {
 	case RefreshUpdated:
-		return fmt.Sprintf("%s: fast-forwarded %s %d commit(s) to %s%s (%s..%s)",
-			r.Path, r.Branch, r.Behind, r.Upstream, inferredNote(r), r.From, r.To)
+		return fmt.Sprintf("%s: fast-forwarded %s %s to %s%s (%s..%s)",
+			r.Path, r.Branch, behindText(r.Behind), r.Upstream, inferredNote(r), r.From, r.To)
 	case RefreshAlreadyCurrent:
 		return fmt.Sprintf("%s: %s already current with %s%s",
 			r.Path, r.Branch, r.Upstream, inferredNote(r))

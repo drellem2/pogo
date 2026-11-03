@@ -125,3 +125,39 @@ func TestNilRegistryIsAnErrorNotAnEmptyFleet(t *testing.T) {
 		t.Error("RegistryWorktree(nil) claimed a readable worktree")
 	}
 }
+
+// TestWorktreeNewestReadsAnEnthCheckout is O3 on enth (enth-vcs slice 5,
+// mg-cc5cd): `enth change` rewrites .enth/checkout, so its mtime is the
+// checkout's progress signal, named in the result. The git arm is the
+// positive control that the same probe still reads a git dir.
+func TestWorktreeNewestReadsAnEnthCheckout(t *testing.T) {
+	old := time.Now().Add(-2 * time.Hour)
+	recent := time.Now().Add(-1 * time.Minute)
+
+	enth := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(enth, ".enth"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(enth, ".enth", "checkout")
+	if err := os.WriteFile(state, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.Chtimes(state, recent, recent)
+	os.Chtimes(enth, old, old)
+	got, which, ok := worktreeNewest(enth)
+	if !ok || which != ".enth/checkout" || got.Sub(recent).Abs() > time.Second {
+		t.Errorf("enth checkout: newest = %v %q %v, want %v from .enth/checkout", got, which, ok, recent)
+	}
+
+	git := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(git, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	head := filepath.Join(git, ".git", "HEAD")
+	os.WriteFile(head, []byte("ref: refs/heads/main\n"), 0o644)
+	os.Chtimes(head, recent, recent)
+	os.Chtimes(git, old, old)
+	if _, which, ok := worktreeNewest(git); !ok || which != "HEAD" {
+		t.Errorf("git control: which = %q %v, want HEAD", which, ok)
+	}
+}

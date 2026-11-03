@@ -63,6 +63,7 @@ func VCSOf(repoPath string) (vcs.Kind, *vcs.EnthRepo) {
 	p := projects[i]
 	if p.Enth != nil {
 		e := *p.Enth
+		e.WorkspacePaths = append([]string(nil), p.Enth.WorkspacePaths...)
 		return p.Kind(), &e
 	}
 	return p.Kind(), nil
@@ -72,7 +73,7 @@ func sameEnth(a, b *vcs.EnthRepo) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return *a == *b
+	return a.Equal(*b)
 }
 
 // SetVCS changes the backend recorded for the project at path and persists
