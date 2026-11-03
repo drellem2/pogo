@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 
-	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/reaper"
 	"github.com/drellem2/pogo/internal/service"
@@ -18,7 +18,7 @@ import (
 //
 // The reaper library (internal/reaper) is launchd-free and fully unit-tested;
 // pogod supplies the two real-world seams: service.KickstartJob (the only
-// launchctl call) and client.SendMGMail (the escalation channel). Its give-up
+// launchctl call) and alerts.Transport (the escalation channel). Its give-up
 // mail goes to coordinator ([agents] coordinator) and to escalationBox ([agents]
 // escalation_box), the box every other watcher escalation goes to
 // (drellem2/pogo#148).
@@ -48,7 +48,7 @@ func reaperOptions(cfg config.ReaperConfig, coordinator, escalationBox string) r
 		Jobs:          jobs,
 		MaxKickstarts: cfg.MaxKickstarts,
 		Kickstart:     service.KickstartJob,
-		Mail:          client.SendMGMail,
+		Mail:          alerts.Transport,
 		EscalateTo:    escalationBox,
 		Coordinator:   coordinator,
 	}

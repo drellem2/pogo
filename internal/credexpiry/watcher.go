@@ -2,6 +2,7 @@ package credexpiry
 
 import (
 	"context"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"sync"
 	"time"
@@ -92,7 +93,7 @@ const DefaultInterval = 15 * time.Minute
 // permanently-moved schema does not bury the inbox.
 const DefaultBlindRenotify = 24 * time.Hour
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. It is the only side-effect channel this package has — there is no
 // seam for refreshing or re-minting a credential, by design.
 type MailFunc func(to, from, subject, body string) error
@@ -297,7 +298,7 @@ func (w *Watcher) sample(ctx context.Context, now time.Time) {
 	}
 
 	subject, body := WarningMail(tier, st, now)
-	err := w.mail(w.mailTo, mailFrom, subject, body)
+	err := alerts.Mail(alerts.CredExpiryWarning, w.mail, w.mailTo, mailFrom, subject, body)
 
 	details := map[string]any{
 		"tier":            tier.String(),
@@ -342,7 +343,7 @@ func (w *Watcher) reportBlind(st Status, now time.Time) {
 	}
 
 	subject, body := BlindMail(st, now)
-	err := w.mail(w.mailTo, mailFrom, subject, body)
+	err := alerts.Mail(alerts.CredExpiryBlind, w.mail, w.mailTo, mailFrom, subject, body)
 	details := map[string]any{"reason": st.Reason, "domain": DomainBlind}
 	if err != nil {
 		details["mail_error"] = err.Error()

@@ -3,6 +3,7 @@ package ackwatch
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"strings"
 	"sync"
 	"time"
@@ -62,7 +63,7 @@ const (
 	DefaultEscalateTo = "human"
 )
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. As in internal/ghteardown, it is the ONLY side-effect channel this
 // package has: there is deliberately no seam through which the watcher could
 // nudge, restart, or otherwise act on an agent.
@@ -414,7 +415,7 @@ func (w *Watcher) sample(now time.Time) {
 	}
 	failures := 0
 	for _, to := range recipients {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.AckWatchFinding, w.mail, to, mailFrom, subject, body); err != nil {
 			// The deficit was detected but could not be reported. Record it: a
 			// notice that reaches nobody is this ticket's bug, one level up.
 			details["mail_error_"+to] = err.Error()

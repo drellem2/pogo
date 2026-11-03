@@ -3,6 +3,7 @@ package deafwatch
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"sort"
 	"strings"
 	"sync"
@@ -321,7 +322,7 @@ func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
 		"coordinator": deafCoordinator,
 	}
 	for _, to := range recipients {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.DeafWatchFinding, w.mail, to, mailFrom, subject, body); err != nil {
 			// The fault was detected and could not be reported. Record it: a
 			// notice that reaches nobody is this ticket's bug, one level up.
 			details["mail_error_"+to] = err.Error()
@@ -381,7 +382,7 @@ func (w *Watcher) closeEpisode(snap Snapshot, now time.Time) {
 		recipients = append(recipients, w.escalateTo)
 	}
 	for _, to := range recipients {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.DeafWatchCleared, w.mail, to, mailFrom, subject, body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",

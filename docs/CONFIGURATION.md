@@ -492,6 +492,33 @@ with `config get`), a timeout, or output that is not a mailbox name — and the
 run log says which, because a nightly alert that cannot be delivered is worse
 than a mis-routed one.
 
+## Alerts — listing every mail pogod sends (`pogo alerts`)
+
+Every mail pogod sends on its own initiative — a watcher's finding, a refinery
+verdict, a stranded-work notice — is an **alert** with a stable name,
+`<family>.<kind>` (for example `ack_watch.finding`, `refinery.merge_failed`,
+`condition.out_of_band`). The names are declared once, in `internal/alerts`,
+and every send goes through that package; a build that adds a send around it
+fails its tests.
+
+```bash
+pogo alerts           # every alert: muted state, effective and default recipient
+pogo alerts --all     # also the delivery mechanics that send mail but are not alerts
+pogo alerts --json    # the same rows as GET /alerts
+```
+
+`DEFAULT` is the built-in rule; `$coordinator` and `$escalation_box` stand for
+[`[agents] coordinator`](#coordinator-name) and
+[`[agents] escalation_box`](#the-escalation-mailbox). `EFFECTIVE` is that rule
+resolved against the config the running daemon loaded. `SOURCE` names the
+existing key that changed the recipient or silenced the alert (a watcher's
+`notify_to`, `[conditions] mail`/`disable`/`out_of_band`, `[blind_watch] mail`),
+or `default`. Muted alerts are listed first.
+
+There is no `[alerts]` section yet: this listing reports the keys that exist
+today and changes nothing about where mail goes. Per-alert `mute` and `route`
+arrive in later slices of drellem2/pogo#262.
+
 ## pogod's own conditions (`[conditions]`)
 
 pogod mails the coordinator when it hits one of its own conditions: a

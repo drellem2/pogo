@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
-	"os/exec"
 	"sort"
 	"sync"
 	"time"
@@ -425,9 +425,7 @@ func mailOrphanAlert(p OrphanedPolecat) {
 		action, action,
 		p.PID, orphanAlertCooldown)
 
-	cmd := exec.Command("mg", "mail", "send", coordinator,
-		"--from", "pogod", "--subject", subject, "--body", body)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := alerts.MailOutput(alerts.OrphanPolecat, coordinator, "pogod", subject, body); err != nil {
 		log.Printf("orphan: cannot mail %s about orphaned polecat %s (%v): %s",
 			coordinator, p.Name, err, string(out))
 	}

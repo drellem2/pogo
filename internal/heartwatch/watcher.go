@@ -3,6 +3,7 @@ package heartwatch
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"sort"
 	"strings"
 	"sync"
@@ -313,7 +314,7 @@ func (w *Watcher) clear(rep Report, now time.Time) {
 			"0 missing, 0 unreadable.\n\nRead it yourself: pogo check-heartbeats\n",
 		rep.Examined, rep.Fresh)
 	for _, to := range w.clearRecipients(told) {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.HeartWatchCleared, w.mail, to, mailFrom, subject, body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",
@@ -348,7 +349,7 @@ func (w *Watcher) announce(rep Report, confirmed []State, now time.Time) {
 	to := w.recipients(coordinatorHit)
 	for _, box := range to {
 		body := renderNotice(rep, confirmed, w.coordinator, box, w.humanBox, coordinatorHit, now)
-		if err := w.mail(box, mailFrom, subject(confirmed, w.coordinator), body); err != nil {
+		if err := alerts.Mail(alerts.HeartWatchFinding, w.mail, box, mailFrom, subject(confirmed, w.coordinator), body); err != nil {
 			// The fault was detected and could not be reported. Record it: a
 			// notice that reaches nobody is this ticket's bug, one level up.
 			w.emit(events.Event{

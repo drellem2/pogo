@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"strings"
 	"time"
@@ -30,7 +31,7 @@ func notifyEarlyExit(name, workItemID, coordinator string, e agent.EarlyExit,
 		return
 	}
 	subject, body := earlyExitNotice(name, workItemID, e)
-	if err := mail(coordinator, "pogod", subject, body); err != nil {
+	if err := alerts.Mail(alerts.AgentEarlyExit, mail, coordinator, "pogod", subject, body); err != nil {
 		log.Printf("agent %s: early-exit notice to %s failed: %v", name, coordinator, err)
 	}
 }

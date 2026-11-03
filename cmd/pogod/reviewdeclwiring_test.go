@@ -1,10 +1,10 @@
 package main
 
 import (
+	"github.com/drellem2/pogo/internal/alerts"
 	"strings"
 	"testing"
 
-	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/reviewdecl"
 )
 
@@ -17,7 +17,7 @@ func TestReviewDeclSeamsFitTheRealImplementations(t *testing.T) {
 	w := reviewdecl.New(reviewdecl.Options{
 		Enabled:  true,
 		Source:   src.Items,
-		Mail:     client.SendMGMail,
+		Mail:     alerts.Transport,
 		Statuses: src.Statuses(),
 	})
 	if w == nil {

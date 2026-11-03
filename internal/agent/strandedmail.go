@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"os/exec"
 	"path/filepath"
@@ -134,9 +135,7 @@ func defaultStrandedAlertMail(a StrandedAlert) {
 	recipients := strandedRecipients(a.Repo)
 	subject, body := a.Message()
 	for _, to := range recipients {
-		cmd := exec.Command("mg", "mail", "send", to,
-			"--from", "pogod", "--subject", subject, "--body", body)
-		out, err := cmd.CombinedOutput()
+		out, err := alerts.MailOutput(alerts.StrandedWorkBranch, to, "pogod", subject, body)
 		if err == nil {
 			continue
 		}

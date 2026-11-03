@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"sync"
 	"time"
 
@@ -18,7 +19,7 @@ type AgentLookup interface {
 	Get(name string) *agent.Agent
 }
 
-// MailSender sends a macguffin mail message. Mirrors client.SendMGMail but is
+// MailSender sends a macguffin mail message. Mirrors alerts.Transport but is
 // declared as a function value so tests can pass a recorder instead of
 // shelling out to `mg`.
 type MailSender func(to, from, subject, body string) error
@@ -362,7 +363,7 @@ func (p *PogodDeliverer) sendMail(to, subject, body string) error {
 	if p.Mail == nil {
 		return errors.New("scheduler: mail sender not configured")
 	}
-	return p.Mail(to, "scheduler", subject, body)
+	return alerts.Mail(alerts.SchedulerDelivery, p.Mail, to, "scheduler", subject, body)
 }
 
 // buildBody assembles the message text delivered on fire. It always includes

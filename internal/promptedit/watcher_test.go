@@ -12,7 +12,7 @@ import (
 	"github.com/drellem2/pogo/internal/events"
 )
 
-// recorder is the mail seam substituted for client.SendMGMail. Without it a
+// recorder is the mail seam substituted for alerts.Transport. Without it a
 // test run shells out to the real `mg` and mails a live crew agent — a
 // manufactured fleet alarm, which is the same class of fault as writing test
 // events onto the real spine.

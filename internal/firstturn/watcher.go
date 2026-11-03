@@ -3,6 +3,7 @@ package firstturn
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"strings"
 	"sync"
 	"time"
@@ -73,7 +74,7 @@ const DefaultFirstRepage = time.Hour
 // rather than doubling into silence.
 const DefaultMaxRepage = 6 * time.Hour
 
-// MailFunc sends operator mail. pogod wires client.SendMGMail.
+// MailFunc sends operator mail. pogod wires alerts.Transport.
 type MailFunc func(to, from, subject, body string) error
 
 // SourceFunc produces one sample.
@@ -365,7 +366,7 @@ func (w *Watcher) announce(rep Report, now time.Time) {
 	}
 	failures := 0
 	for _, to := range recipients {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.FirstTurnFinding, w.mail, to, mailFrom, subject, body); err != nil {
 			details["mail_error_"+to] = err.Error()
 			failures++
 		}
@@ -437,7 +438,7 @@ func (w *Watcher) closeEpisode(now time.Time) {
 		recipients = append(recipients, w.escalateTo)
 	}
 	for _, to := range recipients {
-		if err := w.mail(to, mailFrom, subject, b.String()); err != nil {
+		if err := alerts.Mail(alerts.FirstTurnCleared, w.mail, to, mailFrom, subject, b.String()); err != nil {
 			w.emit(events.Event{
 				EventType: EventBlind,
 				Agent:     "pogod",

@@ -50,6 +50,7 @@ package reaper
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"os"
 	"path/filepath"
@@ -312,7 +313,7 @@ func (r *Reaper) escalate(j Job, st *jobState, staleness string) {
 			"The reaper has STOPPED kickstarting it to avoid a tight self-concealing loop. Manual investigation needed.",
 		j.Label, st.consecutive, j.Heartbeat, staleness, j.Period, st.lastPID)
 	for _, to := range r.escalationRecipients() {
-		if err := r.mail(to, "pogod-reaper", subject, body); err != nil {
+		if err := alerts.Mail(alerts.ReaperEscalation, r.mail, to, "pogod-reaper", subject, body); err != nil {
 			r.logf("reaper: failed to mail %s about %s give-up: %v", to, j.Label, err)
 		}
 	}

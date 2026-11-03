@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"io/fs"
 	"log"
 	"os"
@@ -61,7 +62,7 @@ const (
 	errorEvent = "prompt_edit_watch_error"
 )
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. It is the ONLY side-effect channel this package has: there is no
 // repair seam, by construction, and see the package doc for why adding one
 // would be worse than the defect.
@@ -325,7 +326,7 @@ func (w *Watcher) notify(rep Report, now time.Time) {
 		}
 
 		body := rc.Body(rep.Root, rep)
-		if err := w.mail(rc.Agent, mailFrom, rc.Subject(), body); err != nil {
+		if err := alerts.Mail(alerts.PromptEditNotice, w.mail, rc.Agent, mailFrom, rc.Subject(), body); err != nil {
 			// The finding was detected and could not be reported. Say so loudly
 			// AND do not remember these paths as announced: dropping them means
 			// the next sweep treats them as new and tries again. A notifier

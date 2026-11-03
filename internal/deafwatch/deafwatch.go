@@ -192,7 +192,7 @@ type Snapshot struct {
 // quiet result.
 type SourceFunc func(now time.Time) (Snapshot, error)
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. As in internal/ackwatch it is the ONLY side-effect channel this
 // package has: there is deliberately no seam through which the watcher could
 // register a schedule, nudge, or restart the agent it names.

@@ -325,7 +325,7 @@ type Snapshot struct {
 // and "I could not look" must never collapse into the same quiet result.
 type SourceFunc func(now time.Time) (Snapshot, error)
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. As in internal/deafwatch it is the ONLY side-effect channel this
 // package has: there is deliberately no seam through which the watcher could
 // start the agent it names.
