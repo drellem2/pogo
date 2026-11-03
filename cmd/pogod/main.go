@@ -1526,8 +1526,14 @@ Flags:
 	// Apply the index_roots allowlist from config (mg-d205).
 	project.SetIndexRoots(cfg.IndexRoots)
 
-	// Configure agent command templates and the harness providers.
+	// Configure agent command templates and the harness providers. The same
+	// config supplies [agents] env / [agents.<type>] env to every spawn and
+	// restart; an entry it cannot use is skipped, and said so here rather than
+	// dropped without a word.
 	agentRegistry.SetCommandConfig(&cfg.Agents)
+	for _, problem := range cfg.Agents.EnvProblems() {
+		fmt.Printf("Warning: %s\n", problem)
+	}
 
 	// Arm the dispatch gate with the configured non-dispatchable vocabulary, so
 	// `pogo agent spawn-polecat` refuses a work item gated to a human, parked, or

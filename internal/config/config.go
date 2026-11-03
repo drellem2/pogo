@@ -2385,6 +2385,14 @@ type AgentsConfig struct {
 	// gh #25). Set via [agents] extra_path or POGO_EXTRA_PATH
 	// (list-separator-joined, i.e. colon-separated on unix).
 	ExtraPath []string
+	// Env lists KEY=VALUE assignments for every agent pogod spawns, crew and
+	// polecat alike ([agents] env). [agents.crew] env and [agents.polecat] env
+	// add to it per type; see AgentEnv for the order and AgentEnvConfig in
+	// internal/agent for where they land in a spawn. Unlike ExtraPath this does
+	// not touch pogod's own environment: it is applied per spawn, so the two
+	// agent types can be told different things, and it is re-applied when pogod
+	// restarts an agent.
+	Env []string
 	// Crew overrides the command template for crew agents.
 	Crew AgentTypeConfig
 	// Polecat overrides the command template for polecat agents.
@@ -2401,6 +2409,10 @@ type AgentTypeConfig struct {
 	// is what lets a mixed fleet run — e.g. [agents.polecat] provider = "pi"
 	// while crew agents stay on Claude. See mg-b31b.
 	Provider string
+	// Env lists KEY=VALUE assignments for this agent type only. They are
+	// applied after the global [agents] env, so a key set in both takes this
+	// value. See AgentEnv.
+	Env []string
 }
 
 // AgentCommand returns the explicitly-configured command template for a given
@@ -2483,6 +2495,79 @@ func (c *AgentsConfig) AgentProvider(agentType string) string {
 		}
 	}
 	return c.Provider
+}
+
+// AgentEnv returns the configured environment for a given agent type: the
+// global [agents] env first, then [agents.<type>] env. Order matters because a
+// process keeps the LAST assignment of a duplicated key, so a per-type entry
+// overrides a global one of the same name. Entries that are not KEY=VALUE with
+// a valid key are left out; EnvProblems names them so pogod can say so at
+// startup instead of dropping them silently. Safe on a nil AgentsConfig.
+func (c *AgentsConfig) AgentEnv(agentType string) []string {
+	if c == nil {
+		return nil
+	}
+	var typed []string
+	switch agentType {
+	case "crew":
+		typed = c.Crew.Env
+	case "polecat":
+		typed = c.Polecat.Env
+	}
+	var out []string
+	for _, list := range [][]string{c.Env, typed} {
+		for _, e := range list {
+			if envEntryProblem(e) == "" {
+				out = append(out, e)
+			}
+		}
+	}
+	return out
+}
+
+// EnvProblems describes every [agents] env, [agents.crew] env and
+// [agents.polecat] env entry that AgentEnv leaves out, one line each, naming
+// the section it came from. Empty when every entry is usable.
+func (c *AgentsConfig) EnvProblems() []string {
+	if c == nil {
+		return nil
+	}
+	var out []string
+	for _, sec := range []struct {
+		name string
+		list []string
+	}{
+		{"[agents] env", c.Env},
+		{"[agents.crew] env", c.Crew.Env},
+		{"[agents.polecat] env", c.Polecat.Env},
+	} {
+		for _, e := range sec.list {
+			if p := envEntryProblem(e); p != "" {
+				out = append(out, fmt.Sprintf("%s: %q %s; skipped", sec.name, e, p))
+			}
+		}
+	}
+	return out
+}
+
+// envEntryProblem returns why e is not a usable KEY=VALUE assignment, or ""
+// when it is. The key must be a portable shell identifier, so that the name a
+// process sees is exactly the name the config wrote; the value is taken as is.
+func envEntryProblem(e string) string {
+	key, _, ok := strings.Cut(e, "=")
+	if !ok {
+		return `has no "="`
+	}
+	if key == "" {
+		return "has an empty name"
+	}
+	for i, r := range key {
+		alpha := r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')
+		if !alpha && (i == 0 || r < '0' || r > '9') {
+			return "has a name that is not [A-Za-z_][A-Za-z0-9_]*"
+		}
+	}
+	return ""
 }
 
 // RefineryConfig holds merge queue configuration.
@@ -4692,6 +4777,8 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				cfg.Agents.Wake = unquotedVal
 			case "extra_path":
 				cfg.Agents.ExtraPath = parseStringArray(val)
+			case "env":
+				cfg.Agents.Env = parseQuotedStringArray(val)
 			}
 		case "agents.crew":
 			switch key {
@@ -4699,6 +4786,8 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				cfg.Agents.Crew.Command = unquotedVal
 			case "provider":
 				cfg.Agents.Crew.Provider = unquotedVal
+			case "env":
+				cfg.Agents.Crew.Env = parseQuotedStringArray(val)
 			}
 		case "agents.polecat":
 			switch key {
@@ -4706,6 +4795,8 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				cfg.Agents.Polecat.Command = unquotedVal
 			case "provider":
 				cfg.Agents.Polecat.Provider = unquotedVal
+			case "env":
+				cfg.Agents.Polecat.Env = parseQuotedStringArray(val)
 			}
 		}
 	}
@@ -4816,5 +4907,67 @@ func parseStringArray(val string) []string {
 			out = append(out, part)
 		}
 	}
+	return out
+}
+
+// parseQuotedStringArray parses a one-line TOML array of strings the way TOML
+// does: a comma inside a quoted element is part of the element. parseStringArray
+// splits on every comma, which is right for directory lists and wrong for
+// values such as `env = ["OPTS=a,b"]`, where it would invent two entries.
+// Basic strings ("...") honour \" \\ \t \n escapes; literal strings ('...')
+// take their content verbatim. A bare unquoted element is accepted trimmed, as
+// parseStringArray accepts it. Empty elements are dropped. Like the rest of
+// this parser it does not handle multi-line arrays.
+func parseQuotedStringArray(val string) []string {
+	val = strings.TrimSpace(val)
+	val = strings.TrimPrefix(val, "[")
+	val = strings.TrimSuffix(val, "]")
+	var out []string
+	var cur strings.Builder
+	quoted := false
+	flush := func() {
+		s := cur.String()
+		if !quoted {
+			s = strings.TrimSpace(s)
+		}
+		if s != "" {
+			out = append(out, s)
+		}
+		cur.Reset()
+		quoted = false
+	}
+	for i := 0; i < len(val); i++ {
+		switch c := val[i]; {
+		case c == '"' || c == '\'':
+			// Whitespace between the previous comma and this quote is
+			// separator, not content.
+			if strings.TrimSpace(cur.String()) == "" {
+				cur.Reset()
+			}
+			quoted = true
+			for i++; i < len(val) && val[i] != c; i++ {
+				if c == '"' && val[i] == '\\' && i+1 < len(val) {
+					i++
+					switch val[i] {
+					case 'n':
+						cur.WriteByte('\n')
+					case 't':
+						cur.WriteByte('\t')
+					default:
+						cur.WriteByte(val[i])
+					}
+					continue
+				}
+				cur.WriteByte(val[i])
+			}
+		case c == ',':
+			flush()
+		case quoted && (c == ' ' || c == '\t'):
+			// Whitespace between a closing quote and the next comma.
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	flush()
 	return out
 }

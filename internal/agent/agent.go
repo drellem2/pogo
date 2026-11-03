@@ -127,6 +127,14 @@ type Agent struct {
 	// Stored so Respawn can re-send it.
 	InitialNudge string `json:"-"`
 
+	// spawnEnv is the spawn's own SpawnRequest.Env, kept so that a restart
+	// re-applies it. Before it was kept, a restart rebuilt the environment
+	// from the identity catalogue alone, so an agent restarted after a crash
+	// lost every --env it was spawned with, and a polecat lost its core budget
+	// and POGO_ROLE. Unexported, like the PTY fields below, so the agents API
+	// never serializes it: an --env value can be a credential.
+	spawnEnv []string
+
 	// master is the PTY master file descriptor. Not exported (held by pogod).
 	master *os.File
 	// slave is the PTY slave, held open by pogod for as long as the child
@@ -1181,7 +1189,9 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	procName := ProcessName(req.Type, req.Name)
 	injectedEnv := envAssignments(agentIdentityEnv(req.Name, req.Type, procName, req.PromptFile, receiptFile))
 
-	cmd.Env = append(os.Environ(), append(injectedEnv, req.Env...)...)
+	// The configured env ([agents] env, [agents.<type>] env) goes beneath the
+	// identity variables and the spawn's own env; processEnv owns the order.
+	cmd.Env = append(os.Environ(), processEnv(r.configEnvLocked(req.Type, req.Name), injectedEnv, req.Env)...)
 
 	// Deliver the persona prompt to a ContextFile-injection provider (Codex
 	// reads AGENTS.override.md from its working directory). Must happen before
@@ -1225,6 +1235,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		WorkItemID:     req.WorkItemID,
 		Model:          req.Model,
 		ClaimedAtSpawn: req.ClaimedAtSpawn,
+		spawnEnv:       append([]string(nil), req.Env...),
 		master:         master,
 		slave:          slave,
 		cmd:            cmd,
@@ -1780,7 +1791,11 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	procName := ProcessName(old.Type, old.Name)
 	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile))
 
-	cmd.Env = append(os.Environ(), injectedEnv...)
+	// And the same layers in the same order: the configured env, then the
+	// identity, then the env the agent was spawned with. Leaving out
+	// old.spawnEnv here is the bug this replaced: every restart silently
+	// dropped the spawn's --env, and a restarted polecat its POGO_ROLE.
+	cmd.Env = append(os.Environ(), processEnv(r.configEnvLocked(old.Type, old.Name), injectedEnv, old.spawnEnv)...)
 
 	// A restart re-resolves to the agent's OWN provider (carried on old.provider
 	// from its original spawn), never the registry default — so a Codex agent
@@ -1819,6 +1834,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		// Carried, not re-resolved: old.Command already carries the model argv,
 		// so a respawn must report the same model it re-execs with.
 		Model:          old.Model,
+		spawnEnv:       old.spawnEnv,
 		master:         master,
 		slave:          slave,
 		cmd:            cmd,
