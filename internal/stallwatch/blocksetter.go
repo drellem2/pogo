@@ -46,8 +46,12 @@ import (
 //
 // The actor is self-asserted (MG_ACTOR / POGO_AGENT_NAME, falling back to the
 // OS user, and every agent here is one unix user), so a match is a strong
-// heuristic and not a proof. The fallback can only produce an OS username, which
-// does not name an agent, so it fails toward the notice too.
+// heuristic and not a proof. The OS-user fallback is NOT safe on its own: it
+// can equal the name in the block — `blocked:daniel` written by `daniel` —
+// and a match there would silence the coordinator's "this blocker is
+// unreachable" notice. The caller therefore consults setter() only for a
+// blocker with a mailbox; an unreachable name always takes the coordinator
+// path, whatever the log says.
 //
 // # Cost
 //
