@@ -1869,7 +1869,38 @@ Exit 0 clean, 1 at least one finding, 2 usage, 3 this run measured nothing.
 | `conflict_suspect` | the two instruments below disagree | check by hand (`git log --grep=<item>`); **neither** command |
 | `unjudged` | the branch could not be read | re-run; this is not a clean row |
 | `repo_unreadable` | the item's repo could not be listed, so no branch was looked for | fix the item's repo field; not a clean row |
-| `orphan_branch` | a polecat worktree on this host whose branch holds commits **no remote ref has**, named by no open item | `git push origin <branch>` — there is no owner to ask and nothing to submit under |
+| `orphan_branch` | a polecat worktree on this host whose branch holds commits **no remote ref has**, named by no open item, and that **neither landedness test shows landed** (see below) | `git push origin <branch>` — there is no owner to ask and nothing to submit under |
+
+#### `orphan_branch` — settled when it landed (drellem2/pogo#160)
+
+The row used to be gated on one question — is this commit object on some remote
+ref — while git-gc, whose reaping is the row's whole justification, already asks
+`gitgc.BranchDurable`: that same test, then ancestry of the target, then
+patch-id equivalence (the refinery rebases, so a landed branch is usually not an
+ancestor). The two disagreed on exactly the branches gc had already cleared. On
+the reporter's host all 64 orphan rows were landed, so the command exited 1
+permanently, and a run with a real finding looked the same as one without.
+
+Before an orphan row is reported, two tests now run:
+
+1. **The reaper's verdict** (`gitgc.BranchDurable`). *Durable* settles the
+   branch. *Unknown* makes it an `unjudged` row, never a pass.
+2. **The squash test.** A squash merge leaves no patch id behind (gh#149), so
+   tier 1 cannot see it. `gh pr list --head <branch> --state merged` is asked
+   for the PR's merge commit and final head. The branch is settled only if its
+   local tip **is that head or an ancestor of it** (a polecat that committed
+   after its PR merged holds work the merge never carried) **and** the merge
+   commit is an ancestor of the target.
+
+A settled branch is **not dropped**. It moves to the exclusions with the test's
+own reason, is named under `--all`, and is counted on the default output:
+
+    1 orphan branch(es), all landed — settled by the landedness tests, not reported (--all names them)
+
+Every test fails toward reporting. If `gh` is missing, unauthenticated,
+rate-limited or pointed at a non-GitHub remote, or the merge commit is not in
+this clone, the row stays and its `squash test:` line says why. A test that did
+not run can cost a suppression. It can never cost a finding.
 
 #### `in_flight` — the exclusion that took the prohibition with it (mg-4bf1)
 
