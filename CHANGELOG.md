@@ -10,6 +10,23 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The refinery classifies a push refused by branch protection as
+  `failed(protected)`, terminal at attempt 1 (drellem2/pogo#164).** The
+  post-gate git steps wrap every non-credential failure as retryable, so a
+  GH013 ruleset refusal used to be recorded as `contention` with the signal
+  "target moved during merge" — a race nobody observed — and spent the whole
+  7-attempt budget in under a minute against a rule no attempt can change.
+  The classifier now matches the remote's own refusal wording (`GH013`,
+  `repository rule violations`, `protected branch`, and git's
+  `[remote rejected]` flag, except for its lock/store-failure reasons, which
+  can carry a genuine race) ahead of the contention fallthrough. The remedy is
+  portable: target a different branch (the item's `branch:` value or
+  `--target=`), not "open a pull request". `protected` commits to an unchanged
+  resubmit repeating, so `check-stranded` prints no submit line for such a
+  branch, and it does not count against the author's failure streak.
+
 ## [0.12.0] - 2026-10-03
 
 ### Added
