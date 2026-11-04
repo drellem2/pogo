@@ -47,6 +47,7 @@ import (
 	"github.com/drellem2/pogo/internal/supervision"
 	"github.com/drellem2/pogo/internal/synthfail"
 	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 	"github.com/drellem2/pogo/internal/version"
 	"github.com/drellem2/pogo/internal/wedgewatch"
 )
@@ -3698,7 +3699,8 @@ The --check mode verifies:
   - Does every installed launchd plist match the plist this build renders?
   - Are required tools installed (git, go, the configured agent harness)?
   - Are repos configured?
-  - Is enth installed (only when a repo is recorded as an enth repo)?
+  - Is enth installed, and does each enth remote accept its token (only when
+    a repo is recorded as an enth repo)?
   - Are agent prompts installed?
   - Are there stale work items?
   - Did any one-shot schedule fire with nobody ever answering it?
@@ -3986,6 +3988,11 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 			} else {
 				pass("projects", fmt.Sprintf("%d repo(s) registered", len(projs)))
 			}
+			// 4a. An enth checkout auto-registered with no vcs key is read
+			// as git and cannot be dispatched to (GH #284).
+			for _, line := range enthUnrecordedLines(projs, enthvcs.IsCheckout, enthCheckoutOrigin) {
+				warn(enthUnrecordedCheckName, line)
+			}
 			// 4b. enth on PATH when any project is an enth repo (O4,
 			// enth-vcs slice 9). No row at all otherwise. See doctorenth.go.
 			if st, detail, applies := enthToolLine(projs, exec.LookPath, enthHelp); applies {
@@ -3996,6 +4003,20 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 					warn(enthToolCheckName, detail)
 				default:
 					pass(enthToolCheckName, detail)
+				}
+				// 4c. Does each enth remote accept the token pogo's workers
+				// will carry (GH #284 item 4)? Only when enth was found.
+				if bin, lerr := exec.LookPath("enth"); lerr == nil && st != "fail" {
+					for _, row := range enthLoginLines(projs, bin, enthWhoami) {
+						switch row.status {
+						case "fail":
+							fail(enthLoginCheckName, row.detail)
+						case "warn":
+							warn(enthLoginCheckName, row.detail)
+						default:
+							pass(enthLoginCheckName, row.detail)
+						}
+					}
 				}
 			}
 
@@ -4453,9 +4474,10 @@ the record carries no vcs key and the repo is git, as every repo was before.
 and pogo's own enth calls for it, act as (see set-enth-token).
 
 The path of an enth repo is a read checkout pogo keeps (it holds .enth/checkout).
-Polecats on it get their own whole-repo enth checkout (enth-vcs slice 5); the
-refinery does not land enth work yet (slices 6-7), and refuses it with
-"unsupported by this backend".`,
+Polecats on it get their own whole-repo enth checkout, with no git worktree
+and no branch, and land their own Changes (enth land, recorded by pogo land);
+the refinery does not land enth work and refuses a submit for it. See
+docs/enth.md.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			path := args[0]
@@ -4518,8 +4540,9 @@ started under the current backend, and moving a repo is a handover, not a
 toggle. Let the queue drain and the polecats finish, then re-run. Re-stating the
 current selection is not a change and is never refused.
 
-Polecats on an enth repo get an enth checkout (slice 5); the refinery does not
-land enth work yet (slices 6-7) and refuses it with "unsupported by this backend".`,
+Polecats on an enth repo get an enth checkout and land their own Changes (enth
+land, recorded by pogo land); the refinery does not land enth work and refuses a
+submit for it. See docs/enth.md.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			if !cmd.Flags().Changed("vcs") {
