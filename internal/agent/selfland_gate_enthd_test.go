@@ -112,7 +112,7 @@ func (r *selfLandRig) selfLand(t *testing.T, dir, stack, race string) (int, stri
 	c := exec.Command("bash", "-c", script)
 	c.Dir = dir
 	c.Env = append(os.Environ(),
-		"PATH="+r.bin+string(os.PathListSeparator)+r.s.BinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PATH="+r.bin+string(os.PathListSeparator)+r.s.BinDir+string(os.PathListSeparator)+pathWithoutLandGate(os.Getenv("PATH")),
 		"ENTH_REMOTE="+r.s.URL, "ENTH_REPO="+r.s.Repo, "ENTH_TOKEN="+r.s.Token,
 		"STACK="+stack, "LAND_LOG="+r.landLog, "GATE_RUNS="+r.runs,
 		"RACE_LAND="+race, "RACE_DONE="+filepath.Join(filepath.Dir(r.runs), "race-done-"+stack[:8]))
@@ -123,6 +123,24 @@ func (r *selfLandRig) selfLand(t *testing.T, dir, stack, race string) (int, stri
 		t.Fatal(err)
 	}
 	return 0, string(out)
+}
+
+// pathWithoutLandGate drops every entry of path that holds an
+// enth-land-gate. The only gate a rig may see is its own copy in r.bin. A gate
+// installed on the host (~/.local/bin is on pogod's PATH) otherwise turns the
+// "without the gate" case into a GATED land (mg-ca090).
+func pathWithoutLandGate(path string) string {
+	var keep []string
+	for _, d := range filepath.SplitList(path) {
+		if d == "" {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(d, "enth-land-gate")); err == nil && !fi.IsDir() {
+			continue
+		}
+		keep = append(keep, d)
+	}
+	return strings.Join(keep, string(os.PathListSeparator))
 }
 
 func (r *selfLandRig) runCount() int {
@@ -199,6 +217,17 @@ func TestSelfLandGateOnTipRunsOnce(t *testing.T) {
 // untested, and says so on its own greppable line (pm-pogo's ruling,
 // 2026-11-04 17:33Z). The flip to fail-closed is mg-2000f.
 func TestSelfLandWithoutTheGateLandsUntestedAndSaysSo(t *testing.T) {
+	// A gate installed on the host must not count as installed in the rig
+	// (mg-ca090). Plant one on the inherited PATH so this case is exercised on
+	// every box, not only on one that happens to have the gate installed.
+	host := t.TempDir()
+	if err := os.WriteFile(filepath.Join(host, "enth-land-gate"), []byte("#!/bin/sh\necho HOST GATE RAN; exit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", host+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if p, err := exec.LookPath("enth-land-gate"); err != nil || p != filepath.Join(host, "enth-land-gate") {
+		t.Fatalf("control: the planted host gate is not on the inherited PATH (%q, %v)", p, err)
+	}
 	r := newSelfLandRig(t)
 	os.Remove(filepath.Join(r.bin, "enth-land-gate"))
 	c, cdir := r.s.Work(t, "mg-c", "", "C", map[string]string{"use.txt": "call f\n"})
@@ -206,8 +235,19 @@ func TestSelfLandWithoutTheGateLandsUntestedAndSaysSo(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "\nGATE NOT INSTALLED — landing untested (mg-64f2e)\n") && !strings.HasPrefix(out, "GATE NOT INSTALLED — landing untested (mg-64f2e)\n") {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	if !strings.Contains(out, "LANDED as") || r.runCount() != 0 {
+	if !strings.Contains(out, "LANDED as") || r.runCount() != 0 || strings.Contains(out, "HOST GATE RAN") {
 		t.Fatalf("want an ungated land (gate runs %d)\n%s", r.runCount(), out)
+	}
+}
+
+// pathWithoutLandGate drops only the directories that hold a gate, so the
+// rig still finds bash, go and enth on the host PATH.
+func TestPathWithoutLandGate(t *testing.T) {
+	with, without := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(with, "enth-land-gate"), []byte("#!/bin/sh\n"), 0o755)
+	sep := string(os.PathListSeparator)
+	if got := pathWithoutLandGate(without + sep + with + sep + without); got != without+sep+without {
+		t.Fatalf("got %q", got)
 	}
 }
 
