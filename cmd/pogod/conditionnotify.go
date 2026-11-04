@@ -250,13 +250,21 @@ type conditionAnnunciator struct {
 	// at startup by setOutOfBandBox, before the first Raise.
 	outOfBandBox string
 
-	// mailOff and disabled are `[conditions] mail = false` and
-	// `[conditions] disable` (drellem2/pogo#238). Set once at startup by
-	// setMailDisabled. A disabled condition is still raised and recorded in
-	// events.log — as notified=false, reason=mail_disabled — and nothing else:
-	// no mail, no out-of-band copy, no wake, and no delivery stamp in the store.
-	mailOff  bool
-	disabled map[string]bool
+	// mailOff and disabled are the mutes of the whole annunciator and of
+	// single rows — `[conditions] mail = false` and `[conditions] disable`
+	// (drellem2/pogo#238), now aliases for muting condition.notice +
+	// condition.out_of_band and condition.<id> (#262 slice 2). Each holds the
+	// key that muted it ("" = not muted). Set once at startup by
+	// setConditionMutes. A disabled condition is still raised and recorded in
+	// events.log — as notified=false, reason=mail_disabled, plus alert_muted —
+	// and nothing else: no mail, no out-of-band copy, no wake, and no delivery
+	// stamp in the store.
+	mailOff  string
+	disabled map[string]string
+	// outOfBandMuted is the key that muted condition.out_of_band ("" = not):
+	// the copy to the out-of-band box is withheld and recorded as alert_muted,
+	// and the coordinator's copy is unchanged.
+	outOfBandMuted string
 	// disabledLogged keeps the per-raise log line to once per condition per
 	// process: A11 raises on every heartbeat tick.
 	disabledLogged map[string]bool
@@ -305,7 +313,7 @@ func newConditionAnnunciator(statePath string, mail conditionMailer, wake condit
 		disk:           loadConditionNotices(statePath),
 		mem:            map[string]conditionNoticeState{},
 		pendingWakes:   map[string]*pendingWake{},
-		disabled:       map[string]bool{},
+		disabled:       map[string]string{},
 		disabledLogged: map[string]bool{},
 	}
 }
@@ -364,7 +372,7 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 	if a == nil {
 		return
 	}
-	if why := a.mailDisabledFor(c.ID); why != "" {
+	if why := a.mailDisabledFor(c); why != "" {
 		// Switched off by the operator. Say so on the spine as NOT delivered:
 		// recording this as mailed would be a false record, and a disabled
 		// condition's only reader is events.log.
@@ -376,6 +384,7 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 		if first {
 			log.Printf("pogod: condition %s (%s) raised but NOT mailed — %s: %s", c.ID, c.Row, why, c.Detail)
 		}
+		alerts.RecordMuted(alerts.ConditionNotice, c.To, c.Subject, why)
 		a.emit(c, c.To, false, "mail_disabled", why)
 		return
 	}
@@ -400,6 +409,7 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 
 	a.mu.Lock()
 	oob := a.outOfBandFor(c)
+	oobMutedTo, oobMutedWhy := a.mutedOutOfBandFor(c)
 	prev, seen := a.mem[c.ID]
 	if !seen {
 		prev, seen = a.disk.Conditions[c.ID]
@@ -439,6 +449,15 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 	a.mu.Unlock()
 
 	subject, body := c.Subject, c.Body
+	if oobMutedTo != "" {
+		// condition.out_of_band is muted: the copy is withheld, as
+		// `out_of_band = false` always withheld it, and now also recorded.
+		alerts.RecordMuted(alerts.ConditionOutOfBand, oobMutedTo, subject, oobMutedWhy)
+	}
+	// condition.notice alone may be muted while its out-of-band copy is not
+	// (only an [alerts] entry can say that). The seam then withholds the
+	// coordinator's copy, and the event must not claim it was delivered.
+	toMuted := alerts.MuteReason(alerts.ConditionNotice)
 	err := alerts.Mail(alerts.ConditionNotice, a.mail, c.To, conditionMailFrom, subject, body)
 	var oobErr error
 	if oob != "" {
@@ -492,7 +511,9 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 	a.disk.Conditions[c.ID] = st
 	a.dirty = true
 	a.raised++
-	if c.Wake && a.wake != nil {
+	// No wake for a coordinator whose copy was muted: there is nothing in its
+	// mailbox to be woken for.
+	if c.Wake && a.wake != nil && toMuted == "" {
 		a.pendingWakes[c.ID] = &pendingWake{
 			to:      c.To,
 			message: conditionWakeMessage(c),
@@ -503,7 +524,11 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 	}
 	a.mu.Unlock()
 
-	if err == nil {
+	switch {
+	case err == nil && toMuted != "":
+		log.Printf("pogod: condition %s (%s) NOT mailed to %s — %s", c.ID, c.Row, c.To, toMuted)
+		a.emit(c, c.To, false, "mail_disabled", toMuted)
+	case err == nil:
 		log.Printf("pogod: condition %s (%s) mailed to %s (%s)", c.ID, c.Row, c.To, reason)
 		a.emit(c, c.To, true, reason, "")
 	}
@@ -514,10 +539,20 @@ func (a *conditionAnnunciator) Raise(c pogodCondition, now time.Time) {
 // To (a deployment whose coordinator mailbox is its escalation box needs one
 // mail, not two). Caller holds a.mu.
 func (a *conditionAnnunciator) outOfBandFor(c pogodCondition) string {
-	if !c.OutOfBand || a.outOfBandBox == "" || a.outOfBandBox == c.To {
+	if !c.OutOfBand || a.outOfBandBox == "" || a.outOfBandBox == c.To || a.outOfBandMuted != "" {
 		return ""
 	}
 	return a.outOfBandBox
+}
+
+// mutedOutOfBandFor is the out-of-band copy c WOULD have sent, and the key
+// that muted it, when condition.out_of_band is muted; "", "" otherwise.
+// Caller holds a.mu.
+func (a *conditionAnnunciator) mutedOutOfBandFor(c pogodCondition) (string, string) {
+	if a.outOfBandMuted == "" || !c.OutOfBand || a.outOfBandBox == "" || a.outOfBandBox == c.To {
+		return "", ""
+	}
+	return a.outOfBandBox, a.outOfBandMuted
 }
 
 // setOutOfBandBox names the mailbox OutOfBand conditions are copied to. pogod
@@ -536,72 +571,106 @@ func (a *conditionAnnunciator) setOutOfBandBox(box string) {
 // returns the startup line naming what is switched off ("" when nothing is).
 // escalationBox is `[agents] escalation_box`; it is only READ here, so the other
 // watchers' escalation routing does not depend on this section.
+//
+// It resolves `[conditions]` alone, as the alias keys it now is; pogod itself
+// calls applyConditionMutes with the whole alert mute table, so an [alerts]
+// entry takes precedence.
 func applyConditionsConfig(a *conditionAnnunciator, cfg config.ConditionsConfig, escalationBox string) string {
-	if cfg.OutOfBand {
-		a.setOutOfBandBox(escalationBox)
-	}
-	a.setMailDisabled(!cfg.Mail, cfg.Disable)
-	return a.disabledSummary(!cfg.OutOfBand)
+	return applyConditionMutes(a, resolveAlertMutes(&config.Config{
+		Conditions: cfg,
+		BlindWatch: config.BlindWatchConfig{Mail: true, OutOfBand: true},
+		StallWatch: config.StallWatchConfig{BlockedReminderEnabled: true},
+	}), escalationBox)
 }
 
-// setMailDisabled applies `[conditions] mail` (off when all is true) and
-// `[conditions] disable`. Unset, every condition mails — so a test that does
+// applyConditionMutes arms the annunciator from the alert mute table
+// (drellem2/pogo#262 slice 2) and returns its startup line. The whole
+// annunciator is off only when BOTH condition.notice and
+// condition.out_of_band are muted (`[conditions] mail = false` mutes both);
+// condition.notice alone is withheld at the seam per send.
+func applyConditionMutes(a *conditionAnnunciator, t alertMuteTable, escalationBox string) string {
+	if a == nil {
+		return ""
+	}
+	a.setOutOfBandBox(escalationBox)
+	all := ""
+	if n, o := t.reason(alerts.ConditionNotice), t.reason(alerts.ConditionOutOfBand); n != "" && o != "" {
+		all = n
+		if o != n {
+			all = n + "; " + o
+		}
+	}
+	a.setConditionMutes(all, t.reason(alerts.ConditionOutOfBand), t.conditionRowMutes())
+	return a.disabledSummary()
+}
+
+// setConditionMutes installs the mutes: all (the whole annunciator), oob
+// (condition.out_of_band) and rows (condition.<id>, keyed by id), each value
+// the key that muted it. Unset, every condition mails — so a test that does
 // not care gets the default.
-func (a *conditionAnnunciator) setMailDisabled(all bool, ids []string) {
+func (a *conditionAnnunciator) setConditionMutes(all, oob string, rows map[string]string) {
 	if a == nil {
 		return
 	}
 	a.mu.Lock()
 	a.mailOff = all
-	a.disabled = map[string]bool{}
-	for _, id := range ids {
+	a.outOfBandMuted = oob
+	a.disabled = map[string]string{}
+	for id, why := range rows {
 		if id = strings.TrimSpace(id); id != "" {
-			a.disabled[id] = true
+			a.disabled[id] = why
 		}
 	}
 	a.mu.Unlock()
 }
 
-// mailDisabledFor says why mail for condition id is off, or "" when it is on.
+// mailDisabledFor says why mail for condition c is off, or "" when it is on.
 // An entry matches the whole id, or the part before the colon of a
 // per-subject id ("autostart_failed" matches "autostart_failed:doctor").
-func (a *conditionAnnunciator) mailDisabledFor(id string) string {
+//
+// condition.notice muted on its own disables the whole raise when c would
+// send no out-of-band copy either: otherwise the raise would be remembered as
+// delivered, and its wake queued, for a notice nobody was sent.
+func (a *conditionAnnunciator) mailDisabledFor(c pogodCondition) string {
+	id := c.ID
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.mailOff {
-		return "[conditions] mail = false"
+	if a.mailOff != "" {
+		return a.mailOff
 	}
-	if a.disabled[id] {
-		return "[conditions] disable lists " + id
+	if why := alerts.MuteReason(alerts.ConditionNotice); why != "" && a.outOfBandFor(c) == "" {
+		return why
 	}
-	if i := strings.Index(id, ":"); i > 0 && a.disabled[id[:i]] {
-		return "[conditions] disable lists " + id[:i]
+	if why := a.disabled[id]; why != "" {
+		return why
+	}
+	if i := strings.Index(id, ":"); i > 0 && a.disabled[id[:i]] != "" {
+		return a.disabled[id[:i]]
 	}
 	return ""
 }
 
 // disabledSummary is the startup line naming what is switched off, or "" when
-// nothing is. outOfBandOff is `[conditions] out_of_band = false`, which lives
-// on the caller's side (it decides whether setOutOfBandBox is called at all).
-func (a *conditionAnnunciator) disabledSummary(outOfBandOff bool) string {
+// nothing is.
+func (a *conditionAnnunciator) disabledSummary() string {
 	if a == nil {
 		return ""
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var parts []string
-	if a.mailOff {
-		parts = append(parts, "ALL condition mail is OFF ([conditions] mail = false)")
+	if a.mailOff != "" {
+		parts = append(parts, "ALL condition mail is OFF ("+a.mailOff+")")
 	} else if len(a.disabled) > 0 {
 		ids := make([]string, 0, len(a.disabled))
 		for id := range a.disabled {
 			ids = append(ids, id)
 		}
 		sort.Strings(ids)
-		parts = append(parts, fmt.Sprintf("mail is OFF for %v ([conditions] disable)", ids))
+		parts = append(parts, fmt.Sprintf("mail is OFF for %v ([conditions] disable / [alerts.\"condition.<id>\"] mute)", ids))
 	}
-	if outOfBandOff && !a.mailOff {
-		parts = append(parts, "no out-of-band copy to [agents] escalation_box ([conditions] out_of_band = false)")
+	if a.outOfBandMuted != "" && a.mailOff == "" {
+		parts = append(parts, "no out-of-band copy to [agents] escalation_box ("+a.outOfBandMuted+")")
 	}
 	if len(parts) == 0 {
 		return ""

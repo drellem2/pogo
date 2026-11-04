@@ -8,8 +8,8 @@ import (
 // Settings is what the listing needs from the daemon's loaded config. pogod
 // fills it; this package does not read config itself.
 //
-// Slice 1 lists only what is ALREADY in force: there is no [alerts] section
-// yet, so every value here comes from an existing key.
+// Recipients come from the keys that exist today (notify_to, [agents]); mute
+// state is the table the send seam enforces (SetMutes).
 type Settings struct {
 	// Coordinator and EscalationBox are the resolved [agents] coordinator and
 	// [agents] escalation_box.
@@ -19,8 +19,10 @@ type Settings struct {
 	// spells it ("ack_watch.notify_to"). It replaces $coordinator for alerts
 	// whose Key names it.
 	NotifyTo map[string]string
-	// Muted names the alerts an existing key already silences, with that key
-	// ("conditions.mail = false"). Listing only — slice 1 changes no send.
+	// Muted names the muted alerts, each with the key that muted it
+	// ("[conditions] mail = false", "[alerts.\"ack_watch.finding\"] mute =
+	// true"). A muted name the registry does not declare — a per-row
+	// condition.<id> — is listed as a row of its own.
 	Muted map[Name]string
 }
 
@@ -63,6 +65,24 @@ func Rows(s Settings, all bool) []Row {
 			r.Source = key
 		}
 		out = append(out, r)
+	}
+	// Muted names with no declaration of their own: the per-row condition
+	// mutes ("condition.scheduler_load_failed"), each a slice of
+	// condition.notice.
+	for n, why := range s.Muted {
+		if _, declared := byName[n]; declared {
+			continue
+		}
+		parent, _ := Lookup(ConditionNotice)
+		if n.Family() != parent.Name.Family() {
+			continue
+		}
+		out = append(out, Row{
+			Name: n, Class: ClassAlert, Default: parent.Default,
+			Effective: resolve(parent.Default, s.Coordinator, s.EscalationBox),
+			Muted:     true, Source: why, Key: parent.Key,
+			Summary: "condition row " + n.Kind() + " only (sent as " + string(ConditionNotice) + ")",
+		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Muted != out[j].Muted {

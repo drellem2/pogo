@@ -7,11 +7,11 @@
 // registry below. Every send site calls Mail (or MailOutput) with that name, and
 // TestNoSendBypassesTheRegistry fails the build if a send does not.
 //
-// This is slice 1 of 4 and changes no behaviour: Mail resolves the name and
-// hands the message to the transport the caller already used. Mute (slice 2),
-// route (slice 3) and nudges (slice 4) attach here later — which is the point
-// of having one seam rather than ~60 call sites that each address `mg` on
-// their own.
+// Mail resolves the name and hands the message to the transport the caller
+// already used — unless the alert is MUTED (slice 2, SetMutes), in which case
+// it is withheld and recorded as an alert_muted event. Route (slice 3) and
+// nudges (slice 4) attach here later — which is the point of having one seam
+// rather than ~60 call sites that each address `mg` on their own.
 //
 // Some mail is not an alert: the scheduler delivering a registered message is
 // a delivery mechanic, not pogod telling anyone anything. Those are declared
@@ -84,6 +84,10 @@ const (
 
 	BlindWatchFinding Name = "blind_watch.finding"
 	BlindWatchCleared Name = "blind_watch.cleared"
+	// BlindWatchOutOfBand is the copy of a blind-watch finding or clear sent
+	// to the escalation box, so `[blind_watch] out_of_band = false` is the
+	// mute of one name (slice 2) rather than a per-recipient special case.
+	BlindWatchOutOfBand Name = "blind_watch.out_of_band"
 
 	CarrierDriftFinding Name = "carrier_drift.finding"
 
@@ -147,6 +151,11 @@ const (
 	ServiceInstallReport Name = "service.install_report"
 
 	StallWatchMailFallback Name = "stall_watch.mail_fallback"
+	// StallWatchBlockedReminder is the blocked-reminder nudge (mg-3844). It is
+	// a nudge, not a mail: it is declared here, ahead of the other nudges
+	// (slice 4), because `[stall_watch] blocked_reminder_enabled = false` is
+	// one of the existing silencing keys slice 2 turns into a mute alias.
+	StallWatchBlockedReminder Name = "stall_watch.blocked_reminder"
 
 	StrandedWorkBranch Name = "stranded_work.branch"
 
@@ -183,8 +192,9 @@ var registry = []Def{
 	{AbsentWatchCleared, ClassAlert, tiered, "absent_watch.notify_to", "an absent-agent episode is over"},
 	{AckWatchFinding, ClassAlert, tiered, "ack_watch.notify_to", "a scheduled message completed with no acknowledgement"},
 	{AgentEarlyExit, ClassAlert, RoleCoordinator, "", "a polecat died during its cold start"},
-	{BlindWatchFinding, ClassAlert, RoleCoordinator + ", or " + RoleEscalationBox + " instead when the detector or coordinator is involved", "blind_watch.mail, blind_watch.out_of_band", "the wedge detector cannot judge some agents"},
-	{BlindWatchCleared, ClassAlert, RoleCoordinator + " (and " + RoleEscalationBox + " if it was told)", "blind_watch.mail, blind_watch.out_of_band", "the wedge detector is judging again"},
+	{BlindWatchFinding, ClassAlert, RoleCoordinator + " (" + RoleEscalationBox + "'s copy is blind_watch.out_of_band)", "blind_watch.mail", "the wedge detector cannot judge some agents"},
+	{BlindWatchCleared, ClassAlert, RoleCoordinator + " (" + RoleEscalationBox + "'s copy is blind_watch.out_of_band)", "blind_watch.mail", "the wedge detector is judging again"},
+	{BlindWatchOutOfBand, ClassAlert, RoleEscalationBox + ", when the detector or coordinator is involved", "blind_watch.mail, blind_watch.out_of_band", "escalation-box copy of a blind-watch finding or clear"},
 	{CarrierDriftFinding, ClassAlert, tiered, "carrier_drift.notify_to", "a work item's workflow carrier drifted from its stage"},
 	{ConditionNotice, ClassAlert, "the condition's addressee (usually " + RoleCoordinator + ")", "conditions.mail, conditions.disable", "a daemon condition row was raised"},
 	{ConditionOutOfBand, ClassAlert, RoleEscalationBox, "conditions.out_of_band", "out-of-band copy of a condition notice"},
@@ -225,6 +235,7 @@ var registry = []Def{
 	{SentinelDrift, ClassAlert, RoleCoordinator, "", "a harness prompt-ready sentinel stopped matching"},
 	{ServiceInstallReport, ClassAlert, RoleCoordinator, "", "`pogo service install` report"},
 	{StallWatchMailFallback, ClassAlert, "the stall notice's recipient", "", "a stall notice that could not be typed into a terminal"},
+	{StallWatchBlockedReminder, ClassAlert, "the agent an item is blocked on (" + RoleCoordinator + " when it is unreachable)", "stall_watch.blocked_reminder_enabled", "nudge: work items are blocked on the recipient"},
 	{StrandedWorkBranch, ClassAlert, RoleCoordinator + " and the repo's pm-<repo>, if it exists", "", "a stopped polecat left unmerged work"},
 	{SynthWatchHit, ClassAlert, RoleEscalationBox, "", "synthetic error messages are being emitted"},
 	{SynthWatchCleared, ClassAlert, RoleEscalationBox, "", "a synthetic-error episode is over"},

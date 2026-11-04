@@ -26,9 +26,19 @@ reaches on this install, and whether it is muted.
 
 DEFAULT is the built-in rule ($coordinator and $escalation_box name the
 [agents] coordinator and escalation_box). EFFECTIVE is that rule resolved
-against the running daemon's config. SOURCE names the existing config key
-that changed the recipient or silenced the alert, or "default". Muted alerts
-are listed first.
+against the running daemon's config. SOURCE names the config key that
+changed the recipient or muted the alert, or "default". Muted alerts are
+listed first.
+
+Mute an alert with:
+
+  [alerts."<name>"]
+  mute = true
+
+A muted alert is not sent; its detector still runs, and each withheld send is
+recorded as an alert_muted event. The older keys ([conditions] mail /
+out_of_band / disable, [blind_watch] mail / out_of_band, [stall_watch]
+blocked_reminder_enabled) are aliases, and an [alerts] entry wins over them.
 
 --all adds the delivery mechanics that also send mail but are not alerts
 (the scheduler delivering a registered message).
