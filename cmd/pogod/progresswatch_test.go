@@ -254,12 +254,77 @@ func TestUnreadableWorktreeIsNotGone(t *testing.T) {
 }
 
 // TestNoWorktreeIsNotGoneEither. A NoWorktree worker never had a tree to lose,
-// and its work goes somewhere this detector cannot see. That is unmeasurable,
-// which is a blindness — a different answer from a tree that was there and was
-// reaped, and the remedies differ.
+// and its work goes somewhere this detector cannot see. That is its own state
+// (mg-ac972) — not a reaped tree, and not a failed measurement either.
 func TestNoWorktreeIsNotGoneEither(t *testing.T) {
 	got := workerReading(context.Background(), agent.WorkerProgress{Name: "p1", Age: time.Hour}, time.Now(), nil)
 	if got.WorktreeGone {
 		t.Errorf("a worker spawned without a worktree is not one whose worktree vanished: %+v", got)
+	}
+	if !got.NoWorktree {
+		t.Errorf("a worker spawned without a worktree must carry NoWorktree: %+v", got)
+	}
+	if got.WritesKnown {
+		t.Errorf("nothing about its writes is known: %+v", got)
+	}
+}
+
+// TestBoxOpBesideHealthyWorkersIsNotBlind runs the real source path end to
+// end (mg-ac972): two workers with real, freshly written trees and one
+// --no-worktree box-op. The reading must not be blind and must name the box-op
+// on its own field — and, as the control, a worker whose walk really fails
+// (an unreadable root) still blinds it.
+func TestBoxOpBesideHealthyWorkersIsNotBlind(t *testing.T) {
+	now := time.Now()
+	live := []agent.WorkerProgress{
+		{Name: "p1", Age: time.Hour, PTYIdle: time.Minute, HasOutput: true, WorktreeDir: t.TempDir()},
+		{Name: "p2", Age: time.Hour, PTYIdle: time.Minute, HasOutput: true, WorktreeDir: t.TempDir()},
+		{Name: "p7daa2", Age: time.Hour, PTYIdle: time.Minute, HasOutput: true},
+	}
+	for _, w := range live[:2] {
+		if err := os.WriteFile(filepath.Join(w.WorktreeDir, "f"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap := progresswatch.Snapshot{
+		Now: now, CoresKnown: true, HostCores: 10, WorkerCores: 2,
+		ProgressKnown: true, LastProgress: now.Add(-2 * time.Minute), LastProgressWhat: "x",
+	}
+	for _, w := range live {
+		snap.Workers = append(snap.Workers, workerReading(context.Background(), w, now, nil))
+	}
+	r := progresswatch.Evaluate(snap, progresswatch.Thresholds{})
+	if r.Verdict() == progresswatch.VerdictBlind {
+		t.Fatalf("a box-op blinded the fleet: %v", r.Blind)
+	}
+	if r.NoWorktree != 1 || len(r.NoWorktreeNames) != 1 || r.NoWorktreeNames[0] != "p7daa2" {
+		t.Errorf("no_worktree = %d %v, want 1 [p7daa2]", r.NoWorktree, r.NoWorktreeNames)
+	}
+
+	// Negative control: a tree whose walk really errors.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: 0o000 does not deny this process")
+	}
+	bad := t.TempDir()
+	if err := os.Mkdir(filepath.Join(bad, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(bad, "sub"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(bad, "sub"), 0o755) })
+	snap.Workers = append(snap.Workers, workerReading(context.Background(), agent.WorkerProgress{
+		Name: "p9", Age: time.Hour, PTYIdle: time.Minute, HasOutput: true, WorktreeDir: bad,
+	}, now, nil))
+	r = progresswatch.Evaluate(snap, progresswatch.Thresholds{})
+	if r.Verdict() != progresswatch.VerdictBlind {
+		t.Fatalf("control: a walk that errors must still blind the reading, got %q", r.Verdict())
+	}
+	joined := strings.Join(r.Blind, " ")
+	if !strings.Contains(joined, "p9 (") || !strings.Contains(joined, "permission denied") {
+		t.Errorf("control: blind line must name p9 and its error: %v", r.Blind)
+	}
+	if strings.Contains(joined, "p7daa2") {
+		t.Errorf("the box-op reached the blind line: %v", r.Blind)
 	}
 }

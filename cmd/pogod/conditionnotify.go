@@ -754,7 +754,25 @@ func (a *conditionAnnunciator) retryWakes(now time.Time) {
 		if wake == nil {
 			err = fmt.Errorf("no wake channel")
 		} else {
-			err = wake(w.to, w.message)
+			// condition.wake is an alert of its own (drellem2/pogo#262
+			// slice 4): mutable apart from the notice, and routable.
+			var muted string
+			muted, err = alerts.Nudge(alerts.ConditionWake, wake, w.to, "condition "+w.id, w.message)
+			if muted != "" {
+				log.Printf("pogod: condition %s (%s) — wake of %s MUTED (%s); the notice is in its maildir", w.id, w.row, w.to, muted)
+				a.mu.Lock()
+				delete(a.pendingWakes, w.id)
+				a.mu.Unlock()
+				events.Emit(context.Background(), events.Event{
+					EventType: conditionEvent,
+					Agent:     w.to,
+					Details: map[string]any{
+						"condition": w.id, "row": w.row, "notified": false,
+						"reason": "wake_muted", "muted": muted, "tries": w.tries,
+					},
+				})
+				continue
+			}
 		}
 		if err == nil {
 			log.Printf("pogod: condition %s (%s) — %s WOKEN to read the notice (try %d)", w.id, w.row, w.to, w.tries)

@@ -19,15 +19,23 @@ func newAlertsCmd(jsonOutput *bool) *cobra.Command {
 	var all bool
 	cmd := &cobra.Command{
 		Use:   "alerts",
-		Short: "List every alert pogod sends, its recipient and mute state",
+		Short: "List every alert pogod sends, its recipient, route and mute state",
 		Long: `alerts lists every alert pogod can send — each by its stable name,
 "<family>.<kind>" — with its default recipient, the recipient it actually
 reaches on this install, and whether it is muted.
 
+VIA is "mail", or "nudge" for an alert typed into the recipient's terminal
+(stall-watch's checks, a condition's wake, crew-reset's pointer). Nudges are
+muted and routed exactly like mail. Nudges that only deliver something else —
+wake-watch's mail-arrival pointers, the kickoff prompt, the mid-session-wedge
+submit, scheduler deliveries, an operator's pogo nudge — are not alerts: --all
+lists them as delivery mechanics, and they cannot be muted or routed.
+
 DEFAULT is the built-in rule ($coordinator and $escalation_box name the
 [agents] coordinator and escalation_box). EFFECTIVE is that rule resolved
 against the running daemon's config. SOURCE names the config key that
-changed the recipient or muted the alert, or "default". Muted alerts are
+changed the recipient (a route, or a notify_to) or muted the alert, or
+"default". Muted alerts are
 listed first.
 
 Mute an alert with:
@@ -40,8 +48,19 @@ recorded as an alert_muted event. The older keys ([conditions] mail /
 out_of_band / disable, [blind_watch] mail / out_of_band, [stall_watch]
 blocked_reminder_enabled) are aliases, and an [alerts] entry wins over them.
 
---all adds the delivery mechanics that also send mail but are not alerts
-(the scheduler delivering a registered message).
+Route an alert's primary copy (or a nudge) to another agent or box with:
+
+  [alerts."<name>"]
+  route = "<agent or box>"     # or "$coordinator" / "$escalation_box"
+
+Escalation copies keep going to [agents] escalation_box. A route to a box that
+does not exist falls back to the default recipient (recorded as an
+alert_route_invalid event), so mail is never dropped. Every watcher's
+notify_to is an alias for route, and an [alerts] route wins over it.
+
+--all adds the delivery mechanics, marked "(delivery)": mail and nudges
+pogo sends that are not alerts (a scheduled message, a mail-arrival pointer,
+a kickoff prompt). They cannot be muted or routed.
 
 The list comes from the running pogod (GET /alerts), so it reflects the
 config the daemon loaded, not the file as it is now.`,
@@ -58,13 +77,13 @@ config the daemon loaded, not the file as it is now.`,
 			printAlerts(os.Stdout, rows)
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "also list delivery mechanics that send mail but are not alerts")
+	cmd.Flags().BoolVar(&all, "all", false, "also list delivery mechanics (mail and nudges) that are not alerts")
 	return cmd
 }
 
 func printAlerts(w io.Writer, rows []alerts.Row) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tMUTED\tEFFECTIVE\tDEFAULT\tSOURCE")
+	fmt.Fprintln(tw, "NAME\tVIA\tMUTED\tEFFECTIVE\tDEFAULT\tSOURCE")
 	for _, r := range rows {
 		muted := "no"
 		if r.Muted {
@@ -74,7 +93,11 @@ func printAlerts(w io.Writer, rows []alerts.Row) {
 		if r.Class != alerts.ClassAlert {
 			name += " (" + r.Class + ")"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", name, muted, r.Effective, r.Default, r.Source)
+		via := r.Channel
+		if via == "" {
+			via = alerts.ChannelMail // a pogod older than slice 4 lists mail only
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", name, via, muted, r.Effective, r.Default, r.Source)
 	}
 	tw.Flush()
 }

@@ -1235,6 +1235,22 @@ func newStallNudgerWithTimeout(reg *agent.Registry, mail func(to, from, subject,
 // nothing and holds the heartbeat longer for it. The outcome of every one of
 // those fires was determined in the first two seconds. That is the same
 // conclusion mg-79dc reached from 18 samples, now confirmed at ~100x the n.
+// wakeConditionAddressee is the condition annunciator's wake transport: a PTY
+// nudge at the named agent. The annunciator hands it to alerts.Nudge under
+// condition.wake, which has already muted or routed the wake by the time this
+// runs. It reads agentRegistry when called, not when wired: the annunciator
+// exists before the registry does.
+func wakeConditionAddressee(name, message string) error {
+	if agentRegistry == nil {
+		return fmt.Errorf("no agent registry")
+	}
+	a := agentRegistry.Get(name)
+	if a == nil {
+		return fmt.Errorf("agent %s is not running", name)
+	}
+	return a.Nudge(message)
+}
+
 func newStallNudger(reg *agent.Registry, mail func(to, from, subject, body string) error, fallbackCap int) stallwatch.Nudger {
 	return newStallNudgerWithTimeoutAndDamper(reg, mail, agent.DefaultNudgeTimeout,
 		newStallFallbackDamper(fallbackCap))
@@ -1531,6 +1547,22 @@ Flags:
 	if line := mutedAlertsLine(alertMutes); line != "" {
 		log.Print(line)
 	}
+	// Arm the alert routes (slice 3): `[alerts."<name>"] route` and every
+	// watcher's notify_to, its alias. A route naming an unknown box is
+	// reported here and still installed — the seam re-checks the box at send
+	// and falls back to the default recipient, so a route never drops mail.
+	alerts.BoxExists = alerts.MGBoxExists
+	alertRoutes := resolveAlertRoutes(cfg, alerts.MGBoxExists)
+	alerts.SetRoutes(alertRoutes.Routes)
+	for _, w := range alertRoutes.Warnings {
+		log.Print(w)
+	}
+	for _, e := range routeInvalidAtLoadEvents(alertRoutes) {
+		events.Emit(context.Background(), e)
+	}
+	if line := routedAlertsLine(alertRoutes); line != "" {
+		log.Print(line)
+	}
 
 	// Second, config-aware PATH repair pass: [agents] extra_path lets a
 	// deployment point pogod at harness runtimes the automatic probe in
@@ -1679,6 +1711,7 @@ Flags:
 	// fresh read of a file that may have changed since (drellem2/pogo#262).
 	{
 		s := alertSettingsFrom(cfg)
+		s.RouteInvalid = alertRoutes.Invalid
 		alertSettings.Store(&s)
 	}
 
@@ -1699,16 +1732,7 @@ Flags:
 	conditions = newConditionAnnunciator(
 		conditionNoticesPath(),
 		alerts.Transport,
-		func(name, message string) error {
-			if agentRegistry == nil {
-				return fmt.Errorf("no agent registry")
-			}
-			a := agentRegistry.Get(name)
-			if a == nil {
-				return fmt.Errorf("agent %s is not running", name)
-			}
-			return a.Nudge(message)
-		},
+		wakeConditionAddressee,
 	)
 	// mg-875d: the rows whose trigger means pogod is unhealthy or the
 	// coordinator is down are ALSO copied here, because the coordinator is an
@@ -3963,6 +3987,10 @@ Flags:
 		fatalf("pogod: failed to listen on %s: %v", addr, listenErr)
 	}
 	fmt.Printf("pogod listening on %s\n", addr)
+	// Every agent this daemon spawns must talk to THIS daemon. Without it a
+	// sandbox pogod's agents inherited no POGO_PORT and their CLIs defaulted
+	// to :10000, the live fleet (mg-0c1a5).
+	agentRegistry.SetServerPort(cfg.Port)
 
 	// Start the timer-driven index_roots scan: every index_interval it
 	// registers git repos newly created under a configured index_root. The

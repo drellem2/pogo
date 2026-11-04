@@ -12,6 +12,24 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **An agent always talks to the pogod that spawned it (mg-0c1a5).** pogod now
+  sets `POGO_PORT` to its own listening port in every agent it spawns or
+  restarts, in the identity layer, so neither the inherited environment nor a
+  crew prompt's `env` can point it elsewhere. Before, an agent of a sandbox
+  pogod on a reserved port inherited no `POGO_PORT` and its `pogo`/`mg` CLIs
+  reached the live daemon on :10000. `pogo agent env` lists the variable.
+  `scripts/pogo-sandbox`'s `pogo_sandbox_daemon` now exports `POGO_PORT` too,
+  as only the `run --daemon` path did before.
+- **progress-watch no longer reads `blind` because a `--no-worktree` worker
+  is running (mg-ac972).** A box-op has no tree, so its writes were reported
+  as "worktree unreadable" and put on the blind line, and one box-op made the
+  whole verdict `blind` while the fleet was landing work. It is now reported
+  as `no_worktree_workers` / `no_worktree_names`, judged on age and PTY, and
+  excluded from the writes term. A walk that really fails still blinds the
+  reading, and the blind entry now carries each worker's error text. Before
+  this, events.log recorded only the names, so the cause of p1841f's one
+  "unreadable" sample at 2026-11-04T19:38Z could not be recovered.
+
 - **`spawn-polecat` is on the record from the moment it is requested
   (drellem2/pogo#169).** The handler used to print nothing unconditional
   before its terminal line, and its first events fired at the very end. So a

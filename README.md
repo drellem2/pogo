@@ -46,7 +46,7 @@ mg mail send mayor --subject="priority change" --body="pause feature work"
 | Display label | `pogo-crew-<name>` | `pogo-cat-<id>` |
 | Lifetime | Persistent — respawned on crash | Ephemeral — exits after task |
 | Prompt | `~/.pogo/agents/crew/<name>.md` | Template + work item |
-| Merge path | Push to main | Refinery merge queue |
+| Merge path | Push to main | Refinery merge queue (enth repos: the polecat lands its own Change) |
 
 The display label is human-facing — it is what `pogo agent list` shows and what
 `process_name` carries in the `/agents` JSON. It is **not** a process name: nothing
@@ -82,6 +82,10 @@ a pipe, so captured output carries no escape sequences.
 The **coordinator** (auto-started crew, already running) watches for work and spawns a **polecat** per item; the polecat fixes it on a branch and submits to the **refinery**, which runs your gates and merges to `main`.
 
 Swap the prompts and set `[refinery] enabled = false` to drive research, content, or any queue-shaped work. See [docs/customizing.md](docs/customizing.md) and the [research-triage example](docs/examples/research-triage/README.md).
+
+### Git-backed or enth-backed repos
+
+A project is git-backed by default. It can instead be **enth-backed**: its history lives on an enthd server ([enth](https://enth.app)), and pogo knows it from the project record (`"vcs": "enth"`, set with `pogo project add <path> --vcs=enth …`). On disk, the repo root holds `.enth/checkout` and no `.git`. On an enth repo a worker gets an enth checkout instead of a git worktree, and it lands its own Change with `enth land` instead of going through the refinery. There is no pull-request track. Setup, the `pogo doctor --check` rows, and the differences are in [docs/enth.md](docs/enth.md); the design is in [docs/design/enth-vcs.md](docs/design/enth-vcs.md).
 
 ## Batteries included
 

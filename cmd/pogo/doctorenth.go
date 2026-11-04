@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/project"
 	"github.com/drellem2/pogo/internal/vcs"
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
 
 // enthToolCheckName is the `pogo doctor --check` row for enth (O4, enth-vcs
@@ -27,7 +30,8 @@ func enthHelp(bin string) ([]byte, error) {
 	return exec.CommandContext(ctx, bin, "--help").CombinedOutput()
 }
 
-// enthToolLine is the enth row. applies is false when no project is recorded
+// enthToolLine is the enth row, and bin is the enth it found ("" when none),
+// which the "enth login" row then runs, so both rows judge one binary. applies is false when no project is recorded
 // as enth, and then there is no row at all: a host of git repos prints
 // exactly what it printed before enth existed.
 //
@@ -42,7 +46,7 @@ func enthHelp(bin string) ([]byte, error) {
 // The PATH asked about is this shell's. pogod's own PATH is what spawns use,
 // and it can differ (a launchd service has its own); the detail says so
 // rather than claiming more than was measured.
-func enthToolLine(projs []project.Project, lookPath func(string) (string, error), help func(string) ([]byte, error)) (status, detail string, applies bool) {
+func enthToolLine(projs []project.Project, lookPath func(string) (string, error), help func(string) ([]byte, error)) (status, detail, bin string, applies bool) {
 	var repos []string
 	for _, p := range projs {
 		if p.Kind() == vcs.Enth {
@@ -50,20 +54,173 @@ func enthToolLine(projs []project.Project, lookPath func(string) (string, error)
 		}
 	}
 	if len(repos) == 0 {
-		return "", "", false
+		return "", "", "", false
 	}
 	sort.Strings(repos)
 	which := fmt.Sprintf("%d enth repo(s): %s", len(repos), strings.Join(repos, ", "))
 	bin, err := lookPath("enth")
 	if err != nil {
-		return "fail", "not found, and " + which + " need it — pogo cannot check out, judge or land work there", true
+		return "fail", "not found, and " + which + " need it — pogo cannot check out, judge or land work there", "", true
 	}
 	out, herr := help(bin)
 	if herr != nil {
-		return "warn", fmt.Sprintf("%s found, but `enth --help` failed (%v), so whether it is enth #9 or later is unknown; %s", bin, herr, which), true
+		return "warn", fmt.Sprintf("%s found, but `enth --help` failed (%v), so whether it is enth #9 or later is unknown; %s", bin, herr, which), bin, true
 	}
 	if !bytes.Contains(out, []byte("status DIR")) {
-		return "warn", fmt.Sprintf("%s predates enth #9 (no `status` verb): its checkouts carry no .enth/ state pogo can read; %s", bin, which), true
+		return "warn", fmt.Sprintf("%s predates enth #9 (no `status` verb): its checkouts carry no .enth/ state pogo can read; %s", bin, which), bin, true
 	}
-	return "pass", fmt.Sprintf("%s (for %s; this shell's PATH — pogod spawns with its own)", bin, which), true
+	return "pass", fmt.Sprintf("%s (for %s; this shell's PATH — pogod spawns with its own)", bin, which), bin, true
+}
+
+// enthLoginCheckName is the `pogo doctor --check` row asking whether each
+// enth remote a project names will accept pogo's token (GH #284 item 4,
+// mg-d8dc9). "enth in PATH" proves the binary exists; a worker on a repo whose
+// remote refuses its token still cannot make or land a Change.
+const enthLoginCheckName = "enth login"
+
+// enthWhoamiTimeout bounds one `enth whoami` round trip to an enthd.
+const enthWhoamiTimeout = 10 * time.Second
+
+// enthWhoami runs `enth --remote REMOTE whoami`, with ENTH_TOKEN set to token
+// when token is non-empty (a project's token file) and the caller's own
+// environment otherwise. The token reaches enth only through the child's
+// environment; it is never printed.
+func enthWhoami(bin, remote, token string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), enthWhoamiTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "--remote", remote, "whoami")
+	if token != "" {
+		cmd.Env = append(os.Environ(), vcs.EnthTokenEnv+"="+token)
+	}
+	return cmd.CombinedOutput()
+}
+
+// enthLoginRow is one "enth login" row.
+type enthLoginRow struct{ status, detail string }
+
+// enthLoginLines asks each distinct (remote, token file) pair among the enth
+// projects who its token names. Nothing is returned for a host with no enth
+// project, so a git-only host's output is unchanged.
+//
+//   - pass: enth answered a user ("signed in as NAME");
+//   - fail: enth answered an error (unauthorized, not_logged_in, …), or the
+//     project's token file cannot be read: pogo's workers would be refused;
+//   - warn: no parseable answer (enthd unreachable, a timeout): whether the
+//     token is good is unknown, and the row says so rather than guessing.
+//
+// With no token file the token is this shell's ($ENTH_TOKEN, else the one
+// `enth login` saved), which is what pogod hands its workers only when pogod
+// runs as the same user with the same environment; the detail says so.
+func enthLoginLines(projs []project.Project, bin string, whoami func(bin, remote, token string) ([]byte, error)) []enthLoginRow {
+	type key struct{ remote, tokenFile string }
+	repos := map[key][]string{}
+	var keys []key
+	for _, p := range projs {
+		if p.Kind() != vcs.Enth || p.Enth == nil {
+			continue
+		}
+		k := key{p.Enth.Remote, p.Enth.TokenFile}
+		if _, seen := repos[k]; !seen {
+			keys = append(keys, k)
+		}
+		repos[k] = append(repos[k], p.Enth.Repo)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].remote != keys[j].remote {
+			return keys[i].remote < keys[j].remote
+		}
+		return keys[i].tokenFile < keys[j].tokenFile
+	})
+	var rows []enthLoginRow
+	for _, k := range keys {
+		names := repos[k]
+		sort.Strings(names)
+		which := fmt.Sprintf("for %s", strings.Join(names, ", "))
+		source := "this shell's enth login / $ENTH_TOKEN"
+		token := ""
+		if k.tokenFile != "" {
+			source = "token file " + k.tokenFile
+			tok, _, err := (vcs.EnthRepo{TokenFile: k.tokenFile}).Token()
+			if err != nil {
+				rows = append(rows, enthLoginRow{"fail", fmt.Sprintf("%s: %v (%s)", k.remote, err, which)})
+				continue
+			}
+			token = tok
+		}
+		out, err := whoami(bin, k.remote, token)
+		var ans struct {
+			Type    string `json:"type"`
+			Name    string `json:"name"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		if jerr := json.Unmarshal(lastLine(out), &ans); jerr != nil || ans.Type == "" {
+			why := "no answer"
+			if err != nil {
+				why = err.Error()
+			}
+			rows = append(rows, enthLoginRow{"warn", fmt.Sprintf("%s: could not ask who the token names (%s), so whether workers can land is unknown; %s, %s", k.remote, why, source, which)})
+			continue
+		}
+		switch ans.Type {
+		case "user":
+			rows = append(rows, enthLoginRow{"pass", fmt.Sprintf("%s: signed in as %s (%s, %s)", k.remote, ans.Name, source, which)})
+		case "error":
+			rows = append(rows, enthLoginRow{"fail", fmt.Sprintf("%s: %s: %s (%s, %s)", k.remote, ans.Code, ans.Message, source, which)})
+		default:
+			rows = append(rows, enthLoginRow{"warn", fmt.Sprintf("%s: unexpected answer type %q from enth whoami; %s, %s", k.remote, ans.Type, source, which)})
+		}
+	}
+	return rows
+}
+
+// lastLine is the last non-empty line of b: enth prints one JSON object per
+// answer, and anything before it is not the answer.
+func lastLine(b []byte) []byte {
+	lines := bytes.Split(bytes.TrimSpace(b), []byte("\n"))
+	return bytes.TrimSpace(lines[len(lines)-1])
+}
+
+// enthUnrecordedCheckName is the row for an enth checkout that pogo has on
+// record as a git repo (GH #284, mg-d8dc9).
+const enthUnrecordedCheckName = "enth repo recorded as git"
+
+// enthUnrecordedLines finds projects recorded as git (no vcs key) whose path
+// is an enth checkout root (.enth/checkout). Auto-registration (pogo visit, the
+// indexer) records every repo it finds with no vcs key, because the record
+// needs an enthd endpoint and repo name a directory scan cannot be trusted to
+// supply. Such a record is read as git: a dispatch onto it tries to make a git
+// worktree of a directory with no .git and fails. Each row names the set-vcs
+// command, filled in from the checkout's recorded origin when it has one.
+//
+// isCheckout and origin are the enthvcs readers, injected for the test.
+func enthUnrecordedLines(projs []project.Project, isCheckout func(string) bool, origin func(string) (remote, repo string)) []string {
+	var out []string
+	for _, p := range projs {
+		if p.Kind() != vcs.Git || !isCheckout(p.Path) {
+			continue
+		}
+		remote, repo := origin(p.Path)
+		if remote == "" {
+			remote = "URL"
+		}
+		if repo == "" {
+			repo = "NAME"
+		}
+		out = append(out, fmt.Sprintf("%s is an enth checkout but is recorded as git, so workers cannot be dispatched there; run: pogo project set-vcs %s --vcs=enth --enth-remote=%s --enth-repo=%s",
+			p.Path, p.Path, remote, repo))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// enthCheckoutOrigin reads the remote and repo an enth checkout was made from;
+// empty strings when it cannot tell (a local-store checkout, an unreadable
+// state file).
+func enthCheckoutOrigin(dir string) (remote, repo string) {
+	st, err := enthvcs.ReadState(dir)
+	if err != nil {
+		return "", ""
+	}
+	return st.Origin.Remote, st.Origin.Repo
 }

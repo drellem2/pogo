@@ -17,27 +17,26 @@ var alertSettings atomic.Pointer[alerts.Settings]
 
 // alertSettingsFrom extracts the keys that decide who an alert reaches, or
 // whether it is sent. The notify_to map is keyed as alerts.Def.Key spells it;
-// Muted is the resolved mute table, [alerts] entries and their aliases.
+// Muted and Routes are the resolved mute and route tables, [alerts] entries
+// and their aliases.
 func alertSettingsFrom(cfg *config.Config) alerts.Settings {
 	s := alerts.Settings{
 		Coordinator:   cfg.Agents.CoordinatorName(),
 		EscalationBox: cfg.Agents.EscalationBoxName(),
-		NotifyTo: map[string]string{
-			"gh_teardown.notify_to":       cfg.GHTeardown.NotifyTo,
-			"gh_intake.notify_to":         cfg.GHIntake.NotifyTo,
-			"carrier_drift.notify_to":     cfg.CarrierDrift.NotifyTo,
-			"review_decl.notify_to":       cfg.ReviewDecl.NotifyTo,
-			"ack_watch.notify_to":         cfg.AckWatch.NotifyTo,
-			"deaf_watch.notify_to":        cfg.DeafWatch.NotifyTo,
-			"absent_watch.notify_to":      cfg.AbsentWatch.NotifyTo,
-			"progress_watch.notify_to":    cfg.ProgressWatch.NotifyTo,
-			"first_turn.notify_to":        cfg.FirstTurn.NotifyTo,
-			"mid_session_wedge.notify_to": cfg.MidSessionWedge.NotifyTo,
-		},
+		NotifyTo:      watcherNotifyTo(cfg),
 		// The same table the send seam enforces (alertmutes.go), so the
 		// listing cannot say an alert is live while the seam withholds it.
 		Muted: resolveAlertMutes(cfg).Muted,
 	}
+	// Likewise the routes (alertroutes.go). This does not probe mg: main
+	// fills RouteInvalid from the startup check, whose result the startup
+	// warning printed.
+	// The stall-watch nudges go to the watched agent, which is not a route
+	// alias (it also names whose mailbox the watcher reads), so it joins the
+	// listing's map only — not watcherNotifyTo, which installs aliases.
+	s.NotifyTo[alerts.StallWatchAgentKey] = cfg.StallWatch.Agent
+	rt := resolveAlertRoutes(cfg, nil)
+	s.Routes = rt.Routes
 	return s
 }
 

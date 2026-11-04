@@ -1809,13 +1809,16 @@ type WakeWatchConfig struct {
 // imports this package's dependents) — pogod does, at startup, and names an
 // unknown one in a warning line.
 //
-// Only `mute` exists yet. A muted alert's send is skipped: the detector still
-// runs and still emits its own event, and the seam records an `alert_muted`
-// event in its place. `route` arrives in a later slice.
+// `mute` skips the send: the detector still runs and still emits its own
+// event, and the seam records an `alert_muted` event in its place. `route`
+// sends the alert's primary copy to another agent or box (a literal name, or
+// the role tokens "$coordinator" / "$escalation_box"); an unknown box falls
+// back to the default recipient at send time, so mail is never dropped.
 //
 // It takes precedence over the older per-section keys it absorbs
 // ([conditions] mail/out_of_band/disable, [blind_watch] mail/out_of_band,
-// [stall_watch] blocked_reminder_enabled), which keep working as aliases.
+// [stall_watch] blocked_reminder_enabled for mute; every watcher's notify_to
+// for route), which keep working as aliases.
 type AlertConfig struct {
 	// Mute skips the send. Meaningful only when MuteSet.
 	Mute bool
@@ -1823,6 +1826,12 @@ type AlertConfig struct {
 	// alias key that muted the alert and a later config layer can unmute what
 	// an earlier one muted.
 	MuteSet bool
+	// Route is the `route` value as written, unquoted. pogod validates it (a
+	// single box name or role token) at startup. Meaningful only when RouteSet.
+	Route string
+	// RouteSet records that `route` appeared. `route = ""` clears a route an
+	// earlier config layer set.
+	RouteSet bool
 }
 
 // ConditionsConfig configures the mail sent by pogod's condition annunciator
@@ -3201,14 +3210,23 @@ func Load() *Config {
 			cfg.Conditions.Disable = fileCfg.Conditions.Disable
 		}
 		// Per alert name: a later layer replaces only the names it states.
+		// mute and route layer independently: a layer that only routes an
+		// alert keeps the mute an earlier layer gave it, and vice versa.
 		for name, a := range fileCfg.Alerts {
-			if !a.MuteSet {
+			if !a.MuteSet && !a.RouteSet {
 				continue
 			}
 			if cfg.Alerts == nil {
 				cfg.Alerts = map[string]AlertConfig{}
 			}
-			cfg.Alerts[name] = a
+			cur := cfg.Alerts[name]
+			if a.MuteSet {
+				cur.Mute, cur.MuteSet = a.Mute, true
+			}
+			if a.RouteSet {
+				cur.Route, cur.RouteSet = a.Route, true
+			}
+			cfg.Alerts[name] = cur
 		}
 		if fileCfg.WakeWatch.Coalesce > 0 {
 			cfg.WakeWatch.Coalesce = fileCfg.WakeWatch.Coalesce
@@ -4082,6 +4100,14 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				a := cfg.Alerts[name]
 				a.Mute = val == "true"
 				a.MuteSet = true
+				cfg.Alerts[name] = a
+			case "route":
+				if cfg.Alerts == nil {
+					cfg.Alerts = map[string]AlertConfig{}
+				}
+				a := cfg.Alerts[name]
+				a.Route = strings.TrimSpace(unquotedVal)
+				a.RouteSet = true
 				cfg.Alerts[name] = a
 			}
 			continue

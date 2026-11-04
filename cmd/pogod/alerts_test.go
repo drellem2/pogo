@@ -41,7 +41,9 @@ func TestAlertSettings_ExistingKeysAreReported(t *testing.T) {
 	for _, r := range alerts.Rows(s, false) {
 		by[r.Name] = r
 	}
-	if r := by[alerts.AckWatchFinding]; r.Source != "ack_watch.notify_to" || r.Muted {
+	// Since slice 3 notify_to is the route alias, named as config.toml spells it.
+	if r := by[alerts.AckWatchFinding]; r.Source != "[ack_watch] notify_to" || r.Route != "pm-pogo" || r.Muted ||
+		r.Effective != "pm-pogo; also human when it escalates" {
 		t.Errorf("ack_watch.finding: %+v", r)
 	}
 	for _, n := range []alerts.Name{alerts.ConditionNotice, alerts.ConditionOutOfBand, alerts.BlindWatchFinding, alerts.BlindWatchCleared} {
@@ -84,5 +86,29 @@ func TestHandleAlerts(t *testing.T) {
 		if found != tc.delivery {
 			t.Errorf("%s: scheduler.delivery listed=%v, want %v", tc.url, found, tc.delivery)
 		}
+	}
+}
+
+// drellem2/pogo#262 slice 4: the nudge alerts are listed with their channel,
+// and a stall-watch nudge's effective recipient is the agent [stall_watch]
+// agent watches.
+func TestAlertSettings_NudgesListed(t *testing.T) {
+	state := sandboxHome(t)
+	cfg := "[stall_watch]\nagent = \"dispatcher\"\n\n[alerts.\"crew_reset.pointer\"]\nroute = \"ops\"\n"
+	if err := os.WriteFile(filepath.Join(state, "config.toml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	by := map[alerts.Name]alerts.Row{}
+	for _, r := range alerts.Rows(alertSettingsFrom(config.Load()), false) {
+		by[r.Name] = r
+	}
+	if r := by[alerts.StallWatchUnreadMail]; r.Channel != alerts.ChannelNudge || r.Effective != "dispatcher" || r.Source != alerts.StallWatchAgentKey {
+		t.Errorf("stall_watch.unread_mail: %+v", r)
+	}
+	if r := by[alerts.CrewResetPointer]; r.Channel != alerts.ChannelNudge || r.Route != "ops" {
+		t.Errorf("crew_reset.pointer: %+v", r)
+	}
+	if r := by[alerts.RefineryMerged]; r.Channel != alerts.ChannelMail {
+		t.Errorf("refinery.merged channel %q, want mail", r.Channel)
 	}
 }

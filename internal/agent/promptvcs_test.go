@@ -176,15 +176,28 @@ func TestEnthRenderCarriesTheEnthProtocol(t *testing.T) {
 			if br != "" {
 				target = br
 			}
-			ref, tgt := "", ""
+			ref, tgt, gref := "", "", ""
 			if br != "" {
-				ref, tgt = "--ref refs/heads/"+br+" ", " --target="+br
+				ref, tgt, gref = "--ref refs/heads/"+br+" ", " --target="+br, "--ref=refs/heads/"+br+" "
 			}
 			for _, want := range []string{
 				`--trailer Pogo-Item=mg-9 --trailer Pogo-Worker="$POGO_AGENT_NAME" /w`,
 				// The self-land of enth-vcs §6 (mg-5b904), whole.
-				`stack=$(pogo presubmit --item="$item" --print-stack) || return 1`,
-				`enth land ` + ref + `$stack --request-id "$item/$n"`,
+				`ids=$(pogo presubmit --item="$item" --print-stack) || return 1`,
+				// Arrays, so zsh passes one argv entry per id and per flag (mg-c07a5).
+				`stack=(); while read -r id; do [ -n "$id" ] && stack+=("$id"); done <<< "$ids"`,
+				`lreq=(); [ -n "$req" ] && lreq=(--require "$job")`,
+				// The gate is the repo's declared one (mg-c07a5).
+				`gate=$(pogo refinery gate --repo=/r --worktree="$PWD")`,
+				`echo "GATE COMMAND: $gate"`,
+				// The land is gated on the merged tree (mg-64f2e): the gate, then a
+				// land bound to the tree it passed.
+				`enth-land-gate --job="$job" --gate="$gate" ` + gref + `"${stack[@]}"`,
+				`enth land ` + ref + `"${lreq[@]}" "${stack[@]}" --request-id "$item/$n"`,
+				`lreq=(); echo "TEST-ONLY (mg-64f2e): tree $t1 passed, unattested (no attest token) — landing without --require" ;;`,
+				`{ echo "GATE NOT INSTALLED — landing untested (mg-64f2e)"; req=; }`,
+				`job=ci/selfland/build`,
+				`unattested_tree|stale_tip) rm -f "$st.pending"; n=$((n+1));`,
 				`pogo land --item="$item" --repo=/r` + tgt + ` --landed-file="$st.out"`,
 				`--verdict-file=/tmp/mg-9-verdict.json "$@"; rc=$?`,
 				`[ "$rc" -eq 0 ] && return 0`,

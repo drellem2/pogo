@@ -55,7 +55,16 @@ func (t alertMuteTable) reason(n alerts.Name) string { return t.Muted[n] }
 func resolveAlertMutes(cfg *config.Config) alertMuteTable {
 	t := alertMuteTable{Muted: map[alerts.Name]string{}}
 	legacy := legacyAlertMutes(cfg)
-	for n, why := range legacy {
+	for _, n := range sortedMuteNames(legacy) {
+		why := legacy[n]
+		if id, ok := strings.CutPrefix(string(n), conditionRowPrefix); ok && !isDeclared(n) && !knownConditionID(id) {
+			// A [conditions] disable entry that names no condition row
+			// would mute nothing while being listed as muted.
+			t.Warnings = append(t.Warnings, fmt.Sprintf(
+				"pogod: ⚠ %s, which names no condition row — ignored; %s", why, conditionIDsHint()))
+			delete(legacy, n)
+			continue
+		}
 		t.Muted[n] = why
 	}
 
@@ -84,6 +93,21 @@ func resolveAlertMutes(cfg *config.Config) alertMuteTable {
 				"pogod: ⚠ [alerts.%q] mute = false overrides %s — %s is NOT muted", raw, why, raw))
 		}
 		delete(t.Muted, n)
+	}
+	// condition.wake wakes the addressee to read condition.notice, so the
+	// annunciator never wakes for a notice it withheld. List that as the
+	// mute it is — even over [alerts."condition.wake"] mute = false, which
+	// cannot take effect and is reported as such.
+	if why := t.Muted[alerts.ConditionNotice]; why != "" {
+		a, set := cfg.Alerts[string(alerts.ConditionWake)]
+		if set && a.MuteSet && !a.Mute {
+			t.Warnings = append(t.Warnings, fmt.Sprintf(
+				"pogod: ⚠ [alerts.%q] mute = false has no effect while condition.notice is muted (%s) — there is no notice to wake anyone for",
+				string(alerts.ConditionWake), why))
+		}
+		if _, muted := t.Muted[alerts.ConditionWake]; !muted {
+			t.Muted[alerts.ConditionWake] = "follows condition.notice: " + why
+		}
 	}
 	return t
 }
@@ -126,10 +150,32 @@ func mutableAlertName(n alerts.Name) string {
 		}
 		return ""
 	}
-	if strings.HasPrefix(string(n), conditionRowPrefix) && len(n) > len(conditionRowPrefix) {
-		return ""
+	if id, ok := strings.CutPrefix(string(n), conditionRowPrefix); ok && id != "" {
+		if knownConditionID(id) {
+			return ""
+		}
+		return fmt.Sprintf("names no condition row (%q is not a condition id; %s)", id, conditionIDsHint())
 	}
 	return "names no alert pogod sends"
+}
+
+func conditionIDsHint() string {
+	return fmt.Sprintf("the ids are %s, or %s followed by a subject",
+		strings.Join(conditionIDs, ", "), strings.Join(conditionIDPrefixes, ", "))
+}
+
+func isDeclared(n alerts.Name) bool {
+	_, ok := alerts.Lookup(n)
+	return ok
+}
+
+func sortedMuteNames(m map[alerts.Name]string) []alerts.Name {
+	out := make([]alerts.Name, 0, len(m))
+	for n := range m {
+		out = append(out, n)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // conditionRowMutes are the per-row condition mutes, keyed by row id (the

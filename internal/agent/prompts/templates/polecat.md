@@ -154,18 +154,53 @@ Follow these steps exactly, in order. Skipping any step is a failure.
     "unverified": ["<anything you are asserting without having measured it — [] if nothing>"]}
    EOF
    jq -e . /tmp/{{.Id}}-verdict.json >/dev/null || echo 'NOT VALID JSON — fix it before submitting; submit rejects it while you can still hear about it'{{if eq .VCS "enth"}}
-   # Land your own Change (enth-vcs §6). Copy this whole block; run it from your checkout.
+   # Land your own Change (enth-vcs §6), gated on the MERGED tree (mg-64f2e). Copy this whole block; run it from your checkout.
    self_land() {
-     local item={{.Id}} st=/tmp/{{.Id}}-land stack n try rc code
+     local item={{.Id}} st=/tmp/{{.Id}}-land job=ci/selfland/build req=1 gate ids id t1 t2 n try rc code
+     # Arrays, quoted where used: zsh (what agents run) does not word-split an unquoted $var, so a 2-Change
+     # stack or "--require <job>" in one scalar would reach enth as ONE argument (mg-c07a5).
+     local -a stack lreq
+     # The merged-tree gate (mg-64f2e), when installed. Not installed: land as before, untested, and say so.
+     # Installed: no fallback — a red, a mismatch or a refusal stops the land.
+     command -v enth-land-gate >/dev/null && enth land --help 2>&1 | grep -q -- '--require' ||
+       { echo "GATE NOT INSTALLED — landing untested (mg-64f2e)"; req=; }
+     # The gate is the command the repo DECLARES as its merge gate, read from .pogo/refinery.toml as the
+     # refinery reads it — not a weaker one (mg-c07a5). None declared: ./build.sh, and pogo says it fell back.
+     if [ -n "$req" ]; then
+       gate=$(pogo refinery gate --repo={{.Repo}} --worktree="$PWD") && [ -n "$gate" ] ||
+         { echo "REFUSED: could not read the repo's declared gate command — nothing landed"; return 1; }
+       echo "GATE COMMAND: $gate"
+     fi
      # The pre-land check (mg-c184d) prints the stack to land, or refuses.
-     stack=$(pogo presubmit --item="$item" --print-stack) || return 1
+     ids=$(pogo presubmit --item="$item" --print-stack) || return 1
+     stack=(); while read -r id; do [ -n "$id" ] && stack+=("$id"); done <<< "$ids"
+     [ ${#stack[@]} -gt 0 ] || { echo "REFUSED: pogo presubmit printed no stack — nothing landed"; return 1; }
      n=$(cat "$st.attempt" 2>/dev/null || echo 0)
      # A land whose answer was lost is re-issued under its SAME request id:
      # a new id would land the same Changes twice (mg-19949).
      [ -f "$st.pending" ] || n=$((n+1))
      for try in 1 2 3 4 5 6; do
+       lreq=(); [ -n "$req" ] && lreq=(--require "$job")
+       if [ -n "$req" ] && [ ! -f "$st.pending" ]; then
+         # Test the tree the land would make, trunk merge included, and attest it (a tree with a pass already is not re-run).
+         enth-land-gate --job="$job" --gate="$gate" {{if .Branch}}--ref=refs/heads/{{.Branch}} {{end}}"${stack[@]}" > "$st.gate" 2> "$st.gerr"; rc=$?
+         case "$rc" in
+           0) echo "GATED (mg-64f2e): $(cat "$st.gate")" ;;
+           # 7: passed, but this token cannot attest (no --attest scope yet). Re-check the tree right before landing.
+           7) t1=$(sed -n 's/.*"tree":"\([0-9a-f]*\)".*/\1/p' "$st.gate")
+              t2=$(enth land --dry-run {{if .Branch}}--ref refs/heads/{{.Branch}} {{end}}"${stack[@]}" 2>/dev/null | sed -n 's/.*"tree":"\([0-9a-f]*\)".*/\1/p')
+              [ -n "$t1" ] && [ "$t1" = "$t2" ] || { echo "TEST-ONLY: the trunk moved since the test (now ${t2:-unreadable}, tested $t1) — testing again"; continue; }
+              lreq=(); echo "TEST-ONLY (mg-64f2e): tree $t1 passed, unattested (no attest token) — landing without --require" ;;
+           1) tail -n 40 "$st.gerr"; echo "RED: the merged tree fails $gate — nothing landed. Your work breaks against the current trunk: re-make it there (step 6, as for CONFLICT), then run self_land again"; return 5 ;;
+           3) code=$(sed -n 's/.*"code":"\([a-z_]*\)".*/\1/p' "$st.gerr" | head -1)
+              [ "$code" = conflict ] && { cat "$st.gate"; echo "CONFLICT: nothing landed — re-make your work on the new trunk, then run self_land again"; return 3; }
+              cat "$st.gerr"; echo "REFUSED ($code): nothing landed"; return 1 ;;
+           4|5) tail -n 5 "$st.gerr"; echo "gate did not reach a verdict (exit $rc: infrastructure, or the trunk kept moving) — nothing attested, nothing landed; retrying"; sleep 30; continue ;;
+           *) tail -n 5 "$st.gerr"; echo "REFUSED: the gate ran but could not attest (exit $rc) — nothing landed; mail the {{.Coordinator}} the lines above"; return 1 ;;
+         esac
+       fi
        echo "$n" > "$st.attempt"; touch "$st.pending"
-       enth land {{if .Branch}}--ref refs/heads/{{.Branch}} {{end}}$stack --request-id "$item/$n" > "$st.out" 2> "$st.err"; rc=$?
+       enth land {{if .Branch}}--ref refs/heads/{{.Branch}} {{end}}"${lreq[@]}" "${stack[@]}" --request-id "$item/$n" > "$st.out" 2> "$st.err"; rc=$?
        code=$(sed -n 's/.*"code":"\([a-z_]*\)".*/\1/p' "$st.err" | head -1)
        if [ "$rc" -eq 0 ]; then
          rm -f "$st.pending"
@@ -179,7 +214,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
          return 2
        fi
        case "$code" in
-         stale_tip) rm -f "$st.pending"; n=$((n+1)); echo "stale_tip: the trunk moved under the land, nothing landed — landing again as $item/$n" ;;
+         unattested_tree|stale_tip) rm -f "$st.pending"; n=$((n+1)); echo "$code: the trunk moved since the gate, nothing landed — gating the new merged tree, then landing as $item/$n" ;;
          conflict) rm -f "$st.pending"; cat "$st.out"; echo "CONFLICT: nothing landed — re-make your work on the new trunk, then run self_land again"; return 3 ;;
          unreachable|interrupted|bad_response|"") echo "no answer from enthd (${code:-exit $rc}): the land may have happened — re-issuing the SAME request $item/$n"; sleep 10 ;;
          *) rm -f "$st.pending"; cat "$st.err"; echo "REFUSED ($code): nothing landed"; return 1 ;;
@@ -196,7 +231,7 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    ```{{if eq .VCS "enth"}}
    **`self_land` is the whole land step, and its refusals are not something to work around.** It runs `pogo presubmit`, which refuses: edits `enth status` still lists (pogod's own `.claude/` files excluded); a checkout standing on a Change with no `Pogo-Item` trailer; no unlanded Change carrying `Pogo-Item={{.Id}}` and your `Pogo-Worker`; more than one stack of them; a stack whose top is not this checkout's base; and a Change message carrying a GitHub closing keyword (`Fixes #N` would close the issue on the mirror). Each of those would land nothing, or something other than the work in this checkout — on 2026-10-01 work that delivered nothing was closed `done` with ~240 lines of it uncommitted (mg-3b86e). A check that cannot run refuses too. If it refuses: fix what it names (usually: make the Change of step 4), and run `self_land` again.
 
-   Then it lands your stack with `enth land … --request-id {{.Id}}/<attempt>` and hands enth's answer to `pogo land`, which checks it against enthd and closes your item exactly as a refinery merge closes one. **Nothing tests the merged result before it lands:** you tested your own base, and `enth land` merges onto the trunk. That is the accepted trade-off (enth-vcs §6); post-land CI on the GitHub mirror is the check, so a green `./build.sh` before step 4 is not optional.{{else}}
+   Then it **gates the merged tree** (mg-64f2e): `enth-land-gate` dry-runs the land to get the exact tree it would produce, trunk merge included, runs the repo's **declared** gate on a checkout of that tree, and attests the result as `ci/selfland/build`, with the command recorded in the attestation's detail. The declared gate is the one the refinery would run: `pogo refinery gate` reads it from `.pogo/refinery.toml` (yours, then the repo's), and `self_land` prints it as `GATE COMMAND: …` (mg-c07a5). A repo that declares none is gated by `./build.sh`, and the land output says it fell back. A tree that already carries a pass is not run again. It then lands with `enth land --require ci/selfland/build … --request-id {{.Id}}/<attempt>`, which enth refuses (`unattested_tree`) unless the tree that actually lands is the one that passed. If the trunk moved in between, `self_land` gates the new merged tree and lands again. Finally it hands enth's answer to `pogo land`, which checks it against enthd and closes your item exactly as a refinery merge closes one. This is why two Changes that are each green on their own base cannot land broken together. A green `./build.sh` of your own before step 4 is still expected: the gate is not where you find your own bugs. Every land prints one mode line. `GATED (mg-64f2e)` is the full gate. `TEST-ONLY (mg-64f2e)`: the tree passed, but your enth token cannot attest yet, so `self_land` re-checks right before landing that the land still makes the tested tree, and lands without `--require`. `GATE NOT INSTALLED — landing untested (mg-64f2e)`: `enth-land-gate` or an enth with `land --require` is missing on this box, so it lands untested, as before. Only *not installed* falls back. An installed gate that says red, or cannot attest for any other reason, stops the land.{{else}}
    **The `pogo presubmit` line is not optional, and its refusal is not something to work around.** A branch that is clean but has nothing ahead of the target, or that has its work sitting uncommitted in the worktree, delivers nothing — and on 2026-10-01 exactly that branch was resolved as "already merged", the item closed `done`, and the polecat reaped with ~240 lines of work uncommitted (mg-3b86e). The refinery now refuses such a branch too (`class=defect`, "branch carries no commits ahead of <target>"), but that is the backstop; this check catches it while you can still fix it. It keys on each command's exit status, so a failed `git` or `pogo` refuses rather than reading as "nothing to report". The dirty check is `pogo worktree-dirty`, not a bare `git status --porcelain`: it is the predicate gc uses, which does not count the `.claude/` files pogod itself writes into your tree (the hook settings and mail-hook stamp) — in a repo whose `.gitignore` lacks `.claude/` those alone used to refuse every submit (gh #240, mg-54263). Every other untracked file and every tracked change still refuses. If it refuses: commit, push, and re-run step 5.{{end}}
 
    `"verdict"` is your own word for how the work came out — `pass`, `partial`, `blocked`, whatever is true. Nothing enumerates the legal values and nothing reads the contents: this is the record of what **you** concluded, and the only reader who benefits is the one who later asks what this branch was supposed to have done. A verdict of `partial` with an honest `unverified` list is worth more than a `pass` nobody can check.
@@ -216,7 +251,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
      self_land
      ```
      Run `./build.sh` on the re-made tree before landing it — it is the only test the merged work gets. Copy the `enth change` line whole: without `Pogo-Supersedes` the old Change stays unlanded beside the new one, `pogo presubmit` refuses the pair as two stacks, and stranded-work recovery reports the old one forever. **At most three re-makes:** a fourth conflict means the trunk is moving under the same paths faster than you can land — mail the {{.Coordinator}} the conflict lines and hold per step 8.
-   - **`stale_tip`** is handled inside `self_land`: the trunk moved during the land, nothing landed, and it lands again under the next request id.
+   - **`RED` (exit 5)** — your Change merged onto the current trunk fails the repo's gate (the `GATE COMMAND` line), and that result is attested on the merged tree. Your work is broken *together with* what landed since your base, even if it was green on its own. Re-make it on the new trunk exactly as for `CONFLICT` above (fresh checkout, re-apply, fix, `./build.sh`, `enth change … --trailer Pogo-Supersedes="$OLD"`, `self_land`). Do not re-run `self_land` unchanged: a red tree stays red.
+   - **`stale_tip` and `unattested_tree`** are handled inside `self_land`. The trunk moved between the gate and the land, so nothing landed. It gates the new merged tree and lands again under the next request id. A gate that reaches no verdict (timeout, out of disk, a killed run) attests nothing and is retried the same way.
    - **No answer from enthd** is handled inside `self_land` too: the land may have happened, so it re-issues the SAME request id, which enthd answers with the first land's result and lands nothing twice. If it `GAVE UP`, mail the {{.Coordinator}}; running `self_land` again later re-issues that same request first.
    - **`LANDED BUT NOT RECORDED` (exit 2)** — your work IS on the trunk; only the record is missing (pogod unreachable, or it refused the record). Re-run only the `pogo land` line it printed. Never land again to recover a record: a new request id lands the same Changes a second time.
    - **`REFUSED`, or a `pogo presubmit` refusal** — fix what it names and run `self_land` again; if you cannot, mail the {{.Coordinator}} the exact message and hold per step 8.

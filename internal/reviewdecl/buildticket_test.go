@@ -381,10 +381,123 @@ func TestSourceCarriesTheBuildMarkersOffDisk(t *testing.T) {
 		t.Fatalf("BuildTickets = %+v, want mg-c18d — if this is empty the frontmatter never "+
 			"reached the classifier and it is inert in production", rep.BuildTickets)
 	}
-	if rep.BuildTickets[0].Detail != "depends: mg-1087" {
-		t.Errorf("Detail = %q, want the depends edge read off disk", rep.BuildTickets[0].Detail)
+	// The reviewer's declaration, read off disk, is the strongest marker and wins
+	// (mg-48992) — so the depends edge is checked on its own below, without the
+	// reviewer, to keep pinning that the frontmatter reaches the classifier.
+	if rep.BuildTickets[0].Detail != "reviewed-by: mg-bd39" {
+		t.Errorf("Detail = %q, want the reviewer's declaration read off disk", rep.BuildTickets[0].Detail)
+	}
+	var builderOnly []Item
+	for _, it := range items {
+		if it.ID == "mg-c18d" {
+			builderOnly = append(builderOnly, it)
+		}
+	}
+	alone := Detect(builderOnly, ConventionLandedAt)
+	if len(alone.BuildTickets) != 1 || alone.BuildTickets[0].Detail != "depends: mg-1087" {
+		t.Errorf("BuildTickets = %+v, want the depends edge read off disk when no reviewer exists yet",
+			alone.BuildTickets)
 	}
 	if rep.Scanned != 1 || len(rep.Declared) != 1 {
 		t.Errorf("Scanned = %d, Declared = %+v, want 1 review ticket, declared", rep.Scanned, rep.Declared)
+	}
+}
+
+// TestACounterpartyDeclarationClassifiesTheBuildHalf is mg-48992, reproduced from
+// the live pair that filed it. mg-d8dc9 is the BUILD half of GH #284: titled
+// "GH #284: …", no depends edge, no predecessor tag, advanced to `stage: review`
+// at PR-open. mg-45f31 is its reviewer and declares `reviews: mg-d8dc9`. The
+// 18:39Z report listed that declaration AND reported mg-d8dc9 Missing, because
+// the classifier never read the one edge it already had.
+func TestACounterpartyDeclarationClassifiesTheBuildHalf(t *testing.T) {
+	build := Item{ID: "mg-d8dc9", Title: "GH #284: something the reporter asked for",
+		Status: "claimed", Stage: "review", Created: after}
+	rev := Item{ID: "mg-45f31", Title: "review: GH #284 PR",
+		Status: "claimed", Stage: "review", Reviews: "mg-d8dc9", Created: after}
+
+	rep := Detect([]Item{build, rev}, ConventionLandedAt)
+
+	if len(rep.Missing) != 0 {
+		t.Fatalf("Missing = %+v, want empty — a reviewer has declared mg-d8dc9 its build item", rep.Missing)
+	}
+	if len(rep.BuildTickets) != 1 || rep.BuildTickets[0].Item.ID != "mg-d8dc9" {
+		t.Fatalf("BuildTickets = %+v, want mg-d8dc9", rep.BuildTickets)
+	}
+	if got := rep.BuildTickets[0].Detail; got != "reviewed-by: mg-45f31" {
+		t.Errorf("Detail = %q, want the reviewer named", got)
+	}
+	if len(rep.Declared) != 1 || rep.Declared[0].Item.ID != "mg-45f31" {
+		t.Errorf("Declared = %+v, want the reviewer still audited", rep.Declared)
+	}
+	if rep.Scanned != 1 {
+		t.Errorf("Scanned = %d, want 1", rep.Scanned)
+	}
+	out := rep.Render()
+	for _, want := range []string{"mg-d8dc9", "reviewed-by: mg-45f31", "1 set aside as the BUILD half"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered report is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestTheCounterpartyRuleOutranksTheTitleVeto. The issue asks for the rule to
+// apply regardless of title: a declaration is a fact, a title is prose.
+func TestTheCounterpartyRuleOutranksTheTitleVeto(t *testing.T) {
+	named := Item{ID: "mg-0001", Title: "review-ish wording on a build ticket", Stage: "review", Created: after}
+	rev := Item{ID: "mg-0002", Title: "review: it", Stage: "review", Reviews: "mg-0001", Created: after}
+	rep := Detect([]Item{named, rev}, ConventionLandedAt)
+	if len(rep.BuildTickets) != 1 || rep.BuildTickets[0].Item.ID != "mg-0001" {
+		t.Fatalf("BuildTickets = %+v, want mg-0001", rep.BuildTickets)
+	}
+}
+
+// TestAnUnnamedItemWithNoMarkerIsStillMissing is the negative control: the new
+// rule must fire on a counterparty's declaration and on nothing else.
+func TestAnUnnamedItemWithNoMarkerIsStillMissing(t *testing.T) {
+	lone := Item{ID: "mg-0001", Title: "GH #284: no marker at all", Stage: "review", Created: after}
+	// A reviewer of SOMETHING ELSE, plus declarations that must not name anything:
+	// malformed, and from an unreadable carrier.
+	other := Item{ID: "mg-0002", Title: "review: x", Stage: "review", Reviews: "mg-9999", Created: after}
+	malformed := Item{ID: "mg-0003", Title: "review: y", Stage: "review",
+		Reviews: "mg-0001 (the builder)", Created: after}
+	opaque := Item{ID: "mg-0004", Title: "review: z", Reviews: "mg-0001", CarrierUnreadable: true}
+
+	rep := Detect([]Item{lone, other, malformed, opaque}, ConventionLandedAt)
+	if len(rep.Missing) != 1 || rep.Missing[0].Item.ID != "mg-0001" {
+		t.Fatalf("Missing = %+v, want mg-0001 still reported — nothing usable names it", rep.Missing)
+	}
+	if len(rep.BuildTickets) != 0 {
+		t.Errorf("BuildTickets = %+v, want empty", rep.BuildTickets)
+	}
+}
+
+// TestTheCounterpartyRuleNeverSetsAsideAReviewer. A reviewer is never a build
+// ticket by this rule: one that names itself stays SelfReference, and two items
+// naming each other are both audited as reviewers rather than both set aside.
+func TestTheCounterpartyRuleNeverSetsAsideAReviewer(t *testing.T) {
+	self := Item{ID: "mg-0001", Title: "review: self", Stage: "review", Reviews: "mg-0001", Created: after}
+	a := Item{ID: "mg-0002", Title: "GH #1: a", Stage: "review", Reviews: "mg-0003", Created: after}
+	b := Item{ID: "mg-0003", Title: "GH #1: b", Stage: "review", Reviews: "mg-0002", Created: after}
+
+	rep := Detect([]Item{self, a, b}, ConventionLandedAt)
+	if len(rep.SelfReference) != 1 || rep.SelfReference[0].Item.ID != "mg-0001" {
+		t.Errorf("SelfReference = %+v, want mg-0001", rep.SelfReference)
+	}
+	if len(rep.BuildTickets) != 0 {
+		t.Errorf("BuildTickets = %+v, want empty — every item here carries its own reviews: line", rep.BuildTickets)
+	}
+	if len(rep.Declared) != 2 {
+		t.Errorf("Declared = %+v, want mg-0002 and mg-0003 audited as reviewers", rep.Declared)
+	}
+}
+
+// TestMultipleReviewersAreAllNamedInSortedOrder keeps the detail deterministic.
+func TestMultipleReviewersAreAllNamedInSortedOrder(t *testing.T) {
+	build := Item{ID: "mg-0001", Title: "GH #1", Stage: "review", Created: after}
+	r2 := Item{ID: "mg-0003", Title: "review", Stage: "review", Reviews: "mg-0001", Created: after}
+	r1 := Item{ID: "mg-0002", Title: "review", Stage: "review", Reviews: "mg-0001", Created: after}
+	rep := Detect([]Item{build, r2, r1}, ConventionLandedAt)
+	if len(rep.BuildTickets) != 1 || rep.BuildTickets[0].Detail != "reviewed-by: mg-0002, mg-0003" {
+		t.Fatalf("BuildTickets = %+v", rep.BuildTickets)
 	}
 }

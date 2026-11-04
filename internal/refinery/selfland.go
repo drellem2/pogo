@@ -28,10 +28,11 @@ import (
 // before this change) is failed before any git step, both with a pointer to
 // `pogo land`.
 //
-// ACCEPTED TRADE-OFF, recorded so nobody "fixes" it: the merged result is not
-// tested before it lands. The worker tests its own base, and `enth land`
-// hunk-merges onto the tip. Post-land CI on the GitHub mirror is the safety
-// net; an enth pre-land gate (mg-b729a) may close the gap later.
+// The 11-03 trade-off (the merged result untested) was closed on the
+// worker's side by mg-64f2e. `self_land` runs `enth-land-gate`, which tests
+// the tree the land would produce and attests it, and lands with
+// `enth land --require`. Where the gate is not installed, the land is
+// untested as before, and says so. The refinery still runs no gate of its own.
 //
 // What stays the refinery's is the RECORD. RecordSelfLand turns the worker's
 // land into a merged MR in the refinery's history — slice 8's `enth` land
@@ -176,8 +177,8 @@ func (r *Refinery) RecordSelfLand(req SelfLandRequest) (SelfLandResult, error) {
 		SubmitTime:    now,
 		StartTime:     now,
 		DoneTime:      now,
-		GateOutput: "(self-landed by the worker with `enth land`: the refinery ran no gate, and the merged result was not tested before it landed — " +
-			"the accepted trade-off of enth-vcs §6; post-land CI on the mirror is the check)",
+		GateOutput: "(self-landed by the worker with `enth land`: the refinery ran no gate. The worker's self_land gates the merged tree " +
+			"with enth-land-gate when it is installed (mg-64f2e), and its own output names the mode: GATED, TEST-ONLY, or GATE NOT INSTALLED)",
 		PostMergeTag: req.PostMergeTag,
 	}
 	// The post-merge tag, before the record: `enth tag` is idempotent (a tag

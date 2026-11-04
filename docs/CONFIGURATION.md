@@ -503,9 +503,32 @@ verdict, a stranded-work notice — is an **alert** with a stable name,
 and every send goes through that package; a build that adds a send around it
 fails its tests.
 
+**Nudges are alerts too.** Text pogod types into an agent's terminal to tell it
+something is muted, routed and listed under the same names, with `VIA` (`channel`
+in `--json`) reading `nudge`:
+
+| Nudge | Default recipient |
+|-------|-------------------|
+| `stall_watch.unclaimed_items`, `.priority_wake`, `.unread_mail`, `.indefinite_hold`, `.worked_unclaimed`, `.preserved_worktree`, `.stranded_push` | the agent `[stall_watch] agent` watches (the coordinator by default) |
+| `stall_watch.blocked_reminder` | the agent an item is blocked on |
+| `condition.wake` | the condition's addressee, woken to read the notice |
+| `crew_reset.pointer` | the crew agent (sent only when wake-watch is off) |
+
+A stall-watch nudge that cannot be typed is mailed instead as
+`stall_watch.mail_fallback`, a separate alert. Nudges that only deliver
+something else are **not** alerts: wake-watch's mail-arrival pointers
+(`wake_watch.pointer` — the mail is the message), the kickoff prompt and its
+re-sent Enter (`agent.kickoff`), the mid-session-wedge submit
+(`mid_session_wedge.submit`), scheduler deliveries by nudge
+(`scheduler.nudge_delivery`) and an operator's own `pogo nudge`
+(`operator.nudge`). `pogo alerts --all` lists them as delivery mechanics
+(`CLASS` `delivery`, marked `(delivery)` beside the name); they cannot be muted
+or routed, and an `[alerts]` entry naming one is ignored with a startup
+warning.
+
 ```bash
 pogo alerts           # every alert: muted state, effective and default recipient
-pogo alerts --all     # also the delivery mechanics that send mail but are not alerts
+pogo alerts --all     # also the delivery mechanics (mail and nudges) that are not alerts
 pogo alerts --json    # the same rows as GET /alerts
 ```
 
@@ -513,9 +536,11 @@ pogo alerts --json    # the same rows as GET /alerts
 [`[agents] coordinator`](#coordinator-name) and
 [`[agents] escalation_box`](#the-escalation-mailbox). `EFFECTIVE` is that rule
 resolved against the config the running daemon loaded. `SOURCE` names the key
-that changed the recipient or muted the alert (a watcher's `notify_to`, an
-`[alerts."<name>"] mute`, or one of the alias keys below), or `default`. Muted
-alerts are listed first.
+that changed the recipient or muted the alert (an `[alerts."<name>"] route`,
+a watcher's `notify_to`, an `[alerts."<name>"] mute`, or one of the alias keys
+below), or `default`. A route whose box pogod could not find at startup shows
+its fallback in `EFFECTIVE`, and in `--json` as `route_invalid`. Muted alerts
+are listed first.
 
 ### Muting an alert (`[alerts."<name>"] mute`)
 
@@ -564,12 +589,89 @@ with `[conditions] mail = false`, and pogod warns at startup that it did. A
 later config layer's `[alerts]` entry replaces an earlier layer's for the same
 name.
 
+`condition.wake` follows `condition.notice`: while the notice is muted
+(by `[conditions] mail = false` or an `[alerts]` entry) there is nothing to wake
+the addressee for, so `pogo alerts` lists the wake as muted too, with
+`follows condition.notice` as its source (an `[alerts."condition.wake"] mute =
+false` cannot override that, and pogod warns that it did nothing).
+`condition.wake` can also be muted on its own, leaving the notice mailed.
+
 One behaviour change rides on the last alias: `blocked_reminder_enabled = false`
 used to switch the blocked-reminder check off; it now leaves the check running
 (its `stall_watch_fired` events carry `nudge_delivery = "muted"`) and withholds
 only the nudge, so a muted item's backoff and notice cap still advance.
 
-Routing (`route`) arrives in a later slice of drellem2/pogo#262.
+A `[conditions] disable` entry or an `[alerts."condition.<id>"]` name must
+name a real condition row: an exact id (`scheduler_load_failed`), a
+per-subject id (`autostart_failed:doctor`), or a per-subject prefix's stem
+(`autostart_failed`, every subject). Anything else — a typo — is ignored with
+a startup warning listing the ids, rather than being listed as muted while
+muting nothing.
+
+### Routing an alert (`[alerts."<name>"] route`)
+
+Any alert can be sent to a different agent or mailbox (drellem2/pogo#262):
+
+```toml
+[alerts."stranded_work.branch"]
+route = "$escalation_box"
+
+[alerts."refinery.merged"]
+route = "pm-pogo"
+```
+
+The value is **one** agent or box name, or a role: `$coordinator` or
+`$escalation_box`, which name `[agents] coordinator` and
+`[agents] escalation_box` as configured (so a re-pointed box is followed).
+`route = ""` clears a route an earlier config layer or a `notify_to` set.
+
+**A route moves the alert's primary copy, and only that copy.** Which copy is
+primary is the alert's default rule as `pogo alerts` shows it under DEFAULT:
+
+| DEFAULT starts with | The routed copy | Not rerouted |
+|---------------------|-----------------|--------------|
+| `$coordinator` | the one sent to the coordinator (or the watcher's `notify_to`) | the escalation box's copy of an escalating finding; a failed merge's copy to its author; a stranded branch's copy to `pm-<repo>` |
+| `$escalation_box` | the one sent to the escalation box | — |
+| anything else (the filer, the crew agent, the condition's addressee) | every send | — |
+
+So `[agents] escalation_box` stays the default target of every escalation: a
+route does not move escalation copies. Routing a tiered watcher's alert *to* the
+escalation box therefore means an escalating finding arrives there twice.
+
+**A route never drops mail.** pogod checks every routed box with `mg` at
+startup and logs a warning for one that does not exist
+(`pogod: ⚠ … routes <name> to <box>, but there is no mailbox named <box> — until
+it exists, <name> is sent to <default> instead`), recording an
+`alert_route_invalid` event (`phase = "load"`). The route stays installed: at
+send time the box is checked again, and if it is still unknown — or the routed
+send fails — the mail goes to the alert's **default recipient** (the coordinator
+or escalation box its rule names; for a per-message alert, the recipient the
+send addressed) and an `alert_route_invalid` event (`phase = "send"`) records
+it. A box created later is picked up without a restart. pogod also logs one
+line at startup naming every route set by `[alerts]`.
+
+`mute` wins over `route`: a muted alert is sent nowhere. A condition row
+(`condition.<id>`) cannot be routed on its own — every row is sent as
+`condition.notice`; route that. `scheduler.delivery` is not an alert.
+
+**Nudges route the same way.** A routed nudge is typed at the route's agent
+instead, by the same rule: a stall-watch check's nudge moves only when it is
+addressed to the watched agent, and the blocked reminder, `condition.wake` and
+`crew_reset.pointer` move on every send. The fallback is the same too: if the
+route's agent has no mailbox, or the routed nudge fails (for stall-watch, the
+agent is not running *and* the mail fallback to it failed), the nudge goes to
+its default recipient and `alert_route_invalid` records it. A stall-watch
+nudge falls back to the agent `[stall_watch] agent` names. Routing
+`condition.wake` moves only the wake: it still points at the mailbox the notice
+went to, so route `condition.notice` as well to move both. Likewise
+`crew_reset.notice` and `crew_reset.pointer` route independently.
+
+**Every watcher's `notify_to` is an alias.** `[ack_watch] notify_to = "pm-pogo"`
+routes every alert that watcher sends (`pogo alerts` names
+`[ack_watch] notify_to` as its source). As an alias it gains the route's
+fallback: a `notify_to` naming a box that does not exist is now delivered to the
+coordinator instead of refused. An `[alerts]` route for one of the watcher's
+alerts wins over `notify_to`, and pogod warns at startup that it did.
 
 ## pogod's own conditions (`[conditions]`)
 
@@ -3858,6 +3960,21 @@ in one, and routing seven reaped trees into the judged set evaluates to
 workers on this line. An *unreadable* worktree — EACCES on the root — is a
 different answer and still blinds the reading, which is the control that makes
 the distinction mean anything.
+
+**A worker spawned `--no-worktree` gets its own field too, and is not blind
+(mg-ac972).** Box-ops run without a worktree, so the writes term has nothing to
+ask them. That is a spawn choice known before anything is measured, not a
+failed measurement, so it is reported as `no_worktree_workers` (never
+`omitempty`) and `no_worktree_names`, and in the `Measurements` line — never on
+`blind`. Unlike a gone worktree these workers *are* judged (age and PTY), but
+they are excluded from the writes term and so can never be `blocked`: an unknown
+write term is never quiet. Before this, one box-op beside a working fleet made
+every reading `blind`.
+
+Each worker on the `worktree unreadable` blind entry now carries the walk's
+error in parentheses — `p1 (worktree walk over its share of the sample budget:
+…)` or the filesystem error — so the `fleet_progress_error` event records *why*,
+not only *who*.
 
 progress-watch is disjoint from its nearest neighbours:
 

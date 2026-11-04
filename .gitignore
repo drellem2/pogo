@@ -20,3 +20,6 @@ coverage-internal-project.out
 *.bak
 projects.json
 /main
+
+# goreleaser output (scripts/release-local.sh, mg-c0665)
+/dist/

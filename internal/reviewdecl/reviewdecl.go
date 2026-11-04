@@ -130,7 +130,9 @@
 //	     store this scan does not fully cover (see D-1), and a build item in
 //	     archive/ would come back "missing" — a false finding in the one bucket
 //	     that must not have any.
-//	D-4  A REVIEW ticket wearing a build ticket's markers — a `depends:` edge, a
+//	D-4  An item that some OTHER item's `reviews:` line names is the build half
+//	     (mg-48992), whatever its title — unless it declares `reviews:` itself.
+//	     A REVIEW ticket wearing a build ticket's markers — a `depends:` edge, a
 //	     `predecessor:` tag, or a title whose first word is `build` — is set
 //	     aside as the build half and its missing declaration is NOT reported.
 //	     A title whose first word is `review` vetoes the first two (gh#152), so
@@ -308,6 +310,7 @@ func (r Report) Unprotected() int {
 // for the standing runner, which always passes ConventionLandedAt.
 func Detect(items []Item, boundary time.Time) Report {
 	rep := Report{Boundary: boundary}
+	reviewedBy := reviewedByIndex(items)
 	for _, it := range items {
 		rep.Population++
 
@@ -330,7 +333,7 @@ func Detect(items []Item, boundary time.Time) Report {
 		// The build half is set aside BEFORE Scanned++ because it is not a review
 		// ticket, and counting it in the denominator would make the report claim
 		// to have audited an item it deliberately did not. See buildticket.go.
-		if marker, detail := classifyBuild(it); marker != MarkerNone {
+		if marker, detail := classifyBuild(it, reviewedBy); marker != MarkerNone {
 			rep.BuildTickets = append(rep.BuildTickets, Finding{
 				Item: it, Kind: KindBuildTicket, Detail: detail,
 			})

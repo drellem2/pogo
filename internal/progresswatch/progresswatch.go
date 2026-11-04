@@ -229,6 +229,21 @@ type Worker struct {
 	// here is a convenience for tests and diffs, not a published contract. The
 	// published half of this state is Reading.WorktreeGone/WorktreeGoneNames.
 	WorktreeGone bool `json:"worktree_gone,omitempty"`
+
+	// NoWorktree is true when the worker was spawned WITHOUT a worktree
+	// (--no-worktree: box-ops, mg-ad637/mg-2ab71/mg-7daa2). It has no tree to
+	// be quiet in, so the writes term does not apply to it at all — and that is
+	// a fact about how it was spawned, decided before any measurement, not a
+	// measurement that failed. Before mg-ac972 it was reported as an
+	// unreadable worktree, which put it on the Blind line: one box-op running
+	// beside a working fleet made the whole reading "blind" for hours.
+	//
+	// It stays WritesKnown==false (nothing about its writes is known), and it
+	// is still judged on the terms that DO apply — its age, its PTY, and the
+	// fleet's CPU and completions. Because the writes term is unknown it can
+	// never be counted as alive-and-writing-nothing: an unknown is never quiet.
+	// The published half is Reading.NoWorktree/NoWorktreeNames.
+	NoWorktree bool `json:"no_worktree,omitempty"`
 }
 
 // alive reports whether this worker has produced PTY output recently enough to
@@ -380,6 +395,17 @@ type Reading struct {
 	WorktreeGone      int      `json:"worktree_gone_workers"`
 	WorktreeGoneNames []string `json:"worktree_gone_names,omitempty"`
 
+	// NoWorktree counts the live workers spawned without a worktree, and
+	// NoWorktreeNames identifies them, sorted (mg-ac972). Like WorktreeGone it
+	// is its own state and must NEVER feed Blind: --no-worktree is a spawn
+	// choice, known before anything is measured, and box-ops are common enough
+	// that routing them onto the blind line kept the detector blind for most
+	// of a working evening. Unlike WorktreeGone these workers ARE judged — on
+	// age and PTY — but they are excluded from the writes term, so they can
+	// never be Blocked. No omitempty on the count, for the reason given above.
+	NoWorktree      int      `json:"no_worktree_workers"`
+	NoWorktreeNames []string `json:"no_worktree_names,omitempty"`
+
 	// WorkerCores and HostCores are the subtree measurement and its
 	// denominator; CoresKnown says whether they are a measurement at all.
 	WorkerCores float64 `json:"worker_cores"`
@@ -514,6 +540,13 @@ func Evaluate(s Snapshot, t Thresholds) Reading {
 			r.WorktreeGoneNames = append(r.WorktreeGoneNames, w.Name)
 			continue
 		}
+		// A worker spawned without a worktree is named on its own line
+		// whatever its age or PTY state, for the same reason a gone one is:
+		// a state that is reported only sometimes is a state nobody can rely
+		// on seeing. Unlike a gone one it falls through and is judged.
+		if w.NoWorktree {
+			r.NoWorktreeNames = append(r.NoWorktreeNames, w.Name)
+		}
 		if w.Age < th.MinWorkerAge {
 			continue
 		}
@@ -521,9 +554,15 @@ func Evaluate(s Snapshot, t Thresholds) Reading {
 		if !w.alive(th.PTYActiveWithin) {
 			continue
 		}
+		if w.NoWorktree {
+			// Excluded from the writes term: there is no tree to ask, by
+			// design. Not blind (nothing failed) and not blocked (an unknown
+			// write term is never quiet).
+			continue
+		}
 		quiet, known := w.quiet(th.QuietWritesFor)
 		if !known {
-			unknownWrites = append(unknownWrites, w.Name)
+			unknownWrites = append(unknownWrites, unreadableEntry(w))
 			continue
 		}
 		if quiet {
@@ -532,6 +571,8 @@ func Evaluate(s Snapshot, t Thresholds) Reading {
 	}
 	sort.Strings(r.WorktreeGoneNames)
 	r.WorktreeGone = len(r.WorktreeGoneNames)
+	sort.Strings(r.NoWorktreeNames)
+	r.NoWorktree = len(r.NoWorktreeNames)
 	sort.Slice(blocked, func(i, j int) bool { return blocked[i].Name < blocked[j].Name })
 	r.Blocked = len(blocked)
 	for i, w := range blocked {
@@ -604,6 +645,24 @@ func Evaluate(s Snapshot, t Thresholds) Reading {
 
 	r.Stalled = len(r.Blind) == 0 && len(r.Held) == 0
 	return r
+}
+
+// unreadableEntry names one worker on the blind line WITH the error its walk
+// returned. The name alone was all that reached events.log before mg-ac972, so
+// when p1841f read "unreadable" for one sample at 2026-11-04T19:38Z and fine at
+// the next, nothing recorded whether its walk ran over its share of the sample
+// budget or hit a directory that vanished mid-walk — the cause could not be
+// recovered. The error is clipped so one long path cannot swamp the line.
+func unreadableEntry(w Worker) string {
+	const max = 200
+	e := strings.TrimSpace(w.WritesError)
+	if e == "" {
+		return w.Name
+	}
+	if len(e) > max {
+		e = e[:max] + "…"
+	}
+	return w.Name + " (" + e + ")"
 }
 
 // sinceProgress returns how long the fleet has landed nothing and whether that
@@ -751,6 +810,10 @@ func (r Reading) Measurements() string {
 	if r.WorktreeGone > 0 {
 		parts = append(parts, fmt.Sprintf("%d live worker(s) whose worktree is GONE (%s) — not judged",
 			r.WorktreeGone, strings.Join(r.WorktreeGoneNames, ", ")))
+	}
+	if r.NoWorktree > 0 {
+		parts = append(parts, fmt.Sprintf("%d live worker(s) spawned without a worktree (%s) — writes not judged",
+			r.NoWorktree, strings.Join(r.NoWorktreeNames, ", ")))
 	}
 	if young := r.TooYoung(); young > 0 {
 		parts = append(parts, fmt.Sprintf("%d live worker(s), %d too young to judge",

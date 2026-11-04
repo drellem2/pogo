@@ -423,6 +423,11 @@ type Registry struct {
 	// socketDir is where per-agent unix domain sockets live.
 	socketDir string
 
+	// serverPort is the spawning pogod's listening port, injected into every
+	// agent as POGO_PORT (mg-0c1a5). Atomic because Spawn and Respawn read it
+	// under r.mu and SetServerPort writes it without.
+	serverPort atomic.Int64
+
 	// cmdConfig provides agent command templates. May be nil (uses default).
 	cmdConfig AgentCommandConfig
 
@@ -661,6 +666,18 @@ type Registry struct {
 	// would adopt the claim of a first that is merely slow inside Spawn. Nil is
 	// the empty ledger; beginSpawnClaim fills it in. See spawnclaimadopt.go.
 	spawnClaimsInFlight map[string]inFlightSpawnClaim
+
+	// spawnRequestsInFlight is the in-flight spawn REQUEST ledger: every
+	// spawn-polecat / start handler that is mid-flight, keyed by "item:<id>" and
+	// "name:<name>" (drellem2/pogo#265). Unlike spawnClaimsInFlight it opens at
+	// the handler's ENTRY, so it covers the pre-claim window the live-owner gate
+	// cannot see. Nil is the empty ledger. See spawnrequestledger.go.
+	spawnRequestsInFlight map[string]spawnRequestInFlight
+
+	// spawnRequestHeldHook, when non-nil, is called by handleSpawnPolecat and
+	// handleStart right after their ledger entry opens. Tests only: it is how a
+	// test holds a spawn mid-flight to fire a concurrent second one at it.
+	spawnRequestHeldHook func(route, name, workItemID string)
 
 	// remainderDeclarer reads whether a dispatched work item carries the
 	// `declares-remainder` tag, so handleSpawnPolecat can PREPEND the warning
@@ -1029,6 +1046,19 @@ func NewRegistry(socketDir string) (*Registry, error) {
 	}, nil
 }
 
+// SetServerPort records the port this pogod listens on, so every agent it
+// spawns (and respawns) gets POGO_PORT set to it. pogod calls it once the
+// listener is bound; until then — and in a bare test registry — POGO_PORT is
+// left to whatever the inherited environment says (mg-0c1a5).
+func (r *Registry) SetServerPort(port int) {
+	r.serverPort.Store(int64(port))
+}
+
+// ServerPort reports the port recorded by SetServerPort, or 0.
+func (r *Registry) ServerPort() int {
+	return int(r.serverPort.Load())
+}
+
 // ProcessName returns an agent's DISPLAY label.
 // Crew: pogo-crew-<name>, Polecat: pogo-cat-<name>
 //
@@ -1243,12 +1273,17 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// appearing in the report — which is the property mg-fbaf was filed about:
 	// an environment that exists and is believed absent.
 	procName := ProcessName(req.Type, req.Name)
-	injectedEnv := envAssignments(agentIdentityEnv(req.Name, req.Type, procName, req.PromptFile, receiptFile))
+	injectedEnv := envAssignments(agentIdentityEnv(req.Name, req.Type, procName, req.PromptFile, receiptFile, r.ServerPort()))
 
 	// The configured env ([agents] env, [agents.<type>] env) and the crew
 	// frontmatter env both go beneath the identity variables and the spawn's own
 	// env; layerEnv owns the order.
 	cmd.Env = append(os.Environ(), layerEnv(r.configEnvLocked(req.Type, req.Name), req.BaseEnv, injectedEnv, req.Env)...)
+
+	// Seed the harness's first-run state (Claude: hasCompletedOnboarding) into
+	// the profile this environment points at, so a token-only fresh install
+	// does not stop on the theme picker (drellem2/pogo#286).
+	seedHarnessProfile(provider, req.Name, command, cmd.Env)
 
 	// Deliver the persona prompt to a ContextFile-injection provider (Codex
 	// reads AGENTS.override.md from its working directory). Must happen before
@@ -1847,7 +1882,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	// Same catalogue as the spawn path — a restart that injected a different
 	// set would be an environment nothing reports.
 	procName := ProcessName(old.Type, old.Name)
-	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile))
+	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile, r.ServerPort()))
 
 	// The same layers in the same order as Spawn (layerEnv): the configured
 	// env, the base env (crew frontmatter, gh #263) as captured on spawn, the
@@ -1857,6 +1892,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	// dispatcher-supplied --env on spawn, and only the same order keeps that
 	// true on a restart.
 	cmd.Env = append(os.Environ(), layerEnv(r.configEnvLocked(old.Type, old.Name), old.baseEnv, injectedEnv, old.spawnEnv)...)
+	seedHarnessProfile(old.provider, old.Name, old.Command, cmd.Env)
 
 	// A restart re-resolves to the agent's OWN provider (carried on old.provider
 	// from its original spawn), never the registry default — so a Codex agent
@@ -2270,6 +2306,13 @@ func (r *Registry) waitAndHandle(a *Agent) {
 		log.Printf("agent %s: output reader never attached within %v; "+
 			"releasing the PTY anyway — trailing output may be lost", a.Name, readerAttachTimeout)
 	}
+	// Named before the release so a drain timeout can say who else holds it.
+	slavePath := ""
+	a.mu.Lock()
+	if a.slave != nil {
+		slavePath = a.slave.Name()
+	}
+	a.mu.Unlock()
 	a.closeSlave()
 
 	// Wait for the output reader to drain all remaining PTY output before
@@ -2291,6 +2334,10 @@ func (r *Registry) waitAndHandle(a *Agent) {
 			"and the PTY slave released (its master Read has not returned EOF/EIO); "+
 			"marking the agent exited anyway, trailing output may be lost (mg-d7e17)",
 			a.Name, outputDrainTimeout)
+		holders, uninspected := ptySlaveHolders(slavePath)
+		log.Printf("agent %s: processes still holding PTY slave %s: %d %v "+
+			"(%d processes could not be inspected; -1 = no scan on this OS) (mg-c7a0d)",
+			a.Name, slavePath, len(holders), holders, uninspected)
 	}
 
 	a.mu.Lock()

@@ -9,9 +9,20 @@
 //
 // Mail resolves the name and hands the message to the transport the caller
 // already used — unless the alert is MUTED (slice 2, SetMutes), in which case
-// it is withheld and recorded as an alert_muted event. Route (slice 3) and
-// nudges (slice 4) attach here later — which is the point of having one seam
-// rather than ~60 call sites that each address `mg` on their own.
+// it is withheld and recorded as an alert_muted event — or ROUTED (slice 3,
+// SetRoutes), in which case its primary copy goes to another box, falling back
+// to the default recipient rather than dropping mail. NUDGES — text pogod
+// types into an agent's terminal to tell it something (slice 4) — go through
+// the same seam (Nudge, NudgeVia) under the same table: one mute, one route,
+// one listing, which is the point of having one seam rather than ~60 call
+// sites that each address `mg` or a PTY on their own.
+//
+// Not every nudge is an alert. wake-watch's mail-arrival pointers, the
+// mid-session-wedge bare submit, the kickoff prompt and its re-sent Enter, a
+// scheduler delivery and an operator's own `pogo nudge` carry no news of
+// pogod's: they deliver something else (a mail, a prompt, a keystroke). They
+// are declared here with Class "delivery" so `pogo alerts --all` lists them,
+// but they do not go through the seam and are not mutable or routable.
 //
 // Some mail is not an alert: the scheduler delivering a registered message is
 // a delivery mechanic, not pogod telling anyone anything. Those are declared
@@ -93,11 +104,17 @@ const (
 
 	ConditionNotice    Name = "condition.notice"
 	ConditionOutOfBand Name = "condition.out_of_band"
+	// ConditionWake is the PTY nudge that wakes a condition's addressee to
+	// read the notice (a nudge).
+	ConditionWake Name = "condition.wake"
 
 	CredExpiryWarning Name = "cred_expiry.warning"
 	CredExpiryBlind   Name = "cred_expiry.blind"
 
 	CrewResetNotice Name = "crew_reset.notice"
+	// CrewResetPointer is the pointer typed at a crew agent after its reset
+	// notice lands, when wake-watch is off (a nudge).
+	CrewResetPointer Name = "crew_reset.pointer"
 
 	DeafWatchFinding Name = "deaf_watch.finding"
 	DeafWatchCleared Name = "deaf_watch.cleared"
@@ -151,11 +168,17 @@ const (
 	ServiceInstallReport Name = "service.install_report"
 
 	StallWatchMailFallback Name = "stall_watch.mail_fallback"
-	// StallWatchBlockedReminder is the blocked-reminder nudge (mg-3844). It is
-	// a nudge, not a mail: it is declared here, ahead of the other nudges
-	// (slice 4), because `[stall_watch] blocked_reminder_enabled = false` is
-	// one of the existing silencing keys slice 2 turns into a mute alias.
-	StallWatchBlockedReminder Name = "stall_watch.blocked_reminder"
+	// The stall-watch nudges, one per check (internal/stallwatch). Each is a
+	// nudge typed into the recipient's terminal; one that cannot be typed is
+	// mailed instead, as stall_watch.mail_fallback.
+	StallWatchBlockedReminder   Name = "stall_watch.blocked_reminder"
+	StallWatchUnclaimedItems    Name = "stall_watch.unclaimed_items"
+	StallWatchPriorityWake      Name = "stall_watch.priority_wake"
+	StallWatchUnreadMail        Name = "stall_watch.unread_mail"
+	StallWatchIndefiniteHold    Name = "stall_watch.indefinite_hold"
+	StallWatchWorkedUnclaimed   Name = "stall_watch.worked_unclaimed"
+	StallWatchPreservedWorktree Name = "stall_watch.preserved_worktree"
+	StallWatchStrandedPush      Name = "stall_watch.stranded_push"
 
 	StrandedWorkBranch Name = "stranded_work.branch"
 
@@ -178,6 +201,18 @@ const (
 
 	// Delivery mechanics, not alerts.
 	SchedulerDelivery Name = "scheduler.delivery"
+
+	// Nudges that are delivery mechanics, not alerts (pm-pogo ruling on
+	// drellem2/pogo#262): each delivers something else — a mail pointer, a
+	// prompt, a keystroke — and carries no news of pogod's. They are declared
+	// so `pogo alerts --all` lists them; they do not go through the seam and
+	// cannot be muted or routed. Each is tied to the guard's allowlist entry
+	// for the code that types it (nudgeAllowed in guard_test.go).
+	WakeWatchPointer       Name = "wake_watch.pointer"
+	AgentKickoff           Name = "agent.kickoff"
+	MidSessionWedgeSubmit  Name = "mid_session_wedge.submit"
+	SchedulerNudgeDelivery Name = "scheduler.nudge_delivery"
+	OperatorNudge          Name = "operator.nudge"
 )
 
 // Tiered watchers: the first-tier box is the coordinator (or the watcher's
@@ -185,6 +220,49 @@ const (
 // stale or names the coordinator itself. Stated once so every such row reads
 // the same way.
 const tiered = RoleCoordinator + "; also " + RoleEscalationBox + " when it escalates"
+
+// StallWatchAgentKey is the Key of the stall-watch nudges whose recipient is
+// the watched agent: `[stall_watch] agent` (default the coordinator) is the
+// box their $coordinator stands for, as a watcher's notify_to is for its
+// alerts. It is not a route alias — it also names whose mailbox and claims the
+// watcher reads.
+const StallWatchAgentKey = "stall_watch.agent"
+
+// nudges are the declarations delivered by typing into a terminal rather than
+// by mail — alerts and delivery mechanics alike. Channel reports them.
+var nudges = map[Name]bool{
+	ConditionWake:               true,
+	CrewResetPointer:            true,
+	StallWatchBlockedReminder:   true,
+	StallWatchUnclaimedItems:    true,
+	StallWatchPriorityWake:      true,
+	StallWatchUnreadMail:        true,
+	StallWatchIndefiniteHold:    true,
+	StallWatchWorkedUnclaimed:   true,
+	StallWatchPreservedWorktree: true,
+	StallWatchStrandedPush:      true,
+	// Delivery mechanics typed into a terminal.
+	WakeWatchPointer:       true,
+	AgentKickoff:           true,
+	MidSessionWedgeSubmit:  true,
+	SchedulerNudgeDelivery: true,
+	OperatorNudge:          true,
+}
+
+// Channels an alert is delivered on.
+const (
+	ChannelMail  = "mail"
+	ChannelNudge = "nudge"
+)
+
+// Channel is ChannelNudge for an alert typed into a terminal and ChannelMail
+// for everything else.
+func (d Def) Channel() string {
+	if nudges[d.Name] {
+		return ChannelNudge
+	}
+	return ChannelMail
+}
 
 var registry = []Def{
 	{AbsentWatchDeclared, ClassAlert, tiered, "absent_watch.notify_to", "a crew agent is absent because auto_start = false declares it so"},
@@ -198,9 +276,11 @@ var registry = []Def{
 	{CarrierDriftFinding, ClassAlert, tiered, "carrier_drift.notify_to", "a work item's workflow carrier drifted from its stage"},
 	{ConditionNotice, ClassAlert, "the condition's addressee (usually " + RoleCoordinator + ")", "conditions.mail, conditions.disable", "a daemon condition row was raised"},
 	{ConditionOutOfBand, ClassAlert, RoleEscalationBox, "conditions.out_of_band", "out-of-band copy of a condition notice"},
+	{ConditionWake, ClassAlert, "the condition's addressee (usually " + RoleCoordinator + ")", "conditions.mail", "wake the addressee to read a condition notice"},
 	{CredExpiryWarning, ClassAlert, RoleEscalationBox, "", "the harness credential expires soon"},
 	{CredExpiryBlind, ClassAlert, RoleEscalationBox, "", "the harness credential's expiry cannot be read"},
 	{CrewResetNotice, ClassAlert, "the crew agent", "", "a long-running crew session should reset"},
+	{CrewResetPointer, ClassAlert, "the crew agent", "", "pointer to the reset notice (only when wake-watch is off)"},
 	{DeafWatchFinding, ClassAlert, tiered, "deaf_watch.notify_to", "a crew agent has no mail check registered"},
 	{DeafWatchCleared, ClassAlert, tiered, "deaf_watch.notify_to", "a deaf-agent episode is over"},
 	{DriftWatchDrift, ClassAlert, RoleEscalationBox, "", "deployed host artifacts drifted from the source"},
@@ -226,7 +306,7 @@ var registry = []Def{
 	{PromptSyncNotice, ClassAlert, RoleCoordinator, "", "deployed prompts are not reconciled with the source"},
 	{ReaperEscalation, ClassAlert, RoleCoordinator + " and " + RoleEscalationBox, "", "the launchd reaper gave up kickstarting a job"},
 	{RefineryMerged, ClassAlert, RoleCoordinator, "", "a merge request merged"},
-	{RefineryMergeFailed, ClassAlert, "the merge author and " + RoleCoordinator, "", "a merge request failed"},
+	{RefineryMergeFailed, ClassAlert, RoleCoordinator + " and the merge author", "", "a merge request failed"},
 	{RefineryFailureThreshold, ClassAlert, RoleCoordinator, "", "an author reached the consecutive merge-failure threshold"},
 	{RefineryDeferDoneBackstop, ClassAlert, RoleCoordinator, "", "a --defer-done polecat lingered after its merge and was reaped"},
 	{RefineryDeferredDeath, ClassAlert, RoleCoordinator, "", "a deferred polecat died after its merge, before mg done"},
@@ -235,7 +315,14 @@ var registry = []Def{
 	{SentinelDrift, ClassAlert, RoleCoordinator, "", "a harness prompt-ready sentinel stopped matching"},
 	{ServiceInstallReport, ClassAlert, RoleCoordinator, "", "`pogo service install` report"},
 	{StallWatchMailFallback, ClassAlert, "the stall notice's recipient", "", "a stall notice that could not be typed into a terminal"},
-	{StallWatchBlockedReminder, ClassAlert, "the agent an item is blocked on (" + RoleCoordinator + " when it is unreachable)", "stall_watch.blocked_reminder_enabled", "nudge: work items are blocked on the recipient"},
+	{StallWatchBlockedReminder, ClassAlert, "the agent an item is blocked on (" + RoleCoordinator + " when it is unreachable)", "stall_watch.blocked_reminder_enabled", "work items are blocked on the recipient"},
+	{StallWatchUnclaimedItems, ClassAlert, RoleCoordinator, StallWatchAgentKey, "work items sat unclaimed past the threshold"},
+	{StallWatchPriorityWake, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a priority work item is waiting"},
+	{StallWatchUnreadMail, ClassAlert, RoleCoordinator, StallWatchAgentKey, "unread mail is piling up"},
+	{StallWatchIndefiniteHold, ClassAlert, RoleCoordinator, StallWatchAgentKey, "work items are held with no release condition"},
+	{StallWatchWorkedUnclaimed, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a work item is being worked but nobody claimed it"},
+	{StallWatchPreservedWorktree, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a preserved worktree is waiting on a decision"},
+	{StallWatchStrandedPush, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a pushed branch was never submitted"},
 	{StrandedWorkBranch, ClassAlert, RoleCoordinator + " and the repo's pm-<repo>, if it exists", "", "a stopped polecat left unmerged work"},
 	{SynthWatchHit, ClassAlert, RoleEscalationBox, "", "synthetic error messages are being emitted"},
 	{SynthWatchCleared, ClassAlert, RoleEscalationBox, "", "a synthetic-error episode is over"},
@@ -249,6 +336,11 @@ var registry = []Def{
 	{WorktreeUnpushed, ClassAlert, RoleCoordinator, "", "a worktree with unpushed commits was preserved"},
 	{WorktreeUndetermined, ClassAlert, RoleCoordinator, "", "a worktree whose state could not be read was preserved"},
 	{SchedulerDelivery, ClassDelivery, "the schedule's target", "", "a scheduled message delivered by mail"},
+	{WakeWatchPointer, ClassDelivery, "the agent the mail is for", "", "pointer to newly arrived mail (the mail is the message)"},
+	{AgentKickoff, ClassDelivery, "the agent being started", "", "the kickoff prompt, and the Enter re-sent when it was not submitted"},
+	{MidSessionWedgeSubmit, ClassDelivery, "the wedged agent", "", "a bare submit to release a mid-session wedge"},
+	{SchedulerNudgeDelivery, ClassDelivery, "the schedule's target", "", "a scheduled message delivered by nudge"},
+	{OperatorNudge, ClassDelivery, "the agent the operator names", "", "an operator's own `pogo nudge`"},
 }
 
 var byName = func() map[Name]Def {

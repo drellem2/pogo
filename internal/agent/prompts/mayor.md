@@ -1514,9 +1514,36 @@ When deciding whether to spawn a {{.Worker}}:
 
   **A timeout on a saturated host is UNKNOWN, not failure.** `pogo refinery show` now prints a `Host:` line, and a timeout error on a contended host says so in as many words. When you see one, re-run before you read it as a defect in the change — and tell the {{.Worker}} that, because it will not know.
 
+## Enth-backed projects
+
+A project is **git-backed** (the default) or **enth-backed**: its history lives on an enthd server ([enth](https://enth.app)), not in git. Most of this file describes git. For an enth project, this section overrides it. The setup guide is `docs/enth.md` in the pogo repo; the worker's side is the enth branches of `templates/polecat.md`, which this section does not repeat.
+
+**Recognise one.** `pogo project list --json` shows `"vcs": "enth"` and an `enth` block (remote, repo, trunk). On disk the repo root holds `.enth/checkout` and no `.git`. A directory with `.enth/` whose record has no `vcs` key is recorded as **git**, and a dispatch onto it fails. `pogo doctor --check` reports it as `enth repo recorded as git` and prints the `pogo project set-vcs` line that fixes it.
+
+**What is the same:** filing, dispatch with `pogo agent spawn-polecat … --template=polecat`, the per-repo cap, mail, and completion. The item closes, you get the `MERGED:` mail, and the {{.Worker}} is stopped, just as after a refinery merge.
+
+**What differs:**
+- **No git worktree and no branch.** The {{.Worker}} gets an enth checkout at `$POGO_HOME/polecats/<name>`, and its work is named by `Pogo-Item` trailers on its Changes. `git` commands fail there. Use `enth status <dir>` for its uncommitted edits and `enth query log` for the trunk.
+- **{{.Worker}}s land their own work.** The template's `self_land` step runs `enth land` and then `pogo land`, which records the land and closes the item. The refinery does not land enth work. `pogo refinery submit` on an enth repo is refused, so never submit for a {{.Worker}}. Nothing tests the merged result before it lands; CI runs on the GitHub mirror afterwards.
+- **No pull-request track.** `--template=polecat-build-pr` and a `--branch` other than the trunk are refused with a 409. So the gh-issue review loop cannot run on an enth repo. Ask the human how the item should be gated, rather than dispatching it unreviewed.
+- **Git-only recovery steps do not apply:** branch pushes, `pogo refinery submit` remedies, worktree pruning, stranded-branch hunts. Stranded work on enth is **unlanded Changes**. The `[stranded-push]` mail and `pogo check-stranded` list them with an `enth land … && pogo land --item` remedy. A dispatch onto an item that has some is refused with the same remedy, and `--stranded-adopt` / `--stranded-override` work as on git. Before you stop an enth {{.Worker}}: its committed Changes are already on enthd, so only the edits `enth status <dir>` lists are at risk.
+- **Conflicts are the {{.Worker}}'s.** `self_land` exiting 3 means it re-makes the Change on the new trunk, up to three times. A fourth conflict comes to you.
+
+**Making a new enth repo** ("make me a new enth repo called x"):
+
+```bash
+enth whoami                                                   # OWNER is the name it prints; it fails if not signed in
+enth repo create OWNER/x                                      # an empty repo on the remote you are signed in to
+enth --remote URL --repo OWNER/x checkout main ~/dev/x        # URL: that remote; an empty repo checks out empty
+pogo project add ~/dev/x --vcs=enth --enth-remote=URL --enth-repo=OWNER/x
+pogo doctor --check                                           # the enth rows must pass
+```
+
+Then file the first item with `mg new --repo=<that path>` and dispatch it as above. Installing the enth CLI and signing in (`enth login`) belong to the human. Ask them; do not work around either.
+
 ## The Refinery
 
-The refinery is a deterministic merge queue loop inside pogod — not an agent. It runs automatically. When a {{.Worker}} finishes work, it:
+The refinery is a deterministic merge queue loop inside pogod — not an agent. It runs automatically. It lands **git-backed** projects only; enth work is landed by the {{.Worker}} (see "Enth-backed projects" above). When a {{.Worker}} finishes work, it:
 1. Pushes a branch — named after the {{.Worker}}'s **agent name**, not its work item id (`spawn-polecat abea --id=mg-abea` gets branch `polecat-abea`). **Never tell a {{.Worker}} its branch name** — not in a dispatch body, not in a wakeup note. You will get it wrong: it reads its own branch with `git rev-parse --abbrev-ref HEAD`, and its worktree is the authority (mg-d39e).
 2. Submits it via `pogo refinery submit <branch> --repo=<path>`
 3. Polls the refinery for the merge result

@@ -738,3 +738,129 @@ func TestWorktreeGoneCountIsAlwaysInTheJSON(t *testing.T) {
 		t.Errorf("a clean reading omitted the count: %s", b)
 	}
 }
+
+// boxOpWorker is a --no-worktree worker (mg-ac972): PTY-active and old enough
+// to judge, with no tree for the writes term to ask about — the shape p7daa2
+// had while the detector read "blind" beside a fleet that was landing work.
+func boxOpWorker(name string) Worker {
+	w := blockedWorker(name)
+	w.WriteIdle, w.HasWrites, w.WritesKnown = 0, false, false
+	w.NoWorktree = true
+	w.WritesError = "spawned without a worktree"
+	return w
+}
+
+// TestNoWorktreeWorkerDoesNotBlindTheFleet is mg-ac972's acceptance fixture:
+// one --no-worktree worker alongside healthy ones. The reading is NOT blind,
+// the worker is named in its own field, and nothing about it reaches Blind.
+func TestNoWorktreeWorkerDoesNotBlindTheFleet(t *testing.T) {
+	s := incident()
+	s.LastProgress = now.Add(-2 * time.Minute) // the fleet is producing
+	s.Workers = append(s.Workers, boxOpWorker("p7daa2"))
+
+	r := Evaluate(s, Thresholds{})
+
+	if got := r.Verdict(); got == VerdictBlind {
+		t.Fatalf("verdict = %q — a box-op blinded the fleet (blind=%v)", got, r.Blind)
+	}
+	if got := r.Verdict(); got != VerdictClean {
+		t.Errorf("verdict = %q, want %q (held=%v blind=%v)", got, VerdictClean, r.Held, r.Blind)
+	}
+	if len(r.Blind) != 0 {
+		t.Errorf("blind = %v, want empty", r.Blind)
+	}
+	if r.NoWorktree != 1 || len(r.NoWorktreeNames) != 1 || r.NoWorktreeNames[0] != "p7daa2" {
+		t.Errorf("no-worktree worker not reported in its own field: n=%d names=%v",
+			r.NoWorktree, r.NoWorktreeNames)
+	}
+	// Still judged on the terms that apply (age, PTY), never blocked.
+	if r.Judged != 8 || r.Blocked != 7 {
+		t.Errorf("judged=%d blocked=%d, want 8/7 — judged on PTY, excluded from writes", r.Judged, r.Blocked)
+	}
+	if r.WorktreeGone != 0 {
+		t.Errorf("gone = %d, want 0 — never having a tree is not losing one", r.WorktreeGone)
+	}
+	if m := r.Measurements(); !strings.Contains(m, "spawned without a worktree (p7daa2)") {
+		t.Errorf("Measurements dropped the state: %s", m)
+	}
+	if r.TooYoung() != 0 {
+		t.Errorf("too_young = %d, want 0", r.TooYoung())
+	}
+}
+
+// TestNoWorktreeWorkerCannotManufactureAFinding: a fleet of box-ops that are
+// PTY-active with nothing landing must not read as stalled — their write term
+// is unknown, and an unknown is never quiet.
+func TestNoWorktreeWorkerCannotManufactureAFinding(t *testing.T) {
+	s := incident()
+	for i := range s.Workers {
+		s.Workers[i] = boxOpWorker(s.Workers[i].Name)
+	}
+	r := Evaluate(s, Thresholds{})
+	if r.Stalled || r.Blocked != 0 {
+		t.Fatalf("box-ops manufactured a finding: stalled=%v blocked=%d", r.Stalled, r.Blocked)
+	}
+	if r.Verdict() == VerdictBlind {
+		t.Errorf("box-ops blinded the reading: %v", r.Blind)
+	}
+	if r.NoWorktree != 7 {
+		t.Errorf("no_worktree = %d, want 7", r.NoWorktree)
+	}
+}
+
+// TestNoWorktreeIsNamedEvenWhenNotJudged: young or PTY-silent box-ops are
+// still named, so the count does not depend on the worker's state.
+func TestNoWorktreeIsNamedEvenWhenNotJudged(t *testing.T) {
+	s := incident()
+	young := boxOpWorker("pyoung")
+	young.Age = time.Minute
+	silent := boxOpWorker("psilent")
+	silent.HasOutput = false
+	s.Workers = append(s.Workers, young, silent)
+	r := Evaluate(s, Thresholds{})
+	if strings.Join(r.NoWorktreeNames, ",") != "psilent,pyoung" {
+		t.Errorf("names = %v, want [psilent pyoung] (sorted, both named)", r.NoWorktreeNames)
+	}
+	if r.TooYoung() != 1 {
+		t.Errorf("too_young = %d, want 1 (pyoung)", r.TooYoung())
+	}
+}
+
+// TestRealWalkErrorStillBlindsBesideABoxOp is the negative control: carving
+// no-worktree out of the unreadable set must not carry a real walk failure
+// with it. That worker stays on the Blind line, and the line now carries the
+// error itself — the text that was missing when p1841f's 19:38Z sample could
+// not be explained.
+func TestRealWalkErrorStillBlindsBesideABoxOp(t *testing.T) {
+	s := incident()
+	s.LastProgress = now.Add(-2 * time.Minute)
+	s.Workers = append(s.Workers, boxOpWorker("p7daa2"))
+	s.Workers[0].WritesKnown = false
+	s.Workers[0].WritesError = "open /tree/target/tmp/x: no such file or directory"
+
+	r := Evaluate(s, Thresholds{})
+
+	if got := r.Verdict(); got != VerdictBlind {
+		t.Fatalf("verdict = %q, want %q — a walk that errored is still a blindness", got, VerdictBlind)
+	}
+	joined := strings.Join(r.Blind, " ")
+	if !strings.Contains(joined, "worktree unreadable for 1 worker(s): p1 (open /tree/target/tmp/x: no such file or directory)") {
+		t.Errorf("blind line must name the worker and its error: %v", r.Blind)
+	}
+	if strings.Contains(joined, "p7daa2") {
+		t.Errorf("the box-op reached the blind line: %v", r.Blind)
+	}
+}
+
+// TestNoWorktreeCountIsAlwaysInTheJSON: no omitempty, as for worktree_gone.
+func TestNoWorktreeCountIsAlwaysInTheJSON(t *testing.T) {
+	s := incident()
+	s.LastProgress = now.Add(-1 * time.Minute)
+	b, err := json.Marshal(Evaluate(s, Thresholds{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"no_worktree_workers":0`) {
+		t.Errorf("a clean reading omitted the count: %s", b)
+	}
+}
