@@ -15,8 +15,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$HERE/release-local.sh"
 
-T="$(mktemp -d "${TMPDIR:-/tmp}/release-local-test.XXXXXX")"
-trap 'rm -rf "$T"' EXIT
+# git runs in a fixture; keep it (and anything else) off the developer's $HOME.
+source "$HERE/pogo-sandbox"
+pogo_sandbox_create releaselocal
+trap pogo_sandbox_down EXIT
+pogo_sandbox_isolate
+T="$POGO_SANDBOX_DIR"
 
 PASS=0
 FAIL=0
