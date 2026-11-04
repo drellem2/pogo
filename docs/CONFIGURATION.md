@@ -3210,6 +3210,79 @@ max_renudges      = 3
 lookback          = "24h"
 ```
 
+## Waking an agent on Discord activity (harold)
+
+harold gives agents a Discord presence and keeps an inbox of pings per
+identity. It can run a command when a ping lands. pogo ships that command, so a
+ping wakes the agent it is for instead of waiting for the agent's next turn.
+
+**Setup.** `pogo install` writes `~/.pogo/bin/harold-wake`, a short wrapper
+around `pogo hook harold-wake`. It does nothing until harold names it. In
+harold's config, add these two lines to `[inbox]` exactly as written (harold
+refuses unknown `[inbox]` keys):
+
+```toml
+[inbox]
+notify = ["~/.pogo/bin/harold-wake"]
+notify_interval = 30
+```
+
+harold expands the `~`. `notify_interval = 30` means at most one wake every
+30 seconds per identity. Pings that arrive in between are folded into the next
+run, so the last ping always gets one. Leave `notify_timeout` at its default of
+10 seconds: harold-wake stops waiting for stdin after 2 seconds and for `mg`
+after 5.
+
+**Which agent.** Each harold identity is named after its pogo agent, so the
+identity `mayor` wakes the agent `mayor`. To send an identity somewhere else,
+add a line to `~/.pogo/harold-wake.conf` (under `POGO_HOME`):
+
+```
+# harold identity = pogo agent
+default = mayor
+```
+
+A line there wins over the identity's own name. The target must be the
+coordinator or a crew agent with a prompt under `~/.pogo/agents`. Polecats and
+templates do not count, and polecats run with `HAROLD_IDENTITY=none`. An
+identity that maps to no such agent wakes nobody. harold-wake writes one line
+to stderr (harold's log) and exits 0, so it never falls back to a guess. A
+`harold-wake.conf` that does not parse wakes nobody and exits 1, because the
+line it could not read might be the one that redirects this identity.
+
+**What it sends.**
+
+```
+mg mail send <agent> --from=harold --subject="Discord: <n> new pings; call discord_poll" --body=...
+```
+
+`<n>` is the `arrived` count from harold's stdin. That count is the only thing
+taken from stdin. The ping's text, author and channel never reach the mail's
+subject, body, `mg`'s argv or `mg`'s stdin. They were written by someone
+outside the fleet, and an agent reads mail as coming from the fleet. The agent
+reads the ping itself with harold's `discord_poll` tool. A payload that is not
+one JSON object with a positive integer `arrived`, or that is over 256 KiB,
+wakes nobody and exits 0. The send goes through pogo's alert seam as
+`harold_wake.ping`, so `pogo alerts --all` lists it.
+
+It sends mail rather than a nudge so that [wake-watch](#the-pointer-waker-wake-watch)
+handles it like any other mail: a pointer to a running agent, and a bounce to
+the coordinator for one that is not running. A nudge to a stopped agent just
+fails.
+
+**Finding `mg`.** harold's daemon inherits the environment of whatever started
+it, so `PATH` cannot be trusted. harold-wake runs `mg` by absolute path, taking
+the first executable it finds in `~/go/bin/mg`, the directory of the running
+`pogo`, `/opt/homebrew/bin`, `/usr/local/bin` and `/usr/bin`, and then the
+absolute entries of `PATH`. Relative `PATH` entries are skipped.
+
+**Exit status.** 0 when it mailed the agent or chose not to act. 1 when it
+meant to mail and could not (no `mg`, or `mg` failed or timed out), or when
+`harold-wake.conf` is broken. harold logs a non-zero exit.
+
+pogod does not run or read any of this. If the wrapper's `pogo` moves, run
+`pogo install` again to rewrite it.
+
 ## The missing-mail-loop announcer (deaf-watch)
 
 An agent with no `mail-check-<name>` schedule can be mailed, and **nothing will

@@ -3220,7 +3220,7 @@ the tool call it is reporting on.`,
 	}
 	cmdHookMailRecipient.Flags().BoolVar(&mailRecipientSelfCheckFlag, "self-check", false,
 		"Report whether the warning is armed here: is the hook registered in this directory, and can the roster be read?")
-	cmdHook.AddCommand(cmdHookPromptSubmit, cmdHookMailRecipient)
+	cmdHook.AddCommand(cmdHookPromptSubmit, cmdHookMailRecipient, newHookHaroldWakeCmd())
 
 	// Scheduler commands. Talks to pogod's /scheduler/* endpoints. The daemon
 	// drives fires off the heartbeat tick, so schedules persist across
@@ -3540,6 +3540,7 @@ overwritten.`,
 1. Start the pogo daemon (if not already running)
 2. Initialize macguffin workspace (mg init)
 3. Install default agent prompts to ~/.pogo/agents/
+4. Write ~/.pogo/bin/harold-wake, the wrapper harold's [inbox] notify runs
 
 Safe to run multiple times — stale prompts are auto-updated, other files are preserved.
 
@@ -3634,13 +3635,22 @@ that copy and overwrite without a safety net.`,
 			// missing login becomes the loudest next step.
 			harnesses := configuredHarnessOnboarding()
 
+			// Helper commands other tools are configured to run. Non-fatal:
+			// none of them is needed for pogo itself to work.
+			shimPath, shimChanged, shimErr := installHaroldWakeShim()
+
 			if jsonOutput {
+				helper := map[string]interface{}{"path": shimPath, "changed": shimChanged}
+				if shimErr != nil {
+					helper["error"] = shimErr.Error()
+				}
 				cli.PrintJSON(map[string]interface{}{
 					"status":       "installed",
 					"prompts":      result,
 					"pinnedRoles":  pinRes.Pinned,
 					"configPinned": len(pinRes.Pinned) > 0,
 					"harnesses":    harnesses,
+					"haroldWake":   helper,
 				})
 			} else {
 				if len(result.Installed) > 0 {
@@ -3661,6 +3671,11 @@ that copy and overwrite without a safety net.`,
 				if len(pinRes.Pinned) > 0 {
 					fmt.Printf("  ✓ pinned current role default(s) [%s] in %s (existing install)\n",
 						strings.Join(pinRes.Pinned, ", "), pinRes.Path)
+				}
+				if shimErr != nil {
+					fmt.Fprintf(os.Stderr, "  ⚠ could not write %s: %v\n", shimPath, shimErr)
+				} else if shimChanged {
+					fmt.Printf("  ✓ wrote %s (harold's notify hook; unused until harold names it)\n", shimPath)
 				}
 				printHarnessOnboarding(os.Stdout, harnesses)
 				fmt.Println("\nReady. Next steps:")

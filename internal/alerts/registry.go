@@ -201,6 +201,7 @@ const (
 
 	// Delivery mechanics, not alerts.
 	SchedulerDelivery Name = "scheduler.delivery"
+	HaroldWakePing    Name = "harold_wake.ping"
 
 	// Nudges that are delivery mechanics, not alerts (pm-pogo ruling on
 	// drellem2/pogo#262): each delivers something else — a mail pointer, a
@@ -336,6 +337,7 @@ var registry = []Def{
 	{WorktreeUnpushed, ClassAlert, RoleCoordinator, "", "a worktree with unpushed commits was preserved"},
 	{WorktreeUndetermined, ClassAlert, RoleCoordinator, "", "a worktree whose state could not be read was preserved"},
 	{SchedulerDelivery, ClassDelivery, "the schedule's target", "", "a scheduled message delivered by mail"},
+	{HaroldWakePing, ClassDelivery, "the agent behind the harold identity", "", "harold has new Discord pings for an agent (`pogo hook harold-wake`)"},
 	{WakeWatchPointer, ClassDelivery, "the agent the mail is for", "", "pointer to newly arrived mail (the mail is the message)"},
 	{AgentKickoff, ClassDelivery, "the agent being started", "", "the kickoff prompt, and the Enter re-sent when it was not submitted"},
 	{MidSessionWedgeSubmit, ClassDelivery, "the wedged agent", "", "a bare submit to release a mid-session wedge"},
