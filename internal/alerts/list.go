@@ -8,8 +8,8 @@ import (
 // Settings is what the listing needs from the daemon's loaded config. pogod
 // fills it; this package does not read config itself.
 //
-// Recipients come from the keys that exist today (notify_to, [agents]); mute
-// state is the table the send seam enforces (SetMutes).
+// Recipients come from [agents], each watcher's notify_to and the route table
+// (SetRoutes); mute state is the table the send seam enforces (SetMutes).
 type Settings struct {
 	// Coordinator and EscalationBox are the resolved [agents] coordinator and
 	// [agents] escalation_box.
@@ -24,6 +24,12 @@ type Settings struct {
 	// true"). A muted name the registry does not declare — a per-row
 	// condition.<id> — is listed as a row of its own.
 	Muted map[Name]string
+	// Routes is the route table the send seam enforces (SetRoutes): [alerts]
+	// routes and the notify_to aliases.
+	Routes map[Name]Route
+	// RouteInvalid names each route whose box pogod could not find at
+	// startup, with why. Such a route falls back to the default recipient.
+	RouteInvalid map[Name]string
 }
 
 // Row is one line of `pogo alerts` / GET /alerts.
@@ -35,6 +41,11 @@ type Row struct {
 	// against the running config — who the mail goes to on this install.
 	Effective string `json:"effective"`
 	Muted     bool   `json:"muted"`
+	// Route is the box a route sends the primary copy to, if one is set.
+	Route string `json:"route,omitempty"`
+	// RouteInvalid says why Route was not usable at startup; the alert then
+	// falls back to its default recipient.
+	RouteInvalid string `json:"route_invalid,omitempty"`
 	// Source names the config key that made Effective or Muted differ from the
 	// built-in default, or "default".
 	Source  string `json:"source"`
@@ -59,7 +70,24 @@ func Rows(s Settings, all bool) []Row {
 				r.Source = d.Key
 			}
 		}
-		r.Effective = resolve(d.Default, first, s.EscalationBox)
+		rule := d.Default
+		if rt, ok := s.Routes[d.Name]; ok {
+			r.Route, r.Source = rt.To, rt.Source
+			if p := Primary(d); p != "" {
+				rule = strings.Replace(rule, p, rt.To, 1)
+			} else {
+				rule = rt.To + " (instead of " + rule + ")"
+			}
+			if why, bad := s.RouteInvalid[d.Name]; bad {
+				r.RouteInvalid = why
+				fb := rt.Fallback
+				if fb == "" {
+					fb = d.Default
+				}
+				rule = resolve(fb, first, s.EscalationBox) + " (route to " + rt.To + " is unusable: " + why + ")"
+			}
+		}
+		r.Effective = resolve(rule, first, s.EscalationBox)
 		if key, ok := s.Muted[d.Name]; ok {
 			r.Muted = true
 			r.Source = key

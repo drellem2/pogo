@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // The condition catalogue: one constructor per enumeration row, so the mapping
 // between
@@ -74,6 +77,43 @@ const (
 	rowA6RestartPrefix   = "restart_failed:"
 	rowA7ProviderPrefix  = "unknown_provider:"
 )
+
+// conditionIDs is every exact condition id, and conditionIDPrefixes every
+// per-subject id's prefix ("autostart_failed:" of "autostart_failed:doctor").
+// A mute name `condition.<id>` and a `[conditions] disable` entry are checked
+// against them at startup, so a typo is reported instead of muting nothing
+// while being listed as muted (mg-4d76c advisory #3).
+// TestConditionIDsListEveryRowConstant keeps the lists complete.
+var (
+	conditionIDs = []string{
+		rowA2SchedulerLoad, rowA2SchedulerNoHome, rowA3AckWatchNotArmed,
+		rowA4PromptRefresh, rowA10RolePin, rowA11HeartbeatWrite,
+		rowA13TeardownNotArmed, rowA13IntakeNotArmed, rowA13IntakeNoCred,
+		rowA13IntakeWatchEmpty, rowA13GHWatchNotReporting, rowA14LogRotation,
+		rowA9TicketIndex, rowA9PolecatWitness, rowA9OrphanScan,
+		logDestinationConditionID, orchResumeConditionID, harnessNotLoggedInConditionID,
+	}
+	conditionIDPrefixes = []string{
+		rowA9SweepFailedPrefix, rowA5AutoStartPrefix, rowA6RestartPrefix, rowA7ProviderPrefix,
+	}
+)
+
+// knownConditionID reports whether id names condition rows: an exact id, a
+// per-subject id ("autostart_failed:doctor"), or a prefix's stem
+// ("autostart_failed"), which matches every subject.
+func knownConditionID(id string) bool {
+	for _, c := range conditionIDs {
+		if id == c {
+			return true
+		}
+	}
+	for _, p := range conditionIDPrefixes {
+		if id == strings.TrimSuffix(p, ":") || (strings.HasPrefix(id, p) && len(id) > len(p)) {
+			return true
+		}
+	}
+	return false
+}
 
 // conditionSchedulerLoadFailed — A2, main.go's `scheduler load failed`.
 //

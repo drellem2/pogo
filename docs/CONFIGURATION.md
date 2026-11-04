@@ -513,9 +513,11 @@ pogo alerts --json    # the same rows as GET /alerts
 [`[agents] coordinator`](#coordinator-name) and
 [`[agents] escalation_box`](#the-escalation-mailbox). `EFFECTIVE` is that rule
 resolved against the config the running daemon loaded. `SOURCE` names the key
-that changed the recipient or muted the alert (a watcher's `notify_to`, an
-`[alerts."<name>"] mute`, or one of the alias keys below), or `default`. Muted
-alerts are listed first.
+that changed the recipient or muted the alert (an `[alerts."<name>"] route`,
+a watcher's `notify_to`, an `[alerts."<name>"] mute`, or one of the alias keys
+below), or `default`. A route whose box pogod could not find at startup shows
+its fallback in `EFFECTIVE`, and in `--json` as `route_invalid`. Muted alerts
+are listed first.
 
 ### Muting an alert (`[alerts."<name>"] mute`)
 
@@ -569,7 +571,66 @@ used to switch the blocked-reminder check off; it now leaves the check running
 (its `stall_watch_fired` events carry `nudge_delivery = "muted"`) and withholds
 only the nudge, so a muted item's backoff and notice cap still advance.
 
-Routing (`route`) arrives in a later slice of drellem2/pogo#262.
+A `[conditions] disable` entry or an `[alerts."condition.<id>"]` name must
+name a real condition row: an exact id (`scheduler_load_failed`), a
+per-subject id (`autostart_failed:doctor`), or a per-subject prefix's stem
+(`autostart_failed`, every subject). Anything else — a typo — is ignored with
+a startup warning listing the ids, rather than being listed as muted while
+muting nothing.
+
+### Routing an alert (`[alerts."<name>"] route`)
+
+Any alert can be sent to a different agent or mailbox (drellem2/pogo#262):
+
+```toml
+[alerts."stranded_work.branch"]
+route = "$escalation_box"
+
+[alerts."refinery.merged"]
+route = "pm-pogo"
+```
+
+The value is **one** agent or box name, or a role: `$coordinator` or
+`$escalation_box`, which name `[agents] coordinator` and
+`[agents] escalation_box` as configured (so a re-pointed box is followed).
+`route = ""` clears a route an earlier config layer or a `notify_to` set.
+
+**A route moves the alert's primary copy, and only that copy.** Which copy is
+primary is the alert's default rule as `pogo alerts` shows it under DEFAULT:
+
+| DEFAULT starts with | The routed copy | Not rerouted |
+|---------------------|-----------------|--------------|
+| `$coordinator` | the one sent to the coordinator (or the watcher's `notify_to`) | the escalation box's copy of an escalating finding; a failed merge's copy to its author; a stranded branch's copy to `pm-<repo>` |
+| `$escalation_box` | the one sent to the escalation box | — |
+| anything else (the filer, the crew agent, the condition's addressee) | every send | — |
+
+So `[agents] escalation_box` stays the default target of every escalation: a
+route does not move escalation copies. Routing a tiered watcher's alert *to* the
+escalation box therefore means an escalating finding arrives there twice.
+
+**A route never drops mail.** pogod checks every routed box with `mg` at
+startup and logs a warning for one that does not exist
+(`pogod: ⚠ … routes <name> to <box>, but there is no mailbox named <box> — until
+it exists, <name> is sent to <default> instead`), recording an
+`alert_route_invalid` event (`phase = "load"`). The route stays installed: at
+send time the box is checked again, and if it is still unknown — or the routed
+send fails — the mail goes to the alert's **default recipient** (the coordinator
+or escalation box its rule names; for a per-message alert, the recipient the
+send addressed) and an `alert_route_invalid` event (`phase = "send"`) records
+it. A box created later is picked up without a restart. pogod also logs one
+line at startup naming every route set by `[alerts]`.
+
+`mute` wins over `route`: a muted alert is sent nowhere. A condition row
+(`condition.<id>`) cannot be routed on its own — every row is sent as
+`condition.notice`; route that. `scheduler.delivery` is not an alert, and the
+`stall_watch.blocked_reminder` nudge cannot be routed yet (nudges are slice 4).
+
+**Every watcher's `notify_to` is an alias.** `[ack_watch] notify_to = "pm-pogo"`
+routes every alert that watcher sends (`pogo alerts` names
+`[ack_watch] notify_to` as its source). As an alias it gains the route's
+fallback: a `notify_to` naming a box that does not exist is now delivered to the
+coordinator instead of refused. An `[alerts]` route for one of the watcher's
+alerts wins over `notify_to`, and pogod warns at startup that it did.
 
 ## pogod's own conditions (`[conditions]`)
 

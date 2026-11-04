@@ -1529,6 +1529,22 @@ Flags:
 	if line := mutedAlertsLine(alertMutes); line != "" {
 		log.Print(line)
 	}
+	// Arm the alert routes (slice 3): `[alerts."<name>"] route` and every
+	// watcher's notify_to, its alias. A route naming an unknown box is
+	// reported here and still installed — the seam re-checks the box at send
+	// and falls back to the default recipient, so a route never drops mail.
+	alerts.BoxExists = alerts.MGBoxExists
+	alertRoutes := resolveAlertRoutes(cfg, alerts.MGBoxExists)
+	alerts.SetRoutes(alertRoutes.Routes)
+	for _, w := range alertRoutes.Warnings {
+		log.Print(w)
+	}
+	for _, e := range routeInvalidAtLoadEvents(alertRoutes) {
+		events.Emit(context.Background(), e)
+	}
+	if line := routedAlertsLine(alertRoutes); line != "" {
+		log.Print(line)
+	}
 
 	// Second, config-aware PATH repair pass: [agents] extra_path lets a
 	// deployment point pogod at harness runtimes the automatic probe in
@@ -1671,6 +1687,7 @@ Flags:
 	// fresh read of a file that may have changed since (drellem2/pogo#262).
 	{
 		s := alertSettingsFrom(cfg)
+		s.RouteInvalid = alertRoutes.Invalid
 		alertSettings.Store(&s)
 	}
 
