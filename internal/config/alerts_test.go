@@ -11,7 +11,7 @@ func TestAlertsTableParsesQuotedDottedNames(t *testing.T) {
 	_, home := layeredSandbox(t)
 	write(t, home, "[alerts.\"ack_watch.finding\"]\nmute = true\n\n"+
 		"[alerts.\"condition.out_of_band\"]\nmute = false\n\n"+
-		"[alerts.\"refinery.merged\"]\nroute = [\"x\"]\n\n"+ // no mute key: not an entry for slice 2
+		"[alerts.\"refinery.merged\"]\nroute = \"x\"\n\n"+ // route only: no mute
 		"[ack_watch]\nnotify_to = \"pm-pogo\"\n")
 
 	cfg := Load()
@@ -19,10 +19,11 @@ func TestAlertsTableParsesQuotedDottedNames(t *testing.T) {
 	want := map[string]AlertConfig{
 		"ack_watch.finding":     {Mute: true, MuteSet: true},
 		"condition.out_of_band": {Mute: false, MuteSet: true},
+		"refinery.merged":       {Route: "x", RouteSet: true},
 	}
 	got := map[string]AlertConfig{}
 	for k, v := range cfg.Alerts {
-		if v.MuteSet {
+		if v.MuteSet || v.RouteSet {
 			got[k] = v
 		}
 	}
@@ -58,5 +59,24 @@ func TestAlertsLayering(t *testing.T) {
 	}
 	if a := cfg.Alerts["deaf_watch.finding"]; a.Mute || !a.MuteSet {
 		t.Errorf("override layer's mute = false lost: %+v", a)
+	}
+}
+
+// drellem2/pogo#262 slice 3: route. The value is kept as written (pogod
+// validates it), and mute and route layer independently.
+func TestAlertsRouteParsesAndLayers(t *testing.T) {
+	xdg, home := layeredSandbox(t)
+	write(t, xdg, "[alerts.\"refinery.merged\"]\nmute = true\nroute = \"pm-pogo\"\n"+
+		"[alerts.\"stranded_work.branch\"]\nroute = \"$escalation_box\"\n")
+	write(t, home, "[alerts.\"refinery.merged\"]\nroute = \"\"\n"+
+		"[alerts.\"stranded_work.branch\"]\nmute = false\n")
+
+	cfg := Load()
+
+	if a := cfg.Alerts["refinery.merged"]; !a.Mute || !a.MuteSet || a.Route != "" || !a.RouteSet {
+		t.Errorf("refinery.merged: base mute kept, override clears the route: %+v", a)
+	}
+	if a := cfg.Alerts["stranded_work.branch"]; a.Route != "$escalation_box" || !a.RouteSet || a.Mute || !a.MuteSet {
+		t.Errorf("stranded_work.branch: base route kept under an override's mute: %+v", a)
 	}
 }

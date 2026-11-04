@@ -41,7 +41,9 @@ func TestAlertSettings_ExistingKeysAreReported(t *testing.T) {
 	for _, r := range alerts.Rows(s, false) {
 		by[r.Name] = r
 	}
-	if r := by[alerts.AckWatchFinding]; r.Source != "ack_watch.notify_to" || r.Muted {
+	// Since slice 3 notify_to is the route alias, named as config.toml spells it.
+	if r := by[alerts.AckWatchFinding]; r.Source != "[ack_watch] notify_to" || r.Route != "pm-pogo" || r.Muted ||
+		r.Effective != "pm-pogo; also human when it escalates" {
 		t.Errorf("ack_watch.finding: %+v", r)
 	}
 	for _, n := range []alerts.Name{alerts.ConditionNotice, alerts.ConditionOutOfBand, alerts.BlindWatchFinding, alerts.BlindWatchCleared} {

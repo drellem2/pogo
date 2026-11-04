@@ -27,12 +27,24 @@ type MailFunc = func(to, from, subject, body string) error
 // nil — the caller's detector carries on exactly as if the mail had gone, so
 // it still emits its own event and keeps its own suppression state. An
 // unmuted alert is passed to via unchanged and via's error is returned
-// unchanged. Routing (slice 3) is applied here too, which is why a send that
-// skips this function is a build failure (TestNoSendBypassesTheRegistry).
+// unchanged.
+//
+// A ROUTED alert (SetRoutes, slice 3) is sent to its route instead of to, when
+// to is the alert's primary recipient (see Primary). If the route's box does
+// not exist or the routed send fails, the mail goes to the route's fallback —
+// the default recipient — and an alert_route_invalid event is recorded: a
+// route never drops mail. That is why a send that skips this function is a
+// build failure (TestNoSendBypassesTheRegistry).
 func Mail(name Name, via MailFunc, to, from, subject, body string) error {
 	check(name)
 	if _, muted := Withhold(name, to, subject); muted {
 		return nil
+	}
+	if r, ok := routeFor(name, to); ok {
+		_, err := sendRouted(name, r, subject, func(box string) (struct{}, error) {
+			return struct{}{}, via(box, from, subject, body)
+		})
+		return err
 	}
 	return via(to, from, subject, body)
 }
@@ -42,15 +54,22 @@ func Mail(name Name, via MailFunc, to, from, subject, body string) error {
 // and returns the command's combined output and its error, exactly as those
 // callers' own exec.Command did before the seam existed.
 //
-// A muted alert returns no output and no error, as Mail does.
+// A muted alert returns no output and no error, as Mail does; a routed one is
+// sent to its route, with the same fallback as Mail.
 func MailOutput(name Name, to, from, subject, body string) ([]byte, error) {
 	check(name)
 	if _, muted := Withhold(name, to, subject); muted {
 		return nil, nil
 	}
-	cmd := execCommand("mg", "mail", "send", to,
-		"--from", from, "--subject", subject, "--body", body)
-	return cmd.CombinedOutput()
+	send := func(box string) ([]byte, error) {
+		cmd := execCommand("mg", "mail", "send", box,
+			"--from", from, "--subject", subject, "--body", body)
+		return cmd.CombinedOutput()
+	}
+	if r, ok := routeFor(name, to); ok {
+		return sendRouted(name, r, subject, send)
+	}
+	return send(to)
 }
 
 // Transport sends one message with `mg mail send`. It is the production
