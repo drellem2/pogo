@@ -1188,7 +1188,8 @@ type AgentMeta struct {
 	// Env is the crew-only `env` key: KEY=VALUE entries a crew agent is
 	// started with, applied BENEATH pogo's identity catalogue so a prompt can
 	// never rename an agent or repoint its mailbox, and re-applied on every
-	// restart (drellem2/pogo#263). Written as a TOML string array, single- or
+	// restart (drellem2/pogo#263). POGO_* keys are reserved and skipped at
+	// parse (reservedEnvPrefix); the layer order is the second line of defence. Written as a TOML string array, single- or
 	// multi-line: env = ["K=V", "K2=V2"]. Ignored for every non-crew spawn.
 	//
 	// json:"-" because an env can carry secrets: nothing that encodes an
@@ -1351,19 +1352,28 @@ func findFenceLine(s string) int {
 // AgentMeta fields stays backwards compatible.
 func parseFrontmatterBody(text string, meta *AgentMeta) error {
 	lines := strings.Split(text, "\n")
-	envUnclosed := false
+	// envRecoverFrom is the line number of an env array that never closed, or
+	// 0. While it is set, the parse is recovering from that array: a line that
+	// is not `key = value` (an unquoted element, a stray ']') belongs to the
+	// broken array and costs env a warning, never the block an error. A
+	// recognized key still parses, so it survives; a bare ']' ends recovery.
+	envRecoverFrom := 0
 	for i := 0; i < len(lines); i++ {
 		lineNo := i + 1
 		line := strings.TrimSpace(lines[i])
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// A bare ']' after an env array that never closed is that array's
-		// orphaned end (a recognized key interrupted it). Already warned on
-		// as part of env; never a block error.
-		if envUnclosed && isBareArrayClose(line) {
-			envUnclosed = false
-			continue
+		if envRecoverFrom != 0 {
+			if isBareArrayClose(line) {
+				envRecoverFrom = 0
+				continue
+			}
+			if eq := strings.IndexByte(line, '='); eq == -1 || !isRecognizedKey(line[:eq]) {
+				meta.envWarnings = append(meta.envWarnings, fmt.Sprintf(
+					"line %d: skipped as part of the malformed env array opened on line %d", lineNo, envRecoverFrom))
+				continue
+			}
 		}
 		eq := strings.IndexByte(line, '=')
 		if eq == -1 {
@@ -1379,26 +1389,14 @@ func parseFrontmatterBody(text string, meta *AgentMeta) error {
 			// next line is shaped like an array line (an element, a comment, a
 			// blank, a bare comma or the closing bracket). Stopping at the first
 			// line that is not keeps an unterminated array from swallowing the
-			// keys after it.
+			// keys after it; recovery (above) takes the rest of the broken array.
 			if strings.HasPrefix(val, "[") {
 				for findArrayClose(val) == -1 && i+1 < len(lines) && isArrayContinuation(lines[i+1]) {
 					i++
 					val += "\n" + strings.TrimSpace(lines[i])
 				}
-				// Still open at a line that is not array-shaped: the array is
-				// malformed (an unquoted element, say). Its own closing ']' is
-				// still ahead, and parsed as a key line it would fail the WHOLE
-				// block. So look ahead for that ']' — but never past a
-				// recognized key, which must survive. If no ']' turns up, take
-				// nothing more: the lines after are left to the normal parse.
 				if findArrayClose(val) == -1 {
-					if end := orphanArrayEnd(lines, i+1); end != -1 {
-						for ; i < end; i++ {
-							val += "\n" + strings.TrimSpace(lines[i+1])
-						}
-					} else {
-						envUnclosed = true
-					}
+					envRecoverFrom = lineNo
 				}
 			}
 			assignEnvField(meta, val, lineNo)
@@ -1411,27 +1409,11 @@ func parseFrontmatterBody(text string, meta *AgentMeta) error {
 	return nil
 }
 
-// orphanArrayEnd looks ahead from lines[from] for the line that ends a
-// malformed multi-line array: the first line ending in ']' (ignoring a
-// trailing comment). It returns that line's index, or -1 if a recognized
-// frontmatter key line or the end of the block comes first — a recognized key
-// is never consumed into a broken array.
-func orphanArrayEnd(lines []string, from int) int {
-	for j := from; j < len(lines); j++ {
-		t := strings.TrimSpace(lines[j])
-		if eq := strings.IndexByte(t, '='); eq != -1 {
-			if _, known := metaFieldByKey(strings.TrimSpace(t[:eq])); known {
-				return -1
-			}
-		}
-		if c := strings.IndexByte(t, '#'); c != -1 && !strings.Contains(t[:c], `"`) {
-			t = strings.TrimSpace(t[:c])
-		}
-		if strings.HasSuffix(t, "]") {
-			return j
-		}
-	}
-	return -1
+// isRecognizedKey reports whether k (untrimmed) names a frontmatter key this
+// parser assigns.
+func isRecognizedKey(k string) bool {
+	_, known := metaFieldByKey(strings.TrimSpace(k))
+	return known
 }
 
 // isBareArrayClose reports whether line is just ']' (plus an optional comment).
@@ -1479,12 +1461,23 @@ func assignEnvField(meta *AgentMeta, raw string, lineNo int) {
 		case !validEnvName(k):
 			meta.envWarnings = append(meta.envWarnings, fmt.Sprintf("line %d: env entry skipped: key %q is not a valid name ([A-Za-z_][A-Za-z0-9_]*)", lineNo, k))
 			continue
+		case strings.HasPrefix(k, reservedEnvPrefix):
+			meta.envWarnings = append(meta.envWarnings, fmt.Sprintf("line %d: env entry skipped: key %q is reserved (the %s prefix belongs to pogo)", lineNo, k, reservedEnvPrefix))
+			continue
 		}
 		env = append(env, e)
 	}
 	meta.Env = env
 	meta.explicit |= metaFieldEnv
 }
+
+// reservedEnvPrefix is the namespace frontmatter env may not set. It is
+// pogo's whole namespace, not only the keys the identity catalogue sets today:
+// POGO_ROLE=polecat on a crew agent or a moved POGO_HOME would change how pogo
+// tooling treats the agent, and a key pogo adds later must not turn out to be
+// one a prompt already set (pm-pogo ruling on drellem2/pogo#263). No escape
+// hatch.
+const reservedEnvPrefix = "POGO_"
 
 // validEnvName reports whether k is a portable environment variable name.
 func validEnvName(k string) bool {

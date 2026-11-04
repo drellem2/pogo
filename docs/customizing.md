@@ -91,10 +91,12 @@ env = [
 - **Beneath pogo's own variables.** `env` is applied below the identity
   catalogue (`POGO_AGENT_NAME`, `POGO_AGENT_TYPE`, `POGO_PROCESS_NAME`, …), so a
   prompt cannot rename its agent or point it at another mailbox; such an entry
-  is silently outranked. Only variables pogod actually sets for a crew agent
-  outrank it: `POGO_ROLE` and the worker core budget are polecat-only, so a
-  crew prompt that sets them is not overridden. `pogo agent env` lists what
-  pogod injects.
+  is outranked.
+- **`POGO_*` is reserved.** Any entry whose key starts with `POGO_` is skipped
+  with a warning naming the key; the rest of `env` still applies. The prefix is
+  pogo's whole namespace, not only the variables it sets today (`POGO_ROLE`,
+  for instance, is polecat-only and not part of crew identity, but a crew
+  prompt still may not set it). There is no override.
 - **On every restart too.** The value is captured when the agent starts and
   re-applied on each crash restart. An edit to the prompt takes effect at the
   next `pogo agent start` (or `stop` + start), not on a crash restart.
