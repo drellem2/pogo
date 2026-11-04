@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 	"sync/atomic"
 
 	"github.com/drellem2/pogo/internal/alerts"
@@ -16,9 +15,9 @@ import (
 // against a config the daemon is not running with.
 var alertSettings atomic.Pointer[alerts.Settings]
 
-// alertSettingsFrom extracts the existing keys that already decide who an
-// alert reaches, or whether it is sent. Slice 1 reports them; it changes no
-// send. The notify_to map is keyed as alerts.Def.Key spells it.
+// alertSettingsFrom extracts the keys that decide who an alert reaches, or
+// whether it is sent. The notify_to map is keyed as alerts.Def.Key spells it;
+// Muted is the resolved mute table, [alerts] entries and their aliases.
 func alertSettingsFrom(cfg *config.Config) alerts.Settings {
 	s := alerts.Settings{
 		Coordinator:   cfg.Agents.CoordinatorName(),
@@ -35,23 +34,9 @@ func alertSettingsFrom(cfg *config.Config) alerts.Settings {
 			"first_turn.notify_to":        cfg.FirstTurn.NotifyTo,
 			"mid_session_wedge.notify_to": cfg.MidSessionWedge.NotifyTo,
 		},
-		Muted: map[alerts.Name]string{},
-	}
-	if !cfg.Conditions.Mail {
-		s.Muted[alerts.ConditionNotice] = "conditions.mail = false"
-		s.Muted[alerts.ConditionOutOfBand] = "conditions.mail = false"
-	} else if !cfg.Conditions.OutOfBand {
-		s.Muted[alerts.ConditionOutOfBand] = "conditions.out_of_band = false"
-	}
-	if len(cfg.Conditions.Disable) > 0 {
-		// Per-row, so the alert as a whole is not muted; say which rows are.
-		if _, muted := s.Muted[alerts.ConditionNotice]; !muted {
-			s.Muted[alerts.ConditionNotice] = "conditions.disable = [" + strings.Join(cfg.Conditions.Disable, ", ") + "] (those rows only)"
-		}
-	}
-	if cfg.BlindWatch.Enabled && !cfg.BlindWatch.Mail {
-		s.Muted[alerts.BlindWatchFinding] = "blind_watch.mail = false"
-		s.Muted[alerts.BlindWatchCleared] = "blind_watch.mail = false"
+		// The same table the send seam enforces (alertmutes.go), so the
+		// listing cannot say an alert is live while the seam withholds it.
+		Muted: resolveAlertMutes(cfg).Muted,
 	}
 	return s
 }

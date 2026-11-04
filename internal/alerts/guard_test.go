@@ -41,6 +41,9 @@ var probeAllowed = map[string]string{
 	"internal/verdictwatch/probe.go":    "verdict-detector self-test: sends into a throwaway store",
 }
 
+// seamFuncs are the alerts functions a send site names its alert to.
+var seamFuncs = map[string]bool{"Mail": true, "MailOutput": true, "Withhold": true}
+
 var mailCallees = map[string]bool{
 	"mail": true, "Mail": true, "send": true, "sendMail": true, "SendMail": true, "Transport": true,
 }
@@ -173,15 +176,16 @@ func scan(root, self string, allowed map[string]string) (scanResult, error) {
 	return res, err
 }
 
-// isSeamCall reports a call to alerts.Mail or alerts.MailOutput (or, inside
-// the alerts package, to Mail / MailOutput unqualified).
+// isSeamCall reports a call to alerts.Mail, alerts.MailOutput or
+// alerts.Withhold (the mute check a non-mail send makes) — or, inside the
+// alerts package, to those unqualified.
 func isSeamCall(c *ast.CallExpr, inSelf bool) bool {
 	switch fn := c.Fun.(type) {
 	case *ast.SelectorExpr:
 		id, ok := fn.X.(*ast.Ident)
-		return ok && id.Name == "alerts" && (fn.Sel.Name == "Mail" || fn.Sel.Name == "MailOutput")
+		return ok && id.Name == "alerts" && seamFuncs[fn.Sel.Name]
 	case *ast.Ident:
-		return inSelf && (fn.Name == "Mail" || fn.Name == "MailOutput")
+		return inSelf && seamFuncs[fn.Name]
 	}
 	return false
 }
