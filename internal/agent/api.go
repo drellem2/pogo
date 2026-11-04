@@ -780,8 +780,8 @@ func (r *Registry) routes() []route {
 		// The two spawn routes answer inside the server's write deadline, with an
 		// explicit 202 still-running when the spawn outlives it (mg-c252) — see
 		// responsedeadline.go.
-		{"/agents/start", WithSpawnResponseDeadline("/agents/start", r.handleStart)},
-		{"/agents/spawn-polecat", WithSpawnResponseDeadline("/agents/spawn-polecat", r.handleSpawnPolecat)},
+		{startRoute, WithSpawnResponseDeadline(startRoute, r.handleStart)},
+		{spawnPolecatRoute, WithSpawnResponseDeadline(spawnPolecatRoute, r.handleSpawnPolecat)},
 		{"/agents/drain", r.handleDrain},
 		{"/agents/hostload", r.handleHostLoad},
 		{"/agents/prompts", r.handlePrompts},
@@ -1687,6 +1687,21 @@ func (r *Registry) handleStart(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// In-flight request gate, keyed on the name (drellem2/pogo#265): a start
+	// retried while the first is still in this handler — which after a 202
+	// spawn-still-running it may be for minutes — is refused, not raced. Shares
+	// the ledger with spawn-polecat, because both register under the same agent
+	// name space. Released by a defer for the reason given at spawn-polecat's.
+	releaseSpawnRequest, inFlightRefusal := r.openSpawnRequest(startRoute, startReq.Name, "")
+	if inFlightRefusal != "" {
+		http.Error(w, inFlightRefusal, http.StatusConflict)
+		return
+	}
+	defer releaseSpawnRequest()
+	if hook := r.spawnRequestHeldHook; hook != nil {
+		hook(startRoute, startReq.Name, "")
+	}
+
 	a, err := r.StartCrewAgent(startReq.Name)
 	if err != nil {
 		switch {
@@ -1773,6 +1788,30 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		failPolecatSpawn(w, spawnReq, http.StatusServiceUnavailable,
 			"pogod is draining for a redeploy; not dispatching new polecats")
 		return
+	}
+
+	// In-flight request gate: refuse a retry while the FIRST request for the same
+	// work item or name is still inside this handler (drellem2/pogo#265). The
+	// live-owner gate below can only see owners that exist — a registered agent,
+	// the witness, a claim — and this handler takes the claim LAST, so for the
+	// whole pre-claim window a retry is invisible to it. Check-and-set, so two
+	// concurrent requests cannot each see the other as absent; non-overridable,
+	// for the live-owner gate's reason.
+	//
+	// The release is DEFERRED HERE, at the point of opening, so it runs on every
+	// return below and on a panic's unwind: a leaked entry would refuse its item
+	// and name until pogod restarts. It also runs only when the handler really
+	// ends, which after a 202 spawn-still-running is well after the caller got
+	// its answer — that is the window a retry comes from. See
+	// spawnrequestledger.go.
+	releaseSpawnRequest, inFlightRefusal := r.openSpawnRequest(spawnPolecatRoute, spawnReq.Name, spawnReq.Id)
+	if inFlightRefusal != "" {
+		failPolecatSpawn(w, spawnReq, http.StatusConflict, inFlightRefusal)
+		return
+	}
+	defer releaseSpawnRequest()
+	if hook := r.spawnRequestHeldHook; hook != nil {
+		hook(spawnPolecatRoute, spawnReq.Name, spawnReq.Id)
 	}
 
 	// Live-owner gate: refuse to put a SECOND worker on a name or a work item a

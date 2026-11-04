@@ -654,6 +654,18 @@ type Registry struct {
 	// the empty ledger; beginSpawnClaim fills it in. See spawnclaimadopt.go.
 	spawnClaimsInFlight map[string]inFlightSpawnClaim
 
+	// spawnRequestsInFlight is the in-flight spawn REQUEST ledger: every
+	// spawn-polecat / start handler that is mid-flight, keyed by "item:<id>" and
+	// "name:<name>" (drellem2/pogo#265). Unlike spawnClaimsInFlight it opens at
+	// the handler's ENTRY, so it covers the pre-claim window the live-owner gate
+	// cannot see. Nil is the empty ledger. See spawnrequestledger.go.
+	spawnRequestsInFlight map[string]spawnRequestInFlight
+
+	// spawnRequestHeldHook, when non-nil, is called by handleSpawnPolecat and
+	// handleStart right after their ledger entry opens. Tests only: it is how a
+	// test holds a spawn mid-flight to fire a concurrent second one at it.
+	spawnRequestHeldHook func(route, name, workItemID string)
+
 	// remainderDeclarer reads whether a dispatched work item carries the
 	// `declares-remainder` tag, so handleSpawnPolecat can PREPEND the warning
 	// that `mg done` will refuse the item without a successor (mg-a367). Nil
