@@ -8,6 +8,9 @@ under different terms:
 Apache License 2.0 (see LICENSE-APACHE):
   - cmd/pogo/       CLI tool
   - cmd/lsp/        Project listing tool
+  - cmd/enth-land-gate/  enth pre-land gate on the merged tree (no internal/
+                    or pkg/ imports; its _test.go files use the BSL-side
+                    internal/vcs/enthvcs/enthdtest harness and stay BSL)
   - emacs/          Emacs integration
   - nvim/           Neovim integration
   - vscode/         VS Code extension

@@ -48,8 +48,10 @@ Recording the same land again is safe and answers the first MR
 ("already_recorded"); re-run this command if its answer was lost. Never land
 again to recover a lost record.
 
-No refinery gate runs: the merged result is not tested before it lands. That is
-the accepted trade-off of enth-vcs §6; post-land CI on the mirror is the check.
+No refinery gate runs here. The template's self_land tests the MERGED tree before
+landing: enth-land-gate tests and attests the tree the land would produce, and
+enth land --require lands only that tree (mg-64f2e). Where enth-land-gate is not
+installed, it prints "GATE NOT INSTALLED — landing untested" and lands as before.
 
 --post-merge-tag=<tag> tags what the land landed as (enth tag <tag> <new>),
 before the item is closed: the self-land form of 'pogo refinery submit

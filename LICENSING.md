@@ -10,6 +10,9 @@ The following components are licensed under the [Apache License 2.0](LICENSE-APA
 
 - `cmd/pogo/` — CLI tool
 - `cmd/lsp/` — project listing tool
+- `cmd/enth-land-gate/` — enth pre-land gate on the merged tree. It imports
+  nothing from `internal/` or `pkg/`. Its `_test.go` files use the BSL-side
+  `internal/vcs/enthvcs/enthdtest` harness and stay BSL.
 - `emacs/` — Emacs integration
 - `nvim/` — Neovim integration
 - `vscode/` — VS Code extension
