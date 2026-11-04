@@ -1252,10 +1252,18 @@ func findFenceLine(s string) int {
 // AgentMeta fields stays backwards compatible.
 func parseFrontmatterBody(text string, meta *AgentMeta) error {
 	lines := strings.Split(text, "\n")
+	envUnclosed := false
 	for i := 0; i < len(lines); i++ {
 		lineNo := i + 1
 		line := strings.TrimSpace(lines[i])
 		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// A bare ']' after an env array that never closed is that array's
+		// orphaned end (a recognized key interrupted it). Already warned on
+		// as part of env; never a block error.
+		if envUnclosed && isBareArrayClose(line) {
+			envUnclosed = false
 			continue
 		}
 		eq := strings.IndexByte(line, '=')
@@ -1278,6 +1286,21 @@ func parseFrontmatterBody(text string, meta *AgentMeta) error {
 					i++
 					val += "\n" + strings.TrimSpace(lines[i])
 				}
+				// Still open at a line that is not array-shaped: the array is
+				// malformed (an unquoted element, say). Its own closing ']' is
+				// still ahead, and parsed as a key line it would fail the WHOLE
+				// block. So look ahead for that ']' — but never past a
+				// recognized key, which must survive. If no ']' turns up, take
+				// nothing more: the lines after are left to the normal parse.
+				if findArrayClose(val) == -1 {
+					if end := orphanArrayEnd(lines, i+1); end != -1 {
+						for ; i < end; i++ {
+							val += "\n" + strings.TrimSpace(lines[i+1])
+						}
+					} else {
+						envUnclosed = true
+					}
+				}
 			}
 			assignEnvField(meta, val, lineNo)
 			continue
@@ -1287,6 +1310,38 @@ func parseFrontmatterBody(text string, meta *AgentMeta) error {
 		}
 	}
 	return nil
+}
+
+// orphanArrayEnd looks ahead from lines[from] for the line that ends a
+// malformed multi-line array: the first line ending in ']' (ignoring a
+// trailing comment). It returns that line's index, or -1 if a recognized
+// frontmatter key line or the end of the block comes first — a recognized key
+// is never consumed into a broken array.
+func orphanArrayEnd(lines []string, from int) int {
+	for j := from; j < len(lines); j++ {
+		t := strings.TrimSpace(lines[j])
+		if eq := strings.IndexByte(t, '='); eq != -1 {
+			if _, known := metaFieldByKey(strings.TrimSpace(t[:eq])); known {
+				return -1
+			}
+		}
+		if c := strings.IndexByte(t, '#'); c != -1 && !strings.Contains(t[:c], `"`) {
+			t = strings.TrimSpace(t[:c])
+		}
+		if strings.HasSuffix(t, "]") {
+			return j
+		}
+	}
+	return -1
+}
+
+// isBareArrayClose reports whether line is just ']' (plus an optional comment).
+func isBareArrayClose(line string) bool {
+	t := strings.TrimSpace(line)
+	if c := strings.IndexByte(t, '#'); c != -1 {
+		t = strings.TrimSpace(t[:c])
+	}
+	return t == "]"
 }
 
 // isArrayContinuation reports whether line could belong to a multi-line

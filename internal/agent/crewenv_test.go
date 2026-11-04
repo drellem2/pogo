@@ -103,6 +103,38 @@ func TestFrontmatterEnvMalformedIsFieldScoped(t *testing.T) {
 	}
 }
 
+// Review round 1 (mg-cbe8b): a malformed MULTI-LINE array must also cost only
+// env — its own closing ']' must not be parsed as a key line and fail the
+// block.
+func TestFrontmatterEnvMalformedMultiLineIsFieldScoped(t *testing.T) {
+	cases := map[string]string{
+		"unquoted element":           "env = [\n  FOO=bar,\n]\n",
+		"unquoted second element":    "env = [\"A=1\",\n  B=2\n]\n",
+		"unquoted then trailing ]":   "env = [\n  \"A=1\",\n  B=2 ]\n",
+		"known key interrupts array": "env = [\n  FOO=bar,\nworktree = true\n]\n",
+		"unquoted, comment on close": "env = [\n  FOO=bar,\n] # end\n",
+		"unquoted, no close at all":  "env = [\n  FOO=bar,\n",
+	}
+	for name, envBlock := range cases {
+		t.Run(name, func(t *testing.T) {
+			meta, _, err := parsePromptFrontmatterBytes([]byte("+++\n" + envBlock +
+				"auto_start = true\nrestart_on_crash = true\nnudge_on_start = \"go\"\n+++\nbody\n"))
+			if err != nil {
+				t.Fatalf("malformed multi-line env failed the whole block: %v", err)
+			}
+			if !meta.AutoStart || !meta.RestartOnCrash || meta.NudgeOnStart != "go" {
+				t.Errorf("neighbours lost: %+v", *meta)
+			}
+			if strings.Contains(name, "known key") && !meta.Worktree {
+				t.Errorf("recognized key inside a broken array was swallowed")
+			}
+			if meta.Env != nil || meta.HasField("env") || len(meta.EnvWarnings()) != 1 {
+				t.Errorf("Env=%q HasField=%v warnings=%q", meta.Env, meta.HasField("env"), meta.EnvWarnings())
+			}
+		})
+	}
+}
+
 // An unterminated multi-line array stops at the first line that cannot be an
 // array line, so the keys after it survive.
 func TestFrontmatterEnvUnterminatedArrayDoesNotSwallowKeys(t *testing.T) {
@@ -212,13 +244,16 @@ func TestStartCrewAgentAppliesFrontmatterEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("envcrew", "restart_on_crash = false\nenv = [\"CREW_TOKEN=abc\", \"POGO_AGENT_NAME=impostor\"]\n")
+	write("envcrew", "restart_on_crash = false\nenv = [\"CREW_TOKEN=abc\", \"POGO_AGENT_NAME=impostor\", \"POGO_AGENT_TYPE=impostor\", \"POGO_PROCESS_NAME=impostor\"]\n")
 
 	a, err := reg.StartCrewAgent("envcrew")
 	if err != nil {
 		t.Fatalf("StartCrewAgent: %v", err)
 	}
 	waitDone(t, a)
+	// Edit the prompt before the crash restart: the restart must run the env
+	// captured at spawn, not re-read the prompt.
+	write("envcrew", "restart_on_crash = false\nenv = [\"CREW_TOKEN=edited\"]\n")
 	b, err := reg.Respawn("envcrew")
 	if err != nil {
 		t.Fatalf("Respawn: %v", err)
@@ -232,6 +267,10 @@ func TestStartCrewAgentAppliesFrontmatterEnv(t *testing.T) {
 		}
 		if env["POGO_AGENT_NAME"] != "envcrew" {
 			t.Errorf("%s: POGO_AGENT_NAME = %q, frontmatter must not override identity", f, env["POGO_AGENT_NAME"])
+		}
+		if env[AgentTypeEnv] != string(TypeCrew) || env[ProcessNameEnv] != ProcessName(TypeCrew, "envcrew") {
+			t.Errorf("%s: %s = %q, %s = %q, frontmatter must not override identity",
+				f, AgentTypeEnv, env[AgentTypeEnv], ProcessNameEnv, env[ProcessNameEnv])
 		}
 	}
 	if b.baseEnv == nil || !reflect.DeepEqual(b.baseEnv, a.baseEnv) {
