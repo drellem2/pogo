@@ -41,8 +41,45 @@ var probeAllowed = map[string]string{
 	"internal/verdictwatch/probe.go":    "verdict-detector self-test: sends into a throwaway store",
 }
 
+// nudgeAllowed are the places that type into an agent's terminal WITHOUT the
+// nudge seam, keyed by file ("path") or by one function in it ("path:Func"),
+// each with why. Two kinds belong here:
+//
+//   - nudge TRANSPORTS: the function a nudge alert's seam call is handed, as
+//     alerts.Transport is for mail. The seam has already muted or routed the
+//     nudge by the time they run;
+//   - nudges that are NOT alerts (drellem2/pogo#262, pm-pogo ruling): they
+//     deliver something else — a mail pointer, a prompt, a keystroke — and
+//     carry no news of pogod's, so there is nothing to mute or route.
+//
+// Anything else that calls a nudge primitive is a nudge nobody can mute.
+var nudgeAllowed = map[string]string{
+	"internal/agent/nudge.go":                              "the nudge primitives themselves",
+	"internal/agent/wakepolicy.go":                         "the nudge primitives themselves",
+	"internal/agent/startverify.go":                        "not an alert: the kickoff prompt's re-sent Enter",
+	"internal/agent/agent.go:Spawn":                        "not an alert: the kickoff prompt",
+	"internal/agent/agent.go:respawn":                      "not an alert: the kickoff prompt",
+	"internal/agent/api.go:handleNudge":                    "not an alert: an operator's own `pogo nudge`",
+	"cmd/pogod/wakewatchwire.go:wakeWatchNudge":            "not an alert: the transport of wake-watch's mail-arrival pointers",
+	"internal/wakewatch/wakewatch.go":                      "not an alert: mail-arrival pointers (the mail is the message)",
+	"internal/midsessionwedge/source.go":                   "not an alert: the mid-session-wedge bare submit",
+	"internal/scheduler/deliverer.go":                      "not an alert: a scheduler delivery",
+	"cmd/pogod/main.go:newStallNudgerWithTimeoutAndDamper": "transport: the stall-watch nudger (alerts.NudgeVia in internal/stallwatch)",
+	"cmd/pogod/main.go:wakeConditionAddressee":             "transport: the condition wake (alerts.Nudge in cmd/pogod/conditionnotify.go)",
+	"internal/stallwatch/stallwatch.go:deliver":            "transport: handed to each stall-watch category's alerts.NudgeVia",
+	"cmd/pogod/crewresetwire.go:crewResetNudge":            "transport: the crew-reset pointer (alerts.Nudge in internal/crewreset)",
+}
+
+// nudgeCallees are the names a nudge is typed through: the Agent methods and
+// the injected transports watchers hold. A zero-argument call is not a nudge
+// (the refinery's r.wake() pokes its own queue loop).
+var nudgeCallees = map[string]bool{
+	"Nudge": true, "NudgeWake": true, "NudgeWithMode": true, "NudgeWithModeCorrelated": true,
+	"nudge": true, "nudgeAgent": true, "wake": true,
+}
+
 // seamFuncs are the alerts functions a send site names its alert to.
-var seamFuncs = map[string]bool{"Mail": true, "MailOutput": true, "Withhold": true}
+var seamFuncs = map[string]bool{"Mail": true, "MailOutput": true, "Withhold": true, "Nudge": true, "NudgeVia": true}
 
 var mailCallees = map[string]bool{
 	"mail": true, "Mail": true, "send": true, "sendMail": true, "SendMail": true, "Transport": true,
@@ -74,8 +111,9 @@ func moduleRoot(t *testing.T) string {
 
 // scan walks every Go file under root. self is the root-relative directory of
 // the alerts package itself, which is exempt from the bypass rules (it IS the
-// seam) but not from the SendMGMail rule.
-func scan(root, self string, allowed map[string]string) (scanResult, error) {
+// seam) but not from the SendMGMail rule. allowed lists mail probes;
+// nudgeOK lists nudge transports and non-alert nudges (see nudgeAllowed).
+func scan(root, self string, allowed, nudgeOK map[string]string) (scanResult, error) {
 	res := scanResult{seamCalls: map[string]int{}}
 	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -127,6 +165,21 @@ func scan(root, self string, allowed map[string]string) (scanResult, error) {
 			}
 			return false
 		}
+		enclosing := func(n ast.Node) string {
+			for _, d := range f.Decls {
+				if fd, ok := d.(*ast.FuncDecl); ok && n.Pos() >= fd.Pos() && n.End() <= fd.End() {
+					return fd.Name.Name
+				}
+			}
+			return ""
+		}
+		nudgeExempt := func(n ast.Node) bool {
+			if _, ok := nudgeOK[rel]; ok {
+				return true
+			}
+			_, ok := nudgeOK[rel+":"+enclosing(n)]
+			return ok
+		}
 
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch x := n.(type) {
@@ -155,6 +208,9 @@ func scan(root, self string, allowed map[string]string) (scanResult, error) {
 						res.violations = append(res.violations, at(x)+": exec of `mg mail send` outside alerts.Mail")
 					}
 				}
+				if nudgeCallees[calleeName(x)] && len(x.Args) > 0 && !insideTransport(x) && !nudgeExempt(x) {
+					res.violations = append(res.violations, at(x)+": "+calleeName(x)+"(...) types into a terminal outside alerts.Nudge — name the alert: alerts.Nudge(alerts.<Name>, ...)")
+				}
 				if _, probe := allowed[rel]; len(x.Args) == 4 && mailCallees[calleeName(x)] && !insideTransport(x) && !probe {
 					res.violations = append(res.violations, at(x)+": "+calleeName(x)+"(to, from, subject, body) called directly — wrap it: alerts.Mail(alerts.<Name>, "+calleeName(x)+", ...)")
 				}
@@ -176,9 +232,9 @@ func scan(root, self string, allowed map[string]string) (scanResult, error) {
 	return res, err
 }
 
-// isSeamCall reports a call to alerts.Mail, alerts.MailOutput or
-// alerts.Withhold (the mute check a non-mail send makes) — or, inside the
-// alerts package, to those unqualified.
+// isSeamCall reports a call to alerts.Mail, alerts.MailOutput,
+// alerts.Nudge, alerts.NudgeVia or alerts.Withhold — or, inside the alerts
+// package, to those unqualified.
 func isSeamCall(c *ast.CallExpr, inSelf bool) bool {
 	switch fn := c.Fun.(type) {
 	case *ast.SelectorExpr:
@@ -260,7 +316,7 @@ func declaredConsts(t *testing.T) map[string]Name {
 
 func TestNoSendBypassesTheRegistry(t *testing.T) {
 	root := moduleRoot(t)
-	res, err := scan(root, "internal/alerts", probeAllowed)
+	res, err := scan(root, "internal/alerts", probeAllowed, nudgeAllowed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +329,7 @@ func TestNoSendBypassesTheRegistry(t *testing.T) {
 // stopped parsing (wrong root, a skipped tree) would find no violations AND
 // no seam calls. A floor on the seam calls it does find tells those apart.
 func TestGuardFindsTheSeam(t *testing.T) {
-	res, err := scan(moduleRoot(t), "internal/alerts", probeAllowed)
+	res, err := scan(moduleRoot(t), "internal/alerts", probeAllowed, nudgeAllowed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +349,7 @@ func TestRegistryMatchesTheSendSites(t *testing.T) {
 	if len(consts) == 0 {
 		t.Fatal("parsed no Name constants from registry.go")
 	}
-	res, err := scan(moduleRoot(t), "internal/alerts", probeAllowed)
+	res, err := scan(moduleRoot(t), "internal/alerts", probeAllowed, nudgeAllowed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,13 +396,16 @@ import (
 
 type w struct{ mail func(a, b, c, d string) error }
 
-func f(x w, name string) {
+func f(x w, name string, a *agent.Agent, n nudger) {
 	_ = client.SendMGMail("to", "from", "s", "b")
 	_ = exec.Command("mg", "mail", "send", "to").Run()
 	_ = []string{"--root", "r", "mail", "send", "to"}
 	_ = x.mail("to", "from", "s", "b")
 	_ = alerts.Transport("to", "from", "s", "b")
 	_ = alerts.Mail(name, x.mail, "to", "from", "s", "b")
+	_ = a.NudgeWake("hi", 0, 0, "")
+	_ = n.nudge("to", "hi")
+	_, _ = alerts.Nudge(name, n.nudge, "to", "s", "hi")
 }
 `)
 	write("good/good.go", `package good
@@ -358,7 +417,11 @@ import (
 
 type w struct{ mail func(a, b, c, d string) error }
 
-func f(x w) {
+func f(x w, n nudger) {
+	_, _ = alerts.Nudge(alerts.CrewResetPointer, n.nudge, "to", "s", "hi")
+	_, _, _ = alerts.NudgeVia(alerts.StallWatchUnreadMail, "to", "s", func(to string) (int, error) {
+		return 0, n.nudge(to, "hi")
+	})
 	_ = alerts.Mail(alerts.AckWatchFinding, x.mail, "to", "from", "s", "b")
 	_ = alerts.Mail(alerts.RefusalWatchAlarm, func(to, from, s, b string) error {
 		return exec.Command("mg", "mail", "send", to).Run()
@@ -367,7 +430,20 @@ func f(x w) {
 	_ = exec.Command("mg", "mail", "list").Run()
 }
 `)
-	res, err := scan(root, "alerts", nil)
+	write("transport/t.go", `package transport
+
+func Typer(a *agent.Agent) error { return a.Nudge("hi") }
+
+func Other(a *agent.Agent) error { return a.Nudge("hi") }
+`)
+	write("delivery/d.go", `package delivery
+
+func f(a *agent.Agent) error { return a.Nudge("") }
+`)
+	res, err := scan(root, "alerts", nil, map[string]string{
+		"transport/t.go:Typer": "transport",
+		"delivery/d.go":        "not an alert",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,6 +454,10 @@ func f(x w) {
 		"bad/bad.go:15: mail(to, from, subject, body) called directly",
 		"bad/bad.go:16: Transport(to, from, subject, body) called directly",
 		"bad/bad.go:17: the alert name must be a declared",
+		"bad/bad.go:18: NudgeWake(...) types into a terminal outside alerts.Nudge",
+		"bad/bad.go:19: nudge(...) types into a terminal outside alerts.Nudge",
+		"bad/bad.go:20: the alert name must be a declared",
+		"transport/t.go:5: Nudge(...) types into a terminal outside alerts.Nudge",
 	}
 	for _, w := range want {
 		found := false
@@ -391,11 +471,12 @@ func f(x w) {
 		}
 	}
 	for _, v := range res.violations {
-		if strings.HasPrefix(v, "good/") {
+		if strings.HasPrefix(v, "good/") || strings.HasPrefix(v, "delivery/") || strings.HasPrefix(v, "transport/t.go:3") {
 			t.Errorf("guard flagged a sanctioned send: %s", v)
 		}
 	}
-	if res.seamCalls["AckWatchFinding"] != 1 || res.seamCalls["RefusalWatchAlarm"] != 1 || res.seamCalls["OrphanPolecat"] != 1 {
+	if res.seamCalls["AckWatchFinding"] != 1 || res.seamCalls["RefusalWatchAlarm"] != 1 || res.seamCalls["OrphanPolecat"] != 1 ||
+		res.seamCalls["CrewResetPointer"] != 1 || res.seamCalls["StallWatchUnreadMail"] != 1 {
 		t.Errorf("seam calls not counted: %v", res.seamCalls)
 	}
 }

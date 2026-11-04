@@ -12,6 +12,9 @@ import (
 
 // Routing (slice 3 of drellem2/pogo#262). `[alerts."<name>"] route = "<box>"`
 // sends an alert's primary copy (alerts.Primary) to another agent or mailbox.
+// A nudge alert (slice 4) is routed the same way: it is typed at the route's
+// agent instead, and a box that does not exist or a nudge that fails falls
+// back to the default recipient.
 // The value is one box name, or a role token: "$coordinator" or
 // "$escalation_box", resolved here against [agents].
 //
@@ -74,6 +77,9 @@ func resolveAlertRoutes(cfg *config.Config, exists func(string) bool) alertRoute
 	primary := func(d alerts.Def) string {
 		switch alerts.Primary(d) {
 		case alerts.RoleCoordinator:
+			if d.Key == alerts.StallWatchAgentKey && cfg.StallWatch.Agent != "" {
+				return cfg.StallWatch.Agent
+			}
 			if v := notifyTo[d.Key]; v != "" {
 				return v
 			}
@@ -88,6 +94,12 @@ func resolveAlertRoutes(cfg *config.Config, exists func(string) bool) alertRoute
 	fallback := func(d alerts.Def) string {
 		switch alerts.Primary(d) {
 		case alerts.RoleCoordinator:
+			// A stall-watch nudge falls back to the agent it watches: that
+			// is its default recipient, and [stall_watch] agent is not a
+			// route alias.
+			if d.Key == alerts.StallWatchAgentKey && cfg.StallWatch.Agent != "" {
+				return cfg.StallWatch.Agent
+			}
 			return coordinator
 		case alerts.RoleEscalationBox:
 			return escalation
@@ -185,9 +197,6 @@ func routableAlert(n alerts.Name) (alerts.Def, string) {
 	}
 	if d.Class != alerts.ClassAlert {
 		return d, fmt.Sprintf("is a %s mechanic, not an alert, and cannot be routed", d.Class)
-	}
-	if n == alerts.StallWatchBlockedReminder {
-		return d, "is a nudge; routing nudges is not supported yet (drellem2/pogo#262 slice 4)"
 	}
 	return d, ""
 }

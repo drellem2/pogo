@@ -16,8 +16,9 @@ type Settings struct {
 	Coordinator   string
 	EscalationBox string
 	// NotifyTo holds each watcher's resolved notify_to, keyed as Def.Key
-	// spells it ("ack_watch.notify_to"). It replaces $coordinator for alerts
-	// whose Key names it.
+	// spells it ("ack_watch.notify_to"), and the resolved [stall_watch] agent
+	// under StallWatchAgentKey. It replaces $coordinator for alerts whose Key
+	// names it.
 	NotifyTo map[string]string
 	// Muted names the muted alerts, each with the key that muted it
 	// ("[conditions] mail = false", "[alerts.\"ack_watch.finding\"] mute =
@@ -34,8 +35,11 @@ type Settings struct {
 
 // Row is one line of `pogo alerts` / GET /alerts.
 type Row struct {
-	Name    Name   `json:"name"`
-	Class   string `json:"class"`
+	Name  Name   `json:"name"`
+	Class string `json:"class"`
+	// Channel is how the alert is delivered: "mail", or "nudge" for text
+	// typed into the recipient's terminal.
+	Channel string `json:"channel"`
 	Default string `json:"default"`
 	// Effective is Default with its role tokens and any notify_to resolved
 	// against the running config — who the mail goes to on this install.
@@ -62,7 +66,7 @@ func Rows(s Settings, all bool) []Row {
 		if d.Class != ClassAlert && !all {
 			continue
 		}
-		r := Row{Name: d.Name, Class: d.Class, Default: d.Default, Key: d.Key, Summary: d.Summary, Source: "default"}
+		r := Row{Name: d.Name, Class: d.Class, Channel: d.Channel(), Default: d.Default, Key: d.Key, Summary: d.Summary, Source: "default"}
 		first := s.Coordinator
 		if v, ok := s.NotifyTo[d.Key]; ok && v != "" {
 			first = v
@@ -106,7 +110,7 @@ func Rows(s Settings, all bool) []Row {
 			continue
 		}
 		out = append(out, Row{
-			Name: n, Class: ClassAlert, Default: parent.Default,
+			Name: n, Class: ClassAlert, Channel: ChannelMail, Default: parent.Default,
 			Effective: resolve(parent.Default, s.Coordinator, s.EscalationBox),
 			Muted:     true, Source: why, Key: parent.Key,
 			Summary: "condition row " + n.Kind() + " only (sent as " + string(ConditionNotice) + ")",

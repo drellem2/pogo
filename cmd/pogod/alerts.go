@@ -31,6 +31,10 @@ func alertSettingsFrom(cfg *config.Config) alerts.Settings {
 	// Likewise the routes (alertroutes.go). This does not probe mg: main
 	// fills RouteInvalid from the startup check, whose result the startup
 	// warning printed.
+	// The stall-watch nudges go to the watched agent, which is not a route
+	// alias (it also names whose mailbox the watcher reads), so it joins the
+	// listing's map only — not watcherNotifyTo, which installs aliases.
+	s.NotifyTo[alerts.StallWatchAgentKey] = cfg.StallWatch.Agent
 	rt := resolveAlertRoutes(cfg, nil)
 	s.Routes = rt.Routes
 	return s

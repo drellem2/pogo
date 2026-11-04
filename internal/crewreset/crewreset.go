@@ -229,8 +229,11 @@ func (w *Watcher) Tick(now time.Time) []Notice {
 		}
 		s.notices++
 		s.lastAt = now
+		nudgeMuted := ""
 		if w.o.Nudge != nil {
-			n.NudgeErr = w.o.Nudge(p.Name, Pointer(n.Number))
+			// crew_reset.pointer is an alert of its own (drellem2/pogo#262
+			// slice 4): muted, the pointer is withheld and the mail stands.
+			nudgeMuted, n.NudgeErr = alerts.Nudge(alerts.CrewResetPointer, w.o.Nudge, p.Name, subject, Pointer(n.Number))
 			if n.NudgeErr != nil {
 				w.o.Logf("crew-reset: pointer to %s failed (the mail landed): %v", p.Name, n.NudgeErr)
 			}
@@ -246,6 +249,9 @@ func (w *Watcher) Tick(now time.Time) []Notice {
 		}
 		if n.NudgeErr != nil {
 			d["nudge_error"] = n.NudgeErr.Error()
+		}
+		if nudgeMuted != "" {
+			d["nudge_muted"] = nudgeMuted
 		}
 		w.emit(EventNotice, d)
 		out = append(out, n)
