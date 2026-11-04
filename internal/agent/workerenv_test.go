@@ -16,7 +16,7 @@ import (
 // enumerates the names is a THIRD copy of the list and would drift with either.
 func TestSpawnInjectsExactlyWhatTheCatalogueReports(t *testing.T) {
 	spawned := envAssignments(agentIdentityEnv(
-		"pfbaf", TypePolecat, "pogo-cat-pfbaf", "/prompts/pfbaf.md", "/receipts/pfbaf.log"))
+		"pfbaf", TypePolecat, "pogo-cat-pfbaf", "/prompts/pfbaf.md", "/receipts/pfbaf.log", 18123))
 
 	injected := map[string]bool{}
 	for _, a := range spawned {

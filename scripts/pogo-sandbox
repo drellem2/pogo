@@ -606,7 +606,12 @@ pogo_sandbox_isolate() {
 
 # pogo_sandbox_daemon BIN READY_PATH [LOGFILE] — reserve a port (once per run)
 # and start a pogod that has been PROVEN to be ours. Sets $POGO_SANDBOX_PORT,
-# $POGO_SANDBOX_URL, $POGO_SANDBOX_PID, $POGO_SANDBOX_LOG.
+# $POGO_SANDBOX_URL, $POGO_SANDBOX_PID, $POGO_SANDBOX_LOG, and EXPORTS
+# POGO_PORT=$POGO_SANDBOX_PORT, so every pogo/mg CLI run after it — and every
+# process the caller starts — talks to the sandbox, not to the live pogod on
+# :10000. Before mg-0c1a5 only the `run --daemon` path exported it, and callers
+# that sourced this file (enth_selfland_test.sh, enth_workspaces_test.sh) had to
+# remember to; one that forgot drove the live fleet from inside a "sandbox".
 #
 # Safe to call again after pogo_sandbox_daemon_kill: the port reservation is held
 # until teardown on purpose, so a control that kills its daemon to prove what a
@@ -632,6 +637,7 @@ pogo_sandbox_daemon() {
     POGO_SANDBOX_READY="$ready"
     sandbox_daemon_start "$bin" "$POGO_SANDBOX_PORT" "$POGO_SANDBOX_LOG" "$ready"
     POGO_SANDBOX_PID="$SANDBOX_DAEMON_PID"
+    export POGO_PORT="$POGO_SANDBOX_PORT"
     return 0
 }
 
@@ -835,8 +841,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
                 trap pogo_sandbox_down EXIT
                 pogo_sandbox_isolate
                 if [ -n "$daemon_bin" ]; then
+                    # Exports POGO_PORT itself (mg-0c1a5).
                     pogo_sandbox_daemon "$daemon_bin" "$ready"
-                    export POGO_PORT="$POGO_SANDBOX_PORT"
                 fi
                 export POGO_SANDBOX_DIR POGO_SANDBOX_TOKEN POGO_SANDBOX_PORT POGO_SANDBOX_URL
                 "$@" || rc=$?
