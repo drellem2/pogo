@@ -148,7 +148,10 @@ func workerReading(ctx context.Context, w agent.WorkerProgress, now time.Time, s
 	case w.WorktreeDir == "":
 		// A worker spawned with NoWorktree has no tree to be quiet in. That is
 		// not an unwritten tree and must not be counted as one — its work goes
-		// somewhere this detector cannot see, so it is unmeasurable here.
+		// somewhere this detector cannot see. Nor is it a failed measurement:
+		// it is a spawn choice, so it gets its own state and stays OFF the
+		// blind line (mg-ac972). See Reading.NoWorktree.
+		out.NoWorktree = true
 		out.WritesError = "spawned without a worktree"
 	case worktreeGone(w.WorktreeDir):
 		// A worker that is REGISTERED and pid-alive, holding a path that is not

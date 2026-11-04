@@ -3916,6 +3916,21 @@ workers on this line. An *unreadable* worktree — EACCES on the root — is a
 different answer and still blinds the reading, which is the control that makes
 the distinction mean anything.
 
+**A worker spawned `--no-worktree` gets its own field too, and is not blind
+(mg-ac972).** Box-ops run without a worktree, so the writes term has nothing to
+ask them. That is a spawn choice known before anything is measured, not a
+failed measurement, so it is reported as `no_worktree_workers` (never
+`omitempty`) and `no_worktree_names`, and in the `Measurements` line — never on
+`blind`. Unlike a gone worktree these workers *are* judged (age and PTY), but
+they are excluded from the writes term and so can never be `blocked`: an unknown
+write term is never quiet. Before this, one box-op beside a working fleet made
+every reading `blind`.
+
+Each worker on the `worktree unreadable` blind entry now carries the walk's
+error in parentheses — `p1 (worktree walk over its share of the sample budget:
+…)` or the filesystem error — so the `fleet_progress_error` event records *why*,
+not only *who*.
+
 progress-watch is disjoint from its nearest neighbours:
 
 | | population | question |

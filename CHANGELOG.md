@@ -12,6 +12,16 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **progress-watch no longer reads `blind` because a `--no-worktree` worker
+  is running (mg-ac972).** A box-op has no tree, so its writes were reported
+  as "worktree unreadable" and put on the blind line, and one box-op made the
+  whole verdict `blind` while the fleet was landing work. It is now reported
+  as `no_worktree_workers` / `no_worktree_names`, judged on age and PTY, and
+  excluded from the writes term. A walk that really fails still blinds the
+  reading, and the blind entry now carries each worker's error text. Before
+  this, events.log recorded only the names, so the cause of p1841f's one
+  "unreadable" sample at 2026-11-04T19:38Z could not be recovered.
+
 - **`spawn-polecat` is on the record from the moment it is requested
   (drellem2/pogo#169).** The handler used to print nothing unconditional
   before its terminal line, and its first events fired at the very end. So a
