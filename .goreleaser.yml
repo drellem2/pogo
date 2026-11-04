@@ -111,3 +111,10 @@ release:
     ### Installation
 
     Download the appropriate binary for your platform below, extract it, and place it in your PATH.
+
+    ### Provenance
+
+    This release ships **without SLSA provenance**. Releases may be published
+    by `scripts/release-local.sh`, which runs goreleaser outside GitHub Actions,
+    and SLSA signing needs Actions OIDC; releases ship unsigned until a
+    signing path exists outside Actions (mg-c0665). Verify downloads against `checksums.txt`.
