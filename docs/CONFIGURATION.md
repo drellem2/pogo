@@ -516,14 +516,19 @@ in `--json`) reading `nudge`:
 
 A stall-watch nudge that cannot be typed is mailed instead as
 `stall_watch.mail_fallback`, a separate alert. Nudges that only deliver
-something else are **not** alerts and are not listed: wake-watch's mail-arrival
-pointers (the mail is the message), the kickoff prompt and its re-sent Enter,
-the mid-session-wedge submit, scheduler deliveries and an operator's own
-`pogo nudge`.
+something else are **not** alerts: wake-watch's mail-arrival pointers
+(`wake_watch.pointer` — the mail is the message), the kickoff prompt and its
+re-sent Enter (`agent.kickoff`), the mid-session-wedge submit
+(`mid_session_wedge.submit`), scheduler deliveries by nudge
+(`scheduler.nudge_delivery`) and an operator's own `pogo nudge`
+(`operator.nudge`). `pogo alerts --all` lists them as delivery mechanics
+(`CLASS` `delivery`, marked `(delivery)` beside the name); they cannot be muted
+or routed, and an `[alerts]` entry naming one is ignored with a startup
+warning.
 
 ```bash
 pogo alerts           # every alert: muted state, effective and default recipient
-pogo alerts --all     # also the delivery mechanics that send mail but are not alerts
+pogo alerts --all     # also the delivery mechanics (mail and nudges) that are not alerts
 pogo alerts --json    # the same rows as GET /alerts
 ```
 

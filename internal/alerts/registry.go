@@ -21,7 +21,8 @@
 // mid-session-wedge bare submit, the kickoff prompt and its re-sent Enter, a
 // scheduler delivery and an operator's own `pogo nudge` carry no news of
 // pogod's: they deliver something else (a mail, a prompt, a keystroke). They
-// are not declared here and are not mutable.
+// are declared here with Class "delivery" so `pogo alerts --all` lists them,
+// but they do not go through the seam and are not mutable or routable.
 //
 // Some mail is not an alert: the scheduler delivering a registered message is
 // a delivery mechanic, not pogod telling anyone anything. Those are declared
@@ -200,6 +201,18 @@ const (
 
 	// Delivery mechanics, not alerts.
 	SchedulerDelivery Name = "scheduler.delivery"
+
+	// Nudges that are delivery mechanics, not alerts (pm-pogo ruling on
+	// drellem2/pogo#262): each delivers something else — a mail pointer, a
+	// prompt, a keystroke — and carries no news of pogod's. They are declared
+	// so `pogo alerts --all` lists them; they do not go through the seam and
+	// cannot be muted or routed. Each is tied to the guard's allowlist entry
+	// for the code that types it (nudgeAllowed in guard_test.go).
+	WakeWatchPointer       Name = "wake_watch.pointer"
+	AgentKickoff           Name = "agent.kickoff"
+	MidSessionWedgeSubmit  Name = "mid_session_wedge.submit"
+	SchedulerNudgeDelivery Name = "scheduler.nudge_delivery"
+	OperatorNudge          Name = "operator.nudge"
 )
 
 // Tiered watchers: the first-tier box is the coordinator (or the watcher's
@@ -215,8 +228,8 @@ const tiered = RoleCoordinator + "; also " + RoleEscalationBox + " when it escal
 // watcher reads.
 const StallWatchAgentKey = "stall_watch.agent"
 
-// nudges are the declared alerts delivered by typing into a terminal rather
-// than by mail. Channel reports them.
+// nudges are the declarations delivered by typing into a terminal rather than
+// by mail — alerts and delivery mechanics alike. Channel reports them.
 var nudges = map[Name]bool{
 	ConditionWake:               true,
 	CrewResetPointer:            true,
@@ -228,6 +241,12 @@ var nudges = map[Name]bool{
 	StallWatchWorkedUnclaimed:   true,
 	StallWatchPreservedWorktree: true,
 	StallWatchStrandedPush:      true,
+	// Delivery mechanics typed into a terminal.
+	WakeWatchPointer:       true,
+	AgentKickoff:           true,
+	MidSessionWedgeSubmit:  true,
+	SchedulerNudgeDelivery: true,
+	OperatorNudge:          true,
 }
 
 // Channels an alert is delivered on.
@@ -317,6 +336,11 @@ var registry = []Def{
 	{WorktreeUnpushed, ClassAlert, RoleCoordinator, "", "a worktree with unpushed commits was preserved"},
 	{WorktreeUndetermined, ClassAlert, RoleCoordinator, "", "a worktree whose state could not be read was preserved"},
 	{SchedulerDelivery, ClassDelivery, "the schedule's target", "", "a scheduled message delivered by mail"},
+	{WakeWatchPointer, ClassDelivery, "the agent the mail is for", "", "pointer to newly arrived mail (the mail is the message)"},
+	{AgentKickoff, ClassDelivery, "the agent being started", "", "the kickoff prompt, and the Enter re-sent when it was not submitted"},
+	{MidSessionWedgeSubmit, ClassDelivery, "the wedged agent", "", "a bare submit to release a mid-session wedge"},
+	{SchedulerNudgeDelivery, ClassDelivery, "the schedule's target", "", "a scheduled message delivered by nudge"},
+	{OperatorNudge, ClassDelivery, "the agent the operator names", "", "an operator's own `pogo nudge`"},
 }
 
 var byName = func() map[Name]Def {

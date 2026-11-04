@@ -105,7 +105,13 @@ func TestRowsListMutedFirstIncludingConditionRows(t *testing.T) {
 		},
 	}
 	rows := Rows(s, false)
-	if len(rows) != len(registry)-1+1 { // minus the delivery, plus the condition row
+	deliveries := 0
+	for _, d := range registry {
+		if d.Class == ClassDelivery {
+			deliveries++
+		}
+	}
+	if len(rows) != len(registry)-deliveries+1 { // minus the deliveries, plus the condition row
 		t.Errorf("listed %d rows", len(rows))
 	}
 	if !rows[0].Muted || !rows[1].Muted || rows[2].Muted {
