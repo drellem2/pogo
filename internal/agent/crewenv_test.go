@@ -114,6 +114,12 @@ func TestFrontmatterEnvMalformedMultiLineIsFieldScoped(t *testing.T) {
 		"known key interrupts array": "env = [\n  FOO=bar,\nworktree = true\n]\n",
 		"unquoted, comment on close": "env = [\n  FOO=bar,\n] # end\n",
 		"unquoted, no close at all":  "env = [\n  FOO=bar,\n",
+		// Review round 2 (mg-cbe8b): an element ending in ']' must not be
+		// taken for the array's end, and a line with no '=' in a broken
+		// array is env's problem, not the block's.
+		"element ending in ]":         "env = [\n  HOST=[::1]\n]\n",
+		"no '=' and no ]":             "env = [\n  LOG_LEVEL\n",
+		"junk after interrupting key": "env = [\n  FOO\nworktree = true\n  BAR\n]\n",
 	}
 	for name, envBlock := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -125,11 +131,12 @@ func TestFrontmatterEnvMalformedMultiLineIsFieldScoped(t *testing.T) {
 			if !meta.AutoStart || !meta.RestartOnCrash || meta.NudgeOnStart != "go" {
 				t.Errorf("neighbours lost: %+v", *meta)
 			}
-			if strings.Contains(name, "known key") && !meta.Worktree {
+			if strings.Contains(name, "key") && !meta.Worktree {
 				t.Errorf("recognized key inside a broken array was swallowed")
 			}
-			if meta.Env != nil || meta.HasField("env") || len(meta.EnvWarnings()) != 1 {
-				t.Errorf("Env=%q HasField=%v warnings=%q", meta.Env, meta.HasField("env"), meta.EnvWarnings())
+			w := meta.EnvWarnings()
+			if meta.Env != nil || meta.HasField("env") || len(w) == 0 || !strings.Contains(w[0], "line 1: env ignored") {
+				t.Errorf("Env=%q HasField=%v warnings=%q", meta.Env, meta.HasField("env"), w)
 			}
 		})
 	}
@@ -169,6 +176,31 @@ func TestFrontmatterNoEnv(t *testing.T) {
 	meta := parseFM(t, "auto_start = true\n")
 	if meta.Env != nil || meta.HasField("env") || meta.EnvWarnings() != nil || len(meta.EnvKeys()) != 0 {
 		t.Errorf("no env key: %+v", *meta)
+	}
+}
+
+// pm-pogo ruling on #263: POGO_* is reserved in crew env. The reserved key is
+// skipped with a warning naming it; the rest of env and of the block applies.
+func TestFrontmatterEnvReservesPogoPrefix(t *testing.T) {
+	meta := parseFM(t, "auto_start = true\nenv = [\"POGO_ROLE=x\", \"FOO=bar\", \"POGO_HOME=/elsewhere\"]\nnudge_on_start = \"go\"\n")
+	if !reflect.DeepEqual(meta.Env, []string{"FOO=bar"}) {
+		t.Errorf("Env = %q, want [FOO=bar]", meta.Env)
+	}
+	if !meta.AutoStart || meta.NudgeOnStart != "go" || !meta.HasField("env") {
+		t.Errorf("reserved key cost more than itself: %+v", *meta)
+	}
+	w := strings.Join(meta.EnvWarnings(), "\n")
+	for _, k := range []string{"POGO_ROLE", "POGO_HOME"} {
+		if !strings.Contains(w, `"`+k+`"`) {
+			t.Errorf("no warning names %s: %q", k, meta.EnvWarnings())
+		}
+	}
+	if strings.Contains(w, "/elsewhere") {
+		t.Errorf("warning leaks a value: %q", w)
+	}
+	// Control: a near-miss name is not reserved.
+	if m := parseFM(t, "env = [\"POGOX=1\", \"pogo_role=1\"]\n"); len(m.Env) != 2 {
+		t.Errorf("only the exact POGO_ prefix is reserved: Env = %q", m.Env)
 	}
 }
 
@@ -244,7 +276,7 @@ func TestStartCrewAgentAppliesFrontmatterEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("envcrew", "restart_on_crash = false\nenv = [\"CREW_TOKEN=abc\", \"POGO_AGENT_NAME=impostor\", \"POGO_AGENT_TYPE=impostor\", \"POGO_PROCESS_NAME=impostor\"]\n")
+	write("envcrew", "restart_on_crash = false\nenv = [\"CREW_TOKEN=abc\", \"POGO_AGENT_NAME=impostor\", \"POGO_AGENT_TYPE=impostor\", \"POGO_PROCESS_NAME=impostor\", \"POGO_ROLE=x\"]\n")
 
 	a, err := reg.StartCrewAgent("envcrew")
 	if err != nil {
@@ -272,6 +304,15 @@ func TestStartCrewAgentAppliesFrontmatterEnv(t *testing.T) {
 			t.Errorf("%s: %s = %q, %s = %q, frontmatter must not override identity",
 				f, AgentTypeEnv, env[AgentTypeEnv], ProcessNameEnv, env[ProcessNameEnv])
 		}
+		// POGO_ROLE is not in crew identity, so only the reservation keeps the
+		// prompt's value out. "Unchanged", not "absent": the test process's own
+		// environment (inherited via os.Environ) may carry one.
+		if env[RoleEnv] == "x" || env[RoleEnv] != os.Getenv(RoleEnv) {
+			t.Errorf("%s: %s = %q, want the inherited %q; POGO_* is reserved", f, RoleEnv, env[RoleEnv], os.Getenv(RoleEnv))
+		}
+	}
+	if !reflect.DeepEqual(a.baseEnv, []string{"CREW_TOKEN=abc"}) {
+		t.Errorf("spawn baseEnv = %q, want only the non-reserved entry", a.baseEnv)
 	}
 	if b.baseEnv == nil || !reflect.DeepEqual(b.baseEnv, a.baseEnv) {
 		t.Errorf("respawn baseEnv = %q, want the spawn-captured %q", b.baseEnv, a.baseEnv)
