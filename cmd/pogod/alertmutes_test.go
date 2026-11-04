@@ -43,6 +43,8 @@ func TestAlertMutes_AliasKeys(t *testing.T) {
 		{"conditions.mail", func(c *config.Config) { c.Conditions.Mail = false }, map[alerts.Name]string{
 			alerts.ConditionNotice:    "[conditions] mail = false",
 			alerts.ConditionOutOfBand: "[conditions] mail = false",
+			// No notice, nothing to wake for (slice 4 lists it).
+			alerts.ConditionWake: "follows condition.notice: [conditions] mail = false",
 		}},
 		{"conditions.out_of_band", func(c *config.Config) { c.Conditions.OutOfBand = false }, map[alerts.Name]string{
 			alerts.ConditionOutOfBand: "[conditions] out_of_band = false",
@@ -309,5 +311,32 @@ func TestConditionMutes_NoticeMutedWithoutOutOfBandIsWhollyDisabled(t *testing.T
 	}
 	if n := mutedEvents(t, log, alerts.ConditionNotice); n != 1 {
 		t.Errorf("%d alert_muted events, want 1", n)
+	}
+}
+
+// drellem2/pogo#262 slice 4: condition.wake follows condition.notice's mute,
+// can be muted on its own, and an explicit unmute while the notice is muted
+// is listed as muted anyway (the annunciator withholds it) and warned about.
+func TestAlertMutes_ConditionWakeFollowsNotice(t *testing.T) {
+	cfg := defaultsCfg()
+	cfg.Alerts = map[string]config.AlertConfig{"condition.wake": {Mute: true, MuteSet: true}}
+	if got := resolveAlertMutes(cfg).Muted; len(got) != 1 || got[alerts.ConditionWake] != `[alerts."condition.wake"] mute = true` {
+		t.Errorf("wake muted alone: %v", got)
+	}
+
+	cfg = defaultsCfg()
+	cfg.Conditions.Mail = false
+	cfg.Alerts = map[string]config.AlertConfig{"condition.wake": {Mute: false, MuteSet: true}}
+	tbl := resolveAlertMutes(cfg)
+	if got := tbl.Muted[alerts.ConditionWake]; got != "follows condition.notice: [conditions] mail = false" {
+		t.Errorf("wake listed as %q while the notice is muted — the annunciator withholds it regardless", got)
+	}
+	if !strings.Contains(strings.Join(tbl.Warnings, "\n"), `[alerts."condition.wake"] mute = false has no effect`) {
+		t.Errorf("no warning for an unmute that cannot take effect: %v", tbl.Warnings)
+	}
+
+	// Control: with the notice live, the wake is not muted.
+	if got := resolveAlertMutes(defaultsCfg()).Muted; len(got) != 0 {
+		t.Errorf("default install muted %v", got)
 	}
 }

@@ -1351,24 +1351,25 @@ func (w *Watcher) fireTo(recipient, category string, n Notice, details map[strin
 	if n.Subject != "" {
 		details["nudge_subject"] = n.Subject
 	}
-	// The blocked-reminder is a muteable alert (drellem2/pogo#262 slice 2;
-	// `blocked_reminder_enabled = false` is now its alias). Muted, the check
-	// has still run and this event is still emitted — only the nudge is
-	// withheld, and the seam records alert_muted. The other categories are
-	// not alerts in the registry yet (slice 4).
-	if category == categoryBlockedReminder {
-		if why, muted := alerts.Withhold(alerts.StallWatchBlockedReminder, recipient, n.Subject); muted {
-			details["nudge_delivery"] = "muted"
-			details["muted"] = why
-			w.emit(events.Event{
-				EventType: "stall_watch_fired",
-				Agent:     "pogod",
-				Details:   details,
-			})
-			return
-		}
+	// Every check's nudge is an alert (drellem2/pogo#262 slice 4), named per
+	// category, so it is muted and routed at the seam. Muted, the check has
+	// still run and this event is still emitted — only the nudge is withheld,
+	// and the seam records alert_muted. Routed, it is typed at the route's
+	// agent instead; the event's nudge_routed_to says so.
+	delivery, to, muted, err := w.deliver(category, recipient, n)
+	if muted != "" {
+		details["nudge_delivery"] = "muted"
+		details["muted"] = muted
+		w.emit(events.Event{
+			EventType: "stall_watch_fired",
+			Agent:     "pogod",
+			Details:   details,
+		})
+		return
 	}
-	delivery, err := w.nudge(recipient, n)
+	if to != recipient {
+		details["nudge_routed_to"] = to
+	}
 	if err != nil {
 		details["nudge_error"] = err.Error()
 	}
@@ -1391,6 +1392,41 @@ func (w *Watcher) fireTo(recipient, category string, n Notice, details map[strin
 		Agent:     "pogod",
 		Details:   details,
 	})
+}
+
+// deliver sends a category's nudge through the alert seam under its alert
+// name. It returns the delivery, the agent the nudge was finally addressed to
+// (a route can change it), and the mute reason when the alert is muted.
+func (w *Watcher) deliver(category, recipient string, n Notice) (d Delivery, to, muted string, err error) {
+	to = recipient
+	send := func(box string) (Delivery, error) {
+		to = box
+		return w.nudge(box, n)
+	}
+	switch category {
+	case categoryBlockedReminder:
+		d, muted, err = alerts.NudgeVia(alerts.StallWatchBlockedReminder, recipient, n.Subject, send)
+	case categoryUnclaimedItems:
+		d, muted, err = alerts.NudgeVia(alerts.StallWatchUnclaimedItems, recipient, n.Subject, send)
+	case categoryPriorityWake:
+		d, muted, err = alerts.NudgeVia(alerts.StallWatchPriorityWake, recipient, n.Subject, send)
+	case categoryUnreadMail:
+		d, muted, err = alerts.NudgeVia(alerts.StallWatchUnreadMail, recipient, n.Subject, send)
+	case categoryIndefiniteHold:
+		d, muted, err = alerts.NudgeVia(alerts.StallWatchIndefiniteHold, recipient, n.Subject, send)
+	case categoryWorkedUnclaimed:
+		d, muted, err = alerts.NudgeVia(alerts.StallWatchWorkedUnclaimed, recipient, n.Subject, send)
+	case categoryPreservedWorktree:
+		d, muted, err = alerts.NudgeVia(alerts.StallWatchPreservedWorktree, recipient, n.Subject, send)
+	case categoryStrandedPush:
+		d, muted, err = alerts.NudgeVia(alerts.StallWatchStrandedPush, recipient, n.Subject, send)
+	default:
+		// A category with no alert name would be a nudge nobody can mute.
+		// TestEveryCategoryIsAnAlert keeps this unreachable; refusing here
+		// rather than sending keeps the guarantee if it is ever reached.
+		err = fmt.Errorf("stall-watch category %q has no alert name; nudge not sent", category)
+	}
+	return d, to, muted, err
 }
 
 // oldestModTime returns the earliest ModTime in items. items is non-empty at

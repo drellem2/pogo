@@ -94,6 +94,21 @@ func resolveAlertMutes(cfg *config.Config) alertMuteTable {
 		}
 		delete(t.Muted, n)
 	}
+	// condition.wake wakes the addressee to read condition.notice, so the
+	// annunciator never wakes for a notice it withheld. List that as the
+	// mute it is — even over [alerts."condition.wake"] mute = false, which
+	// cannot take effect and is reported as such.
+	if why := t.Muted[alerts.ConditionNotice]; why != "" {
+		a, set := cfg.Alerts[string(alerts.ConditionWake)]
+		if set && a.MuteSet && !a.Mute {
+			t.Warnings = append(t.Warnings, fmt.Sprintf(
+				"pogod: ⚠ [alerts.%q] mute = false has no effect while condition.notice is muted (%s) — there is no notice to wake anyone for",
+				string(alerts.ConditionWake), why))
+		}
+		if _, muted := t.Muted[alerts.ConditionWake]; !muted {
+			t.Muted[alerts.ConditionWake] = "follows condition.notice: " + why
+		}
+	}
 	return t
 }
 
