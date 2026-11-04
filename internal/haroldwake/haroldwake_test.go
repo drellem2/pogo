@@ -525,7 +525,8 @@ func TestRunExecsTheResolvedAbsolutePath(t *testing.T) {
 func TestInstallShim(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "bin")
 	pogo := "/opt/pogo's bin/pogo"
-	changed, err := InstallShim(dir, pogo)
+	env := ShimEnv{PogoHome: "/srv/pogo's home"}
+	changed, err := InstallShim(dir, pogo, env)
 	if err != nil || !changed {
 		t.Fatalf("InstallShim = %v, %v; want changed", changed, err)
 	}
@@ -541,21 +542,50 @@ func TestInstallShim(t *testing.T) {
 	if !strings.HasPrefix(string(data), "#!/bin/sh\n") {
 		t.Errorf("shim does not start with #!/bin/sh:\n%s", data)
 	}
-	if !strings.Contains(string(data), `exec '/opt/pogo'\''s bin/pogo' hook harold-wake "$@"`) {
-		t.Errorf("shim does not exec the quoted pogo path:\n%s", data)
+	for _, want := range []string{
+		`export POGO_HOME='/srv/pogo'\''s home'` + "\n",
+		"unset MG_ROOT\n",
+		`exec '/opt/pogo'\''s bin/pogo' hook harold-wake "$@"` + "\n",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("shim lacks %q:\n%s", want, data)
+		}
 	}
 
-	changed, err = InstallShim(dir, pogo)
+	changed, err = InstallShim(dir, pogo, env)
 	if err != nil || changed {
 		t.Errorf("second InstallShim = %v, %v; want unchanged", changed, err)
 	}
-	if _, err := InstallShim(dir, "bin/pogo"); err == nil {
-		t.Errorf("InstallShim accepted a relative pogo path, which harold's cwd of / would break")
+	// A state root that moved is a change: the old shim would wake agents
+	// from the old tree.
+	env.MGRoot = "/srv/mg"
+	changed, err = InstallShim(dir, pogo, env)
+	if err != nil || !changed {
+		t.Errorf("InstallShim after MG_ROOT changed = %v, %v; want changed", changed, err)
+	}
+	data, _ = os.ReadFile(path)
+	if !strings.Contains(string(data), "export MG_ROOT='/srv/mg'\n") || strings.Contains(string(data), "unset MG_ROOT") {
+		t.Errorf("shim does not export the install-time MG_ROOT:\n%s", data)
+	}
+
+	for _, bad := range []struct {
+		pogo string
+		env  ShimEnv
+		why  string
+	}{
+		{"bin/pogo", ShimEnv{PogoHome: "/p"}, "a relative pogo path, which harold's cwd of / would break"},
+		{pogo, ShimEnv{}, "no POGO_HOME, which would leave the hook on harold's"},
+		{pogo, ShimEnv{PogoHome: "p"}, "a relative POGO_HOME"},
+		{pogo, ShimEnv{PogoHome: "/p", MGRoot: "mg"}, "a relative MG_ROOT"},
+	} {
+		if _, err := InstallShim(dir, bad.pogo, bad.env); err == nil {
+			t.Errorf("InstallShim accepted %s", bad.why)
+		}
 	}
 }
 
 // The shim is run by harold with stdin attached; it must hand both stdin and
-// the environment to pogo untouched.
+// the environment to pogo untouched, apart from the state roots it pins.
 func TestShimPassesStdinAndEnvThrough(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "pogo")
@@ -564,7 +594,7 @@ func TestShimPassesStdinAndEnvThrough(t *testing.T) {
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InstallShim(dir, fake); err != nil {
+	if _, err := InstallShim(dir, fake, ShimEnv{PogoHome: "/p"}); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(filepath.Join(dir, ShimName))
@@ -577,5 +607,47 @@ func TestShimPassesStdinAndEnvThrough(t *testing.T) {
 	got, _ := os.ReadFile(out)
 	if string(got) != "hook harold-wake|mayor|payload" {
 		t.Errorf("shim passed through %q", got)
+	}
+}
+
+// harold's daemon may carry no POGO_HOME or MG_ROOT (launchd started it), or
+// another instance's. The hook must still read the install-time agent tree and
+// mail through the install-time store, so the shim sets both over whatever
+// harold passes, and clears an MG_ROOT that install did not have.
+func TestShimPinsTheInstallTimeStateRoots(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  ShimEnv
+		want string
+	}{
+		{"mg root set", ShimEnv{PogoHome: "/inst/pogo", MGRoot: "/inst/mg"}, "/inst/pogo|/inst/mg|"},
+		{"mg root unset", ShimEnv{PogoHome: "/inst/pogo"}, "/inst/pogo|unset|"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fake := filepath.Join(dir, "pogo")
+			out := filepath.Join(dir, "out")
+			script := fmt.Sprintf("#!/bin/sh\nprintf '%%s|' \"$POGO_HOME\" \"${MG_ROOT-unset}\" > %q\n", out)
+			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := InstallShim(dir, fake, tc.env); err != nil {
+				t.Fatal(err)
+			}
+			for _, harold := range [][]string{
+				{"HAROLD_IDENTITY=mayor"},
+				{"HAROLD_IDENTITY=mayor", "POGO_HOME=/harold/pogo", "MG_ROOT=/harold/mg"},
+			} {
+				cmd := exec.Command(filepath.Join(dir, ShimName))
+				cmd.Env = harold
+				cmd.Dir = "/"
+				if b, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("shim: %v\n%s", err, b)
+				}
+				if got, _ := os.ReadFile(out); string(got) != tc.want {
+					t.Errorf("under harold env %q the hook saw POGO_HOME|MG_ROOT = %q, want %q", harold, got, tc.want)
+				}
+			}
+		})
 	}
 }

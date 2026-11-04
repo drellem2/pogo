@@ -3280,8 +3280,14 @@ absolute entries of `PATH`. Relative `PATH` entries are skipped.
 meant to mail and could not (no `mg`, or `mg` failed or timed out), or when
 `harold-wake.conf` is broken. harold logs a non-zero exit.
 
-pogod does not run or read any of this. If the wrapper's `pogo` moves, run
-`pogo install` again to rewrite it.
+**State roots.** The wrapper sets `POGO_HOME` to the one `pogo install` ran
+under and `MG_ROOT` to install's value, or clears it when install had none.
+harold's daemon may have been started without either, or with another
+instance's, and the hook must read this install's agents and
+`harold-wake.conf` and mail through this install's store.
+
+pogod does not run or read any of this. If the wrapper's `pogo` moves, or you
+change `POGO_HOME` or `MG_ROOT`, run `pogo install` again to rewrite it.
 
 ## The missing-mail-loop announcer (deaf-watch)
 

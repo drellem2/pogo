@@ -5,5 +5,7 @@
   identity's own name is the agent, unless `~/.pogo/harold-wake.conf` maps it to
   another. Only the count is passed on. The ping's text never reaches the mail,
   because a stranger wrote it. An identity with no coordinator or crew agent
-  behind it wakes nobody. See docs/CONFIGURATION.md, "Waking an agent on
-  Discord activity (harold)".
+  behind it wakes nobody. The wrapper pins the `POGO_HOME` and `MG_ROOT` that
+  `pogo install` ran under, so the hook does not depend on harold's
+  environment. See docs/CONFIGURATION.md, "Waking an agent on Discord
+  activity (harold)".

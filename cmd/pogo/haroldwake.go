@@ -45,15 +45,37 @@ on Discord activity".`,
 }
 
 // installHaroldWakeShim writes ~/.pogo/bin/harold-wake pointing at the pogo
-// running this install. It is inert until harold's config names it, so
-// `pogo install` writes it on every host rather than asking.
+// running this install, under this install's POGO_HOME and MG_ROOT. It is
+// inert until harold's config names it, so `pogo install` writes it on every
+// host rather than asking.
 func installHaroldWakeShim() (path string, changed bool, err error) {
-	dir := filepath.Join(config.PogoHome(), "bin")
+	env, err := haroldWakeShimEnv()
+	if err != nil {
+		return filepath.Join(config.PogoHome(), "bin", haroldwake.ShimName), false, err
+	}
+	dir := filepath.Join(env.PogoHome, "bin")
 	path = filepath.Join(dir, haroldwake.ShimName)
 	exe, err := os.Executable()
 	if err != nil {
 		return path, false, err
 	}
-	changed, err = haroldwake.InstallShim(dir, exe)
+	changed, err = haroldwake.InstallShim(dir, exe, env)
 	return path, changed, err
+}
+
+// haroldWakeShimEnv is the state roots the shim pins, made absolute here
+// because harold runs the shim from /, where a relative root names another
+// tree.
+func haroldWakeShimEnv() (haroldwake.ShimEnv, error) {
+	home, err := filepath.Abs(config.PogoHome())
+	if err != nil {
+		return haroldwake.ShimEnv{}, err
+	}
+	env := haroldwake.ShimEnv{PogoHome: home}
+	if mg := os.Getenv("MG_ROOT"); mg != "" {
+		if env.MGRoot, err = filepath.Abs(mg); err != nil {
+			return haroldwake.ShimEnv{}, err
+		}
+	}
+	return env, nil
 }

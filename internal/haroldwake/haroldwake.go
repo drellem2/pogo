@@ -411,19 +411,47 @@ func (f Finder) MG() (string, error) {
 	return "", errors.New("no mg at ~/go/bin/mg, beside pogo, in /opt/homebrew/bin, /usr/local/bin or /usr/bin, or on PATH")
 }
 
+// ShimEnv is the state the shim pins for the hook: the roots `pogo install`
+// ran under. harold's daemon starts the shim with its own environment, which
+// launchd may have left without POGO_HOME or MG_ROOT, or with another
+// instance's. Without them pinned the hook would read ~/.pogo's agents and map
+// (possibly a stale legacy tree) and mail through the default mg store.
+type ShimEnv struct {
+	// PogoHome is the resolved POGO_HOME at install time. Required.
+	PogoHome string
+	// MGRoot is MG_ROOT at install time; empty means it was unset, and the
+	// shim then clears any MG_ROOT harold passes so mg uses its default store,
+	// as pogod's own launchd job (which sets no MG_ROOT) does.
+	MGRoot string
+}
+
 // InstallShim writes dir/harold-wake: a short script that runs
-// `pogo hook harold-wake` from the given pogo. The logic stays in the pogo
-// binary so it upgrades with pogo; a copy of the logic in ~/.pogo/bin would
-// go stale the way pogo's other installed copies have. changed is false when
-// the file already held exactly this.
-func InstallShim(dir, pogo string) (changed bool, err error) {
+// `pogo hook harold-wake` from the given pogo under env's state roots. The
+// logic stays in the pogo binary so it upgrades with pogo; a copy of the logic
+// in ~/.pogo/bin would go stale the way pogo's other installed copies have.
+// changed is false when the file already held exactly this.
+func InstallShim(dir, pogo string, env ShimEnv) (changed bool, err error) {
+	// harold runs the shim from /, so a relative path names the wrong file or
+	// tree.
 	if !filepath.IsAbs(pogo) {
-		// harold runs the shim from /, so a relative path names the wrong file.
 		return false, fmt.Errorf("pogo path %q is not absolute", pogo)
+	}
+	if !filepath.IsAbs(env.PogoHome) {
+		return false, fmt.Errorf("POGO_HOME %q is not absolute", env.PogoHome)
+	}
+	if env.MGRoot != "" && !filepath.IsAbs(env.MGRoot) {
+		return false, fmt.Errorf("MG_ROOT %q is not absolute", env.MGRoot)
+	}
+	mgRoot := "unset MG_ROOT\n"
+	if env.MGRoot != "" {
+		mgRoot = "export MG_ROOT=" + shellQuote(env.MGRoot) + "\n"
 	}
 	content := "#!/bin/sh\n" +
 		"# harold's [inbox] notify hook, written by `pogo install`. See pogo's\n" +
 		"# docs/CONFIGURATION.md, \"Waking an agent on Discord activity\".\n" +
+		"# The state roots are the ones install ran under, not harold's.\n" +
+		"export POGO_HOME=" + shellQuote(env.PogoHome) + "\n" +
+		mgRoot +
 		"exec " + shellQuote(pogo) + " hook harold-wake \"$@\"\n"
 	path := filepath.Join(dir, ShimName)
 	if old, err := os.ReadFile(path); err == nil && string(old) == content {
