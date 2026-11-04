@@ -103,9 +103,10 @@ func (r Report) Render() string {
 			"from creation, the build ticket from the moment its PR opens (mayor.md transition\n" +
 			"4). So the stage line collects this population and cannot classify it, and a\n" +
 			"detector keyed on stage alone reports the builder once PER ISSUE, every time the\n" +
-			"track runs correctly (mg-2829). These are set aside on a marker that does not read\n" +
-			"`reviews:` — a declared predecessor, or a title whose first word is `build`;\n" +
-			"a title whose first word is `review` overrides a declared predecessor.\n\n" +
+			"track runs correctly (mg-2829). These are set aside on ANOTHER item's `reviews:`\n" +
+			"line naming them (reviewed-by), or failing that on a marker that does not read\n" +
+			"`reviews:` at all — a declared predecessor, or a title whose first word is\n" +
+			"`build`; a title whose first word is `review` overrides a declared predecessor.\n\n" +
 			"THE COST IS LISTED HERE RATHER THAN ASSUMED AWAY: if one of the items above is\n" +
 			"really a review ticket, its missing `reviews:` line is NOT in the report above.\n" +
 			"The marker in parentheses is the exact fact each exclusion rests on — check it.\n\n")
