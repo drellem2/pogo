@@ -11,9 +11,17 @@
 // already used — unless the alert is MUTED (slice 2, SetMutes), in which case
 // it is withheld and recorded as an alert_muted event — or ROUTED (slice 3,
 // SetRoutes), in which case its primary copy goes to another box, falling back
-// to the default recipient rather than dropping mail. Nudges (slice 4) attach
-// here later — which is the point of having one seam
-// rather than ~60 call sites that each address `mg` on their own.
+// to the default recipient rather than dropping mail. NUDGES — text pogod
+// types into an agent's terminal to tell it something (slice 4) — go through
+// the same seam (Nudge, NudgeVia) under the same table: one mute, one route,
+// one listing, which is the point of having one seam rather than ~60 call
+// sites that each address `mg` or a PTY on their own.
+//
+// Not every nudge is an alert. wake-watch's mail-arrival pointers, the
+// mid-session-wedge bare submit, the kickoff prompt and its re-sent Enter, a
+// scheduler delivery and an operator's own `pogo nudge` carry no news of
+// pogod's: they deliver something else (a mail, a prompt, a keystroke). They
+// are not declared here and are not mutable.
 //
 // Some mail is not an alert: the scheduler delivering a registered message is
 // a delivery mechanic, not pogod telling anyone anything. Those are declared
@@ -95,11 +103,17 @@ const (
 
 	ConditionNotice    Name = "condition.notice"
 	ConditionOutOfBand Name = "condition.out_of_band"
+	// ConditionWake is the PTY nudge that wakes a condition's addressee to
+	// read the notice (a nudge).
+	ConditionWake Name = "condition.wake"
 
 	CredExpiryWarning Name = "cred_expiry.warning"
 	CredExpiryBlind   Name = "cred_expiry.blind"
 
 	CrewResetNotice Name = "crew_reset.notice"
+	// CrewResetPointer is the pointer typed at a crew agent after its reset
+	// notice lands, when wake-watch is off (a nudge).
+	CrewResetPointer Name = "crew_reset.pointer"
 
 	DeafWatchFinding Name = "deaf_watch.finding"
 	DeafWatchCleared Name = "deaf_watch.cleared"
@@ -153,11 +167,17 @@ const (
 	ServiceInstallReport Name = "service.install_report"
 
 	StallWatchMailFallback Name = "stall_watch.mail_fallback"
-	// StallWatchBlockedReminder is the blocked-reminder nudge (mg-3844). It is
-	// a nudge, not a mail: it is declared here, ahead of the other nudges
-	// (slice 4), because `[stall_watch] blocked_reminder_enabled = false` is
-	// one of the existing silencing keys slice 2 turns into a mute alias.
-	StallWatchBlockedReminder Name = "stall_watch.blocked_reminder"
+	// The stall-watch nudges, one per check (internal/stallwatch). Each is a
+	// nudge typed into the recipient's terminal; one that cannot be typed is
+	// mailed instead, as stall_watch.mail_fallback.
+	StallWatchBlockedReminder   Name = "stall_watch.blocked_reminder"
+	StallWatchUnclaimedItems    Name = "stall_watch.unclaimed_items"
+	StallWatchPriorityWake      Name = "stall_watch.priority_wake"
+	StallWatchUnreadMail        Name = "stall_watch.unread_mail"
+	StallWatchIndefiniteHold    Name = "stall_watch.indefinite_hold"
+	StallWatchWorkedUnclaimed   Name = "stall_watch.worked_unclaimed"
+	StallWatchPreservedWorktree Name = "stall_watch.preserved_worktree"
+	StallWatchStrandedPush      Name = "stall_watch.stranded_push"
 
 	StrandedWorkBranch Name = "stranded_work.branch"
 
@@ -188,6 +208,43 @@ const (
 // the same way.
 const tiered = RoleCoordinator + "; also " + RoleEscalationBox + " when it escalates"
 
+// StallWatchAgentKey is the Key of the stall-watch nudges whose recipient is
+// the watched agent: `[stall_watch] agent` (default the coordinator) is the
+// box their $coordinator stands for, as a watcher's notify_to is for its
+// alerts. It is not a route alias — it also names whose mailbox and claims the
+// watcher reads.
+const StallWatchAgentKey = "stall_watch.agent"
+
+// nudges are the declared alerts delivered by typing into a terminal rather
+// than by mail. Channel reports them.
+var nudges = map[Name]bool{
+	ConditionWake:               true,
+	CrewResetPointer:            true,
+	StallWatchBlockedReminder:   true,
+	StallWatchUnclaimedItems:    true,
+	StallWatchPriorityWake:      true,
+	StallWatchUnreadMail:        true,
+	StallWatchIndefiniteHold:    true,
+	StallWatchWorkedUnclaimed:   true,
+	StallWatchPreservedWorktree: true,
+	StallWatchStrandedPush:      true,
+}
+
+// Channels an alert is delivered on.
+const (
+	ChannelMail  = "mail"
+	ChannelNudge = "nudge"
+)
+
+// Channel is ChannelNudge for an alert typed into a terminal and ChannelMail
+// for everything else.
+func (d Def) Channel() string {
+	if nudges[d.Name] {
+		return ChannelNudge
+	}
+	return ChannelMail
+}
+
 var registry = []Def{
 	{AbsentWatchDeclared, ClassAlert, tiered, "absent_watch.notify_to", "a crew agent is absent because auto_start = false declares it so"},
 	{AbsentWatchFinding, ClassAlert, tiered, "absent_watch.notify_to", "a crew agent that should be running is absent"},
@@ -200,9 +257,11 @@ var registry = []Def{
 	{CarrierDriftFinding, ClassAlert, tiered, "carrier_drift.notify_to", "a work item's workflow carrier drifted from its stage"},
 	{ConditionNotice, ClassAlert, "the condition's addressee (usually " + RoleCoordinator + ")", "conditions.mail, conditions.disable", "a daemon condition row was raised"},
 	{ConditionOutOfBand, ClassAlert, RoleEscalationBox, "conditions.out_of_band", "out-of-band copy of a condition notice"},
+	{ConditionWake, ClassAlert, "the condition's addressee (usually " + RoleCoordinator + ")", "conditions.mail", "wake the addressee to read a condition notice"},
 	{CredExpiryWarning, ClassAlert, RoleEscalationBox, "", "the harness credential expires soon"},
 	{CredExpiryBlind, ClassAlert, RoleEscalationBox, "", "the harness credential's expiry cannot be read"},
 	{CrewResetNotice, ClassAlert, "the crew agent", "", "a long-running crew session should reset"},
+	{CrewResetPointer, ClassAlert, "the crew agent", "", "pointer to the reset notice (only when wake-watch is off)"},
 	{DeafWatchFinding, ClassAlert, tiered, "deaf_watch.notify_to", "a crew agent has no mail check registered"},
 	{DeafWatchCleared, ClassAlert, tiered, "deaf_watch.notify_to", "a deaf-agent episode is over"},
 	{DriftWatchDrift, ClassAlert, RoleEscalationBox, "", "deployed host artifacts drifted from the source"},
@@ -237,7 +296,14 @@ var registry = []Def{
 	{SentinelDrift, ClassAlert, RoleCoordinator, "", "a harness prompt-ready sentinel stopped matching"},
 	{ServiceInstallReport, ClassAlert, RoleCoordinator, "", "`pogo service install` report"},
 	{StallWatchMailFallback, ClassAlert, "the stall notice's recipient", "", "a stall notice that could not be typed into a terminal"},
-	{StallWatchBlockedReminder, ClassAlert, "the agent an item is blocked on (" + RoleCoordinator + " when it is unreachable)", "stall_watch.blocked_reminder_enabled", "nudge: work items are blocked on the recipient"},
+	{StallWatchBlockedReminder, ClassAlert, "the agent an item is blocked on (" + RoleCoordinator + " when it is unreachable)", "stall_watch.blocked_reminder_enabled", "work items are blocked on the recipient"},
+	{StallWatchUnclaimedItems, ClassAlert, RoleCoordinator, StallWatchAgentKey, "work items sat unclaimed past the threshold"},
+	{StallWatchPriorityWake, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a priority work item is waiting"},
+	{StallWatchUnreadMail, ClassAlert, RoleCoordinator, StallWatchAgentKey, "unread mail is piling up"},
+	{StallWatchIndefiniteHold, ClassAlert, RoleCoordinator, StallWatchAgentKey, "work items are held with no release condition"},
+	{StallWatchWorkedUnclaimed, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a work item is being worked but nobody claimed it"},
+	{StallWatchPreservedWorktree, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a preserved worktree is waiting on a decision"},
+	{StallWatchStrandedPush, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a pushed branch was never submitted"},
 	{StrandedWorkBranch, ClassAlert, RoleCoordinator + " and the repo's pm-<repo>, if it exists", "", "a stopped polecat left unmerged work"},
 	{SynthWatchHit, ClassAlert, RoleEscalationBox, "", "synthetic error messages are being emitted"},
 	{SynthWatchCleared, ClassAlert, RoleEscalationBox, "", "a synthetic-error episode is over"},

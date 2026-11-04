@@ -503,6 +503,24 @@ verdict, a stranded-work notice — is an **alert** with a stable name,
 and every send goes through that package; a build that adds a send around it
 fails its tests.
 
+**Nudges are alerts too.** Text pogod types into an agent's terminal to tell it
+something is muted, routed and listed under the same names, with `VIA` (`channel`
+in `--json`) reading `nudge`:
+
+| Nudge | Default recipient |
+|-------|-------------------|
+| `stall_watch.unclaimed_items`, `.priority_wake`, `.unread_mail`, `.indefinite_hold`, `.worked_unclaimed`, `.preserved_worktree`, `.stranded_push` | the agent `[stall_watch] agent` watches (the coordinator by default) |
+| `stall_watch.blocked_reminder` | the agent an item is blocked on |
+| `condition.wake` | the condition's addressee, woken to read the notice |
+| `crew_reset.pointer` | the crew agent (sent only when wake-watch is off) |
+
+A stall-watch nudge that cannot be typed is mailed instead as
+`stall_watch.mail_fallback`, a separate alert. Nudges that only deliver
+something else are **not** alerts and are not listed: wake-watch's mail-arrival
+pointers (the mail is the message), the kickoff prompt and its re-sent Enter,
+the mid-session-wedge submit, scheduler deliveries and an operator's own
+`pogo nudge`.
+
 ```bash
 pogo alerts           # every alert: muted state, effective and default recipient
 pogo alerts --all     # also the delivery mechanics that send mail but are not alerts
@@ -566,6 +584,13 @@ with `[conditions] mail = false`, and pogod warns at startup that it did. A
 later config layer's `[alerts]` entry replaces an earlier layer's for the same
 name.
 
+`condition.wake` follows `condition.notice`: while the notice is muted
+(by `[conditions] mail = false` or an `[alerts]` entry) there is nothing to wake
+the addressee for, so `pogo alerts` lists the wake as muted too, with
+`follows condition.notice` as its source (an `[alerts."condition.wake"] mute =
+false` cannot override that, and pogod warns that it did nothing).
+`condition.wake` can also be muted on its own, leaving the notice mailed.
+
 One behaviour change rides on the last alias: `blocked_reminder_enabled = false`
 used to switch the blocked-reminder check off; it now leaves the check running
 (its `stall_watch_fired` events carry `nudge_delivery = "muted"`) and withholds
@@ -622,8 +647,19 @@ line at startup naming every route set by `[alerts]`.
 
 `mute` wins over `route`: a muted alert is sent nowhere. A condition row
 (`condition.<id>`) cannot be routed on its own — every row is sent as
-`condition.notice`; route that. `scheduler.delivery` is not an alert, and the
-`stall_watch.blocked_reminder` nudge cannot be routed yet (nudges are slice 4).
+`condition.notice`; route that. `scheduler.delivery` is not an alert.
+
+**Nudges route the same way.** A routed nudge is typed at the route's agent
+instead, by the same rule: a stall-watch check's nudge moves only when it is
+addressed to the watched agent, and the blocked reminder, `condition.wake` and
+`crew_reset.pointer` move on every send. The fallback is the same too: if the
+route's agent has no mailbox, or the routed nudge fails (for stall-watch, the
+agent is not running *and* the mail fallback to it failed), the nudge goes to
+its default recipient and `alert_route_invalid` records it. A stall-watch
+nudge falls back to the agent `[stall_watch] agent` names. Routing
+`condition.wake` moves only the wake: it still points at the mailbox the notice
+went to, so route `condition.notice` as well to move both. Likewise
+`crew_reset.notice` and `crew_reset.pointer` route independently.
 
 **Every watcher's `notify_to` is an alias.** `[ack_watch] notify_to = "pm-pogo"`
 routes every alert that watcher sends (`pogo alerts` names

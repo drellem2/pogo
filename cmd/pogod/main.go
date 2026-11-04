@@ -1233,6 +1233,22 @@ func newStallNudgerWithTimeout(reg *agent.Registry, mail func(to, from, subject,
 // nothing and holds the heartbeat longer for it. The outcome of every one of
 // those fires was determined in the first two seconds. That is the same
 // conclusion mg-79dc reached from 18 samples, now confirmed at ~100x the n.
+// wakeConditionAddressee is the condition annunciator's wake transport: a PTY
+// nudge at the named agent. The annunciator hands it to alerts.Nudge under
+// condition.wake, which has already muted or routed the wake by the time this
+// runs. It reads agentRegistry when called, not when wired: the annunciator
+// exists before the registry does.
+func wakeConditionAddressee(name, message string) error {
+	if agentRegistry == nil {
+		return fmt.Errorf("no agent registry")
+	}
+	a := agentRegistry.Get(name)
+	if a == nil {
+		return fmt.Errorf("agent %s is not running", name)
+	}
+	return a.Nudge(message)
+}
+
 func newStallNudger(reg *agent.Registry, mail func(to, from, subject, body string) error, fallbackCap int) stallwatch.Nudger {
 	return newStallNudgerWithTimeoutAndDamper(reg, mail, agent.DefaultNudgeTimeout,
 		newStallFallbackDamper(fallbackCap))
@@ -1708,16 +1724,7 @@ Flags:
 	conditions = newConditionAnnunciator(
 		conditionNoticesPath(),
 		alerts.Transport,
-		func(name, message string) error {
-			if agentRegistry == nil {
-				return fmt.Errorf("no agent registry")
-			}
-			a := agentRegistry.Get(name)
-			if a == nil {
-				return fmt.Errorf("agent %s is not running", name)
-			}
-			return a.Nudge(message)
-		},
+		wakeConditionAddressee,
 	)
 	// mg-875d: the rows whose trigger means pogod is unhealthy or the
 	// coordinator is down are ALSO copied here, because the coordinator is an

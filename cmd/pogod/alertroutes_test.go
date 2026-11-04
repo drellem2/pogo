@@ -119,7 +119,6 @@ func TestAlertRoutes_RefusedNamesAndValues(t *testing.T) {
 	cfg.Alerts = map[string]config.AlertConfig{
 		"nope.never":                      {Route: "x", RouteSet: true},
 		"scheduler.delivery":              {Route: "x", RouteSet: true},
-		"stall_watch.blocked_reminder":    {Route: "x", RouteSet: true},
 		"condition.scheduler_load_failed": {Route: "x", RouteSet: true},
 		"refinery.merged":                 {Route: "$mayor", RouteSet: true},
 		"refinery.merge_failed":           {Route: `["a", "b"]`, RouteSet: true},
@@ -134,7 +133,6 @@ func TestAlertRoutes_RefusedNamesAndValues(t *testing.T) {
 	for _, w := range []string{
 		`[alerts."nope.never"] route names no alert`,
 		`[alerts."scheduler.delivery"] route is a delivery mechanic`,
-		`[alerts."stall_watch.blocked_reminder"] route is a nudge`,
 		`[alerts."condition.scheduler_load_failed"] route cannot be set on one condition row`,
 		`[alerts."refinery.merged"] route = "$mayor" is not a role`,
 		`[alerts."refinery.merge_failed"] route = "[\"a\", \"b\"]" is not one mailbox name`,
@@ -144,8 +142,8 @@ func TestAlertRoutes_RefusedNamesAndValues(t *testing.T) {
 			t.Errorf("warnings lack %q:\n%s", w, joined)
 		}
 	}
-	if len(tbl.Warnings) != 7 {
-		t.Errorf("%d warnings, want 7:\n%s", len(tbl.Warnings), joined)
+	if len(tbl.Warnings) != 6 {
+		t.Errorf("%d warnings, want 6:\n%s", len(tbl.Warnings), joined)
 	}
 }
 
@@ -312,5 +310,42 @@ func TestConditionIDsListEveryRowConstant(t *testing.T) {
 	}
 	if n < len(conditionIDs)+len(conditionIDPrefixes) {
 		t.Errorf("found only %d condition id constants; the scan is not finding them", n)
+	}
+}
+
+// drellem2/pogo#262 slice 4: nudges are routed under the same table. A
+// stall-watch nudge's primary is the agent [stall_watch] agent watches (not
+// necessarily the coordinator), and it falls back there; a per-message nudge
+// (the blocked-on agent, the crew agent, the condition's addressee) moves
+// every send.
+func TestAlertRoutes_Nudges(t *testing.T) {
+	cfg := routesCfg()
+	cfg.StallWatch.Agent = "dispatcher"
+	cfg.Alerts = map[string]config.AlertConfig{
+		"stall_watch.unread_mail":      {Route: "$escalation_box", RouteSet: true},
+		"stall_watch.blocked_reminder": {Route: "pm-pogo", RouteSet: true},
+		"condition.wake":               {Route: "ops", RouteSet: true},
+		"crew_reset.pointer":           {Route: "ops", RouteSet: true},
+	}
+	tbl := resolveAlertRoutes(cfg, nil)
+	if len(tbl.Warnings) != 0 {
+		t.Errorf("warnings: %v", tbl.Warnings)
+	}
+	want := map[alerts.Name]alerts.Route{
+		alerts.StallWatchUnreadMail:      {To: "human", Match: "dispatcher", Fallback: "dispatcher"},
+		alerts.StallWatchBlockedReminder: {To: "pm-pogo"},
+		alerts.ConditionWake:             {To: "ops"},
+		alerts.CrewResetPointer:          {To: "ops"},
+	}
+	for n, w := range want {
+		got, ok := tbl.Routes[n]
+		if !ok || got.To != w.To || got.Match != w.Match || got.Fallback != w.Fallback {
+			t.Errorf("%s: route %+v (installed=%v), want To=%q Match=%q Fallback=%q", n, got, ok, w.To, w.Match, w.Fallback)
+		}
+	}
+	// [stall_watch] agent is not an alias: on its own it installs no route.
+	cfg.Alerts = nil
+	if tbl := resolveAlertRoutes(cfg, nil); len(tbl.Routes) != 0 {
+		t.Errorf("[stall_watch] agent installed routes: %+v", tbl.Routes)
 	}
 }
