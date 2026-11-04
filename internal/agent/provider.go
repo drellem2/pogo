@@ -89,6 +89,20 @@ type Provider struct {
 	// must come back AuthUnknown, which fails open. See authpreflight.go.
 	AuthPreflight func(ctx context.Context, binary string) AuthReading
 
+	// ProfileSeedHook prepares the harness's on-disk profile before the
+	// process starts, so that a first-run screen nothing can answer is never
+	// shown. env is the environment the harness will run with (exec.Cmd form,
+	// last assignment wins), from which the hook locates the profile. nil = no
+	// seeding. (Claude: merge hasCompletedOnboarding:true into .claude.json,
+	// drellem2/pogo#286.)
+	//
+	// It runs only when the spawn command actually runs this provider's
+	// Binary, the same rule AuthPreflight uses: an [agents] command of
+	// `sleep 600` (sandboxes, tests) must not write to anyone's profile. An
+	// error is logged and the spawn goes ahead: an agent that might stall on
+	// a first-run screen is better than one that never starts.
+	ProfileSeedHook func(env []string) error
+
 	// InitialPromptViaArgv is true when the harness accepts its initial task
 	// message as a trailing positional argv element (pi: `pi [messages...]`).
 	// Spawn then appends SpawnRequest.InitialNudge to the spawn command as a
