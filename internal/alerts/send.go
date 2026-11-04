@@ -1,10 +1,13 @@
 package alerts
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os/exec"
 	"sync"
+
+	"github.com/drellem2/pogo/internal/events"
 )
 
 // MailFunc is the shape every mail transport in pogo has: the one watchers
@@ -19,12 +22,18 @@ type MailFunc = func(to, from, subject, body string) error
 // have called it: there is no nil default, because a nil transport in a unit
 // test silently becoming the real `mg` would mail a live inbox.
 //
-// Slice 1 changes no behaviour: the message, recipient and sender are passed to
-// via unchanged and via's error is returned unchanged. Muting and routing
-// (later slices of drellem2/pogo#262) are applied here, which is why a send
-// that skips this function is a build failure (TestNoSendBypassesTheRegistry).
+// A MUTED alert (SetMutes, slice 2 of drellem2/pogo#262) is not sent: via is
+// not called, an `alert_muted` event is recorded in its place, and Mail returns
+// nil — the caller's detector carries on exactly as if the mail had gone, so
+// it still emits its own event and keeps its own suppression state. An
+// unmuted alert is passed to via unchanged and via's error is returned
+// unchanged. Routing (slice 3) is applied here too, which is why a send that
+// skips this function is a build failure (TestNoSendBypassesTheRegistry).
 func Mail(name Name, via MailFunc, to, from, subject, body string) error {
 	check(name)
+	if _, muted := Withhold(name, to, subject); muted {
+		return nil
+	}
 	return via(to, from, subject, body)
 }
 
@@ -32,8 +41,13 @@ func Mail(name Name, via MailFunc, to, from, subject, body string) error {
 // it runs `mg mail send <to> --from <from> --subject <subject> --body <body>`
 // and returns the command's combined output and its error, exactly as those
 // callers' own exec.Command did before the seam existed.
+//
+// A muted alert returns no output and no error, as Mail does.
 func MailOutput(name Name, to, from, subject, body string) ([]byte, error) {
 	check(name)
+	if _, muted := Withhold(name, to, subject); muted {
+		return nil, nil
+	}
 	cmd := execCommand("mg", "mail", "send", to,
 		"--from", from, "--subject", subject, "--body", body)
 	return cmd.CombinedOutput()
@@ -67,4 +81,76 @@ func check(name Name) {
 	if _, seen := unknownLogged.LoadOrStore(name, true); !seen {
 		log.Printf("alerts: %q is not a declared alert; sending it anyway", name)
 	}
+}
+
+// EventMuted is the event recorded in place of a muted alert's send.
+const EventMuted = "alert_muted"
+
+var (
+	mutesMu sync.RWMutex
+	mutes   map[Name]string
+)
+
+// SetMutes installs the muted alerts and, for each, the config key that muted
+// it ("[alerts.\"ack_watch.finding\"] mute = true", "[conditions] mail =
+// false"). pogod calls it once at startup with the table it resolved; nil (the
+// default, and every unit test that does not call it) mutes nothing.
+func SetMutes(m map[Name]string) {
+	cp := make(map[Name]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	mutesMu.Lock()
+	mutes = cp
+	mutesMu.Unlock()
+}
+
+// MuteReason returns the key that muted name, or "" when it is not muted. It
+// records nothing; Withhold is the call for a send site.
+func MuteReason(name Name) string {
+	mutesMu.RLock()
+	defer mutesMu.RUnlock()
+	return mutes[name]
+}
+
+var mutedLogged sync.Map
+
+// emitEvent is a variable so a test can observe the alert_muted record.
+var emitEvent = func(e events.Event) { events.Emit(context.Background(), e) }
+
+// Withhold is the mute check for a send that is not mail — the blocked-reminder
+// nudge — and the one Mail and MailOutput make. When name is muted it records
+// an `alert_muted` event (alert, recipient, subject and the key that muted it),
+// logs the first withheld send per alert per process, and reports the reason
+// and true: the caller must then skip its send and nothing else. When name is
+// not muted it records nothing and returns "", false.
+func Withhold(name Name, to, subject string) (string, bool) {
+	why := MuteReason(name)
+	if why == "" {
+		return "", false
+	}
+	RecordMuted(name, to, subject, why)
+	return why, true
+}
+
+// RecordMuted records that a send of name to to was withheld because of why.
+// Withhold calls it; a caller that decides the mute itself — the condition
+// annunciator, whose per-row mutes (condition.<id>) are finer than any one
+// alert name — calls it directly, so every withheld send leaves the same
+// record whichever layer withheld it. It sends nothing.
+func RecordMuted(name Name, to, subject, why string) {
+	if _, seen := mutedLogged.LoadOrStore(name, true); !seen {
+		log.Printf("alerts: %s is MUTED (%s) — not sent to %s; recorded as %s in events.log (logged once per process)",
+			name, why, to, EventMuted)
+	}
+	emitEvent(events.Event{
+		EventType: EventMuted,
+		Agent:     "pogod",
+		Details: map[string]any{
+			"alert":   string(name),
+			"to":      to,
+			"subject": subject,
+			"reason":  why,
+		},
+	})
 }

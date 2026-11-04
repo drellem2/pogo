@@ -1516,6 +1516,20 @@ Flags:
 	// the pinned names.
 	cfg, rolePinErr := pinAndResolveRoles(cfg)
 
+	// Arm the alert mutes (drellem2/pogo#262 slice 2) before anything can
+	// send: `[alerts."<name>"] mute = true` and the older keys that are now
+	// its aliases, resolved into the one table the send seam enforces. The
+	// line naming every muted alert is printed whatever muted it — a muted
+	// alert's only remaining reader is events.log.
+	alertMutes := resolveAlertMutes(cfg)
+	alerts.SetMutes(alertMutes.Muted)
+	for _, w := range alertMutes.Warnings {
+		log.Print(w)
+	}
+	if line := mutedAlertsLine(alertMutes); line != "" {
+		log.Print(line)
+	}
+
 	// Second, config-aware PATH repair pass: [agents] extra_path lets a
 	// deployment point pogod at harness runtimes the automatic probe in
 	// pathenv.Ensure misses (gh #25). Runs before any agent spawns.
@@ -1697,7 +1711,7 @@ Flags:
 	// events.log are unchanged), and `[conditions] mail` / `disable` switch the
 	// mail off entirely or per condition. Neither touches the other watchers'
 	// escalation routing, which reads escalationBox directly below.
-	if line := applyConditionsConfig(conditions, cfg.Conditions, escalationBox); line != "" {
+	if line := applyConditionMutes(conditions, alertMutes, escalationBox); line != "" {
 		log.Print(line)
 	}
 
@@ -2199,7 +2213,7 @@ Flags:
 		log.Printf("pogod: no config file at %s; stall watcher not armed (no auto-started coordinator to nudge)", config.ConfigFilePath())
 	}
 	if stallWatchArmed(cfg) {
-		stallWatcher = stallwatch.New(cfg.StallWatch, stallwatch.Options{
+		stallWatcher = stallwatch.New(stallWatchConfigForMutes(cfg.StallWatch), stallwatch.Options{
 			// The cap is mg-61ce's damping term on the mail fallback: past it,
 			// a coordinator that has not gone idle once stops being sent more
 			// notices about being too busy to be sent notices.
@@ -3249,13 +3263,14 @@ Flags:
 			Coordinator:   coordinator,
 			HumanBox:      escalationBox,
 			StartedAt:     time.Now(),
-			// drellem2/pogo#244: the sends are gated inside the watcher, never
-			// by passing a nil Mail — Check refuses to run without one.
-			MailOff:      !cfg.BlindWatch.Mail,
-			OutOfBandOff: !cfg.BlindWatch.OutOfBand,
+			// drellem2/pogo#244's MailOff/OutOfBandOff are left false: those
+			// keys are now aliases in the alert mute table (#262 slice 2), and
+			// the watcher asks the seam per recipient (blind_watch.finding /
+			// .cleared, or .out_of_band for the escalation box), which records
+			// each withheld send as alert_muted as well as mail_disabled.
 		})
 	}
-	log.Print(blindWatchStartupLine(cfg.BlindWatch, escalationBox))
+	log.Print(blindWatchStartupLine(effectiveBlindWatch(cfg.BlindWatch, alertMutes), escalationBox))
 
 	// The done-item polecat reaper (mg-56d1): completion frees a slot, however
 	// completion happened. The merge hook above covers polecats whose deliverable

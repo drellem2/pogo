@@ -55,7 +55,7 @@ cap and `load_gate_fleet_share = 0` for the host load gate.
 | `[gitgc]` | `enabled` | on | ACTS | Once at boot, then every `interval`: acts only where no live polecat owns the branch or tree and the work item is done or archived. It force-deletes local `polecat-*` branches (`git branch -D`); a done item's branch must be merged into `main` first, while an archived item's branch is deleted even if it never merged. It removes a registered polecat worktree unless the tree is dirty or holds commits no ref reaches. It removes an orphan directory under `$POGO_HOME/polecats` (one git no longer knows as a worktree) with no dirty check, because there is no index to check against. With either removal it also deletes the polecat's harness session temp dir (for Claude Code, `${CLAUDE_CODE_TMPDIR:-/tmp}/claude-<uid>/<slug-of-workdir>`, declared by the provider), and it deletes such a dir whose polecat directory is already gone under the same live-and-concluded gate; crew and non-pogo session dirs are never candidates, and the durable transcript store (`~/.claude/projects`) is never touched. It keeps anything it cannot classify. It mails the coordinator when a sweep fails. Code: `internal/gitgc`. |
 | `[stall_watch]` | `enabled` | on | ACTS | Types a nudge into the coordinator's terminal when its unclaimed work or unread mail passes a threshold. The same switch drives the nudges about an available item a live worker is already on, an item whose work sits uncommitted in a retained worktree, and an item whose work is pushed but not merged. If the terminal is busy, it mails instead. Needs a config file. See [Stall watcher](#stall-watcher). |
 | `[stall_watch]` | `priority_wake_enabled` | on | ACTS | Sends the same nudge sooner for a high-priority available item. See [Priority wake](#priority-wake). |
-| `[stall_watch]` | `blocked_reminder_enabled` | on | ACTS | Nudges, or mails, the agent named in a `blocked:<agent>` assignee that a decision is owed. The notices stop at a cap. Silent for a block that agent set on itself, and for an item tagged `waiting-on-purpose` (`blocked_reminder_waiver_tags`). |
+| `[stall_watch]` | `blocked_reminder_enabled` | on | ACTS | Nudges, or mails, the agent named in a `blocked:<agent>` assignee that a decision is owed. The notices stop at a cap. Silent for a block that agent set on itself, and for an item tagged `waiting-on-purpose` (`blocked_reminder_waiver_tags`). `false` is an alias for muting `stall_watch.blocked_reminder`: the check still runs and records its events, and only the nudge is withheld. See [Muting an alert](#muting-an-alert-alertsname-mute). |
 | `[stall_watch]` | `indefinite_hold_report_enabled` | on | ACTS | Types a read-only digest of holds that nothing scheduled will ever release into the coordinator's terminal, through the same nudge channel as the rows above. If the terminal is busy, it mails instead. It releases nothing. See [A hold with no driver is invisible](#a-hold-with-no-driver-is-invisible). |
 | `[dispatch]` | `max_polecats_per_repo` | on | ACTS | Refuses to spawn a worker into a repo that already has 3 live workers. While the refinery holds a merge request for that repo, it holds back 1 of the 3 slots. Default `max_polecats_per_repo = 3`; `0` turns it off. See [Dispatch cap](#dispatch-cap--how-many-workers-may-enter-one-repository). |
 | `[dispatch]` | `load_gate_fleet_share` | on | ACTS | Refuses to spawn any worker while the fleet holds 50% or more of this host's cores. Non-fleet CPU is not counted. Default `load_gate_fleet_share = 0.50`; `0` turns it off. See [Host load gate](#host-load-gate--load_gate_fleet_share). |
@@ -512,14 +512,64 @@ pogo alerts --json    # the same rows as GET /alerts
 `DEFAULT` is the built-in rule; `$coordinator` and `$escalation_box` stand for
 [`[agents] coordinator`](#coordinator-name) and
 [`[agents] escalation_box`](#the-escalation-mailbox). `EFFECTIVE` is that rule
-resolved against the config the running daemon loaded. `SOURCE` names the
-existing key that changed the recipient or silenced the alert (a watcher's
-`notify_to`, `[conditions] mail`/`disable`/`out_of_band`, `[blind_watch] mail`),
-or `default`. Muted alerts are listed first.
+resolved against the config the running daemon loaded. `SOURCE` names the key
+that changed the recipient or muted the alert (a watcher's `notify_to`, an
+`[alerts."<name>"] mute`, or one of the alias keys below), or `default`. Muted
+alerts are listed first.
 
-There is no `[alerts]` section yet: this listing reports the keys that exist
-today and changes nothing about where mail goes. Per-alert `mute` and `route`
-arrive in later slices of drellem2/pogo#262.
+### Muting an alert (`[alerts."<name>"] mute`)
+
+Any alert can be muted (drellem2/pogo#262). The name is quoted because it
+contains a dot:
+
+```toml
+[alerts."ack_watch.finding"]
+mute = true
+
+[alerts."condition.scheduler_load_failed"]   # one condition row
+mute = true
+```
+
+A muted alert is **not sent**, and nothing else changes: its detector still
+runs, still emits its own event, and keeps its own renotify state as if the
+mail had gone. In place of the send pogod records an `alert_muted` event
+(`alert`, `to`, `subject`, and `reason` — the key that muted it), and pogod.log
+says once per alert per process that a send was withheld.
+
+There is **no alert that cannot be muted** — including stranded work and a
+scheduler that did not load. The safety net is that a mute is loud instead: at
+startup pogod logs one line naming every muted alert and the key that muted it
+(`pogod: ⚠ N ALERT(S) MUTED — sent to NOBODY …`), and `pogo alerts` lists muted
+alerts first. A name that is not an alert (a typo, or the `scheduler.delivery`
+mechanic, which is not an alert) is ignored with a startup warning.
+
+`mute` is different from a watcher's `enabled = false`: `enabled` switches the
+detector off, so it records nothing at all. Those switches are unchanged.
+
+**The older silencing keys are aliases.** They keep working, and `pogo alerts`
+names them as the source of the mute:
+
+| Alias key | Mutes |
+|-----------|-------|
+| `[conditions] mail = false` | `condition.notice` and `condition.out_of_band` |
+| `[conditions] out_of_band = false` | `condition.out_of_band` |
+| `[conditions] disable = ["<id>", …]` | `condition.<id>` for each listed id |
+| `[blind_watch] mail = false` | `blind_watch.finding`, `blind_watch.cleared`, `blind_watch.out_of_band` |
+| `[blind_watch] out_of_band = false` | `blind_watch.out_of_band` |
+| `[stall_watch] blocked_reminder_enabled = false` | `stall_watch.blocked_reminder` |
+
+An `[alerts]` entry wins over an alias key, in both directions:
+`[alerts."condition.notice"] mute = false` unmutes the coordinator's copy even
+with `[conditions] mail = false`, and pogod warns at startup that it did. A
+later config layer's `[alerts]` entry replaces an earlier layer's for the same
+name.
+
+One behaviour change rides on the last alias: `blocked_reminder_enabled = false`
+used to switch the blocked-reminder check off; it now leaves the check running
+(its `stall_watch_fired` events carry `nudge_delivery = "muted"`) and withholds
+only the nudge, so a muted item's backoff and notice cap still advance.
+
+Routing (`route`) arrives in a later slice of drellem2/pogo#262.
 
 ## pogod's own conditions (`[conditions]`)
 
@@ -547,6 +597,10 @@ disable = ["scheduler_load_failed", "autostart_failed"]   # default []: per cond
 | `mail` | `true` | `false`: no condition mail to anyone, and no wake nudge. |
 | `out_of_band` | `true` | `false`: no mail from this watcher to [agents] escalation_box; the coordinator and events.log are unchanged |
 | `disable` | `[]` | No mail for the listed conditions. An entry names a condition id. For a per-subject condition (`autostart_failed:doctor`, `restart_failed:mayor`, `unknown_provider:…`, `gitgc_sweep_failed:…`), the part before the colon disables every subject and the full id disables one. |
+
+These three keys are aliases for alert mutes (`condition.notice`,
+`condition.out_of_band`, `condition.<id>`); an `[alerts."<name>"] mute` entry
+takes precedence. See [Muting an alert](#muting-an-alert-alertsname-mute).
 
 The ids are the `condition` field of the `pogod_condition` event:
 `pogo events --type pogod_condition` lists the ones this host has raised.
@@ -3577,6 +3631,11 @@ the same names and meaning as [`[conditions]`](#pogods-own-conditions-conditions
 |-----|---------|---------------------|
 | `mail` | `true` | `false`: no mail from this watcher to anyone. Every `blind_watch_finding` and `blind_watch_clear` is still emitted, with `notified=false` and `reason=mail_disabled`. |
 | `out_of_band` | `true` | `false`: no mail from this watcher to [agents] escalation_box; the coordinator and events.log are unchanged |
+
+Both are aliases for alert mutes: the escalation box's copy is its own alert,
+`blind_watch.out_of_band`, and the coordinator's copies are
+`blind_watch.finding` and `blind_watch.cleared`. An `[alerts."<name>"] mute`
+entry takes precedence. See [Muting an alert](#muting-an-alert-alertsname-mute).
 
 **What it costs.** The findings about the detector itself (`stopped`, `empty`),
 and any naming the coordinator, go to the escalation box ALONE. With

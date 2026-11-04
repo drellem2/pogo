@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/alerts"
 )
 
 // drellem2/pogo#244: `[blind_watch] mail = false` and `out_of_band = false`
@@ -113,5 +115,58 @@ func TestDefaultSwitchesRecordWhoWasMailed(t *testing.T) {
 	d := r.typed(EventFinding)[0].Details
 	if !reflect.DeepEqual(d["notified"], []string{"human"}) || d["mail_suppressed"] != false {
 		t.Errorf("details = %v, want notified=[human] mail_suppressed=false", d)
+	}
+}
+
+// drellem2/pogo#262 slice 2: the alert mute table reaches the same gate as
+// the #244 switches, per recipient. The escalation box's copy is its own
+// alert, blind_watch.out_of_band.
+func TestAlertMuteOutOfBandWithholdsOnlyTheEscalationCopy(t *testing.T) {
+	alerts.SetMutes(map[alerts.Name]string{alerts.BlindWatchOutOfBand: "test"})
+	t.Cleanup(func() { alerts.SetMutes(nil) })
+	now := time.Now().UTC()
+
+	r := &recorder{}
+	blind := "mayor" // names the coordinator: escalation box alone
+	w := switchedWatcher(r, false, false, &blind, now)
+	w.Check(now)
+	if len(r.mails) != 0 {
+		t.Fatalf("mailed %v with blind_watch.out_of_band muted", r.to())
+	}
+	d := r.typed(EventFinding)[0].Details
+	if d["notified"] != false || d["reason"] != "mail_disabled" || !reflect.DeepEqual(d["suppressed"], []string{"human"}) {
+		t.Errorf("details = %v, want an event-only finding with human suppressed", d)
+	}
+
+	// Positive control: a finding for the coordinator is not the out-of-band
+	// alert and still goes.
+	r2 := &recorder{}
+	blind2 := "pm-riemann"
+	switchedWatcher(r2, false, false, &blind2, now).Check(now)
+	if got := r2.to(); !reflect.DeepEqual(got, []string{"mayor"}) {
+		t.Errorf("recipients = %v, want [mayor]", got)
+	}
+}
+
+func TestAlertMuteFindingWithholdsTheCoordinatorCopy(t *testing.T) {
+	alerts.SetMutes(map[alerts.Name]string{alerts.BlindWatchFinding: "test"})
+	t.Cleanup(func() { alerts.SetMutes(nil) })
+	now := time.Now().UTC()
+
+	r := &recorder{}
+	blind := "pm-riemann"
+	w := switchedWatcher(r, false, false, &blind, now)
+	w.Check(now)
+	if len(r.mails) != 0 {
+		t.Fatalf("mailed %v with blind_watch.finding muted", r.to())
+	}
+	if d := r.typed(EventFinding)[0].Details; d["notified"] != false || d["reason"] != "mail_disabled" {
+		t.Errorf("details = %v", d)
+	}
+	// The clear is a different alert and is not muted.
+	blind = ""
+	w.Check(now.Add(time.Second))
+	if got := r.to(); !reflect.DeepEqual(got, []string{"mayor"}) {
+		t.Errorf("clear recipients = %v, want [mayor]", got)
 	}
 }

@@ -70,6 +70,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drellem2/pogo/internal/alerts"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/workitem"
@@ -1349,6 +1350,23 @@ func (w *Watcher) fireTo(recipient, category string, n Notice, details map[strin
 	// is why the complaint sat unfiled long enough to be measured twice.
 	if n.Subject != "" {
 		details["nudge_subject"] = n.Subject
+	}
+	// The blocked-reminder is a muteable alert (drellem2/pogo#262 slice 2;
+	// `blocked_reminder_enabled = false` is now its alias). Muted, the check
+	// has still run and this event is still emitted — only the nudge is
+	// withheld, and the seam records alert_muted. The other categories are
+	// not alerts in the registry yet (slice 4).
+	if category == categoryBlockedReminder {
+		if why, muted := alerts.Withhold(alerts.StallWatchBlockedReminder, recipient, n.Subject); muted {
+			details["nudge_delivery"] = "muted"
+			details["muted"] = why
+			w.emit(events.Event{
+				EventType: "stall_watch_fired",
+				Agent:     "pogod",
+				Details:   details,
+			})
+			return
+		}
 	}
 	delivery, err := w.nudge(recipient, n)
 	if err != nil {
