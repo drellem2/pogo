@@ -27,10 +27,10 @@ func TestEnthToolLine(t *testing.T) {
 	// The git control: no enth project, no row — whatever enth's state. A row
 	// here would change every git host's doctor output.
 	asked := false
-	if _, _, applies := enthToolLine(gitOnly, func(string) (string, error) { asked = true; return "", errors.New("x") }, help9); applies || asked {
+	if _, _, _, applies := enthToolLine(gitOnly, func(string) (string, error) { asked = true; return "", errors.New("x") }, help9); applies || asked {
 		t.Errorf("git-only host: applies=%v, PATH asked=%v; want no row and no lookup", applies, asked)
 	}
-	if _, _, applies := enthToolLine(nil, missing, help9); applies {
+	if _, _, _, applies := enthToolLine(nil, missing, help9); applies {
 		t.Error("no projects: a row was produced")
 	}
 
@@ -46,7 +46,10 @@ func TestEnthToolLine(t *testing.T) {
 		{"help fails", found, func(string) ([]byte, error) { return nil, errors.New("exec format error") }, "warn", "exec format error"},
 		{"ok", found, help9, "pass", "/bin/enth (for 1 enth repo(s): /r/e"},
 	} {
-		st, detail, applies := enthToolLine(withEnth, tc.look, tc.help)
+		st, detail, bin, applies := enthToolLine(withEnth, tc.look, tc.help)
+		if wantBin := map[bool]string{true: "", false: "/bin/enth"}[tc.status == "fail"]; bin != wantBin {
+			t.Errorf("%s: bin = %q, want %q (the login row runs this binary)", tc.name, bin, wantBin)
+		}
 		if !applies || st != tc.status || !strings.Contains(detail, tc.want) {
 			t.Errorf("%s: (%q, %q, %v), want %s containing %q", tc.name, st, detail, applies, tc.status, tc.want)
 		}

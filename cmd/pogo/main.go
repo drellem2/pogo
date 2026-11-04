@@ -3995,7 +3995,7 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 			}
 			// 4b. enth on PATH when any project is an enth repo (O4,
 			// enth-vcs slice 9). No row at all otherwise. See doctorenth.go.
-			if st, detail, applies := enthToolLine(projs, exec.LookPath, enthHelp); applies {
+			if st, detail, bin, applies := enthToolLine(projs, exec.LookPath, enthHelp); applies {
 				switch st {
 				case "fail":
 					fail(enthToolCheckName, detail)
@@ -4006,7 +4006,7 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 				}
 				// 4c. Does each enth remote accept the token pogo's workers
 				// will carry (GH #284 item 4)? Only when enth was found.
-				if bin, lerr := exec.LookPath("enth"); lerr == nil && st != "fail" {
+				if bin != "" {
 					for _, row := range enthLoginLines(projs, bin, enthWhoami) {
 						switch row.status {
 						case "fail":

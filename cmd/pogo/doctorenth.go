@@ -30,7 +30,8 @@ func enthHelp(bin string) ([]byte, error) {
 	return exec.CommandContext(ctx, bin, "--help").CombinedOutput()
 }
 
-// enthToolLine is the enth row. applies is false when no project is recorded
+// enthToolLine is the enth row, and bin is the enth it found ("" when none),
+// which the "enth login" row then runs, so both rows judge one binary. applies is false when no project is recorded
 // as enth, and then there is no row at all: a host of git repos prints
 // exactly what it printed before enth existed.
 //
@@ -45,7 +46,7 @@ func enthHelp(bin string) ([]byte, error) {
 // The PATH asked about is this shell's. pogod's own PATH is what spawns use,
 // and it can differ (a launchd service has its own); the detail says so
 // rather than claiming more than was measured.
-func enthToolLine(projs []project.Project, lookPath func(string) (string, error), help func(string) ([]byte, error)) (status, detail string, applies bool) {
+func enthToolLine(projs []project.Project, lookPath func(string) (string, error), help func(string) ([]byte, error)) (status, detail, bin string, applies bool) {
 	var repos []string
 	for _, p := range projs {
 		if p.Kind() == vcs.Enth {
@@ -53,22 +54,22 @@ func enthToolLine(projs []project.Project, lookPath func(string) (string, error)
 		}
 	}
 	if len(repos) == 0 {
-		return "", "", false
+		return "", "", "", false
 	}
 	sort.Strings(repos)
 	which := fmt.Sprintf("%d enth repo(s): %s", len(repos), strings.Join(repos, ", "))
 	bin, err := lookPath("enth")
 	if err != nil {
-		return "fail", "not found, and " + which + " need it — pogo cannot check out, judge or land work there", true
+		return "fail", "not found, and " + which + " need it — pogo cannot check out, judge or land work there", "", true
 	}
 	out, herr := help(bin)
 	if herr != nil {
-		return "warn", fmt.Sprintf("%s found, but `enth --help` failed (%v), so whether it is enth #9 or later is unknown; %s", bin, herr, which), true
+		return "warn", fmt.Sprintf("%s found, but `enth --help` failed (%v), so whether it is enth #9 or later is unknown; %s", bin, herr, which), bin, true
 	}
 	if !bytes.Contains(out, []byte("status DIR")) {
-		return "warn", fmt.Sprintf("%s predates enth #9 (no `status` verb): its checkouts carry no .enth/ state pogo can read; %s", bin, which), true
+		return "warn", fmt.Sprintf("%s predates enth #9 (no `status` verb): its checkouts carry no .enth/ state pogo can read; %s", bin, which), bin, true
 	}
-	return "pass", fmt.Sprintf("%s (for %s; this shell's PATH — pogod spawns with its own)", bin, which), true
+	return "pass", fmt.Sprintf("%s (for %s; this shell's PATH — pogod spawns with its own)", bin, which), bin, true
 }
 
 // enthLoginCheckName is the `pogo doctor --check` row asking whether each
