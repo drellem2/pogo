@@ -19,7 +19,7 @@ func newAlertsCmd(jsonOutput *bool) *cobra.Command {
 	var all bool
 	cmd := &cobra.Command{
 		Use:   "alerts",
-		Short: "List every alert pogod sends, its recipient and mute state",
+		Short: "List every alert pogod sends, its recipient, route and mute state",
 		Long: `alerts lists every alert pogod can send — each by its stable name,
 "<family>.<kind>" — with its default recipient, the recipient it actually
 reaches on this install, and whether it is muted.
@@ -27,7 +27,8 @@ reaches on this install, and whether it is muted.
 DEFAULT is the built-in rule ($coordinator and $escalation_box name the
 [agents] coordinator and escalation_box). EFFECTIVE is that rule resolved
 against the running daemon's config. SOURCE names the config key that
-changed the recipient or muted the alert, or "default". Muted alerts are
+changed the recipient (a route, or a notify_to) or muted the alert, or
+"default". Muted alerts are
 listed first.
 
 Mute an alert with:
@@ -39,6 +40,16 @@ A muted alert is not sent; its detector still runs, and each withheld send is
 recorded as an alert_muted event. The older keys ([conditions] mail /
 out_of_band / disable, [blind_watch] mail / out_of_band, [stall_watch]
 blocked_reminder_enabled) are aliases, and an [alerts] entry wins over them.
+
+Route an alert's primary copy to another agent or box with:
+
+  [alerts."<name>"]
+  route = "<agent or box>"     # or "$coordinator" / "$escalation_box"
+
+Escalation copies keep going to [agents] escalation_box. A route to a box that
+does not exist falls back to the default recipient (recorded as an
+alert_route_invalid event), so mail is never dropped. Every watcher's
+notify_to is an alias for route, and an [alerts] route wins over it.
 
 --all adds the delivery mechanics that also send mail but are not alerts
 (the scheduler delivering a registered message).

@@ -9,8 +9,10 @@
 //
 // Mail resolves the name and hands the message to the transport the caller
 // already used — unless the alert is MUTED (slice 2, SetMutes), in which case
-// it is withheld and recorded as an alert_muted event. Route (slice 3) and
-// nudges (slice 4) attach here later — which is the point of having one seam
+// it is withheld and recorded as an alert_muted event — or ROUTED (slice 3,
+// SetRoutes), in which case its primary copy goes to another box, falling back
+// to the default recipient rather than dropping mail. Nudges (slice 4) attach
+// here later — which is the point of having one seam
 // rather than ~60 call sites that each address `mg` on their own.
 //
 // Some mail is not an alert: the scheduler delivering a registered message is
@@ -226,7 +228,7 @@ var registry = []Def{
 	{PromptSyncNotice, ClassAlert, RoleCoordinator, "", "deployed prompts are not reconciled with the source"},
 	{ReaperEscalation, ClassAlert, RoleCoordinator + " and " + RoleEscalationBox, "", "the launchd reaper gave up kickstarting a job"},
 	{RefineryMerged, ClassAlert, RoleCoordinator, "", "a merge request merged"},
-	{RefineryMergeFailed, ClassAlert, "the merge author and " + RoleCoordinator, "", "a merge request failed"},
+	{RefineryMergeFailed, ClassAlert, RoleCoordinator + " and the merge author", "", "a merge request failed"},
 	{RefineryFailureThreshold, ClassAlert, RoleCoordinator, "", "an author reached the consecutive merge-failure threshold"},
 	{RefineryDeferDoneBackstop, ClassAlert, RoleCoordinator, "", "a --defer-done polecat lingered after its merge and was reaped"},
 	{RefineryDeferredDeath, ClassAlert, RoleCoordinator, "", "a deferred polecat died after its merge, before mg done"},
