@@ -1266,6 +1266,11 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 
 	cmd.Env = append(os.Environ(), layerEnv(req.BaseEnv, injectedEnv, req.Env)...)
 
+	// Seed the harness's first-run state (Claude: hasCompletedOnboarding) into
+	// the profile this environment points at, so a token-only fresh install
+	// does not stop on the theme picker (drellem2/pogo#286).
+	seedHarnessProfile(provider, req.Name, command, cmd.Env)
+
 	// Deliver the persona prompt to a ContextFile-injection provider (Codex
 	// reads AGENTS.override.md from its working directory). Must happen before
 	// the process starts so the harness picks it up on launch. A no-op for
@@ -1872,6 +1877,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	// same order keeps that true on a restart. The base env (crew frontmatter,
 	// gh #263) goes back beneath the catalogue, as it went in on spawn.
 	cmd.Env = append(os.Environ(), layerEnv(old.baseEnv, injectedEnv, old.spawnEnv)...)
+	seedHarnessProfile(old.provider, old.Name, old.Command, cmd.Env)
 
 	// A restart re-resolves to the agent's OWN provider (carried on old.provider
 	// from its original spawn), never the registry default — so a Codex agent

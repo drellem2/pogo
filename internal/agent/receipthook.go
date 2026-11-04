@@ -109,3 +109,20 @@ func installMailRecipientHook(p *Provider, name, dir string) {
 			"(mail to a stopped agent will report Delivered with no warning)", name, err)
 	}
 }
+
+// seedHarnessProfile runs the provider's ProfileSeedHook for one spawn or
+// restart. It runs only when command runs the provider's own binary, and a
+// failure never fails the spawn (see Provider.ProfileSeedHook).
+func seedHarnessProfile(p *Provider, name string, command, env []string) {
+	if p == nil || p.ProfileSeedHook == nil || len(command) == 0 {
+		return
+	}
+	if filepath.Base(command[0]) != p.Binary {
+		return
+	}
+	if err := p.ProfileSeedHook(env); err != nil {
+		log.Printf("agent %s: could not seed %s first-run state: %v "+
+			"(the agent may stop on a first-run screen such as the theme picker)",
+			name, p.ID, err)
+	}
+}

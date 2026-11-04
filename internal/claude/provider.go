@@ -57,6 +57,11 @@ var Provider = agent.Provider{
 	// only on a positive loggedIn:false (#173). See AuthStatus.
 	AuthPreflight: AuthStatus,
 
+	// A token-only profile (CLAUDE_CODE_OAUTH_TOKEN) passes the preflight
+	// above yet has never run the first-run flow, so it opens on the theme
+	// picker. Merge hasCompletedOnboarding into .claude.json first (#286).
+	ProfileSeedHook: SeedOnboarding,
+
 	// Claude's Ink/React TUI nudge dialect. pogo's DefaultNudgeProfile was
 	// tuned against it, so the provider adopts it verbatim — keeping a single
 	// source of truth for the {60s, "\r", 50ms, 2s} timings.
