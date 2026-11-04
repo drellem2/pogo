@@ -2267,6 +2267,13 @@ func (r *Registry) waitAndHandle(a *Agent) {
 		log.Printf("agent %s: output reader never attached within %v; "+
 			"releasing the PTY anyway — trailing output may be lost", a.Name, readerAttachTimeout)
 	}
+	// Named before the release so a drain timeout can say who else holds it.
+	slavePath := ""
+	a.mu.Lock()
+	if a.slave != nil {
+		slavePath = a.slave.Name()
+	}
+	a.mu.Unlock()
 	a.closeSlave()
 
 	// Wait for the output reader to drain all remaining PTY output before
@@ -2288,6 +2295,10 @@ func (r *Registry) waitAndHandle(a *Agent) {
 			"and the PTY slave released (its master Read has not returned EOF/EIO); "+
 			"marking the agent exited anyway, trailing output may be lost (mg-d7e17)",
 			a.Name, outputDrainTimeout)
+		holders, uninspected := ptySlaveHolders(slavePath)
+		log.Printf("agent %s: processes still holding PTY slave %s: %d %v "+
+			"(%d processes could not be inspected; -1 = no scan on this OS) (mg-c7a0d)",
+			a.Name, slavePath, len(holders), holders, uninspected)
 	}
 
 	a.mu.Lock()
