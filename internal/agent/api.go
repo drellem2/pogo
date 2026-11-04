@@ -1643,7 +1643,7 @@ func (r *Registry) startCrewAgent(name string, preflight *authPreflight) (*Agent
 	// and everyone else gets a generic start message.
 	// The crew-only `env` frontmatter key (drellem2/pogo#263). Passed as
 	// BaseEnv, NOT Env: Env lands after the identity catalogue and would let a
-	// prompt override POGO_AGENT_NAME / POGO_ROLE; BaseEnv lands beneath it.
+	// prompt override POGO_AGENT_NAME / POGO_AGENT_TYPE; BaseEnv lands beneath it.
 	// Spawn captures it, and a crash restart re-applies that captured copy.
 	// Names are logged, never values (an env can carry secrets) — so the env is
 	// reported, not just present (mg-fbaf). Skipped lines/entries are logged
