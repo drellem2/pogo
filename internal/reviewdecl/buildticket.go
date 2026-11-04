@@ -1,6 +1,11 @@
 package reviewdecl
 
-import "strings"
+import (
+	"sort"
+	"strings"
+
+	"github.com/drellem2/pogo/internal/client"
+)
 
 // This file holds the answer to the question `stage:` cannot answer: OF THE TWO
 // ITEMS THAT CARRY `stage: review` AT THE SAME TIME, WHICH ONE IS THE REVIEW
@@ -61,8 +66,30 @@ import "strings"
 // build item", and the finding count would be structurally zero. So the markers
 // below are chosen for being NON-CIRCULAR: neither reads `reviews:`.
 //
-// # The two markers, in the order they are trusted
+// # The markers, in the order they are trusted
 //
+//	MarkerReviewedBy   ANOTHER scanned item's `reviews:` line names this item
+//	                   (mg-48992). This is the authoritative edge — it is the
+//	                   very declaration mg-2829's exclusion exists to honour —
+//	                   and it is read from the COUNTERPARTY, never from the item
+//	                   being classified, so it is not the circular predicate
+//	                   ruled out above: an item's own missing `reviews:` line
+//	                   is still reported unless someone else has declared that
+//	                   they review it. It applies regardless of title, depends
+//	                   or tags (so it outranks the title veto), because a
+//	                   declaration is a fact and a title is prose. Two guards
+//	                   keep it from swallowing a reviewer: an item that carries
+//	                   its own non-empty `reviews:` line is never set aside by
+//	                   this rule (it is a reviewer, and is audited as one —
+//	                   mutual naming therefore cannot set both halves aside),
+//	                   and a self-reference names nothing, so it stays
+//	                   KindSelfReference. Only a value that LooksLikeWorkItemID
+//	                   is admitted as a name, because only such a value can
+//	                   match the done-reaper's exact-string test. Measured
+//	                   miss it repairs: mg-d8dc9, the build half of GH #284,
+//	                   titled "GH #284: …" with no edge and no tag, reported
+//	                   Missing at 18:39Z on 2026-11-04 in the same report that
+//	                   listed `mg-45f31 -> mg-d8dc9` as declared.
 //	MarkerSuccessor    the item declares a PREDECESSOR — a `depends:` edge, or a
 //	                   `predecessor:<id>` tag. This is the triage -> build chain:
 //	                   mayor.md transition 3 files the build ticket with
@@ -78,6 +105,10 @@ import "strings"
 //	                   tickets that carry no edge — mg-55f9 and mg-dd92 on the
 //	                   live store, both filed before the depends chaining was
 //	                   written into the playbook.
+//
+// The last two are kept as FALLBACKS behind MarkerReviewedBy, not retired by it:
+// a build half can reach `stage: review` before its reviewer is filed, and in
+// that window no counterparty declaration exists to read.
 //
 // # The title veto
 //
@@ -121,6 +152,8 @@ const (
 	// MarkerNone means nothing identified the item as a build ticket, so it is
 	// audited as a review ticket.
 	MarkerNone BuildMarker = ""
+	// MarkerReviewedBy is another item's `reviews:` line naming this one.
+	MarkerReviewedBy BuildMarker = "reviewed-by"
 	// MarkerSuccessor is a declared predecessor: a `depends:` edge or a
 	// `predecessor:<id>` tag.
 	MarkerSuccessor BuildMarker = "successor"
@@ -139,7 +172,19 @@ const predecessorTagPrefix = "predecessor:"
 //
 // The detail string names the value that was read, not merely the marker, so the
 // report can show a reader the exact fact the exclusion rests on.
-func classifyBuild(it Item) (BuildMarker, string) {
+//
+// reviewedBy maps an item id to the ids of the OTHER items whose `reviews:` line
+// names it — see reviewedByIndex. It may be nil.
+func classifyBuild(it Item, reviewedBy map[string][]string) (BuildMarker, string) {
+	// The counterparty's declaration, first and regardless of title: it is the
+	// one authoritative signal of which half is which (mg-48992). An item that
+	// declares a `reviews:` line of its own is a reviewer and is never set aside
+	// by this rule.
+	if strings.TrimSpace(it.Reviews) == "" {
+		if rs := reviewedBy[it.ID]; len(rs) > 0 {
+			return MarkerReviewedBy, "reviewed-by: " + strings.Join(rs, ", ")
+		}
+	}
 	// The title veto, symmetric with MarkerTitlePrefix: a title whose first
 	// word is `review` overrides a predecessor marker of EITHER shape. mg-0218
 	// (a `predecessor:` tag) set aside the live store's only review ticket and
@@ -165,6 +210,32 @@ func classifyBuild(it Item) (BuildMarker, string) {
 		return MarkerTitlePrefix, "title begins `build`"
 	}
 	return MarkerNone, ""
+}
+
+// reviewedByIndex returns, for every item id that some OTHER item's `reviews:`
+// line names, the sorted ids of the items naming it.
+//
+// Only a declaration the strict parser could read counts: an item whose carrier
+// block is unreadable contributes nothing, since none of its lines can be
+// trusted. A value that is not a bare work-item id cannot name anything (the
+// done-reaper's match is exact string equality), and a self-reference names
+// nothing — donereap refuses it by name — so neither enters the index.
+func reviewedByIndex(items []Item) map[string][]string {
+	idx := map[string][]string{}
+	for _, it := range items {
+		if it.CarrierUnreadable {
+			continue
+		}
+		target := strings.TrimSpace(it.Reviews)
+		if target == "" || target == it.ID || !client.LooksLikeWorkItemID(target) {
+			continue
+		}
+		idx[target] = append(idx[target], it.ID)
+	}
+	for _, rs := range idx {
+		sort.Strings(rs)
+	}
+	return idx
 }
 
 // firstWord returns the leading run of letters of a title, lowercased.
