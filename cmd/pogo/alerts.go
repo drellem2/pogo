@@ -28,7 +28,8 @@ VIA is "mail", or "nudge" for an alert typed into the recipient's terminal
 (stall-watch's checks, a condition's wake, crew-reset's pointer). Nudges are
 muted and routed exactly like mail. Nudges that only deliver something else —
 wake-watch's mail-arrival pointers, the kickoff prompt, the mid-session-wedge
-submit, scheduler deliveries — are not alerts and are not listed.
+submit, scheduler deliveries, an operator's pogo nudge — are not alerts: --all
+lists them as delivery mechanics, and they cannot be muted or routed.
 
 DEFAULT is the built-in rule ($coordinator and $escalation_box name the
 [agents] coordinator and escalation_box). EFFECTIVE is that rule resolved
@@ -57,8 +58,9 @@ does not exist falls back to the default recipient (recorded as an
 alert_route_invalid event), so mail is never dropped. Every watcher's
 notify_to is an alias for route, and an [alerts] route wins over it.
 
---all adds the delivery mechanics that also send mail but are not alerts
-(the scheduler delivering a registered message).
+--all adds the delivery mechanics, marked "(delivery)": mail and nudges
+pogo sends that are not alerts (a scheduled message, a mail-arrival pointer,
+a kickoff prompt). They cannot be muted or routed.
 
 The list comes from the running pogod (GET /alerts), so it reflects the
 config the daemon loaded, not the file as it is now.`,
@@ -75,7 +77,7 @@ config the daemon loaded, not the file as it is now.`,
 			printAlerts(os.Stdout, rows)
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "also list delivery mechanics that send mail but are not alerts")
+	cmd.Flags().BoolVar(&all, "all", false, "also list delivery mechanics (mail and nudges) that are not alerts")
 	return cmd
 }
 
