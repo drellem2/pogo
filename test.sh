@@ -156,6 +156,12 @@ gate_step "Testing the merge gate's signal witness" bash scripts/tmpdir-leak-gua
 # the cost was invisible until the gate's own step profile named the row.
 gate_step "Testing the merge gate's signal sender" bash scripts/tmpdir-leak-guard.sh bash scripts/signal-sender_test.sh
 
+# The local release path (mg-c0665): scripts/release-local.sh publishes a pushed
+# tag with goreleaser from this box, without Actions. Stub gh/goreleaser and a
+# bare temp origin; the refusals (HEAD off the tag, release already exists, tag
+# not pushed, ...) are each paired with a passing control. ~1s.
+gate_step "Testing the local release script" bash scripts/tmpdir-leak-guard.sh bash scripts/release-local_test.sh
+
 gate_step "Testing neovim plugin" bash scripts/tmpdir-leak-guard.sh bash nvim/test_nvim.sh
 
 gate_step "Testing bash shell integration" bash scripts/tmpdir-leak-guard.sh bash shell/bashrc_test.sh

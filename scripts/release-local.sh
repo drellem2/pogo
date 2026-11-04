@@ -27,6 +27,8 @@
 #   - go.mod carries a replace directive (same guard as release.yml)
 #   - a GitHub Release for the tag ALREADY EXISTS (no double publish), or
 #     gh cannot say whether one does (an unknown answer is not "absent")
+#   - a release.yml run for the tag is still queued or in progress (Actions
+#     may still run on a public repo; two publishers must not race)
 #   - no token is available (GH_TOKEN or GITHUB_TOKEN)
 #
 # NOT REPRODUCED: SLSA provenance (go-ossf-slsa3-publish.yml) needs Actions
@@ -118,6 +120,21 @@ case "$view_out" in
     *"release not found"*) say "no release for $TAG in $REPO yet" ;;
     *) refuse "cannot tell whether a release for $TAG exists in $REPO (gh exit $view_rc): $view_out" ;;
 esac
+
+# --- no race with release.yml ---------------------------------------------------
+# On a public repo Actions may still run release.yml for the pushed tag. A run
+# that has not finished could publish while this script does, so refuse until
+# it completes; a run that FAILED or was refused leaves no release, and the
+# check above already covers one that succeeded.
+set +e
+runs_out="$("$GH" run list --repo "$REPO" --workflow release.yml --limit 50 \
+    --json status,headBranch -q ".[] | select(.headBranch == \"$TAG\") | .status" 2>&1)"
+runs_rc=$?
+set -e
+[ "$runs_rc" -eq 0 ] || refuse "cannot list release.yml runs in $REPO (gh exit $runs_rc): $runs_out"
+if printf '%s\n' "$runs_out" | grep -qvE '^(completed)?$'; then
+    refuse "a release.yml run for $TAG is not finished (status: $(printf '%s' "$runs_out" | tr '\n' ' ')) — wait for it, then re-check: gh release view $TAG --repo $REPO"
+fi
 
 say "checks passed: $TAG = HEAD = $REMOTE/$TAG = $TAG_COMMIT"
 

@@ -11,7 +11,11 @@ about 24 hours. This page has two halves:
 
 The tag-trigger itself (a pushed `v*` tag fires `.github/workflows/release.yml`,
 which publishes) and the changelog tooling are covered under **Releases** in
-`CONTRIBUTING.md`.
+`CONTRIBUTING.md`. **release.yml is no longer required (mg-c0665).** When
+Actions does not publish, `scripts/release-local.sh` publishes the same pushed
+tag from this box; see [Publishing without GitHub Actions](#publishing-without-github-actions).
+Either way, a cut counts as published only when the GitHub Release exists with
+its assets (step 4), never because a workflow run went green.
 
 ## Policy (verbatim from mg-8382, pm-pogo, 2026-09-26 10:55Z)
 
@@ -97,7 +101,8 @@ The refinery rebases the bump onto `origin/release/vX.Y.Z` (still at `CAND`),
 runs the gates, and fast-forwards the release branch. It then creates the
 annotated tag `vX.Y.Z` **on the commit that merge landed as** and pushes it
 before any reap can observe the merge (`mg-6879`). Pushing the tag fires
-`release.yml`.
+`release.yml`, if Actions runs for this repo at all. If it does not publish,
+run `scripts/release-local.sh` (below).
 
 The refinery rebases and fast-forwards; it never makes a two-parent merge
 commit. So "the release-branch merge" is the rebased bump commit. Its first
@@ -117,8 +122,61 @@ git fetch origin --tags
 test "$(git rev-parse 'vX.Y.Z^{commit}')" = "$(git rev-parse origin/release/vX.Y.Z)" && echo "tag on release tip"
 test "$(git rev-parse 'vX.Y.Z^{commit}^1')" = "$CAND" && echo "first parent is the candidate"
 git log --oneline "vX.Y.Z..origin/main" | head    # main's post-candidate commits: NOT in the release
-gh run list --workflow=release.yml --limit 1        # the publish run
+gh release view vX.Y.Z --repo drellem2/pogo --json assets -q '.assets[].name'   # the publish
 ```
+
+**The acceptance check is the release, not a workflow run (mg-c0665).** The cut
+is published when `gh release view vX.Y.Z` lists these five assets:
+
+```
+checksums.txt
+pogo_X.Y.Z_darwin_amd64.tar.gz
+pogo_X.Y.Z_darwin_arm64.tar.gz
+pogo_X.Y.Z_linux_amd64.tar.gz
+pogo_X.Y.Z_linux_arm64.tar.gz
+```
+
+`gh run list --workflow=release.yml` is no longer the check. A run that was
+refused (Actions billing) or never started leaves no release. Publish it with
+`scripts/release-local.sh`, then re-run the check above.
+
+### 4a. Publishing without GitHub Actions
+
+`scripts/release-local.sh` runs the repo's `.goreleaser.yml` on this box, against
+the tag the refinery already pushed. It publishes through the GitHub API with
+`$GH_TOKEN`. Every build is `CGO_ENABLED=0`, so the linux and darwin archives
+cross-compile from darwin.
+
+```bash
+git fetch origin --tags
+git worktree add --detach /tmp/release-vX.Y.Z vX.Y.Z   # HEAD = the tag, clean tree
+cd /tmp/release-vX.Y.Z
+/path/to/pogo/scripts/release-local.sh --dry-run vX.Y.Z   # every check + snapshot build, publishes nothing
+/path/to/pogo/scripts/release-local.sh vX.Y.Z             # publish
+cd - && git worktree remove /tmp/release-vX.Y.Z
+```
+
+The script never pushes a tag. It refuses, and publishes nothing, in any of
+these cases:
+
+- HEAD is not exactly `git rev-parse "vX.Y.Z^{}"`.
+- The tag is missing from `origin`, or `origin`'s tag names a different commit.
+- The work tree is dirty.
+- `go.mod` has a `replace` directive.
+- A GitHub Release for the tag **already exists**. This is what stops a double
+  publish, including after release.yml has published.
+- A `release.yml` run for the tag is still queued or in progress.
+- `gh` cannot say whether the release exists. Only the text "release not found"
+  counts as absent.
+
+**No SLSA provenance.** `go-ossf-slsa3-publish.yml` signs with Actions OIDC and
+cannot run locally. pm-pogo's decision, which can be overridden: releases ship
+without SLSA provenance until a signing path exists outside Actions. The release-notes header in
+`.goreleaser.yml` says so. (v0.10.0 to v0.12.0 carried no provenance asset
+either.)
+
+macguffin needs its own copy of the script (`RELEASE_REPO=drellem2/macguffin`).
+That copy lives in the macguffin repo, not here.
 
 ### 5. Carry the bump back to main
 
