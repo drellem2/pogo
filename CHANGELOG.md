@@ -12,6 +12,33 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **`spawn-polecat` is on the record from the moment it is requested
+  (drellem2/pogo#169).** The handler used to print nothing unconditional
+  before its terminal line, and its first events fired at the very end. So a
+  slow spawn, a wedged spawn and one that was never requested all looked the
+  same. pogod now logs `polecat <name>: spawn requested` and emits a new
+  `agent_spawn_requested` event before any gate. It then logs four
+  phase-boundary lines, each with the elapsed time: `gates passed`,
+  `base ref resolved`, `created worktree` and `claim step done`. Stall-watch
+  does not consume the event (see docs/event-log.md).
+
+- **Every `gh pr` call pogo makes or prescribes now asks origin's
+  repository (mg-42fe8, follows drellem2/pogo#259).** #259 pinned pogod's PR
+  lookup to origin with `-R`, but the polecat templates still opened, listed,
+  viewed and commented on PRs unpinned. In a clone with an `upstream` remote
+  or a `gh repo set-default`, gh could open the PR in another repository,
+  and the pinned probe then raised a false stranded-work alert for work that
+  was on an open PR. The templates (`polecat-build-pr.md`, `polecat.md`,
+  `polecat-architect.md`, `polecat-review.md`) now derive
+  `ORIGIN_REPO=$(pogo origin-repo) || exit 1` and pass `-R "$ORIGIN_REPO"`.
+  The `|| exit 1` matters: gh reads `-R ""` as no `-R` at all. The new `pogo origin-repo` prints exactly the
+  OWNER/REPO pogod pins to, through `ghpr.PinToOrigin`. The refinery's PR-body
+  closing-keyword check (`closingref_gate.go`) and the merged-PR list behind
+  `check-stranded` (`ghpr.MergedFor`) go through the same pin, so one branch
+  is no longer asked about in two repositories depending on the step. A
+  standing test fails on any unpinned `gh pr` call in a shipped prompt's
+  code blocks.
+
 - **The refinery classifies a push refused by branch protection as
   `failed(protected)`, terminal at attempt 1 (drellem2/pogo#164).** The
   post-gate git steps wrap every non-credential failure as retryable, so a

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/hostload"
 )
 
@@ -101,6 +102,27 @@ func (r *Registry) SetLoadGate(g LoadGate) {
 	r.loadGate = g
 }
 
+// SetDispatchLoadGate installs the load gate's mark from `[dispatch]
+// load_gate_fleet_share` (drellem2/pogo#202). FleetShare 0 disarms the gate.
+// Until this is called the shipped mark, hostload.FleetHeavyAt, applies.
+func (r *Registry) SetDispatchLoadGate(c config.DispatchLoadGateConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loadGateCfg = c
+	r.loadGateCfgSet = true
+}
+
+// loadGatePolicy is the mark the gate, GET /agents/hostload and the worker
+// budget all read — one accessor, so the three cannot disagree.
+func (r *Registry) loadGatePolicy() config.DispatchLoadGateConfig {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if !r.loadGateCfgSet {
+		return config.DefaultDispatchLoadGateConfig()
+	}
+	return r.loadGateCfg
+}
+
 func (r *Registry) getLoadGate() LoadGate {
 	r.mu.RLock()
 	g := r.loadGate
@@ -130,18 +152,30 @@ func (r *Registry) getLoadGate() LoadGate {
 // told that in the refusal, because the reader is usually an agent deciding
 // what to do next with no human in the loop, and "hold and re-check" and
 // "abandon this item" are opposite actions.
+//
+// # It can be disarmed, and only by config
+//
+// `[dispatch] load_gate_fleet_share` moves the mark; 0 disarms the gate, in
+// which case nothing is sampled and nothing is refused (drellem2/pogo#202). The
+// refusal names the key, so an operator facing a host the gate misjudges learns
+// the lever from the message rather than from the source.
 func (r *Registry) loadGateRefusal() string {
+	pol := r.loadGatePolicy()
+	if !pol.Armed() {
+		return ""
+	}
 	s, ok := r.getLoadGate().DispatchLoad()
 	if !ok {
 		return ""
 	}
-	if !s.FleetHeavy() {
+	if !s.FleetHeavyAtMark(pol.FleetShare) {
 		return ""
 	}
 	return fmt.Sprintf("host has no room for another worker right now: %s "+
 		"This is a LATER, not a refusal of the item — hold it and re-check; nothing about the "+
-		"work item is wrong. Read the current numbers with `pogo host load`.",
-		s.DispatchAdvice())
+		"work item is wrong. Read the current numbers with `pogo host load`. The mark is "+
+		"`[dispatch] load_gate_fleet_share` (%.2f on this daemon); 0 disarms this gate.",
+		s.DispatchAdviceAt(pol.FleetShare), pol.FleetShare)
 }
 
 // HostLoadResponse is the JSON body of GET /agents/hostload.
@@ -163,6 +197,14 @@ type HostLoadResponse struct {
 	// the caller names a repo, and which is the answer to ask for before
 	// planning a batch into one repository (mg-3977).
 	WouldRefuseDispatch bool `json:"would_refuse_dispatch"`
+
+	// LoadGateFleetShare is the mark the gate refuses at, from `[dispatch]
+	// load_gate_fleet_share`, and LoadGateDisarmed is true when that mark is 0
+	// and the gate refuses nothing (drellem2/pogo#202). Both are served even
+	// when the sample failed: they are configuration, not measurement, and a
+	// disarmed gate is exactly the state a reader of this must not miss.
+	LoadGateFleetShare float64 `json:"load_gate_fleet_share"`
+	LoadGateDisarmed   bool    `json:"load_gate_disarmed"`
 
 	// RepoOccupancy is the per-repo cap's view, present only when the request
 	// named a repo (GET /agents/hostload?repo=...). Served from the same counter the
@@ -193,8 +235,15 @@ func (r *Registry) handleHostLoad(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	pol := r.loadGatePolicy()
 	s, ok := r.getLoadGate().DispatchLoad()
-	resp := HostLoadResponse{Sample: s, Measured: ok, WorkerBudget: r.WorkerBudget()}
+	resp := HostLoadResponse{
+		Sample:             s,
+		Measured:           ok,
+		WorkerBudget:       r.WorkerBudget(),
+		LoadGateFleetShare: pol.FleetShare,
+		LoadGateDisarmed:   !pol.Armed(),
+	}
 	// The per-repo cap is independent of the sample: it is a count, and it
 	// answers even when the host could not be measured. Attached whenever a repo
 	// is named so a coordinator planning several dispatches into one repository
@@ -204,9 +253,12 @@ func (r *Registry) handleHostLoad(w http.ResponseWriter, req *http.Request) {
 		resp.RepoOccupancy = &occ
 	}
 	if ok {
-		resp.Advice = s.DispatchAdvice()
-		resp.FleetHeavy = s.FleetHeavy()
-		resp.WouldRefuseDispatch = s.FleetHeavy()
+		resp.Advice = s.DispatchAdviceAt(pol.FleetShare)
+		resp.FleetHeavy = s.FleetHeavyAtMark(pol.FleetShare)
+		resp.WouldRefuseDispatch = resp.FleetHeavy
+	} else if !pol.Armed() {
+		resp.Advice = "PROCEED (load gate DISARMED by config — [dispatch] load_gate_fleet_share = 0; " +
+			"the host sample could not be taken either). This host refuses no dispatch on load."
 	} else {
 		resp.Advice = "PROCEED (unmeasured): the host sample could not be taken, so nothing is " +
 			"known about the fleet's CPU share. Dispatch is not gated on missing information."

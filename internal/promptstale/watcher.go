@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ const (
 	errorEvent = "prompt_stale_watch_error"
 )
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. It is the ONLY side-effect channel this package has.
 type MailFunc func(to, from, subject, body string) error
 
@@ -414,7 +415,7 @@ func (w *Watcher) notify(rep Report, now time.Time) {
 			continue
 		}
 
-		if err := w.mail(rc.Agent, mailFrom, rc.Subject(), rc.Body(rep)); err != nil {
+		if err := alerts.Mail(alerts.PromptStaleNotice, w.mail, rc.Agent, mailFrom, rc.Subject(), rc.Body(rep)); err != nil {
 			// The finding was detected and could not be reported. Say so loudly
 			// AND do not remember these paths as announced: dropping them means
 			// the next sweep treats them as new and tries again. A notifier that

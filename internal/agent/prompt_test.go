@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -2160,7 +2161,7 @@ func TestParsePromptFrontmatterNoFrontmatter(t *testing.T) {
 	if meta == nil {
 		t.Fatal("meta should be non-nil zero value, not nil")
 	}
-	if *meta != (AgentMeta{}) {
+	if !reflect.DeepEqual(*meta, AgentMeta{}) {
 		t.Errorf("expected zero-value meta, got %+v", *meta)
 	}
 	if body != content {
@@ -2287,7 +2288,7 @@ func TestParsePromptFrontmatterBodyOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta == nil || *meta != (AgentMeta{}) {
+	if meta == nil || !reflect.DeepEqual(*meta, AgentMeta{}) {
 		t.Errorf("expected zero-value meta, got %+v", meta)
 	}
 	if body != content {
@@ -2343,7 +2344,7 @@ func TestParsePromptFrontmatterBOM(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BOM-prefixed input should not error: %v", err)
 		}
-		if *meta != (AgentMeta{}) {
+		if !reflect.DeepEqual(*meta, AgentMeta{}) {
 			t.Errorf("expected zero-value meta (BOM hides frontmatter), got %+v", *meta)
 		}
 		if body != content {
@@ -2361,7 +2362,7 @@ func TestParsePromptFrontmatterBOM(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BOM-prefixed plain markdown should not error: %v", err)
 		}
-		if *meta != (AgentMeta{}) {
+		if !reflect.DeepEqual(*meta, AgentMeta{}) {
 			t.Errorf("expected zero-value meta, got %+v", *meta)
 		}
 		if body != content {
@@ -2419,7 +2420,7 @@ func TestParsePromptFrontmatterEmptyFrontmatter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *meta != (AgentMeta{}) {
+	if !reflect.DeepEqual(*meta, AgentMeta{}) {
 		t.Errorf("expected zero-value meta, got %+v", *meta)
 	}
 	if body != "body only\n" {
@@ -4742,9 +4743,9 @@ func TestBranchPolecatTemplatesInstructPRCreate(t *testing.T) {
 		}
 		// The base must be OBSERVED. Naming it would be a claim that can rot,
 		// the same defect mg-d39e fixed for the branch name.
-		if !strings.Contains(got, "gh repo view --json defaultBranchRef") {
+		if !strings.Contains(got, `gh repo view "$ORIGIN_REPO" --json defaultBranchRef`) {
 			t.Errorf("%s: must read the default branch with "+
-				"`gh repo view --json defaultBranchRef`, not assume it", tmplName)
+				"`gh repo view \"$ORIGIN_REPO\" --json defaultBranchRef` (pinned to origin, mg-42fe8), not assume it", tmplName)
 		}
 
 		noBranch := renderShippedTemplate(t, tmplName, base)

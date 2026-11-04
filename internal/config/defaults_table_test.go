@@ -81,6 +81,7 @@ var configFieldSection = map[string]string{
 	"OrchestrationResume": "orchestration_resume",
 	"DispatchPairing":     "dispatch_pairing",
 	"DispatchCap":         "dispatch",
+	"DispatchLoadGate":    "dispatch",
 	"AuditSuccessor":      "audit_successor",
 	"Service":             "service",
 }
@@ -108,6 +109,7 @@ var switchDefaults = map[string]func(*Config) string{
 	"stall_watch/blocked_reminder_enabled":       func(c *Config) string { return onOff(c.StallWatch.BlockedReminderEnabled) },
 	"stall_watch/indefinite_hold_report_enabled": func(c *Config) string { return onOff(c.StallWatch.IndefiniteHoldReportEnabled) },
 	"dispatch/max_polecats_per_repo":             func(c *Config) string { return onOff(c.DispatchCap.Armed()) },
+	"dispatch/load_gate_fleet_share":             func(c *Config) string { return onOff(c.DispatchLoadGate.Armed()) },
 	"dispatch_pairing/repos":                     func(c *Config) string { return inertIfEmpty(len(c.DispatchPairing.Repos)) },
 	"audit_successor/repos":                      func(c *Config) string { return inertIfEmpty(len(c.AuditSuccessor.Repos)) },
 	"reconcile/mirrors":                          func(c *Config) string { return inertIfEmpty(len(c.Reconcile.Mirrors)) },
@@ -412,13 +414,25 @@ func TestDefaultsTableMatchesLoad(t *testing.T) {
 		}
 	}
 
-	// The dispatch row states the cap as a number; keep that number honest.
+	// The dispatch rows state their defaults as numbers; keep those honest.
 	for _, r := range rows {
-		if r.section == "dispatch" {
-			wantCap := "`max_polecats_per_repo = " + strconv.Itoa(cfg.DispatchCap.MaxPolecatsPerRepo) + "`"
-			if !strings.Contains(r.what, wantCap) {
-				t.Errorf("%s:%d: [dispatch] row does not state the default %s", defaultsTableDoc, r.line, wantCap)
+		if r.section != "dispatch" {
+			continue
+		}
+		var want string
+		switch r.key {
+		case "max_polecats_per_repo":
+			want = "`max_polecats_per_repo = " + strconv.Itoa(cfg.DispatchCap.MaxPolecatsPerRepo) + "`"
+		case "load_gate_fleet_share":
+			want = "`load_gate_fleet_share = " + strconv.FormatFloat(cfg.DispatchLoadGate.FleetShare, 'f', 2, 64) + "`"
+			if pct := strconv.Itoa(int(cfg.DispatchLoadGate.FleetShare*100+0.5)) + "%"; !strings.Contains(r.what, pct) {
+				t.Errorf("%s:%d: [dispatch] %s row does not state the default mark %s", defaultsTableDoc, r.line, r.key, pct)
 			}
+		default:
+			continue
+		}
+		if !strings.Contains(r.what, want) {
+			t.Errorf("%s:%d: [dispatch] %s row does not state the default %s", defaultsTableDoc, r.line, r.key, want)
 		}
 	}
 }

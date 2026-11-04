@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"strings"
 	"sync"
 	"time"
@@ -84,7 +85,7 @@ const (
 // because those two must never collapse into the same "nothing to report".
 type SourceFunc func() (Inventory, error)
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. As in internal/ghteardown, this is the ONLY side-effect channel the
 // runner has — there is deliberately no seam through which it could file a work
 // item or comment on an issue.
@@ -376,7 +377,7 @@ func (w *Watcher) sample(now time.Time) {
 		"escalated":        stalled,
 	}
 	for _, to := range recipients {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.GHIntakeFinding, w.mail, to, mailFrom, subject, body); err != nil {
 			// The miss was detected but could not be reported — record it, because
 			// a notice that reaches nobody is this package's own failure mode
 			// reproduced one level up.

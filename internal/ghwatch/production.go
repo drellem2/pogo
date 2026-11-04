@@ -4,8 +4,8 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/drellem2/pogo/internal/alerts"
 	"github.com/drellem2/pogo/internal/carrierdrift"
-	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/ghintake"
 	"github.com/drellem2/pogo/internal/ghteardown"
@@ -41,7 +41,7 @@ func Production(cfg *config.Config, home string, caches Caches, cred ghtoken.Res
 		CredentialOK:     cred.OK(),
 		CredentialSource: string(cred.Source),
 		Credential:       cred.String(),
-		Mail:             client.SendMGMail,
+		Mail:             alerts.Transport,
 		TeardownSource:   tdSrc.Carriers,
 		// RetryingLookup / RetryingSnapshot: this box's network is ~50%
 		// intermittent (mg-0ffc), and an un-retried read turns one blip into a

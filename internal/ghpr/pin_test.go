@@ -1,6 +1,7 @@
 package ghpr
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -210,5 +211,48 @@ func TestParseGitHubRemoteNeverQuotesCredentials(t *testing.T) {
 	}
 	if got := redactURL("https://u:p@github.com/o"); got != "https://<redacted>@github.com/o" {
 		t.Errorf("redactURL = %q", got)
+	}
+}
+
+// TestMergedForIsPinnedToo: the merged-PR list the stranded check reads runs
+// through the same pin as Ask, so an upstream remote cannot redirect it while
+// the open-PR probe asks origin (mg-42fe8).
+func TestMergedForIsPinnedToo(t *testing.T) {
+	dir := repoWithRemotes(t, map[string]string{
+		"origin":   "https://github.com/drellem2/pogo.git",
+		"upstream": "https://github.com/someone-else/pogo.git",
+	})
+	logPath := loggingGH(t, `echo '[]'`)
+	if _, err := MergedFor(dir, "b", time.Minute); err != nil {
+		t.Fatalf("MergedFor: %v", err)
+	}
+	if got := ghArgs(t, logPath); !strings.HasSuffix(got, "-R drellem2/pogo") || !strings.HasPrefix(got, "pr list --head b ") {
+		t.Errorf("gh was called as %q, want pr list pinned with -R drellem2/pogo", got)
+	}
+}
+
+// TestPinToOrigin: a pinnable origin appends -R without touching the caller's
+// slice; an unpinnable one returns the argv unchanged with a reason — the
+// unpinned call, never an invented repository.
+func TestPinToOrigin(t *testing.T) {
+	in := []string{"pr", "create", "--head", "b"}
+	dir := repoWithRemotes(t, map[string]string{
+		"origin":   "git@github.com:fork-owner/pogo.git",
+		"upstream": "https://github.com/drellem2/pogo.git",
+	})
+	got, repo, why := PinToOrigin(context.Background(), dir, in)
+	if strings.Join(got, " ") != "pr create --head b -R fork-owner/pogo" || repo != "fork-owner/pogo" || why != "" {
+		t.Errorf("PinToOrigin = (%q, %q, %q)", got, repo, why)
+	}
+	if len(in) != 4 {
+		t.Errorf("PinToOrigin mutated its input: %q", in)
+	}
+	alias := repoWithRemotes(t, map[string]string{"origin": "git@github-work:o/r.git"})
+	got, repo, why = PinToOrigin(context.Background(), alias, in)
+	if strings.Join(got, " ") != "pr create --head b" || repo != "" || why == "" {
+		t.Errorf("unpinnable origin: PinToOrigin = (%q, %q, %q), want argv unchanged with a reason", got, repo, why)
+	}
+	if r, err := OriginRepo(dir, time.Minute); err != nil || r != "fork-owner/pogo" {
+		t.Errorf("OriginRepo = (%q, %v)", r, err)
 	}
 }

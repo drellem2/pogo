@@ -58,6 +58,7 @@ package driftwatch
 
 import (
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"os"
 	"os/exec"
@@ -457,7 +458,7 @@ func (w *Watcher) sampleRevision(now time.Time) {
 
 	if mail {
 		subject := staleSubject(s)
-		if err := w.mail(w.mailTo, mailFrom, subject, staleBody(s, notice, w.maxNotices, w.behindRepo)); err != nil {
+		if err := alerts.Mail(alerts.DriftWatchStaleRevision, w.mail, w.mailTo, mailFrom, subject, staleBody(s, notice, w.maxNotices, w.behindRepo)); err != nil {
 			// Detected but not reportable. Record it: a staleness notice that
 			// reaches nobody is the failure this detector exists to remove, and
 			// it must not vanish just because the mail channel is down.

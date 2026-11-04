@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"path/filepath"
 
 	"github.com/drellem2/pogo/internal/agent"
-	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/events"
 	"github.com/drellem2/pogo/internal/wakewatch"
@@ -37,7 +37,7 @@ func newWakeWatcher(cfg config.WakeWatchConfig, reg *agent.Registry, coordinator
 		Item:        wakeWatchItem(filepath.Join(root, "work")),
 		Subject:     func(box, id string) string { return wakewatch.ReadSubject(filepath.Join(root, "mail"), box, id) },
 		Nudge:       wakeWatchNudge(reg),
-		Mail:        client.SendMGMail,
+		Mail:        alerts.Transport,
 		Emit:        emitWakeWatch,
 		Coordinator: coordinator,
 		Async:       true,

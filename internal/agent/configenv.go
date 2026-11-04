@@ -40,36 +40,6 @@ func (r *Registry) configEnvLocked(typ AgentType, name string) []string {
 	return out
 }
 
-// processEnv returns the layers pogo puts on top of pogod's own environment
-// for a spawned agent. Spawn and the restart path both build them here, so a
-// restarted agent gets the same environment as the one it replaces.
-//
-// It deliberately does NOT include os.Environ(). Callers write
-// `cmd.Env = append(os.Environ(), processEnv(...)...)`, so that the root is
-// visible at the call site to the gitceiling inheritance guard
-// (internal/gitceiling, TestSubprocessEnvironmentsInheritTheCeiling): an
-// environment that does not visibly root in os.Environ() is flagged, because it
-// could drop GIT_CEILING_DIRECTORIES.
-//
-// The ORDER is the contract, because exec.Cmd keeps the last assignment of a
-// duplicated key:
-//
-//  1. pogod's own environment, inherited (the caller's os.Environ()).
-//  2. configEnv: [agents] env, then [agents.<type>] env. Host configuration, so
-//     it is the lowest of pogo's layers.
-//  3. identity: the catalogue variables (agentIdentityEnv). After the config so
-//     that config cannot rename an agent or point it at another mailbox.
-//  4. spawnEnv: the spawn's own SpawnRequest.Env. For a polecat that is the
-//     core budget, then the dispatcher's --env, then POGO_ROLE last
-//     (polecatSpawnEnv). After the config so that an explicit --env still wins,
-//     as it did before config env existed.
-func processEnv(configEnv, identity, spawnEnv []string) []string {
-	env := make([]string, 0, len(configEnv)+len(identity)+len(spawnEnv))
-	env = append(env, configEnv...)
-	env = append(env, identity...)
-	return append(env, spawnEnv...)
-}
-
 // ConfiguredEnv renders configured env entries as catalogue rows for
 // `pogo agent env`, so that a variable config.toml injects is reported like any
 // other (mg-fbaf: an environment that exists and is believed absent). Values

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"sort"
 	"strings"
 	"sync"
@@ -71,7 +72,7 @@ const (
 // this detector is about, one level up.
 type SourceFunc func() ([]Carrier, int, error)
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. As in the sibling detectors this is the ONLY side-effect channel the
 // runner has — there is deliberately no seam through which it could comment on
 // an issue, close one, or edit a work item.
@@ -355,7 +356,7 @@ func (w *Watcher) sample(now time.Time) {
 		"escalated":            stalled,
 	}
 	for _, to := range recipients {
-		if err := w.mail(to, mailFrom, subject, body); err != nil {
+		if err := alerts.Mail(alerts.CarrierDriftFinding, w.mail, to, mailFrom, subject, body); err != nil {
 			// Detected and not reported — record it, because a notice that
 			// reaches nobody is this package's own subject matter one level up.
 			details["mail_error_"+to] = err.Error()

@@ -42,6 +42,7 @@ package crewreset
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 	"sort"
 	"sync"
@@ -219,7 +220,7 @@ func (w *Watcher) Tick(now time.Time) []Notice {
 		}
 		n := Notice{Agent: p.Name, StartedAt: p.StartedAt, Uptime: uptime, Number: s.notices + 1}
 		subject, body := Message(p.Name, uptime, p.StartedAt, w.o.After, n.Number)
-		if err := w.o.Mail(p.Name, Sender, subject, body); err != nil {
+		if err := alerts.Mail(alerts.CrewResetNotice, w.o.Mail, p.Name, Sender, subject, body); err != nil {
 			n.MailErr = err
 			w.o.Logf("crew-reset: notice %d to %s failed: %v (will retry next tick)", n.Number, p.Name, err)
 			w.emit(EventError, map[string]any{"agent": p.Name, "error": err.Error(), "phase": "mail", "notice": n.Number})

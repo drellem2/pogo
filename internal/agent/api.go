@@ -1641,6 +1641,24 @@ func (r *Registry) startCrewAgent(name string, preflight *authPreflight) (*Agent
 	// A prompt file may declare its own message via `nudge_on_start` in the
 	// TOML frontmatter; otherwise the coordinator gets a coordination message
 	// and everyone else gets a generic start message.
+	// The crew-only `env` frontmatter key (drellem2/pogo#263). Passed as
+	// BaseEnv, NOT Env: Env lands after the identity catalogue and would let a
+	// prompt override POGO_AGENT_NAME / POGO_AGENT_TYPE; BaseEnv lands beneath it.
+	// Spawn captures it, and a crash restart re-applies that captured copy.
+	// Names are logged, never values (an env can carry secrets) — so the env is
+	// reported, not just present (mg-fbaf). Skipped lines/entries are logged
+	// here because the parser cannot: they never fail the parse.
+	var baseEnv []string
+	if meta != nil {
+		for _, w := range meta.EnvWarnings() {
+			log.Printf("crew agent %s: prompt %s: %s", name, promptFile, w)
+		}
+		if len(meta.Env) > 0 {
+			baseEnv = meta.Env
+			log.Printf("crew agent %s: env from frontmatter: %s", name, strings.Join(meta.EnvKeys(), ", "))
+		}
+	}
+
 	var nudgeMsg string
 	if meta != nil && meta.NudgeOnStart != "" {
 		nudgeMsg = meta.NudgeOnStart
@@ -1660,6 +1678,7 @@ func (r *Registry) startCrewAgent(name string, preflight *authPreflight) (*Agent
 		RestartOnCrash: ResolveRestartOnCrashWithStub(stubFile, promptFile, TypeCrew),
 		Provider:       provider,
 		Model:          model,
+		BaseEnv:        baseEnv,
 	})
 }
 
@@ -1734,6 +1753,30 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		failPolecatSpawn(w, spawnReq, http.StatusBadRequest, fmt.Sprintf("bad request: %v", err))
 		return
 	}
+
+	// Request record (drellem2/pogo#169): one UNCONDITIONAL log line and one
+	// agent_spawn_requested event, before any gate. Until this, every line this
+	// handler printed was conditional (an override, a model, a tag) or terminal
+	// (worktree created), and its first events — work_item_claimed_at_spawn and
+	// agent_spawned — fire at the very end. So a spawn that died or wedged in
+	// the middle was indistinguishable from one that was never requested: every
+	// instrument on this path recorded only completions.
+	//
+	// After the decode, not before, for the reason the drain gate below gives:
+	// a signal that cannot name what it is dispatching is the ambiguity being
+	// fixed. A request too malformed to decode is still on the record, as the
+	// agent_spawn_failed just above.
+	//
+	// The event is the load-bearing half: the coordinator, the reviewer and
+	// stall-watch all read the event spine, not pogod's stderr. It is a RECORD,
+	// not a signal anything consumes — stall-watch deliberately does not read
+	// it (a suppression keyed on a request with no matching claim would let a
+	// genuinely failed dispatch silence the alarm forever; if that wiring is
+	// ever added, the event may only DELAY an alarm, never cancel one).
+	spawnStart := time.Now()
+	log.Printf("polecat %s: spawn requested (work item %q, repo %q, template %q)",
+		spawnReq.Name, spawnReq.Id, spawnReq.Repo, spawnReq.Template)
+	emitPolecatSpawnRequested(spawnReq)
 
 	// Drain gate: while the self-deploy driver is quiescing the fleet for a
 	// redeploy, refuse new polecat dispatch so the live count can reach zero
@@ -2313,6 +2356,12 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		emitPolecatStrandedAdopted(spawnReq, *adoption)
 	}
 
+	// Phase boundary (drellem2/pogo#169): every refusal is behind us and every
+	// side effect is ahead. A spawn whose last line is this one died or wedged
+	// in setup, not at a gate. Elapsed time is since the request line above.
+	log.Printf("polecat %s: gates passed (template %s, worktree %v, +%s)",
+		spawnReq.Name, tmplName, createWorktree, time.Since(spawnStart).Round(time.Millisecond))
+
 	// Compute worktree path before template expansion so it can be included
 	// in the prompt. gitgc.DefaultPolecatsDir is the single source of truth
 	// for this location — its orphan-dir scan must see the same directory.
@@ -2479,6 +2528,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		// is behind origin. Falls back to local HEAD when no usable origin
 		// exists (tests, repos without a remote).
 		baseRef := resolvePolecatBaseRef(sourceRepo, spawnReq.Branch)
+		// Phase boundary (drellem2/pogo#169): resolvePolecatBaseRef is the only
+		// networked call on this path (a bounded `git fetch`), so it is the step
+		// most likely to be where a slow spawn is spending its time.
+		log.Printf("polecat %s: base ref resolved to %q for target %q (+%s)",
+			spawnReq.Name, baseRef, spawnReq.Branch, time.Since(spawnStart).Round(time.Millisecond))
 
 		// UNLESS THIS IS AN ADOPTION, in which case the whole point is to start
 		// from the stranded branch instead (mg-ba32). Nothing else about the spawn
@@ -2586,7 +2640,8 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 				fmt.Sprintf("worktree creation failed: %v\n%s", cause, out))
 			return
 		}
-		log.Printf("polecat %s: created worktree at %s (branch %s, base %q)", spawnReq.Name, worktreeDir, branchName, baseRef)
+		log.Printf("polecat %s: created worktree at %s (branch %s, base %q, +%s)", spawnReq.Name, worktreeDir, branchName, baseRef,
+			time.Since(spawnStart).Round(time.Millisecond))
 		spawnBase.BaseRef = baseRef
 		if warning := polecatBaseWarning(spawnReq.Branch, baseRef, adoption != nil); warning != "" {
 			spawnBase.Warning = warning
@@ -2679,6 +2734,11 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		failPolecatSpawn(w, spawnReq, http.StatusConflict, claimRefusal)
 		return
 	}
+	// Phase boundary (drellem2/pogo#169): the last one before Spawn. Logged for
+	// every outcome, including skipped/unknown, so the line's presence means the
+	// claim step ran rather than that a claim exists.
+	log.Printf("polecat %s: claim step done for work item %q: %s (+%s)",
+		spawnReq.Name, spawnReq.Id, claimVerdict.Outcome, time.Since(spawnStart).Round(time.Millisecond))
 	// Close the in-flight window on EVERY path out of here, which is what makes a
 	// defer the right shape rather than two calls: an entry left behind makes a
 	// genuinely stranded claim un-adoptable for the life of the daemon, and the
@@ -2768,6 +2828,34 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 func failPolecatSpawn(w http.ResponseWriter, spawnReq SpawnPolecatAPIRequest, status int, msg string) {
 	emitPolecatSpawnFailed(spawnReq, status, msg)
 	http.Error(w, msg, status)
+}
+
+// emitPolecatSpawnRequested records an agent_spawn_requested event: a polecat
+// dispatch reached the handler and was decoded (drellem2/pogo#169). It opens
+// the window that agent_spawned or agent_spawn_failed closes, so a request
+// with neither after it is a spawn still in progress — or one that died
+// without reaching any exit path — rather than one never attempted. It
+// mirrors emitPolecatSpawnFailed's identity convention deliberately: the agent
+// it names does not exist yet.
+//
+// Nothing consumes it. It is a record for readers of the spine; see the
+// comment at its call site for why stall-watch does not read it.
+func emitPolecatSpawnRequested(spawnReq SpawnPolecatAPIRequest) {
+	actor := "pogod"
+	if spawnReq.Name != "" {
+		actor = "cat-" + spawnReq.Name
+	}
+	events.Emit(context.Background(), events.Event{
+		EventType:  "agent_spawn_requested",
+		Agent:      actor,
+		WorkItemID: spawnReq.Id,
+		Repo:       spawnReq.Repo,
+		Details: map[string]any{
+			"agent_type": string(TypePolecat),
+			"agent_name": spawnReq.Name,
+			"template":   spawnReq.Template,
+		},
+	})
 }
 
 // emitPolecatSpawnFailed records an agent_spawn_failed event: the counterpart

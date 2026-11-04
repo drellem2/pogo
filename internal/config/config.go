@@ -989,6 +989,9 @@ type Config struct {
 	// Conditions configures the mail sent by pogod's condition annunciator
 	// (drellem2/pogo#238). See ConditionsConfig.
 	Conditions ConditionsConfig
+	// Alerts is the per-alert table, `[alerts."<family>.<kind>"]`
+	// (drellem2/pogo#262), keyed by alert name. See AlertConfig.
+	Alerts map[string]AlertConfig
 	// HeartWatch is the pogod-resident reader of the crew heartbeat (mg-d616).
 	// See HeartWatchConfig.
 	HeartWatch HeartWatchConfig
@@ -1027,6 +1030,12 @@ type Config struct {
 	// see dispatchcap.go for why a per-repo bound is platform behaviour and a
 	// per-fleet count is not.
 	DispatchCap DispatchCapConfig
+	// DispatchLoadGate is the host load gate's mark, `[dispatch]
+	// load_gate_fleet_share` — 0 disarms it (drellem2/pogo#202). Ships ARMED at
+	// hostload.FleetHeavyAt. Same section as DispatchCap, separate struct,
+	// because DispatchCap's zero value is "cap disarmed" and this one's must not
+	// silently be "load gate disarmed" too. See dispatchloadgate.go.
+	DispatchLoadGate DispatchLoadGateConfig
 	// AuditSuccessor declares repos whose merged audits must be answered by a
 	// successor inside a window. Zero value = no repos = inert. This is a
 	// DETECTOR and never refuses anything — see auditsuccessor.go.
@@ -1792,6 +1801,28 @@ type WakeWatchConfig struct {
 	MaxRenudges int
 	// Lookback bounds how far back the event log is modelled.
 	Lookback time.Duration
+}
+
+// AlertConfig is one `[alerts."<name>"]` table (drellem2/pogo#262). The name
+// is an alert's stable "<family>.<kind>" as `pogo alerts` lists it; the config
+// package does not validate it (the registry lives in internal/alerts, which
+// imports this package's dependents) — pogod does, at startup, and names an
+// unknown one in a warning line.
+//
+// Only `mute` exists yet. A muted alert's send is skipped: the detector still
+// runs and still emits its own event, and the seam records an `alert_muted`
+// event in its place. `route` arrives in a later slice.
+//
+// It takes precedence over the older per-section keys it absorbs
+// ([conditions] mail/out_of_band/disable, [blind_watch] mail/out_of_band,
+// [stall_watch] blocked_reminder_enabled), which keep working as aliases.
+type AlertConfig struct {
+	// Mute skips the send. Meaningful only when MuteSet.
+	Mute bool
+	// MuteSet records that `mute` appeared, so `mute = false` can override an
+	// alias key that muted the alert and a later config layer can unmute what
+	// an earlier one muted.
+	MuteSet bool
 }
 
 // ConditionsConfig configures the mail sent by pogod's condition annunciator
@@ -2689,6 +2720,9 @@ type parsedConfig struct {
 	// dispatchCapCreditSet: merge_queued_credit = 0 turns the credit off, which
 	// is a value, not an absence (mg-976f).
 	dispatchCapCreditSet bool
+	// dispatchLoadGateShareSet: load_gate_fleet_share = 0 disarms the host load
+	// gate, which is a value, not an absence (drellem2/pogo#202).
+	dispatchLoadGateShareSet bool
 	// sources are the files that were read, lowest precedence first.
 	sources []string
 }
@@ -2725,6 +2759,8 @@ func Load() *Config {
 		// Ships ARMED (mg-3977). See dispatchcap.go for why a per-repo bound is
 		// platform behaviour rather than one deployment's policy.
 		DispatchCap: DefaultDispatchCapConfig(),
+		// Ships ARMED at hostload.FleetHeavyAt (drellem2/pogo#202).
+		DispatchLoadGate: DefaultDispatchLoadGateConfig(),
 		Reaper: ReaperConfig{
 			Enabled:       true,
 			Interval:      DefaultReaperInterval,
@@ -3164,6 +3200,16 @@ func Load() *Config {
 		if fileCfg.conditionsDisableSet {
 			cfg.Conditions.Disable = fileCfg.Conditions.Disable
 		}
+		// Per alert name: a later layer replaces only the names it states.
+		for name, a := range fileCfg.Alerts {
+			if !a.MuteSet {
+				continue
+			}
+			if cfg.Alerts == nil {
+				cfg.Alerts = map[string]AlertConfig{}
+			}
+			cfg.Alerts[name] = a
+		}
 		if fileCfg.WakeWatch.Coalesce > 0 {
 			cfg.WakeWatch.Coalesce = fileCfg.WakeWatch.Coalesce
 		}
@@ -3514,6 +3560,9 @@ func Load() *Config {
 		}
 		if fileCfg.dispatchCapCreditSet {
 			cfg.DispatchCap.MergeQueuedCredit = fileCfg.DispatchCap.MergeQueuedCredit
+		}
+		if fileCfg.dispatchLoadGateShareSet {
+			cfg.DispatchLoadGate.FleetShare = fileCfg.DispatchLoadGate.FleetShare
 		}
 
 		// [audit_successor] has no code-side defaults to preserve either — the
@@ -4018,6 +4067,26 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 		// Strip surrounding quotes from values
 		unquotedVal := unquote(val)
 
+		// [alerts."<family>.<kind>"] (drellem2/pogo#262). The name is quoted
+		// because it contains a dot; an unquoted header is accepted as written.
+		if rest, ok := strings.CutPrefix(currentSection, "alerts."); ok {
+			name := unquote(strings.TrimSpace(rest))
+			if name == "" {
+				continue
+			}
+			switch key {
+			case "mute":
+				if cfg.Alerts == nil {
+					cfg.Alerts = map[string]AlertConfig{}
+				}
+				a := cfg.Alerts[name]
+				a.Mute = val == "true"
+				a.MuteSet = true
+				cfg.Alerts[name] = a
+			}
+			continue
+		}
+
 		switch currentSection {
 		case "server":
 			switch key {
@@ -4190,6 +4259,23 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 					}
 					cfg.DispatchCap.MergeQueuedCredit = n
 					cfg.dispatchCapCreditSet = true
+				}
+			case "load_gate_fleet_share":
+				// The host load gate's mark (drellem2/pogo#202). 0 disarms it.
+				// Negative clamps to 0 for the reason max_polecats_per_repo's
+				// does; above 1 clamps to 1, because a fleet share cannot exceed
+				// 1 and a larger mark would disarm the gate without the boot log
+				// or `pogo host load` saying so. Unparseable (or NaN) is ignored
+				// and the default stands.
+				if f, err := strconv.ParseFloat(unquotedVal, 64); err == nil && f == f {
+					if f < 0 {
+						f = 0
+					}
+					if f > 1 {
+						f = 1
+					}
+					cfg.DispatchLoadGate.FleetShare = f
+					cfg.dispatchLoadGateShareSet = true
 				}
 			}
 		case "dispatch_pairing":

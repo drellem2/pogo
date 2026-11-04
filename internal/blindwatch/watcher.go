@@ -3,6 +3,7 @@ package blindwatch
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"sort"
 	"strings"
 	"sync"
@@ -363,7 +364,8 @@ func (w *Watcher) clear(snap Snapshot, now time.Time) {
 	if !had {
 		return
 	}
-	to, suppressed := w.deliverable(w.clearRecipients(told))
+	subject := fmt.Sprintf("blind-watch: %s can judge the fleet again", snap.Detector)
+	to, suppressed := w.deliverable(w.clearRecipients(told), alerts.BlindWatchCleared, subject)
 	details := map[string]any{"detector": snap.Detector, "examined": snap.Examined}
 	markDelivery(details, to, suppressed)
 	w.emit(events.Event{
@@ -371,14 +373,13 @@ func (w *Watcher) clear(snap Snapshot, now time.Time) {
 		Agent:     "pogod",
 		Details:   details,
 	})
-	subject := fmt.Sprintf("blind-watch: %s can judge the fleet again", snap.Detector)
 	body := fmt.Sprintf(
 		"%s is sampling and judging again: last sample %s, %d agent(s) examined, 0 unjudgeable.\n\n"+
 			"This clears the condition blind-watch reported. Nothing about the fleet's HEALTH is\n"+
 			"asserted here — only that the instrument is answering.\n",
 		snap.Detector, snap.SampledAt.UTC().Format(time.RFC3339), snap.Examined)
 	for _, box := range to {
-		if err := w.mail(box, mailFrom, subject, body); err != nil {
+		if err := w.mailOne(box, alerts.BlindWatchCleared, subject, body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",
@@ -403,11 +404,11 @@ func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
 	}
 
 	escalate := aboutTheDetector(confirmed) || namesCoordinator(confirmed, w.coordinator)
-	to, suppressed := w.deliverable(w.recipients(escalate))
-	body := renderNotice(snap, confirmed, w.coordinator, escalate, now)
 	subj := subject(snap, confirmed)
+	to, suppressed := w.deliverable(w.recipients(escalate), alerts.BlindWatchFinding, subj)
+	body := renderNotice(snap, confirmed, w.coordinator, escalate, now)
 	for _, box := range to {
-		if err := w.mail(box, mailFrom, subj, body); err != nil {
+		if err := w.mailOne(box, alerts.BlindWatchFinding, subj, body); err != nil {
 			w.emit(events.Event{
 				EventType: EventError,
 				Agent:     "pogod",
@@ -447,22 +448,61 @@ func (w *Watcher) announce(snap Snapshot, confirmed []Finding, now time.Time) {
 	})
 }
 
-// deliverable applies `[blind_watch] mail` and `out_of_band` to the routed
-// recipients (drellem2/pogo#244): to is who is actually mailed, suppressed who
-// the config withheld. With out_of_band off only the human box is dropped, so a
-// finding routed to it alone is mailed to nobody and becomes event-only.
-func (w *Watcher) deliverable(wanted []string) (to, suppressed []string) {
+// deliverable applies `[blind_watch] mail` and `out_of_band` (drellem2/pogo#244)
+// and the alert mutes (#262 slice 2, where those two keys are aliases) to the
+// routed recipients: to is who is actually mailed, suppressed who the config
+// withheld. With out_of_band off only the human box is dropped, so a finding
+// routed to it alone is mailed to nobody and becomes event-only.
+//
+// name is the alert being sent (finding or cleared); the human box's copy is
+// blind_watch.out_of_band instead. A box withheld by an alert mute is recorded
+// as alert_muted by the seam, here, because it never reaches alerts.Mail.
+func (w *Watcher) deliverable(wanted []string, name alerts.Name, subject string) (to, suppressed []string) {
 	for _, box := range wanted {
 		switch {
 		case w.mailOff:
 			suppressed = append(suppressed, box)
-		case w.outOfBandOff && box == w.humanBox && box != w.coordinator:
+		case w.outOfBandOff && w.isOutOfBand(box):
 			suppressed = append(suppressed, box)
 		default:
+			if n := w.alertFor(box, name); alerts.MuteReason(n) != "" {
+				alerts.RecordMuted(n, box, subject, alerts.MuteReason(n))
+				suppressed = append(suppressed, box)
+				continue
+			}
 			to = append(to, box)
 		}
 	}
 	return to, suppressed
+}
+
+// isOutOfBand reports whether box is the escalation copy: the human box,
+// when it is not also the coordinator.
+func (w *Watcher) isOutOfBand(box string) bool {
+	return box == w.humanBox && box != w.coordinator
+}
+
+// mailOne mails one recipient through the seam, under the alert name alertFor
+// gives it. Spelled as branches because the guard test requires a declared
+// constant at every send site.
+func (w *Watcher) mailOne(box string, name alerts.Name, subject, body string) error {
+	switch {
+	case w.isOutOfBand(box):
+		return alerts.Mail(alerts.BlindWatchOutOfBand, w.mail, box, mailFrom, subject, body)
+	case name == alerts.BlindWatchCleared:
+		return alerts.Mail(alerts.BlindWatchCleared, w.mail, box, mailFrom, subject, body)
+	default:
+		return alerts.Mail(alerts.BlindWatchFinding, w.mail, box, mailFrom, subject, body)
+	}
+}
+
+// alertFor is the alert name a send of name to box goes out as: the human
+// box's copy is blind_watch.out_of_band, so it can be muted on its own.
+func (w *Watcher) alertFor(box string, name alerts.Name) alerts.Name {
+	if w.isOutOfBand(box) {
+		return alerts.BlindWatchOutOfBand
+	}
+	return name
 }
 
 // markDelivery records on an event who was mailed, so a withheld send is never

@@ -85,7 +85,7 @@ answer and the values are reported as unknown.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			budget, source := workerBudgetFromDaemon()
 			// The configured env goes first: it is injected beneath every
-			// catalogue variable (agent.processEnv), so it is first in
+			// catalogue variable (agent.layerEnv), so it is first in
 			// injection order and the one every later row overrides.
 			vars := append(agent.ConfiguredEnv(configuredPolecatEnv()), agent.PolecatEnv(budget)...)
 

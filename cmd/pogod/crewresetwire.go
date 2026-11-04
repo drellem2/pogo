@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/drellem2/pogo/internal/alerts"
 
 	"github.com/drellem2/pogo/internal/agent"
-	"github.com/drellem2/pogo/internal/client"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/crewreset"
 	"github.com/drellem2/pogo/internal/events"
@@ -80,7 +80,7 @@ func startCrewReset(ctx context.Context, cfg config.CrewResetConfig, wakeWatchOn
 		Interval:      cfg.Interval,
 		Exclude:       cfg.Exclude,
 		Population:    crewResetPopulation(reg),
-		Mail:          client.SendMGMail,
+		Mail:          alerts.Transport,
 		Emit: func(eventType string, d map[string]any) {
 			events.Emit(context.Background(), events.Event{EventType: eventType, Agent: "pogod", Details: d})
 		},

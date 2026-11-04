@@ -171,6 +171,14 @@ type Agent struct {
 	// caller's slice cannot alias it); safe to read without a.mu.
 	spawnEnv []string
 
+	// baseEnv is SpawnRequest.BaseEnv — for a crew agent, its prompt's `env`
+	// frontmatter as read at spawn (drellem2/pogo#263). Applied BENEATH the
+	// identity catalogue and re-applied on Respawn from this captured copy, not
+	// re-read from the prompt: a crash restart runs the environment the agent
+	// was started with. Unexported for spawnEnv's reason (values may be
+	// secrets). Immutable after construction; safe to read without a.mu.
+	baseEnv []string
+
 	// queuedNudge records the last delivery pogod wrote to this agent's PTY and
 	// could not prove was submitted, because the harness was mid-turn (see
 	// queuednudge.go). nil means nothing is owed. Guarded by mu.
@@ -604,6 +612,14 @@ type Registry struct {
 	// show up a minute later when all seven compile at once. See
 	// dispatchrepocap.go.
 	dispatchCap config.DispatchCapConfig
+
+	// loadGateCfg is the load gate's mark, `[dispatch] load_gate_fleet_share`
+	// (drellem2/pogo#202). Read through loadGatePolicy, which returns the
+	// shipped default until loadGateCfgSet — so a Registry nobody configured
+	// keeps the gate ARMED, unlike dispatchCap, whose zero value disarms. A
+	// zero mark here disarms only when it was set on purpose.
+	loadGateCfg    config.DispatchLoadGateConfig
+	loadGateCfgSet bool
 
 	// refineryActivity is how the cap above learns whether the refinery has a
 	// merge request for a repo, so it can hold a slot back. Nil means the
@@ -1041,6 +1057,7 @@ type SpawnRequest struct {
 	Type           AgentType
 	Command        []string // e.g. ["claude", "--append-system-prompt", "<prompt content>"]
 	Env            []string // additional env vars; carried on the Agent and re-applied on Respawn (gh #165)
+	BaseEnv        []string // env applied BENEATH the identity catalogue (crew `env` frontmatter, gh #263); carried and re-applied on Respawn
 	PromptFile     string   // path to prompt file (optional)
 	Dir            string   // working directory for the process (optional)
 	WorktreeDir    string   // git worktree path for polecat isolation (optional)
@@ -1069,6 +1086,39 @@ type SpawnRequest struct {
 	// the deliberate default; see internal/agent/model.go for the outage
 	// behind it.
 	Model string
+}
+
+// layerEnv assembles the layers pogo puts on top of pogod's own environment
+// for an agent process. Spawn and respawn both build it here, so a restarted
+// agent gets the same environment as the one it replaces.
+//
+// It deliberately does NOT include os.Environ(). Callers write
+// `cmd.Env = append(os.Environ(), layerEnv(...)...)`, so that the root is
+// visible at the call site to the gitceiling inheritance guard
+// (internal/gitceiling, TestSubprocessEnvironmentsInheritTheCeiling): an
+// environment that does not visibly root in os.Environ() is flagged, because it
+// could drop GIT_CEILING_DIRECTORIES.
+//
+// The ORDER is the contract, because exec.Cmd keeps the last assignment of a
+// duplicated key:
+//
+//  1. pogod's own environment, inherited (the caller's os.Environ()).
+//  2. config: [agents] env, then [agents.<type>] env (configEnvLocked). Host
+//     configuration for a whole type, so it is the lowest of pogo's layers.
+//  3. base: SpawnRequest.BaseEnv — a crew prompt's `env` frontmatter
+//     (drellem2/pogo#263). Above config because it is about one agent, so it
+//     can specialise what the host set for the type.
+//  4. identity: the catalogue variables (agentIdentityEnv). Above config and
+//     base so that neither can rename an agent or point it at another mailbox.
+//  5. spawn: SpawnRequest.Env — for a polecat the core budget, the
+//     dispatcher's --env, then POGO_ROLE last (polecatSpawnEnv). Last, so an
+//     explicit --env still wins, as it did before either env existed.
+func layerEnv(config, base, identity, spawn []string) []string {
+	env := make([]string, 0, len(config)+len(base)+len(identity)+len(spawn))
+	env = append(env, config...)
+	env = append(env, base...)
+	env = append(env, identity...)
+	return append(env, spawn...)
 }
 
 // ErrAgentAlreadyRunning is returned by Spawn when a live agent is already
@@ -1195,9 +1245,10 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	procName := ProcessName(req.Type, req.Name)
 	injectedEnv := envAssignments(agentIdentityEnv(req.Name, req.Type, procName, req.PromptFile, receiptFile))
 
-	// The configured env ([agents] env, [agents.<type>] env) goes beneath the
-	// identity variables and the spawn's own env; processEnv owns the order.
-	cmd.Env = append(os.Environ(), processEnv(r.configEnvLocked(req.Type, req.Name), injectedEnv, req.Env)...)
+	// The configured env ([agents] env, [agents.<type>] env) and the crew
+	// frontmatter env both go beneath the identity variables and the spawn's own
+	// env; layerEnv owns the order.
+	cmd.Env = append(os.Environ(), layerEnv(r.configEnvLocked(req.Type, req.Name), req.BaseEnv, injectedEnv, req.Env)...)
 
 	// Deliver the persona prompt to a ContextFile-injection provider (Codex
 	// reads AGENTS.override.md from its working directory). Must happen before
@@ -1248,6 +1299,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		provider:       provider,
 		receiptFile:    receiptFile,
 		spawnEnv:       append([]string(nil), req.Env...),
+		baseEnv:        append([]string(nil), req.BaseEnv...),
 		outputBuf:      NewRingBuffer(OutputRingBytes), // 64KB rolling buffer
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, req.Name+".sock"),
@@ -1797,13 +1849,14 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	procName := ProcessName(old.Type, old.Name)
 	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile))
 
-	// The same layers in the same order as Spawn (processEnv): the configured
-	// env, then the injected catalogue, then the caller's spawn env re-applied
-	// last (drellem2/pogo#165). The order is load-bearing, not incidental:
+	// The same layers in the same order as Spawn (layerEnv): the configured
+	// env, the base env (crew frontmatter, gh #263) as captured on spawn, the
+	// injected catalogue, then the caller's spawn env re-applied last
+	// (drellem2/pogo#165). The order is load-bearing, not incidental:
 	// polecatSpawnEnv appends POGO_ROLE last inside req.Env, so it beats any
 	// dispatcher-supplied --env on spawn, and only the same order keeps that
 	// true on a restart.
-	cmd.Env = append(os.Environ(), processEnv(r.configEnvLocked(old.Type, old.Name), injectedEnv, old.spawnEnv)...)
+	cmd.Env = append(os.Environ(), layerEnv(r.configEnvLocked(old.Type, old.Name), old.baseEnv, injectedEnv, old.spawnEnv)...)
 
 	// A restart re-resolves to the agent's OWN provider (carried on old.provider
 	// from its original spawn), never the registry default — so a Codex agent
@@ -1849,6 +1902,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		provider:       provider,
 		receiptFile:    receiptFile,
 		spawnEnv:       old.spawnEnv,
+		baseEnv:        old.baseEnv,
 		outputBuf:      NewRingBuffer(OutputRingBytes),
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, old.Name+".sock"),

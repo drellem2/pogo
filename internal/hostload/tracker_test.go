@@ -218,3 +218,35 @@ func TestUnattributedDispatchAdviceProceeds(t *testing.T) {
 		t.Errorf("advice must not let unattributed read as idle; got %q", a)
 	}
 }
+
+// TestFleetHeavyAtMarkHonoursAConfiguredMark: the mark a deployment set with
+// `[dispatch] load_gate_fleet_share` moves the line, and 0 (or NaN) disarms it
+// rather than refusing everything (drellem2/pogo#202).
+func TestFleetHeavyAtMarkHonoursAConfiguredMark(t *testing.T) {
+	s := Sample{Cores: 10, FleetCores: 4, Attributed: true}
+	if s.FleetHeavy() {
+		t.Fatal("40% tripped the shipped 50% mark")
+	}
+	if !s.FleetHeavyAtMark(0.3) {
+		t.Error("40% did not trip a configured 30% mark")
+	}
+	if s.FleetHeavyAtMark(0.7) {
+		t.Error("40% tripped a configured 70% mark")
+	}
+	full := Sample{Cores: 10, FleetCores: 10, Attributed: true}
+	nan := 0.0
+	nan = nan / nan
+	for _, mark := range []float64{0, -1, nan} {
+		if full.FleetHeavyAtMark(mark) {
+			t.Errorf("mark %v refused a full host; a disarmed mark refuses nothing", mark)
+		}
+		adv := full.DispatchAdviceAt(mark)
+		if !strings.HasPrefix(adv, "PROCEED (load gate DISARMED by config") || !strings.Contains(adv, "load_gate_fleet_share = 0") {
+			t.Errorf("mark %v: advice does not lead with the disarm and its key: %q", mark, adv)
+		}
+	}
+	// The HOLD sentence quotes the mark it acted on, not the shipped one.
+	if adv := s.DispatchAdviceAt(0.3); !strings.HasPrefix(adv, "HOLD") || !strings.Contains(adv, "30% mark") {
+		t.Errorf("advice at a 30%% mark = %q", adv)
+	}
+}

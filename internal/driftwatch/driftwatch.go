@@ -40,6 +40,7 @@ package driftwatch
 import (
 	"context"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"sort"
 	"strings"
 	"sync"
@@ -64,7 +65,7 @@ const mailFrom = "drift-watch"
 // notices with the rest (drellem2/pogo#148).
 const DefaultMailTo = "human"
 
-// MailFunc sends durable mail. pogod injects client.SendMGMail; tests inject a
+// MailFunc sends durable mail. pogod injects alerts.Transport; tests inject a
 // recorder. It is the ONLY side-effect channel this package has — there is no
 // reconcile/kickstart seam, by design (report-only).
 type MailFunc func(to, from, subject, body string) error
@@ -386,7 +387,7 @@ func (w *Watcher) sample(now time.Time) {
 
 	subject := fmt.Sprintf("deploy drift: %d host artifact(s) drifted (%s)", len(drifted), strings.Join(names, ", "))
 
-	mailErr := w.mail(w.mailTo, mailFrom, subject, body.String())
+	mailErr := alerts.Mail(alerts.DriftWatchDrift, w.mail, w.mailTo, mailFrom, subject, body.String())
 
 	details := map[string]any{
 		"drift_count":  len(drifted),

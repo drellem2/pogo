@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"io"
 	"net"
 	"net/http"
@@ -537,4 +538,29 @@ func Visit(path string) (*project.VisitResponse, error) {
 		return nil, err
 	}
 	return visitResp, nil
+}
+
+// GetAlerts fetches pogod's alert listing (GET /alerts, drellem2/pogo#262):
+// every declared alert with its default and effective recipient and its mute
+// state, as the running daemon resolved them. all adds the delivery mechanics
+// that send mail but are not alerts.
+func GetAlerts(all bool) ([]alerts.Row, error) {
+	u := serverURL + "/alerts"
+	if all {
+		u += "?all=1"
+	}
+	resp, err := http.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out []alerts.Row
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

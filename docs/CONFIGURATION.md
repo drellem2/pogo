@@ -38,7 +38,8 @@ config file, even an empty one, gets all three. Every other row is the same
 with or without a file.
 
 To turn a row off, set its key in your file: `enabled = false` under the
-section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
+section. For `[dispatch]`, set `max_polecats_per_repo = 0` for the per-repo
+cap and `load_gate_fleet_share = 0` for the host load gate.
 
 <!-- defaults-table:begin -->
 | Section | Key | Default | Kind | What it does when it fires |
@@ -54,9 +55,10 @@ section. For `[dispatch]`, set `max_polecats_per_repo = 0`.
 | `[gitgc]` | `enabled` | on | ACTS | Once at boot, then every `interval`: acts only where no live polecat owns the branch or tree and the work item is done or archived. It force-deletes local `polecat-*` branches (`git branch -D`); a done item's branch must be merged into `main` first, while an archived item's branch is deleted even if it never merged. It removes a registered polecat worktree unless the tree is dirty or holds commits no ref reaches. It removes an orphan directory under `$POGO_HOME/polecats` (one git no longer knows as a worktree) with no dirty check, because there is no index to check against. With either removal it also deletes the polecat's harness session temp dir (for Claude Code, `${CLAUDE_CODE_TMPDIR:-/tmp}/claude-<uid>/<slug-of-workdir>`, declared by the provider), and it deletes such a dir whose polecat directory is already gone under the same live-and-concluded gate; crew and non-pogo session dirs are never candidates, and the durable transcript store (`~/.claude/projects`) is never touched. It keeps anything it cannot classify. It mails the coordinator when a sweep fails. Code: `internal/gitgc`. |
 | `[stall_watch]` | `enabled` | on | ACTS | Types a nudge into the coordinator's terminal when its unclaimed work or unread mail passes a threshold. The same switch drives the nudges about an available item a live worker is already on, an item whose work sits uncommitted in a retained worktree, and an item whose work is pushed but not merged. If the terminal is busy, it mails instead. Needs a config file. See [Stall watcher](#stall-watcher). |
 | `[stall_watch]` | `priority_wake_enabled` | on | ACTS | Sends the same nudge sooner for a high-priority available item. See [Priority wake](#priority-wake). |
-| `[stall_watch]` | `blocked_reminder_enabled` | on | ACTS | Nudges, or mails, the agent named in a `blocked:<agent>` assignee that a decision is owed. The notices stop at a cap. Silent for a block that agent set on itself, and for an item tagged `waiting-on-purpose` (`blocked_reminder_waiver_tags`). |
+| `[stall_watch]` | `blocked_reminder_enabled` | on | ACTS | Nudges, or mails, the agent named in a `blocked:<agent>` assignee that a decision is owed. The notices stop at a cap. Silent for a block that agent set on itself, and for an item tagged `waiting-on-purpose` (`blocked_reminder_waiver_tags`). `false` is an alias for muting `stall_watch.blocked_reminder`: the check still runs and records its events, and only the nudge is withheld. See [Muting an alert](#muting-an-alert-alertsname-mute). |
 | `[stall_watch]` | `indefinite_hold_report_enabled` | on | ACTS | Types a read-only digest of holds that nothing scheduled will ever release into the coordinator's terminal, through the same nudge channel as the rows above. If the terminal is busy, it mails instead. It releases nothing. See [A hold with no driver is invisible](#a-hold-with-no-driver-is-invisible). |
 | `[dispatch]` | `max_polecats_per_repo` | on | ACTS | Refuses to spawn a worker into a repo that already has 3 live workers. While the refinery holds a merge request for that repo, it holds back 1 of the 3 slots. Default `max_polecats_per_repo = 3`; `0` turns it off. See [Dispatch cap](#dispatch-cap--how-many-workers-may-enter-one-repository). |
+| `[dispatch]` | `load_gate_fleet_share` | on | ACTS | Refuses to spawn any worker while the fleet holds 50% or more of this host's cores. Non-fleet CPU is not counted. Default `load_gate_fleet_share = 0.50`; `0` turns it off. See [Host load gate](#host-load-gate--load_gate_fleet_share). |
 | `[dispatch_pairing]` | `repos` | inert | ACTS | Once you list `repos`, it refuses to dispatch an item in those repos until its paired item is filed. See [Dispatch pairing](#dispatch-pairing--items-that-owe-a-paired-work-item). |
 | `[audit_successor]` | `repos` | inert | observes | Once you list `repos`, `pogo doctor` warns about merged audits that no successor answered. It runs only inside `pogo doctor`, never in pogod, and it never refuses. See [Audit successors](#audit-successors--merged-audits-that-nothing-answered). |
 | `[reaper]` | `enabled` | on | ACTS | Inert until you list `jobs`. It runs `launchctl kickstart` on a declared launchd job whose heartbeat file has gone stale, and after `max_kickstarts` tries it mails the coordinator (`[agents] coordinator`, `mayor` by default) and the [escalation box](#the-escalation-mailbox) (`human` by default). See [Heartbeat reaper](#heartbeat-reaper-tier-1). |
@@ -492,6 +494,83 @@ with `config get`), a timeout, or output that is not a mailbox name — and the
 run log says which, because a nightly alert that cannot be delivered is worse
 than a mis-routed one.
 
+## Alerts — listing every mail pogod sends (`pogo alerts`)
+
+Every mail pogod sends on its own initiative — a watcher's finding, a refinery
+verdict, a stranded-work notice — is an **alert** with a stable name,
+`<family>.<kind>` (for example `ack_watch.finding`, `refinery.merge_failed`,
+`condition.out_of_band`). The names are declared once, in `internal/alerts`,
+and every send goes through that package; a build that adds a send around it
+fails its tests.
+
+```bash
+pogo alerts           # every alert: muted state, effective and default recipient
+pogo alerts --all     # also the delivery mechanics that send mail but are not alerts
+pogo alerts --json    # the same rows as GET /alerts
+```
+
+`DEFAULT` is the built-in rule; `$coordinator` and `$escalation_box` stand for
+[`[agents] coordinator`](#coordinator-name) and
+[`[agents] escalation_box`](#the-escalation-mailbox). `EFFECTIVE` is that rule
+resolved against the config the running daemon loaded. `SOURCE` names the key
+that changed the recipient or muted the alert (a watcher's `notify_to`, an
+`[alerts."<name>"] mute`, or one of the alias keys below), or `default`. Muted
+alerts are listed first.
+
+### Muting an alert (`[alerts."<name>"] mute`)
+
+Any alert can be muted (drellem2/pogo#262). The name is quoted because it
+contains a dot:
+
+```toml
+[alerts."ack_watch.finding"]
+mute = true
+
+[alerts."condition.scheduler_load_failed"]   # one condition row
+mute = true
+```
+
+A muted alert is **not sent**, and nothing else changes: its detector still
+runs, still emits its own event, and keeps its own renotify state as if the
+mail had gone. In place of the send pogod records an `alert_muted` event
+(`alert`, `to`, `subject`, and `reason` — the key that muted it), and pogod.log
+says once per alert per process that a send was withheld.
+
+There is **no alert that cannot be muted** — including stranded work and a
+scheduler that did not load. The safety net is that a mute is loud instead: at
+startup pogod logs one line naming every muted alert and the key that muted it
+(`pogod: ⚠ N ALERT(S) MUTED — sent to NOBODY …`), and `pogo alerts` lists muted
+alerts first. A name that is not an alert (a typo, or the `scheduler.delivery`
+mechanic, which is not an alert) is ignored with a startup warning.
+
+`mute` is different from a watcher's `enabled = false`: `enabled` switches the
+detector off, so it records nothing at all. Those switches are unchanged.
+
+**The older silencing keys are aliases.** They keep working, and `pogo alerts`
+names them as the source of the mute:
+
+| Alias key | Mutes |
+|-----------|-------|
+| `[conditions] mail = false` | `condition.notice` and `condition.out_of_band` |
+| `[conditions] out_of_band = false` | `condition.out_of_band` |
+| `[conditions] disable = ["<id>", …]` | `condition.<id>` for each listed id |
+| `[blind_watch] mail = false` | `blind_watch.finding`, `blind_watch.cleared`, `blind_watch.out_of_band` |
+| `[blind_watch] out_of_band = false` | `blind_watch.out_of_band` |
+| `[stall_watch] blocked_reminder_enabled = false` | `stall_watch.blocked_reminder` |
+
+An `[alerts]` entry wins over an alias key, in both directions:
+`[alerts."condition.notice"] mute = false` unmutes the coordinator's copy even
+with `[conditions] mail = false`, and pogod warns at startup that it did. A
+later config layer's `[alerts]` entry replaces an earlier layer's for the same
+name.
+
+One behaviour change rides on the last alias: `blocked_reminder_enabled = false`
+used to switch the blocked-reminder check off; it now leaves the check running
+(its `stall_watch_fired` events carry `nudge_delivery = "muted"`) and withholds
+only the nudge, so a muted item's backoff and notice cap still advance.
+
+Routing (`route`) arrives in a later slice of drellem2/pogo#262.
+
 ## pogod's own conditions (`[conditions]`)
 
 pogod mails the coordinator when it hits one of its own conditions: a
@@ -518,6 +597,10 @@ disable = ["scheduler_load_failed", "autostart_failed"]   # default []: per cond
 | `mail` | `true` | `false`: no condition mail to anyone, and no wake nudge. |
 | `out_of_band` | `true` | `false`: no mail from this watcher to [agents] escalation_box; the coordinator and events.log are unchanged |
 | `disable` | `[]` | No mail for the listed conditions. An entry names a condition id. For a per-subject condition (`autostart_failed:doctor`, `restart_failed:mayor`, `unknown_provider:…`, `gitgc_sweep_failed:…`), the part before the colon disables every subject and the full id disables one. |
+
+These three keys are aliases for alert mutes (`condition.notice`,
+`condition.out_of_band`, `condition.<id>`); an `[alerts."<name>"] mute` entry
+takes precedence. See [Muting an alert](#muting-an-alert-alertsname-mute).
 
 The ids are the `condition` field of the `pogod_condition` event:
 `pogo events --type pogod_condition` lists the ones this host has raised.
@@ -618,10 +701,12 @@ env = ["TOOL_IDENTITY=none", "OPTS=a,b"]        # commas inside quotes are kept
   agent's name. Nothing else is expanded: no other variables, no shell syntax.
 - **Order.** A process keeps the last assignment of a name, so the layers are,
   lowest first: pogod's own environment, `[agents] env`, `[agents.<type>] env`,
-  pogo's identity variables (`POGO_AGENT_NAME` and the rest), then the spawn's
-  own env (for a polecat: the core budget, `spawn-polecat --env`, then
-  `POGO_ROLE`). So config cannot rename an agent or change its role, and an
-  explicit `--env` still beats config.
+  a crew prompt's `env` frontmatter ([customizing.md](customizing.md)), pogo's
+  identity variables (`POGO_AGENT_NAME` and the rest), then the spawn's own env
+  (for a polecat: the core budget, `spawn-polecat --env`, then `POGO_ROLE`). So
+  one agent's prompt can override what config set for its type, config cannot
+  rename an agent or change its role, and an explicit `--env` still beats
+  config.
 - **Restarts.** The same environment is applied when pogod restarts an agent
   after a crash, and when it starts a crew agent at boot or on wake. The
   restart path also carries the `--env` the agent was first spawned with.
@@ -1435,6 +1520,96 @@ A `--no-worktree` dispatch is never capped: it runs no repository's test suite.
 
 Source of truth: `internal/config/dispatchcap.go`,
 `internal/agent/dispatchrepocap.go` and `internal/agent/dispatchreviewslot.go`.
+
+## Host load gate — `load_gate_fleet_share`
+
+**On by default, everywhere.** `pogo agent spawn-polecat` refuses with **503**
+while the fleet — pogod and every process under it — is holding at least this
+share of the host's cores. CPU used by anything else (a VPN client, the system
+indexer) is measured and reported, but it is never held against dispatch:
+pausing fleet work would not give those cores back. The refusal is a **later,
+not a no**. It applies to every repo at once, and it clears when the fleet's
+core share falls, which is not the same event as an agent exiting.
+
+```toml
+[dispatch]
+# Fraction of this host's cores the fleet must be holding before a dispatch
+# is refused. 0 = the gate is DISARMED (nothing is refused on load).
+# Values above 1 are clamped to 1. Default: 0.50.
+load_gate_fleet_share = 0.50
+```
+
+Read what the daemon enforces, and the sample it would act on:
+
+```bash
+pogo host load          # first line: "Load gate: refuses at 50% ..." or "DISARMED by config"
+pogo host load --json   # load_gate_fleet_share, load_gate_disarmed, would_refuse_dispatch
+```
+
+**The same value sizes the worker budget.** When no per-repo cap is armed
+(`max_polecats_per_repo = 0`), the `$POGO_WORKER_CORES` a new worker is given
+is this share of the host. With the cap armed, the budget is the core count
+divided by the cap, as before. If both are off, the budget falls back to the
+shipped 50% as advice and says so in its basis.
+
+**Why 0 and not `enabled = false`.** One number says where the line is and, at
+0, whether there is one: the same shape as `max_polecats_per_repo = 0`.
+
+**A disarmed gate is loud on purpose.** pogod logs a `WARNING: host load gate
+DISARMED by config` line at boot, `pogo host load` prints `DISARMED`, and the
+JSON carries `load_gate_disarmed: true`. With the gate off, nothing stops more
+fleet work being piled onto a full host, and a refinery gate that times out
+under that saturation reads like a defect in the branch under test (mg-1b8c).
+config.toml is read at boot, so a change takes effect on the next pogod start.
+
+**What it deliberately does not have.** There is no per-dispatch
+`--load-override`. A host the gate misjudges refuses *every* dispatch, so a
+reason typed on each spawn would be noise; the lever is this key.
+
+Why the shipped mark is half the host is argued at `hostload.FleetHeavyAt`.
+Source of truth: `internal/config/dispatchloadgate.go`,
+`internal/agent/dispatchload.go` and `internal/hostload/tracker.go`.
+
+## Dispatch refusals and their levers
+
+Every reason `pogo agent spawn-polecat` can refuse, in the order the spawn path
+checks them, and the way past each one. **503** is retryable unchanged once the
+condition clears. **409** is refused identically until something about the
+item, the request or the fleet changes.
+
+The rule for which refusals get a config key (drellem2/pogo#202): **a key only
+where the failure is "no work happens", never where it is "work gets
+destroyed".** A refusal that guards a running worker's tree or someone's
+unmerged work has a per-item or per-dispatch lever that records a reason, or
+no lever at all.
+
+| Refusal | Status | Way past it | Config key? |
+|---|---|---|---|
+| pogod is draining for a redeploy | 503 | Wait for the redeploy to finish, then retry. | none — it clears by itself |
+| **Live owner**: a live polecat already holds this name or work item (drellem2/pogo#167) | 409 | Stop the live worker (`pogo agent stop <name>`), or dispatch a different item. | **none, by design**. Dispatching over a live worker destroys its tree. No override flag either. |
+| **Dispatch gate, assignee**: the item's assignee is `human`, `parked` or `blocked:<agent>` | 409 | Per item: `mg edit <id> --assignee=...`. See [Ownership vs execution](#ownership-vs-execution--which-items-the-work-item-detectors-watch). | `[stall_watch] non_dispatchable_assignees` sets which values gate. It names values, not an off switch. |
+| **Dispatch gate, stage**: the item's carrier says `stage: gated` | 409 | This is the human gate. Per item: move the stage on once the decision is made. | none — per item |
+| **Dispatch gate, carrier unreadable**: `workflow:`/`stage:` lines the parser cannot reach | 409 | Per item: fix the body so the carrier is the leading block. | none — per item |
+| **Dispatch gate, depends**: a `depends:` parent is still live (drellem2/pogo#201) | 409 | Per item: `mg edit <id> --rm-depends=<parent>`, or finish the parent. | none — per item |
+| *(not a refusal)* item tagged as blocked but its assignee does not gate | — | Logged, and dispatched anyway: a tag is not a gate. | — |
+| **Target**: `--branch` contradicts the item's `branch:` field (drellem2/pogo#176) | 409 | Drop `--branch`, or fix the item's `branch:`. | none |
+| **Pairing**: the repo requires a paired item that was never filed | 409 | File the pair, or `--pairing-override="<why>"`. | `[dispatch_pairing] repos` (inert unless set) |
+| **Stranded work**: pushed, unmerged work on a polecat branch for this item | 409 | `--stranded-adopt="<why>"` to land the branch, or `--stranded-override="<why>"` to discard it. | none. The branch may be the only copy. |
+| **Preserved worktree**: uncommitted work in a retained tree for this item | 409 | Read the tree (`pogo gc --list-preserved`), then `--preserved-override="<why>"`. | none. The tree may be the only copy. |
+| **Merged work**: work for this item already merged to the target | 409 | `--merged-override="<why>"`. | none |
+| **Per-repo cap**: the repo has its share of live workers | 503 | Wait, or dispatch into another repo. | `[dispatch] max_polecats_per_repo` (`0` = off), `refinery_reserve`, `merge_queued_credit` |
+| **Host load**: the fleet holds at least the configured share of the host | 503 | Wait for the fleet's core share to fall. | `[dispatch] load_gate_fleet_share` (`0` = off) |
+| Invalid agent name | 400 | Fix the name. | none |
+| **Template routing**: the item's `type` routes to no template | 409 | `--template=<name>`, or fix the item's `type`. | none |
+| Template, provider or model problems (template not found, frontmatter or model unparseable) | 400/404 | Fix the template or the flag. | none |
+| Worktree would be cut from `$POGO_HOME` | 409 | Dispatch in place (`--no-worktree`). The refinery cannot merge `$POGO_HOME`. | none |
+| enth repos only: PR-flow template or non-trunk `--branch`; template without enth blocks; unadoptable stranded work | 409 | Use a non-PR template and the trunk or a release branch; refresh the template. | none |
+| **Claim**: the work item cannot be claimed (already claimed by someone else) | 409 | Find out who holds it (`mg show <id>`), and release it only if that owner is gone. | **none, by design**. A second claimant would run over the first worker's work. |
+
+The per-dispatch `--*-override` and `--stranded-adopt` flags each require a
+reason. The reason is recorded as an event beside the refusal it bypassed, so
+an override is cheap but never silent. Each flag clears its own gate and no
+other.
 
 ## Dispatch pairing — items that owe a paired work item
 
@@ -3501,6 +3676,11 @@ the same names and meaning as [`[conditions]`](#pogods-own-conditions-conditions
 |-----|---------|---------------------|
 | `mail` | `true` | `false`: no mail from this watcher to anyone. Every `blind_watch_finding` and `blind_watch_clear` is still emitted, with `notified=false` and `reason=mail_disabled`. |
 | `out_of_band` | `true` | `false`: no mail from this watcher to [agents] escalation_box; the coordinator and events.log are unchanged |
+
+Both are aliases for alert mutes: the escalation box's copy is its own alert,
+`blind_watch.out_of_band`, and the coordinator's copies are
+`blind_watch.finding` and `blind_watch.cleared`. An `[alerts."<name>"] mute`
+entry takes precedence. See [Muting an alert](#muting-an-alert-alertsname-mute).
 
 **What it costs.** The findings about the detector itself (`stopped`, `empty`),
 and any naming the coordinator, go to the escalation box ALONE. With

@@ -54,6 +54,11 @@ const SaturatedAt = 0.85
 //
 // The idle case is untouched either way: five workers doing ordinary work held
 // well under 1 core of 10 in every sample taken here.
+//
+// This is the SHIPPED mark, not necessarily the enforced one: a deployment
+// moves it with `[dispatch] load_gate_fleet_share`, where 0 disarms the gate
+// (drellem2/pogo#202), and config.DefaultLoadGateFleetShare is this constant.
+// Code deciding a dispatch reads the configured value — see Sample.FleetHeavyAtMark.
 const FleetHeavyAt = 0.50
 
 // Summary is what a sequence of samples says about a step's run conditions.
@@ -204,20 +209,44 @@ func (t *Tracker) Summary() Summary {
 //
 // Deliberately a property of a single sample rather than of a Summary: a
 // dispatch decision is about the host as it is now, not about how it has been.
-func (s Sample) FleetHeavy() bool {
-	return s.Attributed && s.Cores > 0 && s.FleetSaturation() >= FleetHeavyAt
+func (s Sample) FleetHeavy() bool { return s.FleetHeavyAtMark(FleetHeavyAt) }
+
+// FleetHeavyAtMark is FleetHeavy against an explicit mark rather than the shipped
+// one — the mark a deployment set with `[dispatch] load_gate_fleet_share`
+// (drellem2/pogo#202). A mark of zero or below DISARMS the judgement: it
+// reports false for every sample, because "refuse when the fleet holds at least
+// 0% of the host" would refuse every dispatch, and an operator who wrote 0
+// meant the opposite.
+func (s Sample) FleetHeavyAtMark(mark float64) bool {
+	if !(mark > 0) { // also catches NaN
+		return false
+	}
+	return s.Attributed && s.Cores > 0 && s.FleetSaturation() >= mark
 }
 
 // DispatchAdvice renders the sentence a dispatcher should act on, and its
 // reasoning, so a refusal is arguable rather than opaque.
-func (s Sample) DispatchAdvice() string {
+func (s Sample) DispatchAdvice() string { return s.DispatchAdviceAt(FleetHeavyAt) }
+
+// DispatchAdviceAt is DispatchAdvice against an explicit mark. A disarmed mark
+// (zero or below) says so FIRST, ahead of the numbers: a disarmed gate is the
+// state in which a saturated host gets misread as a broken branch (mg-1b8c), so
+// the reader must not be able to take the PROCEED for a measured one.
+func (s Sample) DispatchAdviceAt(mark float64) string {
+	if !(mark > 0) {
+		return fmt.Sprintf("PROCEED (load gate DISARMED by config — [dispatch] load_gate_fleet_share = 0): "+
+			"this host refuses no dispatch on load. Host is using %.1f of %d cores, %.1f of them the "+
+			"fleet's. Nothing stops more fleet work being added to a full host, and a gate timeout "+
+			"under saturation reads like a defect in the branch under test.",
+			s.UsedCores(), s.Cores, s.FleetCores)
+	}
 	if !s.Attributed {
 		return fmt.Sprintf("PROCEED (unattributed): no fleet root process was found, so the fleet's "+
 			"share of this host could not be measured. Host is using %.1f of %d cores. "+
 			"This is missing information, not evidence of an idle fleet.",
 			s.UsedCores(), s.Cores)
 	}
-	if s.FleetHeavy() {
+	if s.FleetHeavyAtMark(mark) {
 		return fmt.Sprintf("HOLD: the fleet is already holding %.1f of %d cores (%.0f%%) across %d "+
 			"processes, at or above the %.0f%% mark where more fleet work slows the work in flight "+
 			"and itself. Non-fleet load is %.1f cores and is not counted against you. "+
@@ -228,11 +257,11 @@ func (s Sample) DispatchAdvice() string {
 			"process count falling 32 to 21 in the same step, because two refinery gates that each "+
 			"parallelise across packages outweighed the agents that left. `pogo host load` reads this "+
 			"number without costing a spawn attempt.",
-			s.FleetCores, s.Cores, s.FleetSaturation()*100, s.FleetProcs, FleetHeavyAt*100,
-			s.ExternalCores, FleetHeavyAt*100)
+			s.FleetCores, s.Cores, s.FleetSaturation()*100, s.FleetProcs, mark*100,
+			s.ExternalCores, mark*100)
 	}
 	return fmt.Sprintf("PROCEED: the fleet is holding %.1f of %d cores (%.0f%%), below the %.0f%% mark. "+
 		"Non-fleet load is %.1f cores; %.1f cores are free.",
-		s.FleetCores, s.Cores, s.FleetSaturation()*100, FleetHeavyAt*100,
+		s.FleetCores, s.Cores, s.FleetSaturation()*100, mark*100,
 		s.ExternalCores, s.FreeCores())
 }

@@ -58,7 +58,7 @@ func assertEnvLines(t *testing.T, what, output string, want, notWant []string) {
 
 // TestSpawnAppliesConfigEnvBeneathPogoAndSpawnEnv: the configured env reaches
 // the process, ${POGO_AGENT_NAME} becomes the agent's name, and the order in
-// processEnv holds — pogo's identity variables beat config (config cannot
+// layerEnv holds — pogo's identity variables beat config (config cannot
 // rename an agent), and the spawn's own --env beats config.
 func TestSpawnAppliesConfigEnvBeneathPogoAndSpawnEnv(t *testing.T) {
 	reg, err := NewRegistry(shortSocketDir(t))
@@ -152,6 +152,43 @@ func TestRespawnKeepsSpawnEnvAndConfigEnv(t *testing.T) {
 		t.Fatalf("second Respawn: %v", err)
 	}
 	assertEnvLines(t, "after second restart", waitOutput(t, c), want, nil)
+}
+
+// TestConfigEnvSitsBeneathFrontmatterEnv: the two env sources meet on a crew
+// agent. A prompt's `env` frontmatter (BaseEnv, drellem2/pogo#263) is about one
+// agent, so it overrides what config.toml set for the whole type; both stay
+// beneath the identity catalogue and the spawn's own env, on spawn and on a
+// restart.
+func TestConfigEnvSitsBeneathFrontmatterEnv(t *testing.T) {
+	testsandbox.Isolate(t)
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetCommandConfig(envConfig{byType: map[string][]string{
+		"crew": {"CFG_ONLY=1", "SHARED=from-config", "TOP=from-config"},
+	}})
+
+	a, err := reg.Spawn(SpawnRequest{
+		Name:    "cfgenv-layers",
+		Type:    TypeCrew,
+		Command: []string{"env"},
+		BaseEnv: []string{"BASE_ONLY=1", "SHARED=from-frontmatter", "TOP=from-frontmatter"},
+		Env:     []string{"TOP=from-spawn"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"CFG_ONLY=1", "BASE_ONLY=1", "SHARED=from-frontmatter", "TOP=from-spawn"}
+	notWant := []string{"SHARED=from-config", "TOP=from-config", "TOP=from-frontmatter"}
+	assertEnvLines(t, "spawn", waitOutput(t, a), want, notWant)
+
+	b, err := reg.Respawn("cfgenv-layers")
+	if err != nil {
+		t.Fatalf("Respawn: %v", err)
+	}
+	assertEnvLines(t, "after restart", waitOutput(t, b), want, notWant)
 }
 
 // TestRespawnedPolecatKeepsRole: a polecat's spawn env is the core budget, the

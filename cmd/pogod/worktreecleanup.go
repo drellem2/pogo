@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/drellem2/pogo/internal/alerts"
 	"log"
 
 	"github.com/drellem2/pogo/internal/events"
@@ -105,7 +106,7 @@ func (e exitedAgent) eventIdentity() string {
 // preservation notices for qbe37 and dispatched at its work item anyway, and the
 // work survived because a human chain of mail reached the new polecat in time.
 //
-// mail is injected (client.SendMGMail in production) so the notification path
+// mail is injected (alerts.Transport in production) so the notification path
 // is exercisable without a live daemon.
 func cleanupAgentWorktree(
 	a exitedAgent, coordinator string,
@@ -195,7 +196,7 @@ func cleanupAgentWorktree(
 				agentName, worktreeDir, sourceRepo, workItemLine(a.WorkItemID), dwe,
 				dispatchWarning(a.WorkItemID, "preserved"),
 				worktreeDir, sourceRepo, standingListNote(sourceRepo))
-			if mErr := mail(coordinator, "pogod", subject, body); mErr != nil {
+			if mErr := alerts.Mail(alerts.WorktreePreserved, mail, coordinator, "pogod", subject, body); mErr != nil {
 				log.Printf("agent %s: failed to mail preserved-worktree notice: %v", agentName, mErr)
 				emitWorktreeNoticeUndelivered(a, coordinator, "preserved", mErr)
 			}
@@ -245,7 +246,7 @@ func cleanupAgentWorktree(
 				dispatchWarning(a.WorkItemID, "unpushed"),
 				worktreeDir, worktreeDir, agentName, sourceRepo, worktreeDir,
 				standingListNote(sourceRepo))
-			if mErr := mail(coordinator, "pogod", subject, body); mErr != nil {
+			if mErr := alerts.Mail(alerts.WorktreeUnpushed, mail, coordinator, "pogod", subject, body); mErr != nil {
 				log.Printf("agent %s: failed to mail unpushed-worktree notice: %v", agentName, mErr)
 				emitWorktreeNoticeUndelivered(a, coordinator, "unpushed", mErr)
 			}
@@ -282,7 +283,7 @@ func cleanupAgentWorktree(
 				agentName, worktreeDir, sourceRepo, workItemLine(a.WorkItemID), uwe,
 				dispatchWarning(a.WorkItemID, "undetermined"),
 				worktreeDir, worktreeDir, sourceRepo, standingListNote(sourceRepo))
-			if mErr := mail(coordinator, "pogod", subject, body); mErr != nil {
+			if mErr := alerts.Mail(alerts.WorktreeUndetermined, mail, coordinator, "pogod", subject, body); mErr != nil {
 				log.Printf("agent %s: failed to mail undetermined-worktree notice: %v", agentName, mErr)
 				emitWorktreeNoticeUndelivered(a, coordinator, "undetermined", mErr)
 			}
