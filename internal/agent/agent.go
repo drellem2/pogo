@@ -423,6 +423,11 @@ type Registry struct {
 	// socketDir is where per-agent unix domain sockets live.
 	socketDir string
 
+	// serverPort is the spawning pogod's listening port, injected into every
+	// agent as POGO_PORT (mg-0c1a5). Atomic because Spawn and Respawn read it
+	// under r.mu and SetServerPort writes it without.
+	serverPort atomic.Int64
+
 	// cmdConfig provides agent command templates. May be nil (uses default).
 	cmdConfig AgentCommandConfig
 
@@ -1041,6 +1046,19 @@ func NewRegistry(socketDir string) (*Registry, error) {
 	}, nil
 }
 
+// SetServerPort records the port this pogod listens on, so every agent it
+// spawns (and respawns) gets POGO_PORT set to it. pogod calls it once the
+// listener is bound; until then — and in a bare test registry — POGO_PORT is
+// left to whatever the inherited environment says (mg-0c1a5).
+func (r *Registry) SetServerPort(port int) {
+	r.serverPort.Store(int64(port))
+}
+
+// ServerPort reports the port recorded by SetServerPort, or 0.
+func (r *Registry) ServerPort() int {
+	return int(r.serverPort.Load())
+}
+
 // ProcessName returns an agent's DISPLAY label.
 // Crew: pogo-crew-<name>, Polecat: pogo-cat-<name>
 //
@@ -1244,7 +1262,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	// appearing in the report — which is the property mg-fbaf was filed about:
 	// an environment that exists and is believed absent.
 	procName := ProcessName(req.Type, req.Name)
-	injectedEnv := envAssignments(agentIdentityEnv(req.Name, req.Type, procName, req.PromptFile, receiptFile))
+	injectedEnv := envAssignments(agentIdentityEnv(req.Name, req.Type, procName, req.PromptFile, receiptFile, r.ServerPort()))
 
 	cmd.Env = append(os.Environ(), layerEnv(req.BaseEnv, injectedEnv, req.Env)...)
 
@@ -1845,7 +1863,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	// Same catalogue as the spawn path — a restart that injected a different
 	// set would be an environment nothing reports.
 	procName := ProcessName(old.Type, old.Name)
-	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile))
+	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile, r.ServerPort()))
 
 	// The caller's spawn env is re-applied AFTER the injected catalogue, in the
 	// same last-wins order as Spawn (drellem2/pogo#165). The order is load-

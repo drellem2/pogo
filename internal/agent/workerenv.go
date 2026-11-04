@@ -5,6 +5,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -29,6 +30,12 @@ const (
 	SubmitReceiptEnv = "POGO_SUBMIT_RECEIPT"
 	// RoleEnv is the frozen cross-tool role identifier (mg-6a24 §1.1).
 	RoleEnv = "POGO_ROLE"
+	// ServerPortEnv is the port of the pogod that spawned the agent. The pogo
+	// and mg CLIs resolve their server from it (config.Load), so without it an
+	// agent of a sandbox pogod on a reserved port defaulted to :10000 — the
+	// LIVE daemon — and mailed, scheduled and dispatched against the
+	// production fleet from inside a "sandbox" (mg-0c1a5).
+	ServerPortEnv = "POGO_PORT"
 )
 
 // InjectedEnv is one environment variable pogod sets on an agent process: what
@@ -129,6 +136,13 @@ var agentIdentitySpecs = []envSpec{
 		When:        "the provider has a submit hook that could be installed",
 		Note:        "absent means this agent cannot prove delivery; nudges to it fall back to wait-idle",
 	},
+	{
+		Name:        ServerPortEnv,
+		Placeholder: "<the port the spawning pogod listens on>",
+		Why:         "the daemon the agent's pogo/mg CLIs talk to: always the pogod that spawned it",
+		When:        "pogod has bound its listener (Registry.SetServerPort)",
+		Note:        "in the identity layer, so a crew prompt's `env` frontmatter cannot point an agent at another daemon (mg-0c1a5)",
+	},
 }
 
 // workerBudgetSpecs is the catalogue for the two budget variables. Kept beside
@@ -173,13 +187,22 @@ func (s envSpec) entry(value string) InjectedEnv {
 // injection order. Entries whose value is empty are reported unset and are
 // skipped by envAssignments — an unset variable and one assigned the empty
 // string are different facts to the process receiving them.
-func agentIdentityEnv(name string, typ AgentType, procName, promptFile, receiptFile string) []InjectedEnv {
+//
+// serverPort is the spawning pogod's own listening port; 0 means it was never
+// recorded (a bare registry in a unit test) and leaves POGO_PORT unset rather
+// than inventing one.
+func agentIdentityEnv(name string, typ AgentType, procName, promptFile, receiptFile string, serverPort int) []InjectedEnv {
+	port := ""
+	if serverPort > 0 {
+		port = strconv.Itoa(serverPort)
+	}
 	values := map[string]string{
 		AgentNameEnv:     name,
 		AgentTypeEnv:     string(typ),
 		ProcessNameEnv:   procName,
 		AgentPromptEnv:   promptFile,
 		SubmitReceiptEnv: receiptFile,
+		ServerPortEnv:    port,
 	}
 	out := make([]InjectedEnv, 0, len(agentIdentitySpecs))
 	for _, s := range agentIdentitySpecs {
@@ -214,7 +237,7 @@ func envAssignments(vars []InjectedEnv) []string {
 // inherits pogod's entire environment (os.Environ()), and a dispatcher may add
 // anything it likes with --env. Those are open sets and no list can close them.
 func PolecatEnv(budget WorkerBudget) []InjectedEnv {
-	out := agentIdentityEnv("", TypePolecat, "", "", "")
+	out := agentIdentityEnv("", TypePolecat, "", "", "", 0)
 	// The catalogue view knows the type even though it knows no name.
 	for i := range out {
 		if out[i].Name == AgentTypeEnv {

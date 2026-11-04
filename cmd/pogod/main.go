@@ -3942,6 +3942,10 @@ Flags:
 		fatalf("pogod: failed to listen on %s: %v", addr, listenErr)
 	}
 	fmt.Printf("pogod listening on %s\n", addr)
+	// Every agent this daemon spawns must talk to THIS daemon. Without it a
+	// sandbox pogod's agents inherited no POGO_PORT and their CLIs defaulted
+	// to :10000, the live fleet (mg-0c1a5).
+	agentRegistry.SetServerPort(cfg.Port)
 
 	// Start the timer-driven index_roots scan: every index_interval it
 	// registers git repos newly created under a configured index_root. The

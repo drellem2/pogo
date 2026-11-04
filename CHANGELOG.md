@@ -12,6 +12,14 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **An agent always talks to the pogod that spawned it (mg-0c1a5).** pogod now
+  sets `POGO_PORT` to its own listening port in every agent it spawns or
+  restarts, in the identity layer, so neither the inherited environment nor a
+  crew prompt's `env` can point it elsewhere. Before, an agent of a sandbox
+  pogod on a reserved port inherited no `POGO_PORT` and its `pogo`/`mg` CLIs
+  reached the live daemon on :10000. `pogo agent env` lists the variable.
+  `scripts/pogo-sandbox`'s `pogo_sandbox_daemon` now exports `POGO_PORT` too,
+  as only the `run --daemon` path did before.
 - **progress-watch no longer reads `blind` because a `--no-worktree` worker
   is running (mg-ac972).** A box-op has no tree, so its writes were reported
   as "worktree unreadable" and put on the blind line, and one box-op made the

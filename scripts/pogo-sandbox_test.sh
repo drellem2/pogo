@@ -162,6 +162,56 @@ esac
     || fail "the sandbox root $C_ROOT survived teardown"
 
 # ===========================================================================
+# 1b. THE PORT — the caller AND the daemon's agents talk to the SANDBOX pogod.
+# ===========================================================================
+# mg-0c1a5. pogo_sandbox_daemon used to start pogod on the reserved port without
+# exporting POGO_PORT (only the `run --daemon` CLI path did), and pogod set no
+# POGO_PORT on the agents it spawned. So a real agent under a sandbox pogod —
+# claude plus the pogo/mg CLIs — resolved its server to :10000, the LIVE daemon,
+# and could mail, schedule and dispatch against the production fleet.
+#
+# Two layers, asserted separately:
+#   - the LIBRARY: after pogo_sandbox_daemon, $POGO_PORT is the sandbox port.
+#   - pogod: an agent it spawns sees POGO_PORT = pogod's own port. The daemon is
+#     started with POGO_PORT UNSET in its environment, so the only way the value
+#     can reach the agent is pogod injecting it — inheritance cannot satisfy this.
+# Positive control (run by hand at the fix): a pogod built from the parent
+# commit makes the stub write an EMPTY value here.
+run_child '
+unset POGO_PORT
+pogo_sandbox_create t1b
+trap pogo_sandbox_down EXIT
+pogo_sandbox_isolate
+pogo_sandbox_daemon "'"$WORK"'/pogod" /scheduler/schedules
+echo "SANDBOX_PORT=$POGO_SANDBOX_PORT"
+echo "EXPORTED=${POGO_PORT-<unset>}"
+out="$POGO_SANDBOX_DIR/agent-port"
+name="$(pogo_sandbox_name portprobe)"
+curl -sf --max-time 10 -X POST "$POGO_SANDBOX_URL/agents" -H "Content-Type: application/json" \
+    -d "{\"name\":\"$name\",\"type\":\"crew\",\"command\":[\"sh\",\"-c\",\"printf %s \\\"\${POGO_PORT-<unset>}\\\" > $out.tmp && mv $out.tmp $out; exec sleep 30\"]}" >/dev/null \
+    || { echo "SPAWN FAILED"; exit 1; }
+for i in $(seq 1 40); do [ -s "$out" ] && break; sleep 0.25; done
+echo "AGENT=$(cat "$out" 2>/dev/null)"
+curl -sf --max-time 10 -X DELETE "$POGO_SANDBOX_URL/agents/$name" >/dev/null 2>&1 || true
+'
+P_SANDBOX="$(grep '^SANDBOX_PORT=' "$CHILD_OUT" | head -1 | cut -d= -f2-)"
+P_EXPORTED="$(grep '^EXPORTED=' "$CHILD_OUT" | head -1 | cut -d= -f2-)"
+P_AGENT="$(grep '^AGENT=' "$CHILD_OUT" | head -1 | cut -d= -f2-)"
+if [ "$CHILD_RC" -ne 0 ] || [ -z "$P_SANDBOX" ]; then
+    fail "the port control did not run: rc=$CHILD_RC, output: $(head -20 "$CHILD_OUT" | tr '\n' '|')"
+else
+    [ "$P_SANDBOX" != "10000" ] \
+        && pass "the sandbox pogod is on a reserved port ($P_SANDBOX), not the live :10000 — so the two checks below can tell sandbox from live" \
+        || fail "the sandbox reserved :10000, the live daemon's port"
+    [ "$P_EXPORTED" = "$P_SANDBOX" ] \
+        && pass "pogo_sandbox_daemon EXPORTS POGO_PORT=$P_SANDBOX — a plain pogo/mg call after it hits the sandbox, not the live pogod (mg-0c1a5)" \
+        || fail "after pogo_sandbox_daemon, POGO_PORT is '$P_EXPORTED', not the sandbox port $P_SANDBOX — a CLI call would reach the LIVE pogod (mg-0c1a5)"
+    [ "$P_AGENT" = "$P_SANDBOX" ] \
+        && pass "an agent spawned by the sandbox pogod (started with POGO_PORT unset) sees POGO_PORT=$P_AGENT — pogod points its agents at ITSELF (mg-0c1a5)" \
+        || fail "an agent spawned by the sandbox pogod on :$P_SANDBOX sees POGO_PORT='$P_AGENT' — its CLIs would talk to the LIVE pogod on :10000 (mg-0c1a5)"
+fi
+
+# ===========================================================================
 # 2. THE HOME LEAK — a sandbox whose HOME resolves onto the developer's.
 # ===========================================================================
 # The shape mg-6092/mg-e8e7/mg-5336 all took, staged: every string says private
