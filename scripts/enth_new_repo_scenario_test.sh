@@ -174,6 +174,20 @@ while IFS= read -r line; do
                 bad "4    doctor enth rows: $(grep -i enth "$S/doctor.out")"
             fi
             ;;
+        "pogo project add "*)
+            # pogod's visit refuses a path under a temp root (isEphemeralPath),
+            # and under ./test.sh this sandbox IS under one (/tmp/pogo-gate-tmp…),
+            # so the add answers not-found there. index_roots registration is
+            # exempt, and visit returns an already-registered project, so let the
+            # indexer find x first. A real ~/dev/x is not a temp path and needs
+            # no wait; outside a temp root this costs one index pass.
+            for _ in $(seq 1 30); do pogo project list 2>/dev/null | grep -qF "$X" && break; sleep 1; done
+            if OUT="$(bash -c "$line" 2>&1)"; then
+                ok "4    $line"
+            else
+                bad "4    $line → $OUT"
+            fi
+            ;;
         *)
             if OUT="$(bash -c "$line" 2>&1)"; then
                 ok "4    $line"

@@ -198,6 +198,14 @@ gate_step "Testing the enth build stamp (§10 table on an enth #9 checkout)" bas
 # failure.
 gate_step "Testing enth workspaces (spawn, dirty, remove through a real enthd)" bash scripts/tmpdir-leak-guard.sh bash scripts/enth_workspaces_test.sh
 
+# A fresh install, "make me a new enth repo called x" (GH #284, mg-d8dc9): a
+# sandboxed pogod installs the shipped prompts, the coordinator's new-repo
+# recipe is lifted from mayor.md and run, and a polecat lands the first Change
+# with the template's self_land — so an edit to either prompt that breaks the
+# recipe fails here. It SKIPS (exit 0, and says so) without an enthd and enth;
+# POGO_ENTH_REQUIRE=1 makes that a failure.
+gate_step "Testing a fresh install's new enth repo (coordinator recipe to first land)" bash scripts/tmpdir-leak-guard.sh bash scripts/enth_new_repo_scenario_test.sh
+
 # The size-triggered module-cache reclaim (mg-b7c3). Runs here rather than only
 # in the Go suite because the decision this job exists for — fire, refuse, or
 # defer — lives in the shell script, not in the installer. Its stubs are on PATH,
