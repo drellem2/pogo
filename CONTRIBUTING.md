@@ -646,7 +646,12 @@ Releases are cut by tag-trigger: pushing a `vX.Y.Z` tag to `origin` triggers
 `.github/workflows/release.yml`, which runs `goreleaser` and publishes the
 GitHub release with all three binaries (`pogo`, `pogod`, `lsp` for
 linux/darwin × amd64/arm64). `install.sh`'s `releases/latest` resolver picks
-up the new release within minutes.
+up the new release within minutes. When Actions does not run or does not
+publish, `scripts/release-local.sh vX.Y.Z` runs the same goreleaser config
+from a checkout of the pushed tag and publishes through the API (mg-c0665).
+Either way, a release counts as cut when `gh release view vX.Y.Z --json assets`
+lists the archives, not when a workflow run is green. See
+[`docs/release-process.md`](docs/release-process.md#4a-publishing-without-github-actions).
 
 **Tag-creation policy.** Only the release-cut path pushes `v*` tags — either
 `scripts/bump-version.sh` (which validates strict semver and tags
