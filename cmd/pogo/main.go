@@ -5764,6 +5764,7 @@ Example:
 	cmdRefinery.AddCommand(cmdRefineryPrune)
 	cmdRefinery.AddCommand(cmdRefineryCancel)
 	cmdRefinery.AddCommand(newRefCreateCmd(&jsonOutput))
+	cmdRefinery.AddCommand(newRefineryGateCmd(&jsonOutput))
 	rootCmd.AddCommand(cmdRefinery)
 
 	// Events commands

@@ -242,7 +242,7 @@ self_land_as() { # NAME DIR → runs the lifted self_land; prints its output; re
 step "4. CLEAN SELF-LAND, from the rendered template"
 A="$(new_item "clean self-land")"; [ -n "$A" ] || die "mg new failed"; track "$A"
 setup "$A" sa || die "setup failed"
-grep -q 'enth land \$lreq \$stack --request-id "\$item/\$n"' "$S/sa.self_land" && grep -q "pogo land --item=\"\$item\" --repo=$PROJ" "$S/sa.self_land" \
+grep -qF 'enth land "${lreq[@]}" "${stack[@]}" --request-id "$item/$n"' "$S/sa.self_land" && grep -q "pogo land --item=\"\$item\" --repo=$PROJ" "$S/sa.self_land" \
     && ok "P5   the rendered prompt carries self_land (enth land + pogo land), filled in for $A" || bad "P5   self_land as rendered: $(cat "$S/sa.self_land")"
 grep -q 'pogo refinery submit' "$S/sa.prompt" && bad "P5   the enth prompt still submits to the refinery" || ok "P5   ... and no refinery submit"
 echo "x" > "$D/x.txt"
@@ -271,7 +271,7 @@ printf '%s' "$OUT2" | grep -q "already recorded" && ok "§6   re-running pogo la
 step "5. STALE TIP is landed again under the next request id"
 B="$(new_item "stale tip")"; track "$B"
 setup "$B" sb --branch=main || die "setup failed"
-grep -q 'enth land --ref refs/heads/main \$lreq \$stack' "$S/sb.self_land" && ok "P5   a --branch=main render lands with --ref refs/heads/main" || bad "P5   --branch render: $(grep 'enth land --ref' "$S/sb.self_land")"
+grep -qF 'enth land --ref refs/heads/main "${lreq[@]}" "${stack[@]}"' "$S/sb.self_land" && ok "P5   a --branch=main render lands with --ref refs/heads/main" || bad "P5   --branch render: $(grep 'enth land --ref' "$S/sb.self_land")"
 echo "y" > "$D/y.txt"
 as_worker sb "$D" bash -c "$(cat "$S/sb.change")" >/dev/null 2>&1 || bad "enth change failed"
 touch "$CTL/stale-once"

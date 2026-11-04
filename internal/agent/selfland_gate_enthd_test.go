@@ -72,7 +72,7 @@ func newSelfLandRig(t *testing.T) *selfLandRig {
 	}
 	// The stub pogo: presubmit prints the stack under test, and land records
 	// what it was handed. What is under test is the gate and the land, not pogod.
-	stub := "#!/bin/sh\ncase \"$1\" in\n  presubmit) echo \"$STACK\" ;;\n  land) for a; do case \"$a\" in --landed-file=*) cat \"${a#--landed-file=}\" >> \"$LAND_LOG\" ;; esac; done ;;\n  *) exit 9 ;;\nesac\n"
+	stub := "#!/bin/sh\ncase \"$1\" in\n  presubmit) echo \"$STACK\" ;;\n  land) for a; do case \"$a\" in --landed-file=*) cat \"${a#--landed-file=}\" >> \"$LAND_LOG\" ;; esac; done ;;\n  refinery) echo ./build.sh ;;\n  *) exit 9 ;;\nesac\n"
 	if err := os.WriteFile(filepath.Join(r.bin, "pogo"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}

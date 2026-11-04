@@ -1,0 +1,1 @@
+The enth `self_land` now gates a land with the merge gate the repo declares in `.pogo/refinery.toml` (new `pogo refinery gate`), not always `./build.sh`; it prints `GATE COMMAND: …` and says when it fell back. Its Change stack and `--require` flag are now arrays, so they reach enth as separate arguments under zsh, which agents run.
