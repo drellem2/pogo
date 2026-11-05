@@ -25,10 +25,14 @@ func TestEnthVCSMatchesTheVersionPackage(t *testing.T) {
 // WORST case §10 measured: built inside a git repo without -buildvcs=false, so
 // Go stamped a git vcs.revision that is not the build's — the -X VCS=enth flag
 // must win over it. The control is the same build without the flag.
+//
+// -trimpath=false stands this binary in for build.sh's output, which is built
+// untrimmed. It overrides the GOFLAGS=-trimpath that test.sh exports
+// (drellem2/pogo#282); TestATrimmedEnthBuildIsNotRecognised says why it must.
 func TestBinaryRevRecognisesAnEnthBuild(t *testing.T) {
 	repo, plain, rev := gitRepoWithBinary(t)
 	enth := filepath.Join(t.TempDir(), "enthbuilt")
-	build := exec.Command("go", "build", "-buildvcs=true",
+	build := exec.Command("go", "build", "-buildvcs=true", "-trimpath=false",
 		"-ldflags", "-X github.com/drellem2/pogo/internal/version.VCS=enth", "-o", enth, ".")
 	build.Dir = repo
 	if out, err := build.CombinedOutput(); err != nil {
@@ -39,6 +43,26 @@ func TestBinaryRevRecognisesAnEnthBuild(t *testing.T) {
 	}
 	if got := BinaryRev(plain); got != rev {
 		t.Errorf("control: BinaryRev(git build) = %q, want %q", got, rev)
+	}
+}
+
+// TestATrimmedEnthBuildIsNotRecognised pins the reason build.sh builds its
+// binaries WITHOUT -trimpath while test.sh uses it (drellem2/pogo#282): Go does
+// not record -ldflags in a -trimpath binary's build info (go.dev/issue/52372),
+// so enthStamped has nothing to read and the outer repo's vcs.revision wins.
+// If this starts failing, Go began recording -ldflags under -trimpath, and
+// build.sh may then be able to trim too (scripts/lib/go-trimpath.sh).
+func TestATrimmedEnthBuildIsNotRecognised(t *testing.T) {
+	repo, _, rev := gitRepoWithBinary(t)
+	enth := filepath.Join(t.TempDir(), "enthtrimmed")
+	build := exec.Command("go", "build", "-buildvcs=true", "-trimpath=true",
+		"-ldflags", "-X github.com/drellem2/pogo/internal/version.VCS=enth", "-o", enth, ".")
+	build.Dir = repo
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	if got := BinaryRev(enth); got != rev {
+		t.Errorf("BinaryRev(trimmed enth build) = %q, want the outer repo's %q: Go no longer drops -ldflags under -trimpath", got, rev)
 	}
 }
 
