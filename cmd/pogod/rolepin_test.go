@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -14,6 +15,10 @@ import (
 // sandboxHome redirects HOME, XDG_CONFIG_HOME and POGO_HOME at fresh temp dirs
 // and returns the POGO_HOME path. Both the developer shell and launchd export
 // POGO_HOME on some machines, so an unset alone would not isolate this.
+//
+// It does not need to blank the POGO_* variables config.Load layers over the
+// files (POGO_PORT and the rest): TestMain unsets those for the whole package
+// (configEnvOverrides, mg-14a79).
 func sandboxHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -25,6 +30,44 @@ func sandboxHome(t *testing.T) string {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("POGO_HOME", state)
 	return state
+}
+
+// A new override added to config.Load would leak into this package's tests the
+// same way POGO_PORT did unless TestMain unsets it too. Source-level so it fails the
+// moment the list drifts, not the first time some shell happens to export it.
+// Positive control built in: the list's known members must be found in the
+// source, so a scan that matches nothing cannot pass.
+func TestConfigEnvOverridesCoversConfigLoad(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "internal", "config", "config.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	start := strings.Index(src, "// Environment variables override config file")
+	if start < 0 {
+		t.Fatal(`marker "Environment variables override config file" not found in config.go — update this test`)
+	}
+	end := strings.Index(src[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("end of the env-override function not found")
+	}
+	block := src[start : start+end]
+	found := map[string]bool{}
+	for _, m := range regexp.MustCompile(`os\.(?:Getenv|LookupEnv)\("(POGO_[A-Z_]+)"\)`).FindAllStringSubmatch(block, -1) {
+		found[m[1]] = true
+	}
+	known := map[string]bool{}
+	for _, k := range configEnvOverrides {
+		known[k] = true
+		if !found[k] {
+			t.Errorf("%s is in configEnvOverrides but config.Load's override block no longer reads it", k)
+		}
+	}
+	for k := range found {
+		if !known[k] {
+			t.Errorf("config.Load overrides the config files from %s, but TestMain does not unset it — an agent shell exporting it changes these tests' results", k)
+		}
+	}
 }
 
 // restoreRoleNames resets the process-wide role names after a test mutates them.

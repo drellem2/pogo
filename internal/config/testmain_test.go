@@ -12,7 +12,23 @@ import (
 // POGO_HOME would defeat that isolation and leak test writes into the real
 // state dir. Tests that exercise POGO_HOME semantics set it explicitly via
 // t.Setenv.
+//
+// The same goes for every POGO_* variable Load applies over the config files:
+// a test that asserts a file-derived or default value (port, autostart,
+// extra_path, ...) reads the environment instead when the shell exports one.
+// pogod exports POGO_PORT to every agent since mg-0c1a5 (mg-14a79). Tests that
+// exercise an override set it themselves.
 func TestMain(m *testing.M) {
-	os.Unsetenv("POGO_HOME")
+	for _, k := range []string{
+		"POGO_HOME",
+		"POGO_PORT",
+		"POGO_BIND",
+		"POGO_AGENT_COMMAND",
+		"POGO_AGENT_PROVIDER",
+		"POGO_EXTRA_PATH",
+		"POGO_AGENT_AUTOSTART",
+	} {
+		os.Unsetenv(k)
+	}
 	os.Exit(m.Run())
 }

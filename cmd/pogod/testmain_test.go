@@ -42,7 +42,31 @@ import (
 // Mails passed alone and failed in a full-package run. Restore this, never "".
 var testEventLogPath string
 
+// configEnvOverrides is every environment variable config.Load applies ON TOP
+// of the config files (internal/config/config.go, "Environment variables
+// override config file"). TestMain unsets them all: this package's tests assert
+// what fixture config files resolve to, and several boot real pogods with
+// os.Environ(), so an inherited override silently wins. Since mg-0c1a5 pogod
+// exports POGO_PORT into every agent it spawns, which turned
+// TestPinAndResolveRoles_PartialPogoHomeConfigDoesNotDropThePin red (port 10000,
+// want 10001) in every agent shell — a polecat's ./build.sh, and the refinery
+// gate if it inherits the same environment (mg-14a79).
+// TestConfigEnvOverridesCoversConfigLoad keeps this list in step with
+// config.go. Tests that exercise an override set it with t.Setenv.
+var configEnvOverrides = []string{
+	"POGO_PORT",
+	"POGO_BIND",
+	"POGO_AGENT_COMMAND",
+	"POGO_AGENT_PROVIDER",
+	"POGO_EXTRA_PATH",
+	"POGO_AGENT_AUTOSTART",
+}
+
 func TestMain(m *testing.M) {
+	for _, k := range configEnvOverrides {
+		os.Unsetenv(k)
+	}
+
 	// internal/testtmp, NOT os.MkdirTemp — and the reason is the os.Exit this
 	// function ends on. A `defer os.RemoveAll(dir)` here NEVER RUNS: os.Exit does not run deferred functions, so the naive version
 	// of this leaks one directory into $TMPDIR on every single run, whether the
