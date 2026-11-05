@@ -516,19 +516,92 @@ func TestQACheckoutNamesOrigin(t *testing.T) {
 	}
 }
 
-// releaseCutPrintf returns the single physical line holding the release-cut
+// releaseCutPrintf returns the single physical line holding the GIT release-cut
 // ticket body's printf format. The body is composed with printf rather than a
 // heredoc because it interpolates $tag/$days/$ahead, and that is what puts the
 // whole instruction on one line where shell-escaping rules apply to it.
+//
+// There are two such lines since mg-274ec, one per VCS, so this selects by
+// content rather than taking the first: the git one names
+// docs/release-process.md, the enth one names vcs=enth.
 func releaseCutPrintf(t *testing.T, body string) string {
 	t.Helper()
+	return releaseCutPrintfFor(t, body, "docs/release-process.md")
+}
+
+// releaseCutPrintfFor returns the one release-cut printf line holding marker,
+// and fails if there is not exactly one.
+func releaseCutPrintfFor(t *testing.T, body, marker string) string {
+	t.Helper()
+	var found []string
 	for _, l := range strings.Split(body, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(l), "printf 'Latest release") {
-			return l
+		if strings.HasPrefix(strings.TrimSpace(l), "printf 'Latest release") && strings.Contains(l, marker) {
+			found = append(found, l)
 		}
 	}
-	t.Fatalf("pm/pm-template.md: release-cut printf not found")
-	return ""
+	if len(found) != 1 {
+		t.Fatalf("pm/pm-template.md: want exactly one release-cut printf containing %q, found %d", marker, len(found))
+	}
+	return found[0]
+}
+
+// TestReleaseCutBodyForEnthRepos covers mg-274ec. The release-cut hook knew only
+// pogo's git flow (release/vX.Y.Z carve, --post-merge-tag, back-port), and an
+// enth repo mirrors to GitHub, so `gh release view` succeeds there and the hook
+// filed that body for every enth cut. An enth repo cuts through its own
+// docs/release.md lane: `enth tag` on the deployed revision, and the push mirror
+// creates the GitHub tag.
+func TestReleaseCutBodyForEnthRepos(t *testing.T) {
+	body := pmTemplateBody(t)
+
+	// The kind comes from the fleet's record, matched on the resolved path, and
+	// a failed lookup skips the repo instead of falling through to the git body.
+	for _, want := range []string{
+		`dir=$(cd "$repo" 2>/dev/null && pwd -P)`,
+		`vcs=$(pogo project list --json 2>/dev/null`,
+		`select((.path | rtrimstr("/")) == $d)`,
+		`.vcs // "git"`,
+		`deferred to the next sweep"; continue; }`,
+		`if [ "$vcs" = "enth" ]; then`,
+		"    fi |\n      mg new --title=\"release-cut: $slug",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pm/pm-template.md: release-cut hook is missing %q (mg-274ec)", want)
+		}
+	}
+
+	line := releaseCutPrintfFor(t, body, "vcs=enth")
+	for _, want := range []string{
+		"docs/release.md",
+		"enth tag vX.Y.Z <CHANGE>",
+		"deployed revision that passed the long suite",
+		"The push mirror then creates vX.Y.Z on GitHub",
+		"NEVER git push a tag",
+		"Until the tag mirror is deployed, hand-push",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("pm/pm-template.md: enth release-cut body is missing %q", want)
+		}
+	}
+	// None of the git flow may leak into the enth body as an instruction.
+	for _, banned := range []string{
+		"--post-merge-tag=",
+		"--target=release/",
+		"refs/heads/release/",
+		"git tag -a",
+		"bump-version.sh",
+		"docs/release-process.md",
+	} {
+		if strings.Contains(line, banned) {
+			t.Errorf("pm/pm-template.md: enth release-cut body carries git-flow %q", banned)
+		}
+	}
+	if strings.Contains(line, `\"`) {
+		t.Errorf(`pm/pm-template.md: the enth release-cut printf format contains \" -- zsh keeps it, bash strips it`)
+	}
+	if n := strings.Count(line, "'"); n != 2 {
+		t.Errorf("pm/pm-template.md: the enth release-cut printf line holds %d single quotes, want 2 -- an apostrophe terminates the format", n)
+	}
 }
 
 // promptFile returns one embedded prompt — the artifact that SHIPS, not the
