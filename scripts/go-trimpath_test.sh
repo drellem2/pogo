@@ -13,6 +13,9 @@
 #   (f) build.sh does NOT call it: the binaries it builds and installs must keep
 #       their -ldflags build-info record, which -trimpath drops and
 #       internal/selfdrift reads (see the library's header).
+#   (g) build.sh's go build / go install pass -trimpath=false, so an inherited
+#       GOFLAGS=-trimpath (test.sh runs a nested ./build.sh --install) cannot
+#       strip that record either.
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,6 +83,19 @@ elif ! grep -q '^[[:space:]]*go_trimpath_enable' "$REPO_ROOT/test.sh"; then
 else
     pass "(f) build.sh does not call go_trimpath_enable (control: the pattern finds test.sh's)"
 fi
+
+# (g) build.sh's go build and go install pass -trimpath=false, so a GOFLAGS
+# =-trimpath inherited from the caller cannot reach the binaries either.
+for verb in build install; do
+    line="$(grep -E "^[^#]*gate_step \"go $verb \./cmd/\.\.\.\" go $verb " "$REPO_ROOT/build.sh")"
+    if [ -z "$line" ]; then
+        fail "(g) build.sh: no 'go $verb ./cmd/...' gate step found (the check below cannot be trusted)"
+    elif printf '%s\n' "$line" | grep -q -- ' -trimpath=false '; then
+        pass "(g) build.sh's go $verb passes -trimpath=false"
+    else
+        fail "(g) build.sh's go $verb does not pass -trimpath=false: an inherited GOFLAGS=-trimpath would strip its -ldflags record"
+    fi
+done
 
 echo ""
 echo "=== $PASS passed, $FAIL failed ==="

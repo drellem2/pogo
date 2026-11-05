@@ -217,7 +217,12 @@ go_toolchain_resolve || exit $?
 # binary's build info under -trimpath (go.dev/issue/52372), and `build.sh
 # --install` -- what the nightly deploy runs -- verifies each installed binary's
 # ldflags Commit from that record (verify_installed_stamps). A trimmed build here
-# would fail that check on every install. See scripts/lib/go-trimpath.sh.
+# would fail that check on every install.
+#
+# The build and install lines pass -trimpath=false EXPLICITLY, which overrides
+# GOFLAGS: a GOFLAGS=-trimpath inherited from the caller (test.sh exports one,
+# and build_test.sh runs a nested `./build.sh --install` under it) must not
+# reach them. See scripts/lib/go-trimpath.sh.
 
 # The step labels below are the profile's row names, and fmt.sh/test.sh print
 # their own "Step N:" banners — so these are named for what the row IS rather
@@ -258,10 +263,10 @@ fi
 
 echo "Step 3: Building binaries into ${build_dir}..."
 mkdir -p "$build_dir"
-gate_step "go build ./cmd/..." go build -ldflags "$ldflags" -o "${build_dir%/}/" ./cmd/... || exit $?
+gate_step "go build ./cmd/..." go build -trimpath=false -ldflags "$ldflags" -o "${build_dir%/}/" ./cmd/... || exit $?
 
 if [ "$do_install" = true ]; then
   echo "Step 4: Installing binaries into GOBIN..."
-  gate_step "go install ./cmd/..." go install -ldflags "$ldflags" ./cmd/... || exit $?
+  gate_step "go install ./cmd/..." go install -trimpath=false -ldflags "$ldflags" ./cmd/... || exit $?
   gate_step "verify installed stamps" verify_installed_stamps || exit $?
 fi
