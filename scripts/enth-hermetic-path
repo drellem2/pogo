@@ -1,0 +1,43 @@
+# shellcheck shell=bash
+# =============================================================================
+# enth-hermetic-path — source me. Keeps a box-installed enth-land-gate out of
+# a test's view (mg-7f8e4).
+#
+# enth's install.sh puts enth-land-gate in the same directory as enth and
+# enthd (~/.local/bin on this box). A test that puts that directory, or the
+# inherited PATH, in front of the shipped self_land block is then gated or
+# ungated by whatever happens to be installed on the host, not by what the
+# test set up. On 2026-11-05 a gate install at 05:47Z turned
+# enth_new_repo_scenario_test.sh red on every branch (the scratch repo has no
+# ./build.sh to fall back to). mg-32843 fixed the same leak in the Go SelfLand
+# rig; these are the shell twins of its linkEnthBinaries / pathWithoutLandGate.
+#
+#   enth_bin_without_gate FROM TO   symlink enth, enthd and every enth-* in
+#                                   FROM into TO, except enth-land-gate
+#   path_without_land_gate PATH     PATH minus every entry holding an
+#                                   enth-land-gate
+#
+# The only enth-land-gate such a test may see is one it put on PATH itself.
+# =============================================================================
+
+enth_bin_without_gate() {
+    local from="$1" to="$2" f n
+    mkdir -p "$to" || return 1
+    for f in "$from"/enth "$from"/enthd "$from"/enth-*; do
+        [ -f "$f" ] && [ -x "$f" ] || continue
+        n="$(basename "$f")"
+        [ "$n" = enth-land-gate ] && continue
+        ln -sf "$f" "$to/$n" || return 1
+    done
+}
+
+path_without_land_gate() {
+    local out="" d rest="$1:"
+    while [ -n "$rest" ]; do
+        d="${rest%%:*}"; rest="${rest#*:}"
+        [ -n "$d" ] || continue
+        [ -e "$d/enth-land-gate" ] && continue
+        out="${out:+$out:}$d"
+    done
+    printf '%s' "$out"
+}

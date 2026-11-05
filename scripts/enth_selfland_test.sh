@@ -41,6 +41,8 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/pogo-sandbox"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/enth-hermetic-path"
 
 RUN=0
 PASSED=0
@@ -121,7 +123,15 @@ fi
 exec "$REAL" "$@"
 EOF
 chmod +x "$WBIN/enth"
-export PATH="$BIN_DIR:$WBIN:$EBIN:$PATH"
+# This script tests the land protocol UNGATED (stale tip, lost answer,
+# conflict, re-make); the gated land has its own tests (the SelfLand rig in
+# internal/agent, and enth_new_repo_scenario_test.sh). So no enth-land-gate
+# may be on PATH: not the one enth's install.sh puts next to enthd, and not
+# one elsewhere on the inherited PATH (mg-7f8e4).
+EHB="$S/enth-bin"
+enth_bin_without_gate "$EBIN" "$EHB" || die "could not link the enth binaries of $EBIN"
+export PATH="$BIN_DIR:$WBIN:$EHB:$(path_without_land_gate "$PATH")"
+command -v enth-land-gate >/dev/null && die "an enth-land-gate is still on PATH: $(command -v enth-land-gate)"
 note "sandbox: $S"
 
 step "2. enthd serving an enth-written repo"

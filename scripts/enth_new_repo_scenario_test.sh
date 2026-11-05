@@ -32,6 +32,15 @@
 # no `repo create` or `login` SKIPS with exit 0; POGO_ENTH_REQUIRE=1 turns the
 # skip into a failure.
 #
+# WHICH GATE (mg-7f8e4). The land in 5 is always the GATED one: this script
+# builds enth-land-gate from this tree into the sandbox bin, and hides any
+# enth-land-gate installed on the host (enth's install.sh puts one next to
+# enthd, in ~/.local/bin). The worker's first Change declares a gate in
+# .pogo/refinery.toml, as a repo must for a gated land to have something to
+# run. Before this, the box's gate decided the path: absent, the land was
+# ungated; installed, it fell back to ./build.sh, which x has none of, and
+# section 5 failed on every branch.
+#
 # Exit: 0 all observations made (or skipped); 1 an observation failed; 99 the
 # sandbox could not be established.
 # =============================================================================
@@ -41,6 +50,8 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/pogo-sandbox"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/enth-hermetic-path"
 
 RUN=0
 PASSED=0
@@ -87,13 +98,20 @@ trap cleanup EXIT INT TERM HUP
 
 BIN_DIR="$POGO_SANDBOX_DIR/bin"
 mkdir -p "$BIN_DIR"
-( cd "$REPO_ROOT" && GOBIN="$BIN_DIR" go install -p "${POGO_WORKER_CORES:-2}" ./cmd/pogo ./cmd/pogod ) || die "go install failed"
+( cd "$REPO_ROOT" && GOBIN="$BIN_DIR" go install -p "${POGO_WORKER_CORES:-2}" ./cmd/pogo ./cmd/pogod ./cmd/enth-land-gate ) || die "go install failed"
 command -v mg >/dev/null || die "mg is not on PATH"
 pogo_sandbox_isolate
 export TMPDIR="$POGO_SANDBOX_DIR/tmp"
 mkdir -p "$TMPDIR"
 S="$POGO_SANDBOX_DIR"
-export PATH="$BIN_DIR:$EBIN:$PATH"
+# The enth binaries of $EBIN without the host's enth-land-gate, and the
+# inherited PATH without any directory holding one: the only gate on PATH is
+# the one just built into $BIN_DIR (mg-7f8e4).
+EHB="$S/enth-bin"
+enth_bin_without_gate "$EBIN" "$EHB" || die "could not link the enth binaries of $EBIN"
+export PATH="$BIN_DIR:$EHB:$(path_without_land_gate "$PATH")"
+[ "$(command -v enth-land-gate)" = "$BIN_DIR/enth-land-gate" ] || die "the gate on PATH is $(command -v enth-land-gate), not the sandbox's $BIN_DIR/enth-land-gate"
+[ "$(command -v enth)" = "$EHB/enth" ] || die "the enth on PATH is $(command -v enth), not $EHB/enth"
 # A fresh machine has a git identity or it has nothing; give it one, as a new
 # user's ~/.gitconfig would. pogod hands it to enth workers (mg-30da0).
 git config --global user.name "New User"
@@ -225,10 +243,20 @@ as_worker() {
         POGO_HOME="$POGO_HOME" MG_ROOT="$MG_ROOT" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" TMPDIR="$TMPDIR" "$@" )
 }
 echo "# x" > "$D/README.md"
+# The repo's merge gate, declared in the first Change. The gated land runs it
+# on a checkout of the merged tree, so it passes only if the Change is in it.
+mkdir -p "$D/.pogo"
+echo 'quality_gate = "test -f README.md"' > "$D/.pogo/refinery.toml"
 COUT="$(as_worker bash -c "$(sed 's/<type>: <description>/docs: add a README/' "$S/px.change")" 2>&1)" \
     && ok "5    the template's enth change made the first Change" || bad "5    enth change: $COUT"
 LOUT="$(as_worker bash -c ". '$S/px.self_land'; self_land" 2>&1)"; RC=$?
 [ "$RC" = 0 ] && printf '%s' "$LOUT" | grep -q "LANDED and recorded" && ok "5    self_land landed onto the empty trunk and recorded it" || bad "5    self_land rc $RC: $LOUT"
+if ! enth land --help 2>&1 | grep -q -- '--require'; then
+    printf '%s' "$LOUT" | grep -q '^GATE NOT INSTALLED' && ok "5    ... ungated: $EBIN/enth predates land --require" || bad "5    an enth without land --require, and no GATE NOT INSTALLED line: $LOUT"
+else printf '%s' "$LOUT" | grep -q '^GATE COMMAND: test -f README.md$' && printf '%s' "$LOUT" | grep -qE '^(GATED|TEST-ONLY) \(mg-64f2e\)' \
+    && ok "5    ... gated by the sandbox's enth-land-gate, running the declared gate: $(printf '%s' "$LOUT" | grep -oE '^(GATED|TEST-ONLY) \(mg-64f2e\)')" \
+    || bad "5    self_land did not take the gated path with the declared gate: $LOUT"
+fi
 for _ in $(seq 1 100); do [ "$(mg show "$ITEM" 2>/dev/null | sed -n 's/^Status: *//p' | head -1)" = done ] && break; sleep 0.1; done
 [ "$(mg show "$ITEM" 2>/dev/null | sed -n 's/^Status: *//p' | head -1)" = done ] && ok "5    $ITEM is done" || bad "5    $ITEM is $(mg show "$ITEM" 2>&1 | sed -n 's/^Status: *//p')"
 enth --remote "$URL" --repo "$OWNER/x" query cat README.md --rev refs/heads/main 2>/dev/null | grep -q '# x' \

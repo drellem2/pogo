@@ -49,6 +49,8 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/pogo-sandbox"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/enth-hermetic-path"
 
 RUN=0
 PASSED=0
@@ -103,7 +105,13 @@ command -v mg >/dev/null || die "mg is not on PATH"
 pogo_sandbox_isolate
 export TMPDIR="$POGO_SANDBOX_DIR/tmp"
 mkdir -p "$TMPDIR"
-export PATH="$BIN_DIR:$EBIN:$PATH"
+# No self_land runs here, but the host's enth-land-gate stays out of view
+# anyway: what this script sees should not depend on what the box installed
+# next to enthd (mg-7f8e4).
+EHB="$POGO_SANDBOX_DIR/enth-bin"
+enth_bin_without_gate "$EBIN" "$EHB" || die "could not link the enth binaries of $EBIN"
+export PATH="$BIN_DIR:$EHB:$(path_without_land_gate "$PATH")"
+command -v enth-land-gate >/dev/null && die "an enth-land-gate is still on PATH: $(command -v enth-land-gate)"
 S="$POGO_SANDBOX_DIR"
 note "sandbox: $S"
 note "enth: $EBIN"

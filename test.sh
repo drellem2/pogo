@@ -198,6 +198,10 @@ gate_step "Testing the enth build stamp (§10 table on an enth #9 checkout)" bas
 # failure.
 gate_step "Testing enth workspaces (spawn, dirty, remove through a real enthd)" bash scripts/tmpdir-leak-guard.sh bash scripts/enth_workspaces_test.sh
 
+# The helpers that keep a box-installed enth-land-gate out of the enth
+# scenario scripts (mg-7f8e4): a gate next to enthd made every branch red.
+gate_step "Testing the enth scripts' gate-hiding PATH helpers" bash scripts/tmpdir-leak-guard.sh bash scripts/enth-hermetic-path_test.sh
+
 # A fresh install, "make me a new enth repo called x" (GH #284, mg-d8dc9): a
 # sandboxed pogod installs the shipped prompts, the coordinator's new-repo
 # recipe is lifted from mayor.md and run, and a polecat lands the first Change
