@@ -35,6 +35,13 @@ trap 'gate_exit_report' EXIT
 . "$TEST_SH_DIR/scripts/lib/go-toolchain.sh"
 go_toolchain_resolve || exit $?
 
+# Build and test with -trimpath, so polecat worktrees at different paths share
+# build-cache entries instead of each caching a private copy (drellem2/pogo#282).
+# See scripts/lib/go-trimpath.sh.
+[ -r "$TEST_SH_DIR/scripts/lib/go-trimpath.sh" ] || { echo "test.sh: missing scripts/lib/go-trimpath.sh" >&2; exit 1; }
+. "$TEST_SH_DIR/scripts/lib/go-trimpath.sh"
+go_trimpath_enable
+
 echo "Step 2: Testing..."
 echo "Making test directories"
 mkdir -p _testdata/a-service/.git
@@ -436,6 +443,7 @@ gate_step "Testing build.sh" bash scripts/tmpdir-leak-guard.sh bash build_test.s
 # bare `go` must FAIL under the stripped PATH before the library's success is
 # credited to the library. (c) pins that a bad POGO_GO is refused, not skipped.
 gate_step "Testing the go toolchain lookup" bash scripts/tmpdir-leak-guard.sh bash scripts/go-toolchain_test.sh
+gate_step "Testing the -trimpath gate setting" bash scripts/tmpdir-leak-guard.sh bash scripts/go-trimpath_test.sh
 
 gate_step "Testing changelog fragment assembler" bash scripts/tmpdir-leak-guard.sh bash scripts/assemble-changelog_test.sh
 
