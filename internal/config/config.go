@@ -1228,6 +1228,12 @@ type GitGCConfig struct {
 	// under $POGO_HOME/polecats (gitgc.PolecatTreeRepos, drellem2/pogo#162),
 	// so this is only needed for a repo with no polecat tree on disk.
 	Repos []string
+	// PruneBuildOutput lets the sweep DELETE ignored build output from kept,
+	// dead-owner polecat trees and their harness scratchpads (drellem2/pogo#282).
+	// Off by default: every sweep then only REPORTS it ("would prune build
+	// output ..." in pogod's log), so the report can be read before anything is
+	// deleted. Set `[gitgc] prune_build_output = true` to flip it.
+	PruneBuildOutput bool
 }
 
 // HeartbeatConfig configures pogod's clock-jump detector. Zero values fall
@@ -2919,6 +2925,9 @@ func Load() *Config {
 		if len(fileCfg.GitGC.Repos) > 0 {
 			cfg.GitGC.Repos = fileCfg.GitGC.Repos
 		}
+		if fileCfg.GitGC.PruneBuildOutput {
+			cfg.GitGC.PruneBuildOutput = true
+		}
 		if fileCfg.reaperEnabledSet {
 			cfg.Reaper.Enabled = fileCfg.Reaper.Enabled
 		}
@@ -4086,6 +4095,8 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				}
 			case "repos":
 				cfg.GitGC.Repos = parseStringArray(val)
+			case "prune_build_output":
+				cfg.GitGC.PruneBuildOutput = val == "true"
 			}
 		case "stall_watch":
 			switch key {

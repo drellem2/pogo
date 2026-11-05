@@ -105,6 +105,7 @@ func inertIfEmpty(n int) string {
 // Config field (see enabledDefault), so only these need spelling out.
 var switchDefaults = map[string]func(*Config) string{
 	"agents/autostart":                           func(c *Config) string { return onOff(c.Agents.AutoStart) },
+	"gitgc/prune_build_output":                   func(c *Config) string { return onOff(c.GitGC.PruneBuildOutput) },
 	"stall_watch/priority_wake_enabled":          func(c *Config) string { return onOff(c.StallWatch.PriorityWakeEnabled) },
 	"stall_watch/blocked_reminder_enabled":       func(c *Config) string { return onOff(c.StallWatch.BlockedReminderEnabled) },
 	"stall_watch/indefinite_hold_report_enabled": func(c *Config) string { return onOff(c.StallWatch.IndefiniteHoldReportEnabled) },

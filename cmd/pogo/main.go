@@ -4710,6 +4710,7 @@ spawned with.`,
 	var gcApply bool
 	var gcForce bool
 	var gcListPreserved bool
+	var gcPruneBuildOutput bool
 	var cmdGC = &cobra.Command{
 		Use:   "gc",
 		Short: "Garbage-collect stale polecat branches and leaked worktrees",
@@ -4778,6 +4779,16 @@ A repository whose project record names another backend (pogo project set-vcs
 --vcs=enth) is not swept as git: its worktree, prune and branch phases are
 skipped, and the summary's "coverage:" line says so. Polecat trees under the
 polecats dir, enth checkouts included, are still judged.
+
+A tree that is KEPT, and whose owner is not live, still has its BUILD OUTPUT
+judged (drellem2/pogo#282): in a git tree, the paths git itself reports as
+ignored; in an enth checkout, a target/ beside a Cargo.toml, a .lake/build or a
+node_modules that enth tracks nothing under; and the same three names in the
+owner's harness scratchpads. A non-ignored untracked file is NEVER touched — it
+is why the tree was kept — nor is pogod's .claude/, nor anything holding a .git.
+This is reported on every run ("would prune") and deleted only with BOTH --apply
+and --prune-build-output. pogod reports it on every sweep and deletes it only
+once its config sets [gitgc] prune_build_output = true.
 
 By default gc only reports what it would do; pass --apply to make changes.
 
@@ -4869,6 +4880,8 @@ parseable document while a human can still watch the scan move.`,
 				// Dead polecats' harness session temp dirs (gh #203); a dry
 				// run lists them like everything else.
 				SessionTempDirs: providers.SessionTempDirs,
+				// Report-only unless asked for (drellem2/pogo#282).
+				PruneBuildOutput: gcPruneBuildOutput,
 			})
 			if err != nil {
 				cli.ExitWithError(jsonOutput, err.Error(), cli.ExitError)
@@ -4887,6 +4900,9 @@ parseable document while a human can still watch the scan move.`,
 	cmdGC.Flags().BoolVar(&gcApply, "apply", false, "actually delete (default: dry run)")
 	cmdGC.Flags().BoolVar(&gcForce, "force", false,
 		"also reclaim worktrees holding uncommitted work (DISCARDS that work)")
+	cmdGC.Flags().BoolVar(&gcPruneBuildOutput, "prune-build-output", false,
+		"with --apply, also DELETE ignored build output from kept, dead-owner trees and "+
+			"their scratchpads (default: report it only)")
 	cmdGC.Flags().BoolVar(&gcListPreserved, "list-preserved", false,
 		"list the retained worktrees across all repos and what is in them; change nothing "+
 			"(streams as it scans; progress on stderr)")

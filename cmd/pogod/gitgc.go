@@ -120,6 +120,9 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig, notify string) {
 		return
 	}
 	conditions.Clear(rowA9PolecatWitness, time.Now())
+	// The polecats-dir phases run on every repo's sweep; the build-output
+	// prune judges each kept tree and scratchpad once per pass.
+	pruneSeen := map[string]bool{}
 	// No death-evidence input is passed, and that is deliberate rather than
 	// missing (gh #97). pogod CAN establish positive evidence of death from the
 	// polecat witness, and an earlier revision of this fix fed it in so that a
@@ -146,6 +149,11 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig, notify string) {
 			// and orphaned ones under the same gate (gh #203). Supplied by the
 			// providers, so gitgc names no harness's temp root.
 			SessionTempDirs: providers.SessionTempDirs,
+			// Ignored build output in kept, dead-owner trees: REPORTED every
+			// sweep, deleted only once [gitgc] prune_build_output = true
+			// (drellem2/pogo#282).
+			PruneBuildOutput: cfg.PruneBuildOutput,
+			BuildOutputSeen:  pruneSeen,
 			// One line per ACTION, not just the counts below. The sweep
 			// already assembles path, owner, branch and reason for every
 			// decision and used to throw all of it away — so a removal in a
@@ -167,6 +175,18 @@ func runGitGCSweep(reg *agent.Registry, cfg config.GitGCConfig, notify string) {
 		conditions.Clear(rowA9SweepFailedPrefix+repo, time.Now())
 		if res.GitSkipped != "" {
 			log.Printf("pogod: git GC %s — coverage: %s", repo, res.GitSkipped)
+		}
+		if n := len(res.BuildOutputPruned); n > 0 {
+			var total int64
+			for _, a := range res.BuildOutputPruned {
+				total += a.Bytes
+			}
+			verb := "would prune (report only; [gitgc] prune_build_output = true deletes)"
+			if res.BuildOutputApplied {
+				verb = "pruned"
+			}
+			log.Printf("pogod: git GC %s — build output in %d kept dead-owner tree(s)/scratchpad(s): %s %d bytes",
+				repo, n, verb, total)
 		}
 		if len(res.BranchesDeleted) > 0 || len(res.WorktreesRemoved) > 0 || len(res.SessionTempRemoved) > 0 || len(res.Errors) > 0 {
 			log.Printf("pogod: git GC %s — deleted %d branches, removed %d worktrees, %d session temp dirs, %d errors",

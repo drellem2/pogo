@@ -93,9 +93,13 @@ func TestGitGCConfigFile(t *testing.T) {
 enabled = false
 interval = "15m"
 repos = ["/home/u/dev/pogo", "/home/u/dev/other"]
+prune_build_output = true
 `), 0644)
 
 	cfg := Load()
+	if !cfg.GitGC.PruneBuildOutput {
+		t.Error("prune_build_output = true should turn build-output deletion on (drellem2/pogo#282)")
+	}
 	if cfg.GitGC.Enabled {
 		t.Error("git GC should be disabled by config file")
 	}

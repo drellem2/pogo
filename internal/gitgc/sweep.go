@@ -90,6 +90,16 @@ type Options struct {
 	// `enth status` whichever repo is being swept — so that scan, and the
 	// session-temp scan beside it, still run. Result.GitSkipped says so.
 	VCS vcs.Kind
+	// PruneBuildOutput turns the build-output prune phase from a REPORT into a
+	// deletion (drellem2/pogo#282). Off, every sweep still finds and sizes the
+	// ignored build output in kept, dead-owner trees and their scratchpads, and
+	// reports it as "would prune"; on, a non-dry-run sweep removes it. See
+	// buildoutput.go for what it may and may never touch.
+	PruneBuildOutput bool
+	// BuildOutputSeen, when non-nil, records the trees and scratchpads the prune
+	// phase has already judged, so a caller sweeping several repos (pogod)
+	// judges each once: the polecats-dir phases run on every repo's sweep.
+	BuildOutputSeen map[string]bool
 }
 
 func (o Options) logf(format string, args ...any) {
@@ -172,6 +182,12 @@ type Result struct {
 	// dry run, that would be); SessionTempKept the orphan ones kept, with why.
 	SessionTempRemoved []SessionTempAction
 	SessionTempKept    []SessionTempAction
+	// BuildOutputPruned lists ignored build output pruned from kept, dead-owner
+	// trees and scratchpads — or, unless BuildOutputApplied, that would be.
+	BuildOutputPruned []BuildOutputAction
+	// BuildOutputApplied says whether the prune phase deleted (Options.
+	// PruneBuildOutput on a non-dry-run sweep) or only reported.
+	BuildOutputApplied bool
 	PruneOutput        string
 	Errors             []string
 	// VCS is the backend the sweep was told Repo uses ("" = git).
@@ -214,7 +230,7 @@ func Sweep(opts Options) (Result, error) {
 		tickets = loaded
 	}
 
-	res := Result{Repo: opts.Repo, DryRun: opts.DryRun, VCS: opts.VCS}
+	res := Result{Repo: opts.Repo, DryRun: opts.DryRun, VCS: opts.VCS, BuildOutputApplied: opts.buildOutputApply()}
 
 	// A repo whose project record names another backend is not swept as git
 	// (see Options.VCS). Only the repo-independent scans run: they judge the
@@ -229,6 +245,7 @@ func Sweep(opts Options) (Result, error) {
 			sweepOrphanDirs(opts, tickets, map[string]bool{}, &res)
 			sweepOrphanSessionTemp(opts, tickets, &res)
 		}
+		pruneKeptBuildOutput(opts, &res)
 		return res, nil
 	}
 
@@ -370,6 +387,11 @@ func Sweep(opts Options) (Result, error) {
 		// was already gone (gh #203).
 		sweepOrphanSessionTemp(opts, tickets, &res)
 	}
+
+	// --- Phase 1d: build output in kept, dead-owner trees -----------------
+	// After every tree phase, over what they KEPT (drellem2/pogo#282). A
+	// report unless Options.PruneBuildOutput; see buildoutput.go.
+	pruneKeptBuildOutput(opts, &res)
 
 	// Drop registrations whose directory is already gone.
 	if pruneOut, err := PruneWorktrees(opts.Repo, opts.DryRun); err != nil {
@@ -761,6 +783,22 @@ func (r Result) Summary() string {
 		fmt.Fprintf(&b, "  session temp dirs %s:\n", verb)
 		for _, s := range r.SessionTempRemoved {
 			fmt.Fprintf(&b, "    %s\n", s.String())
+		}
+	}
+	if len(r.BuildOutputPruned) > 0 {
+		pruneVerb, tag := "pruned", ""
+		if !r.BuildOutputApplied {
+			pruneVerb = "would prune"
+			tag = " (report only: deletion needs `pogo gc --apply --prune-build-output`, or [gitgc] prune_build_output = true for pogod)"
+
+		}
+		var total int64
+		for _, a := range r.BuildOutputPruned {
+			total += a.Bytes
+		}
+		fmt.Fprintf(&b, "  build output in kept dead-owner trees: %s %s%s\n", pruneVerb, humanBytes(total), tag)
+		for _, a := range r.BuildOutputPruned {
+			fmt.Fprintf(&b, "    %s\n", a.String())
 		}
 	}
 	if len(r.BranchesDeleted) > 0 {
