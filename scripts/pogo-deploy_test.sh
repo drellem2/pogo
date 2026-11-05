@@ -5510,6 +5510,57 @@ REAL_STATE_AFTER="$(state_fingerprint "$REAL_STATE_DIR")"
     || fail "ACCEPTANCE FAILED: this suite wrote into $REAL_STATE_DIR — before [$REAL_STATE_BEFORE] after [$REAL_STATE_AFTER]. A test run has just armed or suppressed a real fleet restart."
 
 # ---------------------------------------------------------------------------
+# mg-9d088 — THE PRESYNC HOOK (gate 4b)
+# ---------------------------------------------------------------------------
+# An optional executable run before the sync; non-zero refuses the night. The
+# cases are the four states the hook path can be in, plus the two directions a
+# dry run must NOT take (refusing, or skipping the hook silently).
+PS_DIR="$WORK/presync"; mkdir -p "$PS_DIR"
+ps_case() (   # ps_case HOOK_PATH DRY -> the run's log + any alert, then "rc=N"
+    PRESYNC="$1"; DRY_RUN="$2"; PRESYNC_TIMEOUT=10; SRC="$PS_DIR/src"
+    alert() { echo "ALERT-SUBJECT: $1"; echo "$2"; echo "ALERT-EXTRA: $3 TYPE: $4"; }
+    run_presync 2>&1; echo "rc=$?"
+)
+printf '#!/bin/sh\necho "hook saw src=$POGO_DEPLOY_SRC dry=${POGO_DEPLOY_DRY_RUN:-0}"\nexit 0\n' > "$PS_DIR/ok"
+printf '#!/bin/sh\necho "coverage gap: 2 commits"\nexit 1\n' > "$PS_DIR/refuse"
+printf '#!/bin/sh\nexit 0\n' > "$PS_DIR/noexec"
+printf '#!/bin/sh\nsleep 30\n' > "$PS_DIR/hang"
+chmod +x "$PS_DIR/ok" "$PS_DIR/refuse" "$PS_DIR/hang"
+
+PS_OUT="$(ps_case "$PS_DIR/absent" false)"
+case "$PS_OUT" in *"presync: none"*"rc=0") pass "mg-9d088: an absent hook is not an error, and the run SAYS there was none" ;;
+    *) fail "mg-9d088: absent hook: $PS_OUT" ;; esac
+PS_OUT="$(ps_case "" false)"
+case "$PS_OUT" in *"presync: disabled"*"rc=0") pass "mg-9d088: POGO_DEPLOY_PRESYNC= (empty) disables the hook, and says so" ;;
+    *) fail "mg-9d088: empty hook path: $PS_OUT" ;; esac
+PS_OUT="$(ps_case "$PS_DIR/ok" false)"
+case "$PS_OUT" in *"presync| hook saw src=$PS_DIR/src dry=0"*"presync: ok"*"rc=0") pass "mg-9d088: a hook that exits 0 proceeds; its output is logged and it is told which checkout it vouches for" ;;
+    *) fail "mg-9d088: ok hook: $PS_OUT" ;; esac
+PS_OUT="$(ps_case "$PS_DIR/refuse" false)"
+case "$PS_OUT" in *"ALERT-SUBJECT: [pogo-deploy] REFUSED by the presync hook (refused rc=1)"*"coverage gap: 2 commits"*"TYPE: deploy_presync_refused"*"rc=1") pass "mg-9d088: a hook that exits non-zero REFUSES the night, and the alert carries the hook's own words" ;;
+    *) fail "mg-9d088: refusing hook: $PS_OUT" ;; esac
+PS_OUT="$(ps_case "$PS_DIR/noexec" false)"
+case "$PS_OUT" in *"ALERT-SUBJECT: [pogo-deploy] REFUSED: presync hook is not executable"*"rc=1") pass "mg-9d088: a hook that is present but not executable refuses — skipping it would deploy past the check somebody installed" ;;
+    *) fail "mg-9d088: non-executable hook: $PS_OUT" ;; esac
+PS_OUT="$(ps_case "$PS_DIR/refuse" true)"
+case "$PS_OUT" in *ALERT-SUBJECT*) fail "mg-9d088: a dry run alerted on a refusing hook: $PS_OUT" ;;
+    *"a real run would REFUSE here"*"rc=0") pass "mg-9d088: a dry run runs the hook, reports the refusal it WOULD make, and neither alerts nor refuses" ;;
+    *) fail "mg-9d088: dry-run refusing hook: $PS_OUT" ;; esac
+PS_OUT="$(ps_case "$PS_DIR/ok" true)"
+case "$PS_OUT" in *"dry=1"*"rc=0") pass "mg-9d088: and the hook is told it is a dry run (POGO_DEPLOY_DRY_RUN=1)" ;;
+    *) fail "mg-9d088: dry-run flag not passed: $PS_OUT" ;; esac
+PS_OUT="$(ps_case "$PS_DIR/hang" false)"   # ps_case bounds it at 10s; the hook sleeps 30
+case "$PS_OUT" in *"timed-out after 10s"*"rc=1") pass "mg-9d088: a hook that hangs is killed at its bound and refuses as timed-out" ;;
+    *) fail "mg-9d088: hanging hook: $PS_OUT" ;; esac
+
+# Wired, and in the right place: after the alert path exists, before the sync.
+MAIN_BODY="$(sed -n '/^main() {/,/^}/p' "$RUNNER")"
+printf '%s' "$MAIN_BODY" | grep -n 'resolve_mg \|run_presync\|if ! sync_with_retry' | tr '\n' ' ' \
+    | grep -q 'resolve_mg .*run_presync.*if ! sync_with_retry' \
+    && pass "mg-9d088: main runs the hook after the alert path is resolved and BEFORE the sync" \
+    || fail "mg-9d088: run_presync is not between resolve_mg and the sync in main"
+
+# ---------------------------------------------------------------------------
 echo
 echo "--- Results ---"
 grep -c '^PASS' "$RESULTS_FILE" | sed 's/^/passed: /'
