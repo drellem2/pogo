@@ -7,9 +7,12 @@
 #   (b) A GOFLAGS the caller set is kept, with -trimpath appended.
 #   (c) -trimpath already present (bare or =true) is not added twice.
 #   (d) POGO_NO_TRIMPATH=1 leaves GOFLAGS exactly as it was.
-#   (e) build.sh and test.sh both source the library and call
-#       go_trimpath_enable, after go_toolchain_resolve. Without this case,
-#       deleting the call would leave (a)-(d) green and the gate untrimmed.
+#   (e) test.sh sources the library and calls go_trimpath_enable, after
+#       go_toolchain_resolve. Without this case, deleting the call would leave
+#       (a)-(d) green and the test compile untrimmed.
+#   (f) build.sh does NOT call it: the binaries it builds and installs must keep
+#       their -ldflags build-info record, which -trimpath drops and
+#       internal/selfdrift reads (see the library's header).
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,22 +57,29 @@ check "(c) -trimpath=true not added twice" "-trimpath=true" "GOFLAGS=-trimpath=t
 check "(d) POGO_NO_TRIMPATH=1 leaves GOFLAGS unset" "<unset>" POGO_NO_TRIMPATH=1
 check "(d) POGO_NO_TRIMPATH=1 leaves a caller's GOFLAGS untouched" "-mod=mod" POGO_NO_TRIMPATH=1 GOFLAGS=-mod=mod
 
-# (e) The gate scripts call it, after go is resolved.
-for script in build.sh test.sh; do
-    f="$REPO_ROOT/$script"
-    resolve_line="$(grep -n '^go_toolchain_resolve' "$f" | head -1 | cut -d: -f1)"
-    source_line="$(grep -n '^\. ".*scripts/lib/go-trimpath\.sh"' "$f" | head -1 | cut -d: -f1)"
-    enable_line="$(grep -n '^go_trimpath_enable$' "$f" | head -1 | cut -d: -f1)"
-    if [ -z "$resolve_line" ]; then
-        fail "(e) $script: no go_toolchain_resolve line found (the check below cannot be trusted)"
-    elif [ -z "$source_line" ] || [ -z "$enable_line" ]; then
-        fail "(e) $script does not source go-trimpath.sh and call go_trimpath_enable"
-    elif [ "$source_line" -lt "$enable_line" ] && [ "$resolve_line" -lt "$enable_line" ]; then
-        pass "(e) $script sources the library and calls go_trimpath_enable after go_toolchain_resolve"
-    else
-        fail "(e) $script: wrong order (resolve=$resolve_line source=$source_line enable=$enable_line)"
-    fi
-done
+# (e) test.sh calls it, after go is resolved.
+f="$REPO_ROOT/test.sh"
+resolve_line="$(grep -n '^go_toolchain_resolve' "$f" | head -1 | cut -d: -f1)"
+source_line="$(grep -n '^\. ".*scripts/lib/go-trimpath\.sh"' "$f" | head -1 | cut -d: -f1)"
+enable_line="$(grep -n '^go_trimpath_enable$' "$f" | head -1 | cut -d: -f1)"
+if [ -z "$resolve_line" ]; then
+    fail "(e) test.sh: no go_toolchain_resolve line found (the check below cannot be trusted)"
+elif [ -z "$source_line" ] || [ -z "$enable_line" ]; then
+    fail "(e) test.sh does not source go-trimpath.sh and call go_trimpath_enable"
+elif [ "$source_line" -lt "$enable_line" ] && [ "$resolve_line" -lt "$enable_line" ]; then
+    pass "(e) test.sh sources the library and calls go_trimpath_enable after go_toolchain_resolve"
+else
+    fail "(e) test.sh: wrong order (resolve=$resolve_line source=$source_line enable=$enable_line)"
+fi
+
+# (f) build.sh does not. Control: the same pattern finds test.sh's call above.
+if grep -q '^[[:space:]]*go_trimpath_enable' "$REPO_ROOT/build.sh"; then
+    fail "(f) build.sh calls go_trimpath_enable: its installed binaries would lose their -ldflags build-info record"
+elif ! grep -q '^[[:space:]]*go_trimpath_enable' "$REPO_ROOT/test.sh"; then
+    fail "(f) control: the pattern does not find test.sh's call either, so it proves nothing about build.sh"
+else
+    pass "(f) build.sh does not call go_trimpath_enable (control: the pattern finds test.sh's)"
+fi
 
 echo ""
 echo "=== $PASS passed, $FAIL failed ==="
