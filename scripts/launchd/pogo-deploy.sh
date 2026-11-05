@@ -502,6 +502,10 @@
 #   POGO_DEPLOY_ENTH_CI_DEPTH  how many first-parent commits to look back for a
 #                            green one (30)
 #   POGO_DEPLOY_ENTH_TIMEOUT seconds enth's install.sh (a release build) may take (2400)
+#   POGO_DEPLOY_PRESYNC      the presync hook run before the sync (section 4b;
+#                            default ${POGO_HOME:-~/.pogo}/deploy-presync, absent:
+#                            nothing runs; set it empty to disable)
+#   POGO_DEPLOY_PRESYNC_TIMEOUT  seconds the hook may take (900)
 #   POGO_DEPLOY_RUNNER_REFRESH  0 disables the runner self-refresh (section 8d)
 #   POGO_DEPLOY_RUNNER       the INSTALLED runner that step compares and refreshes
 #                            (${POGO_HOME:-~/.pogo}/bin/pogo-deploy.sh — the file the
@@ -1425,6 +1429,94 @@ alert() {
     rm -f "$bf"
     [ "$rc" -eq 0 ] && log "alert: mailed '$ALERT_TO' and '$ESCALATION_BOX'"
     return $rc
+}
+
+# ---------------------------------------------------------------------------
+# 4b. The presync hook (mg-9d088)
+# ---------------------------------------------------------------------------
+# An optional executable, run once per attempting fire, BEFORE the sync of
+# $SRC. It exists for a box whose deploy checkout is fed from somewhere else:
+# the hook brings that source up to date and says whether it is complete, so
+# the sync that follows reads a tree the hook has vouched for.
+#
+# Its contract is its exit status and nothing else:
+#   0         proceed with the sync and the deploy
+#   non-zero  REFUSE tonight's deploy: alert with the hook's own output, exit 1.
+#             Nothing is installed and the running build is untouched — stale,
+#             never rolled back. Exit 1 settles the night: a hook that refused
+#             has established a fact, and the 04:00 fire would refuse again.
+#
+# ABSENT IS NOT AN ERROR — a box with no hook runs exactly as before, and the
+# log says so on every run, because a line that appears only when the hook runs
+# cannot be told from a hook that silently stopped being found. PRESENT BUT NOT
+# EXECUTABLE IS: somebody installed it meaning it to run, and skipping it would
+# deploy past the check they installed.
+#
+# The hook gets POGO_DEPLOY_SRC (the checkout it is vouching for) and, on a dry
+# run, POGO_DEPLOY_DRY_RUN=1 — a hook that writes anything should only read
+# then. A dry run never refuses: it logs what the hook said and goes on.
+PRESYNC="${POGO_DEPLOY_PRESYNC-${POGO_HOME:-$HOME/.pogo}/deploy-presync}"
+PRESYNC_TIMEOUT="${POGO_DEPLOY_PRESYNC_TIMEOUT:-900}"
+PRESYNC_STATUS=""
+run_presync() {
+    local out rc=0
+    if [ -z "$PRESYNC" ]; then
+        PRESYNC_STATUS=disabled
+        log "presync: disabled (POGO_DEPLOY_PRESYNC is empty)"
+        return 0
+    fi
+    if [ ! -e "$PRESYNC" ]; then
+        PRESYNC_STATUS=none
+        log "presync: none — no hook at $PRESYNC, nothing to run before the sync"
+        return 0
+    fi
+    if [ ! -x "$PRESYNC" ]; then
+        PRESYNC_STATUS=not-executable
+        $DRY_RUN && { log "dry-run: presync hook $PRESYNC is not executable — a real run would REFUSE here"; return 0; }
+        alert "[pogo-deploy] REFUSED: presync hook is not executable" \
+"A presync hook exists at $PRESYNC but is not executable, so the check it was
+installed to make could not run. Tonight's deploy was refused; nothing was
+installed and the running build is untouched.
+
+  fix: chmod +x $PRESYNC — or remove it if no check is wanted
+  log: $HOME/Library/Logs/pogo/pogo-deploy.log" \
+            '"presync":"not-executable"' deploy_presync_refused
+        return 1
+    fi
+    out="$(mktemp)" || { err "presync: cannot create an output file"; return 1; }
+    log "presync: running $PRESYNC (bound ${PRESYNC_TIMEOUT}s)"
+    if $DRY_RUN; then
+        POGO_DEPLOY_SRC="$SRC" POGO_DEPLOY_DRY_RUN=1 run_bounded "$PRESYNC_TIMEOUT" "$PRESYNC" > "$out" 2>&1 || rc=$?
+    else
+        POGO_DEPLOY_SRC="$SRC" run_bounded "$PRESYNC_TIMEOUT" "$PRESYNC" > "$out" 2>&1 || rc=$?
+    fi
+    sed 's/^/presync| /' "$out"
+    if [ "$rc" -eq 0 ]; then
+        PRESYNC_STATUS=ok
+        log "presync: ok"
+        rm -f "$out"
+        return 0
+    fi
+    PRESYNC_STATUS="refused rc=$rc"
+    $BOUNDED_TIMED_OUT && PRESYNC_STATUS="timed-out after ${PRESYNC_TIMEOUT}s"
+    if $DRY_RUN; then
+        log "dry-run: presync $PRESYNC_STATUS — a real run would REFUSE here"
+        rm -f "$out"
+        return 0
+    fi
+    alert "[pogo-deploy] REFUSED by the presync hook ($PRESYNC_STATUS)" \
+"The presync hook $PRESYNC exited non-zero ($PRESYNC_STATUS), so tonight's
+deploy was refused before the sync. Nothing was installed and the running
+build is untouched (stale, never rolled back).
+
+WHAT THE HOOK SAID (last 40 lines):
+
+$(tail -40 "$out")
+
+  log: $HOME/Library/Logs/pogo/pogo-deploy.log" \
+        "\"presync\":\"$PRESYNC_STATUS\"" deploy_presync_refused
+    rm -f "$out"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -6408,6 +6500,11 @@ and the running pogod is untouched.
        readable (or set POGO_DEPLOY_ZSHENV to the exact file that has it)"
         exit 1
     }
+
+    # --- gate 4b: the presync hook (mg-9d088) -------------------------------
+    # Before the sync, so the tree the sync reads is the one the hook vouched
+    # for. A refusal is exit 1: it established a fact, so the night is settled.
+    run_presync || exit 1
 
     # --- gate 5: safe sync --------------------------------------------------
     # The alert names the class the runner ESTABLISHED and prints the underlying
