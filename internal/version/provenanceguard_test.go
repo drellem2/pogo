@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -552,11 +551,18 @@ func diffKeys(found map[string]string, allowed map[string]string) (unlisted, mis
 // that had to change to bring this guard across.
 func guardRepoRoot(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot locate this test's source file")
+	// The package directory, from the working directory and NOT from
+	// runtime.Caller(0): the gate builds with -trimpath (drellem2/pogo#282), and
+	// under -trimpath Caller reports a module-relative path such as
+	// "github.com/drellem2/pogo/internal/x/y_test.go", which filepath.Abs would
+	// resolve against the cwd into a directory that does not exist. `go test`
+	// runs every test binary in its package's source directory, so the cwd is
+	// that directory under either build mode.
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("cannot locate this test's package directory: %v", err)
 	}
-	abs, err := filepath.Abs(filepath.Join(filepath.Dir(file), "..", ".."))
+	abs, err := filepath.Abs(filepath.Join(dir, "..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}

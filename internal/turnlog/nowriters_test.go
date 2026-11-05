@@ -3,7 +3,6 @@ package turnlog
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -152,11 +151,18 @@ func TestPogodDoesNotWriteTheTurnLog(t *testing.T) {
 // repoRoot locates the module root from this test's own source path.
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot locate this test's source file")
+	// The package directory, from the working directory and NOT from
+	// runtime.Caller(0): the gate builds with -trimpath (drellem2/pogo#282), and
+	// under -trimpath Caller reports a module-relative path such as
+	// "github.com/drellem2/pogo/internal/x/y_test.go", which filepath.Abs would
+	// resolve against the cwd into a directory that does not exist. `go test`
+	// runs every test binary in its package's source directory, so the cwd is
+	// that directory under either build mode.
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("cannot locate this test's package directory: %v", err)
 	}
-	root := filepath.Join(filepath.Dir(file), "..", "..")
+	root := filepath.Join(dir, "..", "..")
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		t.Fatal(err)

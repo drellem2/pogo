@@ -211,6 +211,13 @@ trap 'gate_profile_report' EXIT
 . "$BUILD_SH_DIR/scripts/lib/go-toolchain.sh"
 go_toolchain_resolve || exit $?
 
+# Build and test with -trimpath, so polecat worktrees at different paths share
+# build-cache entries instead of each caching a private copy (drellem2/pogo#282).
+# See scripts/lib/go-trimpath.sh.
+[ -r "$BUILD_SH_DIR/scripts/lib/go-trimpath.sh" ] || { echo "build.sh: missing scripts/lib/go-trimpath.sh" >&2; exit 1; }
+. "$BUILD_SH_DIR/scripts/lib/go-trimpath.sh"
+go_trimpath_enable
+
 # The step labels below are the profile's row names, and fmt.sh/test.sh print
 # their own "Step N:" banners — so these are named for what the row IS rather
 # than restating a banner the reader is about to see anyway.
