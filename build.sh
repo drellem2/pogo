@@ -211,12 +211,13 @@ trap 'gate_profile_report' EXIT
 . "$BUILD_SH_DIR/scripts/lib/go-toolchain.sh"
 go_toolchain_resolve || exit $?
 
-# Build and test with -trimpath, so polecat worktrees at different paths share
-# build-cache entries instead of each caching a private copy (drellem2/pogo#282).
-# See scripts/lib/go-trimpath.sh.
-[ -r "$BUILD_SH_DIR/scripts/lib/go-trimpath.sh" ] || { echo "build.sh: missing scripts/lib/go-trimpath.sh" >&2; exit 1; }
-. "$BUILD_SH_DIR/scripts/lib/go-trimpath.sh"
-go_trimpath_enable
+# NO -trimpath HERE, deliberately (drellem2/pogo#282). test.sh turns it on for
+# its own go commands, which is where the per-worktree build-cache growth is.
+# The binaries below must stay untrimmed: Go drops the -ldflags setting from a
+# binary's build info under -trimpath (go.dev/issue/52372), and `build.sh
+# --install` -- what the nightly deploy runs -- verifies each installed binary's
+# ldflags Commit from that record (verify_installed_stamps). A trimmed build here
+# would fail that check on every install. See scripts/lib/go-trimpath.sh.
 
 # The step labels below are the profile's row names, and fmt.sh/test.sh print
 # their own "Step N:" banners — so these are named for what the row IS rather

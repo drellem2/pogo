@@ -13,10 +13,10 @@
 # paths with a fresh GOCACHE cost +25M for the second path on
 # `go build ./cmd/lsp`, and +0.4M with -trimpath.
 #
-# go_trimpath_enable adds -trimpath to GOFLAGS, so every `go` this script runs,
-# and every child that inherits the environment (fmt.sh, test.sh, a test that
-# shells out to `go build`), records module-relative paths instead. A GOFLAGS
-# the caller already set is kept, and -trimpath is not added twice.
+# go_trimpath_enable adds -trimpath to GOFLAGS, so every `go` the calling
+# script runs, and every child that inherits the environment (a test that shells
+# out to `go build`), records module-relative paths instead. A GOFLAGS the
+# caller already set is kept, and -trimpath is not added twice.
 #
 # What -trimpath changes for code: runtime.Caller and stack traces report
 # "github.com/drellem2/pogo/internal/x/y.go" instead of an absolute path. A
@@ -25,7 +25,19 @@
 # failed. They now use os.Getwd(), which `go test` sets to the package
 # directory. Do not reintroduce runtime.Caller for locating source files.
 #
-# Scope: pogo's own gate (build.sh, test.sh). Other repos' gates are unchanged.
+# What -trimpath changes for binaries: Go stops recording the -ldflags setting
+# in build info (go.dev/issue/52372, cmd/go/internal/load/pkg.go), and
+# `build.sh --install` verifies the installed binaries' ldflags Commit from it.
+# So:
+#
+#   test.sh   calls go_trimpath_enable. The test compile is the bulk of the
+#             per-worktree cache growth, and its binaries are thrown away.
+#   build.sh  does NOT. Its `go build`/`go install` produce the binaries the
+#             nightly deploy installs (`build.sh --install`), and they must keep
+#             their -ldflags record. A test that builds a binary standing in for
+#             build.sh's output passes -trimpath=false, which overrides GOFLAGS.
+#
+# Scope: pogo's own gate. Other repos' gates are unchanged.
 #
 # POGO_NO_TRIMPATH=1 turns it off, for measuring the cache growth it prevents.
 
