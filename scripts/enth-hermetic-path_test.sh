@@ -6,7 +6,13 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/enth-hermetic-path"
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT INT TERM HUP
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/pogo-sandbox"
+# Nothing here reaches $HOME, but every suite routes through the isolation.
+pogo_sandbox_create enthpath
+pogo_sandbox_isolate
+trap pogo_sandbox_down EXIT INT TERM HUP
+T="$POGO_SANDBOX_DIR/t"; mkdir -p "$T"
 FAILS=0
 fail() { echo "FAIL: $*" >&2; FAILS=$((FAILS+1)); }
 mk() { mkdir -p "$(dirname "$1")"; printf '#!/bin/sh\necho %s\n' "$(basename "$1")" > "$1"; chmod +x "$1"; }
