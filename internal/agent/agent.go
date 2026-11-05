@@ -1120,21 +1120,32 @@ type SpawnRequest struct {
 
 // layerEnv assembles the layers pogo puts on top of pogod's own environment
 // for an agent process. Spawn and respawn both build it here, so a restarted
-// agent gets the same environment as the one it replaces. The ORDER is the
-// contract, because exec.Cmd keeps the last assignment of a duplicated key:
+// agent gets the same environment as the one it replaces.
 //
-//  1. base: SpawnRequest.BaseEnv — a crew prompt's `env` frontmatter. Lowest,
-//     so a prompt cannot rename an agent or point it at another mailbox.
-//  2. identity: the catalogue variables (agentIdentityEnv).
-//  3. spawn: SpawnRequest.Env — for a polecat the core budget, the
-//     dispatcher's --env, then POGO_ROLE last (polecatSpawnEnv).
+// It deliberately does NOT include os.Environ(). Callers write
+// `cmd.Env = append(os.Environ(), layerEnv(...)...)`, so that the root is
+// visible at the call site to the gitceiling inheritance guard
+// (internal/gitceiling, TestSubprocessEnvironmentsInheritTheCeiling): an
+// environment that does not visibly root in os.Environ() is flagged, because it
+// could drop GIT_CEILING_DIRECTORIES.
 //
-// It does not include os.Environ(): callers write
-// `append(os.Environ(), layerEnv(...)...)` so the root stays visible to the
-// gitceiling inheritance guard. Shape after processEnv in drellem2/pogo#268
-// (Redjive2).
-func layerEnv(base, identity, spawn []string) []string {
-	env := make([]string, 0, len(base)+len(identity)+len(spawn))
+// The ORDER is the contract, because exec.Cmd keeps the last assignment of a
+// duplicated key:
+//
+//  1. pogod's own environment, inherited (the caller's os.Environ()).
+//  2. config: [agents] env, then [agents.<type>] env (configEnvLocked). Host
+//     configuration for a whole type, so it is the lowest of pogo's layers.
+//  3. base: SpawnRequest.BaseEnv — a crew prompt's `env` frontmatter
+//     (drellem2/pogo#263). Above config because it is about one agent, so it
+//     can specialise what the host set for the type.
+//  4. identity: the catalogue variables (agentIdentityEnv). Above config and
+//     base so that neither can rename an agent or point it at another mailbox.
+//  5. spawn: SpawnRequest.Env — for a polecat the core budget, the
+//     dispatcher's --env, then POGO_ROLE last (polecatSpawnEnv). Last, so an
+//     explicit --env still wins, as it did before either env existed.
+func layerEnv(config, base, identity, spawn []string) []string {
+	env := make([]string, 0, len(config)+len(base)+len(identity)+len(spawn))
+	env = append(env, config...)
 	env = append(env, base...)
 	env = append(env, identity...)
 	return append(env, spawn...)
@@ -1264,7 +1275,10 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	procName := ProcessName(req.Type, req.Name)
 	injectedEnv := envAssignments(agentIdentityEnv(req.Name, req.Type, procName, req.PromptFile, receiptFile, r.ServerPort()))
 
-	cmd.Env = append(os.Environ(), layerEnv(req.BaseEnv, injectedEnv, req.Env)...)
+	// The configured env ([agents] env, [agents.<type>] env) and the crew
+	// frontmatter env both go beneath the identity variables and the spawn's own
+	// env; layerEnv owns the order.
+	cmd.Env = append(os.Environ(), layerEnv(r.configEnvLocked(req.Type, req.Name), req.BaseEnv, injectedEnv, req.Env)...)
 
 	// Seed the harness's first-run state (Claude: hasCompletedOnboarding) into
 	// the profile this environment points at, so a token-only fresh install
@@ -1870,13 +1884,14 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	procName := ProcessName(old.Type, old.Name)
 	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile, r.ServerPort()))
 
-	// The caller's spawn env is re-applied AFTER the injected catalogue, in the
-	// same last-wins order as Spawn (drellem2/pogo#165). The order is load-
-	// bearing, not incidental: polecatSpawnEnv appends POGO_ROLE last inside
-	// req.Env, so it beats any dispatcher-supplied --env on spawn, and only the
-	// same order keeps that true on a restart. The base env (crew frontmatter,
-	// gh #263) goes back beneath the catalogue, as it went in on spawn.
-	cmd.Env = append(os.Environ(), layerEnv(old.baseEnv, injectedEnv, old.spawnEnv)...)
+	// The same layers in the same order as Spawn (layerEnv): the configured
+	// env, the base env (crew frontmatter, gh #263) as captured on spawn, the
+	// injected catalogue, then the caller's spawn env re-applied last
+	// (drellem2/pogo#165). The order is load-bearing, not incidental:
+	// polecatSpawnEnv appends POGO_ROLE last inside req.Env, so it beats any
+	// dispatcher-supplied --env on spawn, and only the same order keeps that
+	// true on a restart.
+	cmd.Env = append(os.Environ(), layerEnv(r.configEnvLocked(old.Type, old.Name), old.baseEnv, injectedEnv, old.spawnEnv)...)
 	seedHarnessProfile(old.provider, old.Name, old.Command, cmd.Env)
 
 	// A restart re-resolves to the agent's OWN provider (carried on old.provider

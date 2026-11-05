@@ -11,6 +11,7 @@ import (
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/client"
+	"github.com/drellem2/pogo/internal/config"
 )
 
 // newAgentEnvCmd builds `pogo agent env`.
@@ -61,9 +62,13 @@ func newAgentEnvCmd(jsonOutput *bool) *cobra.Command {
 injection order, with what each one is for and which shipped prompts read it.
 
 The variable list is the same list the spawn path injects from, so a variable
-cannot be injected without being reported here. The 'read by' column is
-computed by scanning the prompt corpus embedded in this binary — it is a search
-result, not a claim, and it goes stale only if the binary does.
+cannot be injected without being reported here. Variables this host's
+config.toml sets with [agents] env and [agents.polecat] env are listed first,
+as this command reads the file; pogod applies the copy it read at startup.
+
+The 'read by' column is computed by scanning the prompt corpus embedded in
+this binary — it is a search result, not a claim, and it goes stale only if
+the binary does.
 
 What is NOT covered: a worker also inherits pogod's entire environment, and a
 dispatcher may add anything it likes with 'spawn-polecat --env K=V'. Those are
@@ -79,7 +84,10 @@ answer and the values are reported as unknown.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			budget, source := workerBudgetFromDaemon()
-			vars := agent.PolecatEnv(budget)
+			// The configured env goes first: it is injected beneath every
+			// catalogue variable (agent.layerEnv), so it is first in
+			// injection order and the one every later row overrides.
+			vars := append(agent.ConfiguredEnv(configuredPolecatEnv()), agent.PolecatEnv(budget)...)
 
 			if *jsonOutput {
 				out := agentEnvJSON{
@@ -112,6 +120,18 @@ var agentEnvNotCovered = []string{
 	"`read by` searches the SHIPPED prompt corpus only — not Go code, not user-edited prompts under ~/.pogo/agents, not other repositories",
 }
 
+// configuredPolecatEnv is the [agents] env and [agents.polecat] env a polecat
+// gets, as this CLI reads config.toml. pogod applies the copy it read at
+// startup, which is the bound the rows' Note states. A config that cannot be
+// read contributes nothing, as it contributes nothing to a spawn.
+func configuredPolecatEnv() []string {
+	cfg := config.Load()
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Agents.AgentEnv(string(agent.TypePolecat))
+}
+
 // workerBudgetFromDaemon asks the running pogod what it would hand the next
 // worker, and reports which source answered. The daemon is asked rather than
 // the division recomputed here for the reason WouldRefuseDispatch is: a second
@@ -129,8 +149,9 @@ func printAgentEnv(w io.Writer, vars []agent.InjectedEnv, budget agent.WorkerBud
 	fmt.Fprintln(w, "Environment pogod injects into a polecat")
 	fmt.Fprintln(w, "========================================")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "In injection order. A later assignment of the same name wins, which is why a")
-	fmt.Fprintln(w, "dispatcher's --env beats the core budget and nothing beats POGO_ROLE.")
+	fmt.Fprintln(w, "In injection order. A later assignment of the same name wins, which is why")
+	fmt.Fprintln(w, "pogo's own variables beat config.toml's env, a dispatcher's --env beats the core")
+	fmt.Fprintln(w, "budget, and nothing beats POGO_ROLE.")
 	fmt.Fprintln(w)
 
 	for _, v := range vars {

@@ -777,6 +777,50 @@ extra_path = ["~/my-node/bin", "/opt/tools/bin"]   # prepended to pogod's PATH
 `POGO_EXTRA_PATH` (colon-separated) overrides the file setting. Entries support
 `~` and `$HOME` expansion and win over every discovered location.
 
+## Agent environment (`[agents] env`)
+
+Sets environment variables on the agents pogod spawns. `[agents] env` applies
+to every agent; `[agents.crew] env` and `[agents.polecat] env` apply to one
+type, after the global list.
+
+```toml
+[agents]
+env = ["TOOL_IDENTITY=none"]                    # every agent
+
+[agents.crew]
+env = ["TOOL_IDENTITY=${POGO_AGENT_NAME}"]      # each crew agent gets its own name
+
+[agents.polecat]
+env = ["TOOL_IDENTITY=none", "OPTS=a,b"]        # commas inside quotes are kept
+```
+
+- **Format.** Each entry is `KEY=VALUE`. The key must match
+  `[A-Za-z_][A-Za-z0-9_]*`; the value is taken as written. An entry that is
+  not usable is skipped, and pogod prints a `Warning:` line naming it and its
+  section at startup. The array must be on one line, like every array in this
+  file.
+- **One placeholder.** `${POGO_AGENT_NAME}` in a value becomes the spawned
+  agent's name. Nothing else is expanded: no other variables, no shell syntax.
+- **Order.** A process keeps the last assignment of a name, so the layers are,
+  lowest first: pogod's own environment, `[agents] env`, `[agents.<type>] env`,
+  a crew prompt's `env` frontmatter ([customizing.md](customizing.md)), pogo's
+  identity variables (`POGO_AGENT_NAME` and the rest), then the spawn's own env
+  (for a polecat: the core budget, `spawn-polecat --env`, then `POGO_ROLE`). So
+  one agent's prompt can override what config set for its type, config cannot
+  rename an agent or change its role, and an explicit `--env` still beats
+  config.
+- **Restarts.** The same environment is applied when pogod restarts an agent
+  after a crash, and when it starts a crew agent at boot or on wake. The
+  restart path also carries the `--env` the agent was first spawned with.
+- **Read at startup.** pogod reads these lists once, when it starts. Restart
+  pogod after changing them.
+- **Reported.** `pogo agent env` lists the configured variables first, as that
+  command reads config.toml.
+
+Unlike `extra_path`, this does not change pogod's own environment: it is
+applied per spawn, which is what lets crew and polecats be told different
+things.
+
 ## Service launcher
 
 `pogo service install` writes a launchd plist (macOS) or systemd unit (Linux)

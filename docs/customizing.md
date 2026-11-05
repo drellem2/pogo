@@ -91,7 +91,9 @@ env = [
 - **Beneath pogo's own variables.** `env` is applied below the identity
   catalogue (`POGO_AGENT_NAME`, `POGO_AGENT_TYPE`, `POGO_PROCESS_NAME`, …), so a
   prompt cannot rename its agent or point it at another mailbox; such an entry
-  is outranked.
+  is outranked. It sits above `[agents] env` and `[agents.crew] env` in
+  config.toml ([CONFIGURATION.md](CONFIGURATION.md#agent-environment-agents-env)),
+  so a prompt can override what the host set for every crew agent.
 - **`POGO_*` is reserved.** Any entry whose key starts with `POGO_` is skipped
   with a warning naming the key; the rest of `env` still applies. The prefix is
   pogo's whole namespace, not only the variables it sets today (`POGO_ROLE`,
