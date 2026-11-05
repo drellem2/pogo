@@ -82,6 +82,13 @@ only git repos prints none of them:
   `enth whoami` with the token the workers will use, and passes with the user
   that token names. It fails when enth refuses the token or the token file
   cannot be read. It warns when enthd cannot be reached.
+- **`enth land gate`**: printed only where `enth-land-gate` is installed (on
+  PATH, with an `enth` whose `land` takes `--require`). One row per enth
+  project. The worker's `self_land` runs the gate the repo declares in
+  `.pogo/refinery.toml`, or `./build.sh` when it declares none. The row warns
+  when the project's checkout has neither, because then every land is refused.
+  A new repo starts with neither: give it a gate in its first Change, for
+  example a `.pogo/refinery.toml` holding `quality_gate = "test -f README.md"`.
 
 The end-to-end check is one small work item: file it against the repo
 (`mg new --repo=<path> "…"`), let the coordinator dispatch it, and watch for the

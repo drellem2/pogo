@@ -30,6 +30,11 @@
 #     does the real device login instead. That is a HUMAN step, and it creates a
 #     real repo named x on that account.
 #   - `[agents] autostart = true`, `command` unset (the harness default, claude).
+#   - enth-land-gate built from THIS tree into the sandbox bin, ahead of any the
+#     host has (#287). The worker's self_land is the GATED one: it runs the
+#     repo's declared gate on the merged tree, so the recipe must give the new
+#     repo a gate or P4 fails. An enth whose land has no --require is refused
+#     as a missing prerequisite, since the land would be ungated.
 #   - POGO_PORT exported to pogod, so the agents it spawns reach THIS daemon. The
 #     sandbox daemon is started with -port, and agents inherit pogod's env. With
 #     POGO_PORT unset they would talk to the live pogod on 10000 and dispatch onto
@@ -61,6 +66,8 @@
 #       transcript)
 #   P4  that item is done, and its result sidecar holds landed {vcs: enth, id}
 #   P5  README.md is on OWNER/x's trunk
+#   P6  the trunk carries a gate: .pogo/refinery.toml declaring quality_gate,
+#       or a build.sh (#287)
 #
 # Exit: 0 every PASS observed; 1 one or more not observed by the budget; 2 a
 # prerequisite is missing (nothing was spent); 99 the sandbox could not be
@@ -78,7 +85,7 @@ SEED_ONBOARDING=""
 KEEP=""
 REQUEST="make me a new enth repo called x and add a README"
 
-usage() { sed -n '2,70p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,75p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --budget-minutes) BUDGET_MIN="$2"; shift 2 ;;
@@ -108,6 +115,7 @@ if [ -z "$ENTH_URL" ]; then
     command -v enthd >/dev/null || need "no enthd on PATH (or pass --enth-url for a real remote)"
 fi
 enth --help 2>&1 | grep -q 'repo create NAME' || need "this enth has no 'repo create'"
+enth land --help 2>&1 | grep -q -- '--require' || need "this enth's land has no --require, so the worker's land would be ungated (#287 rehearses the gated one)"
 if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     HUMAN_STEPS+=("claude login: CLAUDE_CODE_OAUTH_TOKEN supplied (claude setup-token)")
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
@@ -156,7 +164,7 @@ trap cleanup EXIT INT TERM HUP
 
 BIN_DIR="$S/bin"
 mkdir -p "$BIN_DIR"
-( cd "$REPO_ROOT" && GOBIN="$BIN_DIR" go install -p "${POGO_WORKER_CORES:-2}" ./cmd/pogo ./cmd/pogod ./cmd/lsp ) || die "go install failed"
+( cd "$REPO_ROOT" && GOBIN="$BIN_DIR" go install -p "${POGO_WORKER_CORES:-2}" ./cmd/pogo ./cmd/pogod ./cmd/lsp ./cmd/enth-land-gate ) || die "go install failed"
 pogo_sandbox_isolate
 # pogo_sandbox_isolate turns autostart off for every sandbox. This one is about
 # the crew starting by itself, so it is turned back on here.
@@ -164,6 +172,7 @@ unset POGO_AGENT_AUTOSTART
 export TMPDIR="$S/tmp"
 mkdir -p "$TMPDIR"
 export PATH="$BIN_DIR:$PATH"
+[ "$(command -v enth-land-gate)" = "$BIN_DIR/enth-land-gate" ] || die "the gate on PATH is $(command -v enth-land-gate), not the sandbox's $BIN_DIR/enth-land-gate"
 git config --global user.name "New User"
 git config --global user.email "new@example.com"
 note "sandbox: $S"
@@ -266,7 +275,7 @@ note "$OUT"
 SENT_EPOCH="$(date +%s)"
 
 # --- observation --------------------------------------------------------------
-X_PATH=""; ITEM=""; P1=""; P2=""; P3=""; P4=""; P5=""
+X_PATH=""; ITEM=""; P1=""; P2=""; P3=""; P4=""; P5=""; P6=""
 SEEN_HUMAN="$S/seen-human"; : > "$SEEN_HUMAN"   # bash 3.2 (macOS): no associative arrays
 HUMAN_MAILS=0
 tokens() {
@@ -332,7 +341,9 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
         fi
     fi
     if [ -z "$P5" ] && E query cat README.md --rev refs/heads/main >/dev/null 2>&1; then P5="$(elapsed)"; echo "  [$P5] P5 README.md is on the trunk"; fi
-    if [ -n "$P1" ] && [ -n "$P2" ] && [ -n "$P3" ] && [ -n "$P4" ] && [ -n "$P5" ]; then STOP_REASON="every criterion observed"; break; fi
+    if [ -z "$P6" ] && { E query cat .pogo/refinery.toml --rev refs/heads/main 2>/dev/null | grep -qE '^[[:space:]]*quality_gate[[:space:]]*=' \
+                        || E query cat build.sh --rev refs/heads/main >/dev/null 2>&1; }; then P6="$(elapsed)"; echo "  [$P6] P6 the trunk carries a gate"; fi
+    if [ -n "$P1" ] && [ -n "$P2" ] && [ -n "$P3" ] && [ -n "$P4" ] && [ -n "$P5" ] && [ -n "$P6" ]; then STOP_REASON="every criterion observed"; break; fi
     [ "$P4" = FAIL ] && { STOP_REASON="item closed without a landed sidecar"; break; }
     read -r USED CREAD <<<"$(tokens)"
     if [ "${USED:-0}" -ge "$TOKEN_BUDGET" ]; then STOP_REASON="budget: $USED tokens"; break; fi
@@ -349,6 +360,11 @@ echo "  P2 registered vcs=enth ..................... $(pass "$P2")"
 echo "  P3 dispatched on the polecat template ...... $(pass "$P3")"
 echo "  P4 item done, sidecar landed {enth, id} .... $(pass "$P4")   item=${ITEM:-none}"
 echo "  P5 README.md on trunk ...................... $(pass "$P5")"
+echo "  P6 a gate on trunk (#287) .................. $(pass "$P6")"
+echo "  the land's gate attestations (ci/selfland/build; none means TEST-ONLY or no land):"
+E query attestations --name ci/selfland/build 2>&1 | sed 's/^/    /' | head -5
+echo "  pogo doctor --check, its enth land gate row:"
+pogo doctor --check 2>&1 | grep 'enth land gate' | sed 's/^/    /'
 echo "  tokens: ${USED:-0} (input + cache writes + output), ${CREAD:-0} cache reads; budget $TOKEN_BUDGET"
 echo "  human steps used:"
 for h in ${HUMAN_STEPS[@]+"${HUMAN_STEPS[@]}"}; do echo "    - $h"; done
@@ -357,4 +373,4 @@ echo "  deviations from a bare fresh install:"
 for d in ${DEVIATIONS[@]+"${DEVIATIONS[@]}"}; do echo "    - $d"; done
 echo "  the coordinator's commands (Bash, all agents, in transcript order):"
 coordinator_bash | grep -E '^(enth|pogo|mg) ' | sed 's/^/    $ /' | head -60
-[ -n "$P1" ] && [ -n "$P2" ] && [ -n "$P3" ] && [ -n "$P4" ] && [ "$P4" != FAIL ] && [ -n "$P5" ]
+[ -n "$P1" ] && [ -n "$P2" ] && [ -n "$P3" ] && [ -n "$P4" ] && [ "$P4" != FAIL ] && [ -n "$P5" ] && [ -n "$P6" ]

@@ -1536,10 +1536,10 @@ enth whoami                                                   # OWNER is the nam
 enth repo create OWNER/x                                      # an empty repo on the remote you are signed in to
 enth --remote URL --repo OWNER/x checkout main ~/dev/x        # URL: that remote; an empty repo checks out empty
 pogo project add ~/dev/x --vcs=enth --enth-remote=URL --enth-repo=OWNER/x
-pogo doctor --check                                           # the enth rows must pass
+pogo doctor --check                                           # enth in PATH and enth login must pass; see enth land gate below
 ```
 
-Then file the first item with `mg new --repo=<that path>` and dispatch it as above. Installing the enth CLI and signing in (`enth login`) belong to the human. Ask them; do not work around either.
+Then file the first item with `mg new --repo=<that path>` and dispatch it as above. **The first item must give the repo its gate.** Where `enth-land-gate` is installed, a {{.Worker}}'s `self_land` runs the repo's declared gate on the merged tree, or `./build.sh` when it declares none. A new repo has neither, so its first land is refused as `RED`. Write in the first item's body that its Change adds `.pogo/refinery.toml` with one line, `quality_gate = "<command>"`. The command checks what the repo holds: `test -f README.md` for a repo that is only a README, or `./build.sh` when the same Change adds an executable `build.sh`. Until the repo has a gate, `pogo doctor --check` warns on its `enth land gate` row, and the row passes once the gate lands. Where `enth-land-gate` is not installed, lands are untested and the row is absent. Give the repo a gate anyway, or installing the gate later turns every land red. Installing the enth CLI and signing in (`enth login`) belong to the human. Ask them; do not work around either.
 
 ## The Refinery
 

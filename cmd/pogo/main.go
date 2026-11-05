@@ -4018,6 +4018,15 @@ Exits with code 1 if any critical check fails (--check mode only).`,
 						}
 					}
 				}
+				// 4d. Does each enth repo have a gate for self_land to run,
+				// where enth-land-gate is installed (GH #287)?
+				for _, row := range enthGateLines(projs, enthGateInstalled(bin, exec.LookPath, enthLandHelp), enthDeclaredGate, os.Stat) {
+					if row.status == "warn" {
+						warn(enthGateCheckName, row.detail)
+					} else {
+						pass(enthGateCheckName, row.detail)
+					}
+				}
 			}
 
 			// 5. Agent prompts installed

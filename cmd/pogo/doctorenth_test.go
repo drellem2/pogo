@@ -153,3 +153,84 @@ func TestEnthUnrecordedLines(t *testing.T) {
 		t.Errorf("plain dir flagged: %q", rows)
 	}
 }
+
+// GH #287: where enth-land-gate is installed, each enth repo needs a gate for
+// self_land to run, or its first land is refused. No row where it is not.
+func TestEnthGateLines(t *testing.T) {
+	root := t.TempDir()
+	mk := func(name string) string {
+		d := filepath.Join(root, name)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	empty, declared, script, noexec := mk("empty"), mk("declared"), mk("script"), mk("noexec")
+	if err := os.MkdirAll(filepath.Join(declared, ".pogo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(declared, ".pogo", "refinery.toml"), []byte("quality_gate = \"test -f README.md\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(script, "build.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(noexec, "build.sh"), []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ep := func(path, repo string) project.Project {
+		return project.Project{Path: path + "/", VCS: vcs.Enth, Enth: &vcs.EnthRepo{Remote: "https://e", Repo: repo}}
+	}
+	projs := []project.Project{
+		{Path: empty + "/"}, // git: never a row, even with no gate
+		ep(empty, "o/empty"), ep(declared, "o/declared"), ep(script, "o/script"), ep(noexec, "o/noexec"),
+	}
+
+	// The control: gate not installed, no rows at all — self_land lands
+	// untested and says so, and a doctor row would only repeat it.
+	if rows := enthGateLines(projs, false, enthDeclaredGate, os.Stat); len(rows) != 0 {
+		t.Fatalf("gate not installed: rows %+v, want none", rows)
+	}
+
+	rows := enthGateLines(projs, true, enthDeclaredGate, os.Stat)
+	want := []struct{ status, sub string }{
+		{"warn", "(o/empty): no gate declared in .pogo/refinery.toml and no ./build.sh"},
+		{"pass", `(o/declared): declared gate "test -f README.md"`},
+		{"pass", "(o/script): no gate declared; self_land falls back to ./build.sh"},
+		{"warn", "(o/noexec): no gate declared in .pogo/refinery.toml and ./build.sh is not executable"},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("got %d rows, want %d: %+v", len(rows), len(want), rows)
+	}
+	for i, w := range want {
+		if rows[i].status != w.status || !strings.Contains(rows[i].detail, w.sub) {
+			t.Errorf("row %d = %+v, want %s containing %q", i, rows[i], w.status, w.sub)
+		}
+	}
+	if !strings.Contains(rows[0].detail, "enth update "+empty) {
+		t.Errorf("the warning does not name the stale-checkout remedy: %q", rows[0].detail)
+	}
+}
+
+func TestEnthGateInstalled(t *testing.T) {
+	found := func(string) (string, error) { return "/bin/enth-land-gate", nil }
+	missing := func(string) (string, error) { return "", errors.New("not found") }
+	withReq := func(string) ([]byte, error) { return []byte("usage: enth land [--require NAME]... C1\n"), nil }
+	noReq := func(string) ([]byte, error) { return []byte("usage: enth land C1\n"), errors.New("exit status 2") }
+	for _, tc := range []struct {
+		name string
+		bin  string
+		look func(string) (string, error)
+		help func(string) ([]byte, error)
+		want bool
+	}{
+		{"installed", "/bin/enth", found, withReq, true},
+		{"no gate binary", "/bin/enth", missing, withReq, false},
+		{"enth without land --require", "/bin/enth", found, noReq, false},
+		{"no enth", "", found, withReq, false},
+	} {
+		if got := enthGateInstalled(tc.bin, tc.look, tc.help); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

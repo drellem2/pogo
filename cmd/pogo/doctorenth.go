@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/drellem2/pogo/internal/project"
+	"github.com/drellem2/pogo/internal/refinery"
 	"github.com/drellem2/pogo/internal/vcs"
 	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
@@ -224,3 +225,79 @@ func enthCheckoutOrigin(dir string) (remote, repo string) {
 	}
 	return st.Origin.Remote, st.Origin.Repo
 }
+
+// enthGateCheckName is the row asking whether each enth repo has a gate for
+// its workers' self_land to run (GH #287). Where enth-land-gate is installed,
+// self_land gates the merged tree with the repo's declared gate, or with
+// ./build.sh when it declares none. A repo with neither, as the coordinator's
+// new-repo recipe once left one, has its first self_land refused.
+const enthGateCheckName = "enth land gate"
+
+// enthGateInstalled reports whether self_land would take its gated path on
+// this host: the same test the template makes, enth-land-gate on PATH and an
+// enth whose land takes --require.
+func enthGateInstalled(bin string, lookPath func(string) (string, error), landHelp func(string) ([]byte, error)) bool {
+	if bin == "" {
+		return false
+	}
+	if _, err := lookPath("enth-land-gate"); err != nil {
+		return false
+	}
+	out, _ := landHelp(bin)
+	return bytes.Contains(out, []byte("--require"))
+}
+
+// enthLandHelp runs `enth land --help`. Its exit status is not read: only
+// whether the help names --require.
+func enthLandHelp(bin string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), enthHelpTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, bin, "land", "--help").CombinedOutput()
+}
+
+// enthGateLines gives one row per enth project when the gate is installed,
+// and none otherwise (self_land then lands untested and says so itself). It
+// reads the project's checkout, the read checkout pogo keeps fresh on the
+// trunk, the way self_land reads it: a gate declared in .pogo/refinery.toml
+// (refinery.DeclaredGate, injected as declared), else ./build.sh.
+//
+//   - pass: a gate is declared, or ./build.sh is there and executable;
+//   - warn: no gate declared and no executable ./build.sh, so the gate would
+//     run a ./build.sh that cannot start and refuse every land.
+//
+// It warns rather than fails: a checkout that is behind its trunk can lack a
+// gate the trunk already has.
+func enthGateLines(projs []project.Project, installed bool, declared func(dir string) (string, bool), stat func(string) (os.FileInfo, error)) []enthLoginRow {
+	if !installed {
+		return nil
+	}
+	var rows []enthLoginRow
+	for _, p := range projs {
+		if p.Kind() != vcs.Enth || p.Enth == nil {
+			continue
+		}
+		dir := strings.TrimRight(p.Path, "/")
+		if cmd, ok := declared(dir); ok {
+			rows = append(rows, enthLoginRow{"pass", fmt.Sprintf("%s (%s): declared gate %q", dir, p.Enth.Repo, cmd)})
+			continue
+		}
+		bs := dir + "/build.sh"
+		fi, err := stat(bs)
+		switch {
+		case err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0:
+			rows = append(rows, enthLoginRow{"pass", fmt.Sprintf("%s (%s): no gate declared; self_land falls back to ./build.sh, which is there", dir, p.Enth.Repo)})
+		default:
+			why := "no ./build.sh"
+			if err == nil {
+				why = "./build.sh is not executable"
+			}
+			rows = append(rows, enthLoginRow{"warn", fmt.Sprintf("%s (%s): no gate declared in .pogo/refinery.toml and %s, so with enth-land-gate installed every self_land is refused. Land a gate with the repo's next Change: a .pogo/refinery.toml with quality_gate = \"<a command that checks the repo>\", or an executable build.sh. If the trunk already has one, this checkout is behind it: enth update %s",
+				dir, p.Enth.Repo, why, dir)})
+		}
+	}
+	return rows
+}
+
+// enthDeclaredGate is the gate a checkout declares, read as self_land's
+// `pogo refinery gate --repo=<dir>` reads it.
+func enthDeclaredGate(dir string) (string, bool) { return refinery.DeclaredGate("", dir) }
