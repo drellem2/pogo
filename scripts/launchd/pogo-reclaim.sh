@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# pogo-reclaim.sh — SIZE-TRIGGERED reclaim of the Go module cache (mg-b7c3).
+# pogo-reclaim.sh — SIZE-TRIGGERED reclaim of the Go module cache (mg-b7c3),
+# with an age trim of the Go BUILD cache ahead of it (mg-925f7).
 #
 # ---------------------------------------------------------------------------
 # WHAT PROMPTED IT, MEASURED
@@ -49,28 +50,52 @@
 # being trivially true.
 #
 # ---------------------------------------------------------------------------
-# THE 34G GO CACHE THIS JOB DOES NOT TOUCH
+# THE BUILD CACHE: TRIMMED BY AGE UNDER PRESSURE, NEVER WIPED (mg-925f7)
 # ---------------------------------------------------------------------------
 # There are TWO Go caches on this box and they differ by a factor of fifty:
 #
 #     ~/go/pkg/mod                680M   the MODULE cache   <- `go clean -modcache`
-#     ~/Library/Caches/go-build    34G   the BUILD cache    <- `go clean -cache`
+#     ~/Library/Caches/go-build  34-53G  the BUILD cache    <- the age trim below
 #
-# "The Go cache is large" is therefore ambiguous, and the larger reading is the
-# one this job does nothing about. Say it here rather than let a reader assume
-# the 34G is covered because a job with "reclaim" in its name is installed.
+# Until mg-925f7 this job left the build cache alone, and said so on every fire,
+# because the only tool on offer was `go clean -cache`: it discards every
+# compiled package on the box, so the next `./build.sh` — which IS the
+# refinery's merge gate — recompiles the world. That reasoning still stands, and
+# this job still never runs `go clean -cache`.
 #
-# NOT touching it is deliberate, not an oversight. `go clean -cache` discards
-# every compiled package on the box, so the next `./build.sh` — which IS the
-# refinery's merge gate — recompiles the world. That trades a disk problem for a
-# gate-latency problem on every merge until the cache refills, which is a worse
-# deal than the one this ticket was filed to make, and it is not what was asked
-# for. If the build cache deserves reclaiming it deserves its own ticket, with
-# its own argument about what a cold gate costs.
+# What changed is the measurement (drellem2/pogo#282, triage mg-2fa77): the
+# cache was never unbounded in Go's sense. Go trims entries unused for 5 days on
+# its own, and the trim had run that day, yet the whole 53G was under 3 days old
+# (38.7G of it used in the last day). The working set was inflated because,
+# without -trimpath, every polecat worktree caches a private copy of pogo's
+# packages. Change A of #282 (mg-b69a6) attacks that at the source; this arm is
+# the backstop for the days that is not enough.
 #
-# The exit-4 log line says all of this on every fire. This block exists because
-# an exit code whose normal state looks like a failure needs its explanation
-# UPSTREAM of the log line: the person diagnosing it is reading the code.
+# THE ARM. When free space is below FREE_FLOOR_GB, or the build cache is over
+# BUILDCACHE_CAP_GB, delete the cache entries (`??/*-a`, `??/*-d`) whose mtime is
+# older than BUILDCACHE_AGE_HOURS (24). It runs BEFORE the module-cache decision,
+# so the exit-4 CANNOT HELP verdict is only reached once this has done what it
+# can.
+#
+# WHY AN AGE TRIM IS SAFE WHERE `go clean -cache` IS NOT. Go refreshes an
+# entry's mtime every time a build USES it, at most once per hour
+# (cmd/go/internal/cache: mtimeInterval = 1h). An entry untouched for 24h has
+# not been read by any build in 23h, so the gate's working set — everything a
+# merge built today — survives. A deleted entry is an ordinary cache miss, not
+# an error. The window in which a build reads an entry this trim is deleting is
+# narrowed by the 1h refresh and by the same in-flight deferral the module-cache
+# arm uses; it is not closed. The age is clamped to at least 2h so a knob turned
+# too far cannot reach entries Go has not yet had the chance to refresh.
+#
+# It also refuses to delete anything from a directory without Go's own README
+# ("This directory holds cached build artifacts from the Go build system"), so a
+# GOCACHE that resolves somewhere unexpected — $HOME, say — is a log line, not a
+# `find -delete` across someone's files.
+#
+# The exit-4 log line and the alert say what the trim did on every fire. This
+# block exists because an exit code whose normal state looks like a failure
+# needs its explanation UPSTREAM of the log line: the person diagnosing it is
+# reading the code.
 #
 # ---------------------------------------------------------------------------
 # WHY THE TRIGGER IS TWO NUMBERS, ANDed
@@ -91,6 +116,10 @@
 #   cache-size alone   fires on a box with 300G free because the cache crossed
 #                      5G, throwing away a cache that costs a network round to
 #                      rebuild, for headroom nobody needed.
+#
+# (That AND is the MODULE-cache trigger. The build-cache arm is an OR — low
+# disk, or cache over its cap — because what it deletes is only entries no build
+# has used in a day, so firing it on a healthy box costs nothing a build needs.)
 #
 # So both must hold. When free space is low and the cache is NOT large, this
 # script does not shrug — it exits 4 and says, in the log and in a mail, that
@@ -147,8 +176,10 @@
 #   0  nothing to do (above the floor), or a reclaim that happened
 #   1  the reclaim ran and failed
 #   3  UNKNOWN — could not measure (no `go`, unreadable df/du). Never a pass.
-#   4  CANNOT HELP — disk is low and the cache is not what is filling it
-#   5  DEFERRED — a build is in flight and free space is not yet critical
+#   4  CANNOT HELP — disk is low, the build-cache trim has done what it can, and
+#      the module cache is not what is filling it
+#   5  DEFERRED — a build is in flight and free space is not yet critical (also
+#      when the build-cache trim was deferred and the disk is still low)
 
 set -u
 
@@ -206,6 +237,26 @@ ALERT_TO="${POGO_RECLAIM_ALERT_TO:-human}"
 ALERT_FROM="${POGO_RECLAIM_ALERT_FROM:-mayor}"
 DRY_RUN="${POGO_RECLAIM_DRY_RUN:-0}"
 
+# Build-cache arm (mg-925f7). See "THE BUILD CACHE" in the header.
+#
+#   BUILDCACHE_AGE_HOURS=24  Entries whose mtime is older than this are trimmed.
+#                            Go refreshes mtime on use at most hourly, so 24h is
+#                            "no build has used it today". Clamped to >= 2.
+#   BUILDCACHE_CAP_GB=40     Over this, the trim runs even on a healthy disk.
+#                            0 disables the cap arm, and with it the one `du` a
+#                            healthy-disk fire pays. 40G sits under the 53G
+#                            measured on 2026-11-04 and well over what a
+#                            -trimpath gate should need.
+#   DU_TIMEOUT_SEC=60        Bound on EACH `du` this script runs for its
+#                            consumer report and the cap check. A `du` that runs
+#                            out is reported as such, never as a size.
+BUILDCACHE_AGE_HOURS="${POGO_RECLAIM_BUILDCACHE_AGE_HOURS:-24}"
+BUILDCACHE_CAP_GB="${POGO_RECLAIM_BUILDCACHE_CAP_GB:-40}"
+DU_TIMEOUT_SEC="${POGO_RECLAIM_DU_TIMEOUT_SEC:-60}"
+case "$BUILDCACHE_AGE_HOURS" in '' | *[!0-9]*) BUILDCACHE_AGE_HOURS=24 ;; esac
+[ "$BUILDCACHE_AGE_HOURS" -lt 2 ] && BUILDCACHE_AGE_HOURS=2
+case "$DU_TIMEOUT_SEC" in '' | *[!0-9]* | 0) DU_TIMEOUT_SEC=60 ;; esac
+
 STATE_DIR="${POGO_RECLAIM_STATE_DIR:-${POGO_HOME:-$HOME/.pogo}/reclaim}"
 LOCK_DIR="$STATE_DIR/reclaim.lock.d"
 ALERT_STAMP="$STATE_DIR/last_alert"
@@ -219,17 +270,6 @@ EXIT_DEFERRED=5
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] pogo-reclaim: $*"; }
-
-# Largest consumers under $HOME, measured 2026-08-12 while the volume was 100%
-# full. Reproduced verbatim rather than re-measured on every fire: a `du` of
-# $HOME costs minutes, and the point of the list is scale, not currency. It is
-# dated in the output so a reader can tell a stale figure from a fresh one.
-CONSUMERS_MEASURED="2026-08-12"
-CONSUMERS="Library 73G, tools 15G, chrome 12G, research 9.8G, go 8.0G, .pogo 6.4G, Virtual Machines 5.0G, dev 4.6G"
-# The single largest item this job is most likely to be MISTAKEN for handling.
-# Same vendor, adjacent name, fifty times the size, different command, and
-# deliberately out of scope — see the header.
-SIBLING_CACHE="~/Library/Caches/go-build (the BUILD cache) measured 34G on $CONSUMERS_MEASURED and is NOT touched by this job; \`go clean -modcache\` does not reach it"
 
 # --- measurement -----------------------------------------------------------
 
@@ -270,6 +310,152 @@ df_field() {
     df -Pk "$path" 2>/dev/null | awk -v c="$col" 'NR == 2 { print $c }'
 }
 
+# bounded_du PATH... prints the total KB of PATHs, with the whole `du` bounded
+# by DU_TIMEOUT_SEC (mg-925f7). Returns 0 with a number, 2 if the bound ran out,
+# 1 if no number came back.
+#
+# The bound is perl's alarm(), which survives exec: macOS ships no `timeout`,
+# and a background watchdog leaves a `sleep` behind every time the du wins the
+# race. SIGALRM's default action kills the du; the shell sees 128+14 = 142.
+#
+# A du that exits non-zero but still printed a total (an unreadable entry
+# somewhere in a polecat's tree) is a reading of what it could read and is
+# returned as one: refusing it would turn every permission-denied file into a
+# missing row.
+bounded_du() {
+    local out rc
+    if command -v perl >/dev/null 2>&1; then
+        out="$(perl -e 'alarm shift @ARGV; exec @ARGV or exit 127' "$DU_TIMEOUT_SEC" du -sk "$@" 2>/dev/null)"
+    else
+        out="$(du -sk "$@" 2>/dev/null)"
+    fi
+    rc=$?
+    [ "$rc" -eq 142 ] && return 2
+    out="$(printf '%s\n' "$out" | awk '$1 ~ /^[0-9]+$/ { s += $1; n++ } END { if (n) printf "%d", s }')"
+    [ -n "$out" ] || return 1
+    printf '%s' "$out"
+}
+
+# --- the live consumer report (mg-925f7) -----------------------------------
+# Replaces a list hardcoded on 2026-08-12 ("Library 73G, tools 15G, ...") that
+# was still being mailed, verbatim, three months later — a figure that has gone
+# stale is worse than none, because it sits where a reader looks for the true
+# one. Each row is a `du` of a path pogo (or a pogo-spawned agent) writes to,
+# taken on THIS fire and bounded by DU_TIMEOUT_SEC.
+#
+# WHAT IT IS NOT: an account of the volume. It names the paths this job knows
+# to look at, and says how much of the volume's used space they add up to, and
+# that the rest is unattributed. On 2026-11-05 the largest grower on this box
+# was swap in /System/Volumes/VM (pogo#258): APFS volumes share a container, so
+# swap takes free space from the Data volume while appearing in no `du` of it.
+# The report says so and quotes `sysctl vm.swapusage`, rather than letting a
+# per-path list imply it explains where the space went.
+#
+# Computed lazily and once per fire: only the low-disk paths pay for it.
+POGO_DIR="${POGO_HOME:-$HOME/.pogo}"
+REPORT_TMPDIR="${POGO_RECLAIM_TMPDIR:-${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)}}"
+REPORT_TMPDIR="${REPORT_TMPDIR%/}"
+CLAUDE_TMP="${POGO_RECLAIM_CLAUDE_TMP:-/private/tmp/claude-$(id -u 2>/dev/null)}"
+CONSUMER_REPORT=""
+CONSUMER_SUM_KB=0
+CONSUMER_UNMEASURED=0
+
+# consumer_row LABEL INDENT PATH... appends one row. Nonexistent PATHs are
+# dropped (an unmatched glob arrives as its own literal text); none left reads
+# "absent". INDENT=1 marks a breakdown of the row above it, which is not added
+# to the sum, so a nested path is never counted twice.
+consumer_row() {
+    local label="$1" indent="$2" kb rc cell p n=0
+    shift 2
+    local paths=()
+    for p in "$@"; do
+        [ -e "$p" ] && { paths[$n]="$p"; n=$((n + 1)); }
+    done
+    if [ "$n" -eq 0 ]; then
+        cell="absent"
+    else
+        kb="$(bounded_du "${paths[@]}")"
+        rc=$?
+        case "$rc" in
+            0)
+                cell="$(human_kb "$kb")"
+                [ "$indent" = 0 ] && CONSUMER_SUM_KB=$((CONSUMER_SUM_KB + kb))
+                ;;
+            2)
+                cell="TIMED OUT after ${DU_TIMEOUT_SEC}s — size unknown"
+                [ "$indent" = 0 ] && CONSUMER_UNMEASURED=$((CONSUMER_UNMEASURED + 1))
+                ;;
+            *)
+                cell="could not be measured"
+                [ "$indent" = 0 ] && CONSUMER_UNMEASURED=$((CONSUMER_UNMEASURED + 1))
+                ;;
+        esac
+    fi
+    # Size first, so a long path cannot push the number out of its column.
+    if [ "$indent" = 0 ]; then
+        CONSUMER_REPORT="$CONSUMER_REPORT$(printf '  %8s  %s' "$cell" "$label")"$'\n'
+    else
+        CONSUMER_REPORT="$CONSUMER_REPORT$(printf '  %8s      %s' "$cell" "$label")"$'\n'
+    fi
+}
+
+# measure_consumers takes the rows, once per fire. It must run in the MAIN
+# shell — not inside $(...) or a pipe — or the rows it takes are thrown away
+# with the subshell and the next caller pays for every `du` again.
+CONSUMERS_MEASURED=0
+measure_consumers() {
+    local t
+    if [ "$CONSUMERS_MEASURED" = 0 ]; then
+        CONSUMERS_MEASURED=1
+        CONSUMER_REPORT=""
+        CONSUMER_SUM_KB=0
+        CONSUMER_UNMEASURED=0
+        consumer_row "Go build cache  ${GOCACHE_DIR:-<unknown>}" 0 ${GOCACHE_DIR:+"$GOCACHE_DIR"}
+        consumer_row "Go module cache  $MODCACHE" 0 "$MODCACHE"
+        consumer_row "polecat worktrees  $POGO_DIR/polecats" 0 "$POGO_DIR/polecats"
+        consumer_row "refinery  $POGO_DIR/refinery" 0 "$POGO_DIR/refinery"
+        consumer_row "Claude scratch root  $CLAUDE_TMP" 0 "$CLAUDE_TMP"
+        consumer_row "~/.cache  $HOME/.cache" 0 "$HOME/.cache"
+        if [ -n "$REPORT_TMPDIR" ]; then
+            t="$REPORT_TMPDIR"
+            consumer_row "\$TMPDIR, all of it  $t" 0 "$t"
+            # Go's t.TempDir() names its dirs after the test (TestFoo123/), and
+            # go build/test work dirs are go-build*; mktemp -d makes tmp.* —
+            # including the unattributed tmp.*/w copies of 2026-11-04.
+            consumer_row "of which Go test fixtures (Test*, go-build*)" 1 "$t"/Test* "$t"/go-build*
+            consumer_row "of which mktemp -d dirs (tmp.*)" 1 "$t"/tmp.*
+        fi
+    fi
+}
+
+# consumer_report USED_KB prints the rows measure_consumers took. USED_KB is
+# the volume's used figure from this fire's df, so the unattributed remainder
+# is this fire's too.
+consumer_report() {
+    local used_kb="$1" swap rest
+    printf 'Measured on this fire (du -sk, each bounded at %ss):\n' "$DU_TIMEOUT_SEC"
+    printf '%s' "$CONSUMER_REPORT"
+    rest=$((used_kb - CONSUMER_SUM_KB))
+    [ "$rest" -lt 0 ] && rest=0
+    if [ "$CONSUMER_UNMEASURED" -gt 0 ]; then
+        printf 'These rows sum to at least %s of the %s used (%s row(s) could not be measured).\n' \
+            "$(human_kb "$CONSUMER_SUM_KB")" "$(human_kb "$used_kb")" "$CONSUMER_UNMEASURED"
+    else
+        printf 'These rows sum to %s of the %s used; the other %s is NOT attributed here.\n' \
+            "$(human_kb "$CONSUMER_SUM_KB")" "$(human_kb "$used_kb")" "$(human_kb "$rest")"
+    fi
+    echo "This is the list of paths this job knows to look at, NOT an account of the volume."
+    echo "Space can also go where no du of this volume sees it: APFS volumes share one"
+    echo "container, so swap in /System/Volumes/VM (pogo#258) takes free space from this"
+    echo "volume while appearing in none of these paths."
+    swap="$(sysctl -n vm.swapusage 2>/dev/null)"
+    if [ -n "$swap" ]; then
+        echo "Swap now (sysctl vm.swapusage): $swap"
+    else
+        echo "Swap now: \`sysctl -n vm.swapusage\` returned nothing — not measured."
+    fi
+}
+
 # --- lock ------------------------------------------------------------------
 # Atomic mkdir, portable (macOS has no /usr/bin/flock). A `du` of a large cache
 # plus a `go clean` can outlast the 30-minute sampling interval on a loaded box,
@@ -295,12 +481,23 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 # The static-copy trap, answered in the log rather than in a doc. `stat -f` is
 # BSD/macOS; the GNU spelling is the fallback so the line is still emitted when
 # this runs from a checkout on Linux.
+#
+# The sha256 (mg-925f7) is what makes "is the merged fix live" a comparison
+# rather than a judgement about an mtime: `shasum -a 256
+# scripts/launchd/pogo-reclaim.sh` on main against this line in the log.
 runner_mtime() {
     stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null ||
         stat -c '%y' "$1" 2>/dev/null ||
         echo unknown
 }
-log "runner: $0 (mtime $(runner_mtime "$0")) — a merge does NOT refresh this copy; \`pogo service install-reclaim\` does"
+runner_sha() {
+    local s
+    s="$(shasum -a 256 "$1" 2>/dev/null || sha256sum "$1" 2>/dev/null)"
+    s="${s%% *}"
+    echo "${s:-unknown}"
+}
+log "runner: $0 (mtime $(runner_mtime "$0"), sha256 $(runner_sha "$0")) — a merge does NOT refresh this copy; \`pogo service install-reclaim\` does"
+
 
 # --- where is the cache ----------------------------------------------------
 if [ -n "${POGO_RECLAIM_MODCACHE:-}" ]; then
@@ -322,121 +519,31 @@ if [ -z "$MODCACHE" ] || [ ! -d "$MODCACHE" ]; then
     exit "$EXIT_OK"
 fi
 
-# --- step 1: the cheap measurement -----------------------------------------
-# The volume that holds the CACHE, because that is the only volume this job can
-# return space to. On this box it is also the boot volume, which is where the
-# damage was observed; on a box where they differ, a full boot volume is outside
-# what this script can do anything about and it must not claim otherwise.
-FREE_KB="$(df_field "$MODCACHE" 4)"
-TOTAL_KB="$(df_field "$MODCACHE" 2)"
-USED_KB="$(df_field "$MODCACHE" 3)"
-MOUNT="$(df -Pk "$MODCACHE" 2>/dev/null | awk 'NR == 2 { print $6 }')"
-
-case "$FREE_KB" in
-    '' | *[!0-9]*)
-        log "UNKNOWN: could not read free space for $MODCACHE (df -Pk returned '${FREE_KB:-<empty>}')"
-        exit "$EXIT_UNKNOWN"
-        ;;
-esac
-
-FREE_FLOOR_KB="$(kb_from_gb "$FREE_FLOOR_GB")"
-CACHE_FLOOR_KB="$(kb_from_gb "$CACHE_FLOOR_GB")"
-CRITICAL_FREE_KB="$(kb_from_gb "$CRITICAL_FREE_GB")"
-
-log "volume $MOUNT: $(human_kb "$FREE_KB") free of $(human_kb "$TOTAL_KB") ($(capacity_pct "$USED_KB" "$FREE_KB")% capacity); free floor $(human_kb "$FREE_FLOOR_KB")"
-
-if [ "$FREE_KB" -ge "$FREE_FLOOR_KB" ]; then
-    log "free space is above the floor — nothing to do (the cache was not measured; that \`du\` is only paid when the disk is low)"
-    exit "$EXIT_OK"
+# --- where is the BUILD cache (mg-925f7) -----------------------------------
+# GOCACHE_OK=1 only for a directory that carries Go's own README. Anything else
+# leaves the build-cache arm off and says why in BUILD_STATUS — a GOCACHE that
+# resolved to the wrong place must be a log line, not a `find -delete`.
+GOCACHE_README_MARK="cached build artifacts from the Go build system"
+if [ -n "${POGO_RECLAIM_BUILDCACHE:-}" ]; then
+    GOCACHE_DIR="$POGO_RECLAIM_BUILDCACHE"
+else
+    GOCACHE_DIR="$(go env GOCACHE 2>/dev/null)"
+fi
+GOCACHE_OK=0
+BUILD_DEFERRED=0
+BUILD_STATUS="not attempted"
+if [ -z "$GOCACHE_DIR" ] || [ "$GOCACHE_DIR" = "off" ]; then
+    BUILD_STATUS="not attempted: the build cache is not located (go env GOCACHE = '${GOCACHE_DIR:-<empty>}')"
+    GOCACHE_DIR=""
+elif [ ! -d "$GOCACHE_DIR" ]; then
+    BUILD_STATUS="not attempted: no build cache at $GOCACHE_DIR"
+elif ! grep -qF "$GOCACHE_README_MARK" "$GOCACHE_DIR/README" 2>/dev/null; then
+    BUILD_STATUS="REFUSED: $GOCACHE_DIR has no Go build-cache README ('$GOCACHE_README_MARK'), so it is not trusted as one and nothing in it was deleted"
+else
+    GOCACHE_OK=1
 fi
 
-# --- step 2: the expensive measurement -------------------------------------
-CACHE_KB="$(du -sk "$MODCACHE" 2>/dev/null | awk 'NR == 1 { print $1 }')"
-case "${CACHE_KB:-}" in
-    '' | *[!0-9]*)
-        log "UNKNOWN: could not measure $MODCACHE (du -sk returned '${CACHE_KB:-<empty>}') — free space IS below the floor and this fire did not establish whether the cache is why"
-        exit "$EXIT_UNKNOWN"
-        ;;
-esac
-log "module cache $MODCACHE: $(human_kb "$CACHE_KB"); cache floor $(human_kb "$CACHE_FLOOR_KB")"
-
-# scope_note is the sentence this ticket exists for as much as the `go clean`
-# is. It is computed from the run's own numbers rather than fixed, so it cannot
-# quietly become wrong as the box changes.
-scope_note() {
-    local free_kb="$1" total_kb="$2" used_kb="$3" reclaimed_kb="${4:-0}"
-    echo "  WHAT THIS DOES NOT FIX:"
-    if [ "$reclaimed_kb" -gt 0 ]; then
-        echo "    This job reclaimed $(human_kb "$reclaimed_kb") — the Go module cache, one directory."
-    else
-        echo "    This job reclaims the Go module cache. That is one directory."
-    fi
-    echo "    $MOUNT is at $(capacity_pct "$used_kb" "$free_kb")% capacity: $(human_kb "$used_kb") used of $(human_kb "$total_kb"), $(human_kb "$free_kb") free."
-    echo "    Largest consumers under \$HOME, measured $CONSUMERS_MEASURED: $CONSUMERS."
-    echo "    NOT RECLAIMED BY THIS JOB: $SIBLING_CACHE."
-    echo "    A cache reclaim against a fill of this size buys HEADROOM, NOT A FIX. If this"
-    echo "    job is firing repeatedly, the disk is filling from somewhere it does not own,"
-    echo "    and the next full-disk build failure will still present as a broken branch."
-}
-
-# alert mails the one reader who can act on a fill this job cannot reclaim.
-# Rate-limited to once per cooldown so a disk that stays full does not deliver a
-# mail every 30 minutes — which is how a real signal gets filtered into a rule.
-# Best-effort throughout: a box without `mg` still gets the full log.
-alert() {
-    local subject="$1" body="$2" now last
-    now="$(date +%s)"
-    last=0
-    [ -f "$ALERT_STAMP" ] && last="$(cat "$ALERT_STAMP" 2>/dev/null || echo 0)"
-    case "$last" in '' | *[!0-9]*) last=0 ;; esac
-    if [ $((now - last)) -lt "$ALERT_COOLDOWN_SEC" ]; then
-        log "alert suppressed (last sent $((now - last))s ago, cooldown ${ALERT_COOLDOWN_SEC}s) — the log below is the full record"
-        return 0
-    fi
-    if ! command -v mg >/dev/null 2>&1; then
-        log "alert NOT SENT: \`mg\` is not on PATH ($PATH) — nobody was told outside this log"
-        return 0
-    fi
-    if printf '%s\n' "$body" | mg mail send "$ALERT_TO" --from="$ALERT_FROM" --subject="$subject" --body-file - >/dev/null 2>&1; then
-        echo "$now" > "$ALERT_STAMP.tmp" && mv "$ALERT_STAMP.tmp" "$ALERT_STAMP"
-        log "alert sent to $ALERT_TO: $subject"
-    else
-        log "alert NOT SENT: \`mg mail send $ALERT_TO\` failed — nobody was told outside this log"
-    fi
-}
-
-if [ "$CACHE_KB" -lt "$CACHE_FLOOR_KB" ]; then
-    # THE CASE THAT MUST NOT READ AS SUCCESS.
-    #
-    # Free space is below the floor and the cache is not why. A free-space-only
-    # trigger would fire here, delete a small cache, exit 0, and leave a log line
-    # that an operator reads as "the disk job ran". Every subsequent full-disk
-    # build failure then gets attributed to the branch, which is exactly the cost
-    # this ticket was filed to stop.
-    log "CANNOT HELP: free space is below the floor and the Go module cache is NOT what is filling this volume."
-    log "  cache $(human_kb "$CACHE_KB") < floor $(human_kb "$CACHE_FLOOR_KB"); reclaiming it would return $(human_kb "$CACHE_KB") of a $(human_kb "$USED_KB") fill and cost a full re-download."
-    scope_note "$FREE_KB" "$TOTAL_KB" "$USED_KB" 0
-    log "  Not firing \`go clean -modcache\`. This is a disk that needs a human, not a cron."
-    alert "disk low on $(hostname -s 2>/dev/null || echo this host) and the Go cache is not why" \
-        "$(printf '%s\n' \
-            "$MOUNT is at $(capacity_pct "$USED_KB" "$FREE_KB")% capacity — $(human_kb "$FREE_KB") free of $(human_kb "$TOTAL_KB")." \
-            "" \
-            "The Go module cache reclaim (com.pogo.reclaim, mg-b7c3) did NOT fire: the cache is" \
-            "$(human_kb "$CACHE_KB"), below its $(human_kb "$CACHE_FLOOR_KB") floor. Deleting it would return" \
-            "$(human_kb "$CACHE_KB") of a $(human_kb "$USED_KB") fill and cost a full re-download." \
-            "" \
-            "This is the case that job cannot fix. Largest consumers under \$HOME, measured" \
-            "$CONSUMERS_MEASURED: $CONSUMERS." \
-            "" \
-            "NOT reclaimed by this job: $SIBLING_CACHE." \
-            "" \
-            "Why it matters now: ./build.sh is the refinery's merge gate, and on a full volume" \
-            "it fails at the link step with 'no space left on device' — which reads like a" \
-            "broken branch. Full log: ${POGO_RECLAIM_LOG:-~/Library/Logs/pogo/pogo-reclaim.log}")"
-    exit "$EXIT_CANNOT_HELP"
-fi
-
-# --- step 3: is anything building right now --------------------------------
+# --- is anything building right now ---------------------------------------
 #
 # Returns 0 and sets IN_FLIGHT_WHY when something is building. `pgrep -x` matches
 # the EXACT process name; `pgrep -f` is never used here, because a pattern
@@ -499,9 +606,219 @@ builds_in_flight() {
     return 1
 }
 
-if [ "$FREE_KB" -lt "$CRITICAL_FREE_KB" ]; then
-    log "free space $(human_kb "$FREE_KB") is below the critical floor $(human_kb "$CRITICAL_FREE_KB") — NOT deferring for in-flight builds; at this level they fail with or without this run"
-elif builds_in_flight; then
+
+# defer_for_builds answers "should a deletion wait for a running build", once
+# per fire: the module-cache arm and the build-cache arm ask the same question
+# and a second `pogo refinery queue` would only add a second PARTIAL line.
+INFLIGHT_ASKED=0
+INFLIGHT=0
+CRITICAL_LOGGED=0
+defer_for_builds() {
+    if [ "$FREE_KB" -lt "$CRITICAL_FREE_KB" ]; then
+        if [ "$CRITICAL_LOGGED" = 0 ]; then
+            log "free space $(human_kb "$FREE_KB") is below the critical floor $(human_kb "$CRITICAL_FREE_KB") — NOT deferring for in-flight builds; at this level they fail with or without this run"
+            CRITICAL_LOGGED=1
+        fi
+        return 1
+    fi
+    if [ "$INFLIGHT_ASKED" = 0 ]; then
+        INFLIGHT_ASKED=1
+        if builds_in_flight; then INFLIGHT=1; fi
+    fi
+    [ "$INFLIGHT" = 1 ]
+}
+
+# --- step 1: the cheap measurement -----------------------------------------
+# The volume that holds the CACHE, because that is the only volume this job can
+# return space to. On this box it is also the boot volume, which is where the
+# damage was observed; on a box where they differ, a full boot volume is outside
+# what this script can do anything about and it must not claim otherwise.
+read_df() {
+    FREE_KB="$(df_field "$MODCACHE" 4)"
+    TOTAL_KB="$(df_field "$MODCACHE" 2)"
+    USED_KB="$(df_field "$MODCACHE" 3)"
+}
+read_df
+MOUNT="$(df -Pk "$MODCACHE" 2>/dev/null | awk 'NR == 2 { print $6 }')"
+
+case "$FREE_KB" in
+    '' | *[!0-9]*)
+        log "UNKNOWN: could not read free space for $MODCACHE (df -Pk returned '${FREE_KB:-<empty>}')"
+        exit "$EXIT_UNKNOWN"
+        ;;
+esac
+
+FREE_FLOOR_KB="$(kb_from_gb "$FREE_FLOOR_GB")"
+CACHE_FLOOR_KB="$(kb_from_gb "$CACHE_FLOOR_GB")"
+CRITICAL_FREE_KB="$(kb_from_gb "$CRITICAL_FREE_GB")"
+BUILDCACHE_CAP_KB="$(kb_from_gb "$BUILDCACHE_CAP_GB")"
+
+log "volume $MOUNT: $(human_kb "$FREE_KB") free of $(human_kb "$TOTAL_KB") ($(capacity_pct "$USED_KB" "$FREE_KB")% capacity); free floor $(human_kb "$FREE_FLOOR_KB")"
+
+# --- step 1b: the build-cache arm (mg-925f7) -------------------------------
+# Fires on low disk OR an over-cap cache. Runs before the module-cache verdict,
+# so CANNOT HELP is only ever said after this has done what it can.
+LOW_DISK=0
+[ "$FREE_KB" -lt "$FREE_FLOOR_KB" ] && LOW_DISK=1
+
+# build_cache_trim deletes cache entries no build has used for
+# BUILDCACHE_AGE_HOURS. Sets BUILD_STATUS to one sentence saying what happened,
+# which every later log line and alert quotes.
+build_cache_trim() {
+    local why="$1" n before after rc mmin
+    mmin=$((BUILDCACHE_AGE_HOURS * 60))
+    if [ "$GOCACHE_OK" != 1 ]; then
+        log "build-cache trim: $BUILD_STATUS"
+        return 0
+    fi
+    if defer_for_builds; then
+        BUILD_DEFERRED=1
+        BUILD_STATUS="DEFERRED: $IN_FLIGHT_WHY; the next fire retries"
+        log "build-cache trim DEFERRED ($why): $IN_FLIGHT_WHY. A build reading an entry this deletes would see a cache miss at best and a missing file at worst."
+        return 0
+    fi
+    # Entries only: the two-hex-digit shards, *-a (action) and *-d (output).
+    # Never README, trim.txt, testexpire.txt or fuzz/ — Go's own bookkeeping.
+    if [ "$DRY_RUN" != "0" ]; then
+        n="$(find "$GOCACHE_DIR" -mindepth 2 -maxdepth 2 -type f -path "$GOCACHE_DIR/[0-9a-f][0-9a-f]/*" \( -name '*-a' -o -name '*-d' \) -mmin +"$mmin" -print 2>/dev/null | wc -l | tr -d ' ')"
+        BUILD_STATUS="DRY RUN: would remove $n build-cache entries older than ${BUILDCACHE_AGE_HOURS}h from $GOCACHE_DIR ($why)"
+        log "build-cache trim: $BUILD_STATUS"
+        return 0
+    fi
+    before="$FREE_KB"
+    log "build-cache trim ($why): removing entries of $GOCACHE_DIR unused for >${BUILDCACHE_AGE_HOURS}h — not \`go clean -cache\`; today's working set stays"
+    # The list goes to a file, not a pipe, so find's own exit status survives.
+    find "$GOCACHE_DIR" -mindepth 2 -maxdepth 2 -type f -path "$GOCACHE_DIR/[0-9a-f][0-9a-f]/*" \( -name '*-a' -o -name '*-d' \) -mmin +"$mmin" -print -delete >"$STATE_DIR/trim.list" 2>/dev/null
+    rc=$?
+    n="$(wc -l <"$STATE_DIR/trim.list" 2>/dev/null | tr -d ' ')"
+    rm -f "$STATE_DIR/trim.list"
+    read_df
+    after="$FREE_KB"
+    case "$after" in '' | *[!0-9]*) after="$before"; FREE_KB="$before" ;; esac
+    BUILD_STATUS="removed $n entries unused for >${BUILDCACHE_AGE_HOURS}h from $GOCACHE_DIR; free space went $(human_kb "$before") -> $(human_kb "$after")"
+    [ "$rc" -ne 0 ] && BUILD_STATUS="$BUILD_STATUS (find exited $rc: some entries could not be removed)"
+    log "build-cache trim: $BUILD_STATUS"
+}
+
+if [ "$LOW_DISK" = 0 ]; then
+    # Healthy disk. The only reason to go further is the cap, and the cap is
+    # the one `du` a healthy-disk fire pays — set the cap to 0 to remove it.
+    if [ "$BUILDCACHE_CAP_KB" -gt 0 ] && [ "$GOCACHE_OK" = 1 ]; then
+        GOCACHE_KB="$(bounded_du "$GOCACHE_DIR")"
+        case $? in
+            0)
+                if [ "$GOCACHE_KB" -gt "$BUILDCACHE_CAP_KB" ]; then
+                    log "build cache $GOCACHE_DIR: $(human_kb "$GOCACHE_KB") is over its $(human_kb "$BUILDCACHE_CAP_KB") cap"
+                    build_cache_trim "cache over its cap"
+                    [ "$BUILD_DEFERRED" = 1 ] && exit "$EXIT_DEFERRED"
+                    exit "$EXIT_OK"
+                fi
+                log "build cache $GOCACHE_DIR: $(human_kb "$GOCACHE_KB"), under its $(human_kb "$BUILDCACHE_CAP_KB") cap"
+                ;;
+            2) log "build cache $GOCACHE_DIR: cap check TIMED OUT after ${DU_TIMEOUT_SEC}s — size unknown, not trimmed on the cap arm this fire" ;;
+            *) log "build cache $GOCACHE_DIR: cap check could not measure it — size unknown, not trimmed on the cap arm this fire" ;;
+        esac
+    fi
+    log "free space is above the floor — nothing to do (the module cache was not measured; that \`du\` is only paid when the disk is low)"
+    exit "$EXIT_OK"
+fi
+
+build_cache_trim "free space below the floor"
+if [ "$FREE_KB" -ge "$FREE_FLOOR_KB" ]; then
+    log "the build-cache trim brought free space above the floor ($(human_kb "$FREE_KB") >= $(human_kb "$FREE_FLOOR_KB")) — the module cache was not measured"
+    exit "$EXIT_OK"
+fi
+
+# --- step 2: the expensive measurement -------------------------------------
+CACHE_KB="$(du -sk "$MODCACHE" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+case "${CACHE_KB:-}" in
+    '' | *[!0-9]*)
+        log "UNKNOWN: could not measure $MODCACHE (du -sk returned '${CACHE_KB:-<empty>}') — free space IS below the floor and this fire did not establish whether the cache is why"
+        exit "$EXIT_UNKNOWN"
+        ;;
+esac
+log "module cache $MODCACHE: $(human_kb "$CACHE_KB"); cache floor $(human_kb "$CACHE_FLOOR_KB")"
+
+# scope_note is the sentence this ticket exists for as much as the `go clean`
+# is. It is computed from the run's own numbers rather than fixed, so it cannot
+# quietly become wrong as the box changes.
+scope_note() {
+    local free_kb="$1" total_kb="$2" used_kb="$3" reclaimed_kb="${4:-0}"
+    measure_consumers
+    echo "  WHAT THIS DOES NOT FIX:"
+    if [ "$reclaimed_kb" -gt 0 ]; then
+        echo "    This job reclaimed $(human_kb "$reclaimed_kb") — the Go module cache, one directory."
+    else
+        echo "    This job trims the Go build cache by age and reclaims the Go module cache. That is two directories."
+    fi
+    echo "    Build-cache trim on this fire: $BUILD_STATUS."
+    echo "    $MOUNT is at $(capacity_pct "$used_kb" "$free_kb")% capacity: $(human_kb "$used_kb") used of $(human_kb "$total_kb"), $(human_kb "$free_kb") free."
+    consumer_report "$used_kb" | sed 's/^/    /'
+    echo "    A cache reclaim against a fill of this size buys HEADROOM, NOT A FIX. If this"
+    echo "    job is firing repeatedly, the disk is filling from somewhere it does not own,"
+    echo "    and the next full-disk build failure will still present as a broken branch."
+}
+
+# alert mails the one reader who can act on a fill this job cannot reclaim.
+# Rate-limited to once per cooldown so a disk that stays full does not deliver a
+# mail every 30 minutes — which is how a real signal gets filtered into a rule.
+# Best-effort throughout: a box without `mg` still gets the full log.
+alert() {
+    local subject="$1" body="$2" now last
+    now="$(date +%s)"
+    last=0
+    [ -f "$ALERT_STAMP" ] && last="$(cat "$ALERT_STAMP" 2>/dev/null || echo 0)"
+    case "$last" in '' | *[!0-9]*) last=0 ;; esac
+    if [ $((now - last)) -lt "$ALERT_COOLDOWN_SEC" ]; then
+        log "alert suppressed (last sent $((now - last))s ago, cooldown ${ALERT_COOLDOWN_SEC}s) — the log below is the full record"
+        return 0
+    fi
+    if ! command -v mg >/dev/null 2>&1; then
+        log "alert NOT SENT: \`mg\` is not on PATH ($PATH) — nobody was told outside this log"
+        return 0
+    fi
+    if printf '%s\n' "$body" | mg mail send "$ALERT_TO" --from="$ALERT_FROM" --subject="$subject" --body-file - >/dev/null 2>&1; then
+        echo "$now" > "$ALERT_STAMP.tmp" && mv "$ALERT_STAMP.tmp" "$ALERT_STAMP"
+        log "alert sent to $ALERT_TO: $subject"
+    else
+        log "alert NOT SENT: \`mg mail send $ALERT_TO\` failed — nobody was told outside this log"
+    fi
+}
+
+if [ "$CACHE_KB" -lt "$CACHE_FLOOR_KB" ]; then
+    # THE CASE THAT MUST NOT READ AS SUCCESS.
+    #
+    # Free space is below the floor, the build-cache trim has done what it can
+    # (or was deferred — said in BUILD_STATUS), and the module cache is not why.
+    # A free-space-only trigger would fire here, delete a small cache, exit 0,
+    # and leave a log line that an operator reads as "the disk job ran". Every
+    # subsequent full-disk build failure then gets attributed to the branch,
+    # which is exactly the cost this ticket was filed to stop.
+    log "CANNOT HELP: free space is below the floor and the Go module cache is NOT what is filling this volume."
+    log "  cache $(human_kb "$CACHE_KB") < floor $(human_kb "$CACHE_FLOOR_KB"); reclaiming it would return $(human_kb "$CACHE_KB") of a $(human_kb "$USED_KB") fill and cost a full re-download."
+    scope_note "$FREE_KB" "$TOTAL_KB" "$USED_KB" 0
+    log "  Not firing \`go clean -modcache\`. This is a disk that needs a human, not a cron."
+    alert "disk low on $(hostname -s 2>/dev/null || echo this host) and the Go caches are not enough" \
+        "$(printf '%s\n' \
+            "$MOUNT is at $(capacity_pct "$USED_KB" "$FREE_KB")% capacity — $(human_kb "$FREE_KB") free of $(human_kb "$TOTAL_KB"), below the $(human_kb "$FREE_FLOOR_KB") floor." \
+            "" \
+            "Build-cache trim (mg-925f7) on this fire: $BUILD_STATUS." \
+            "" \
+            "The Go module cache reclaim (com.pogo.reclaim, mg-b7c3) did NOT fire: the cache is" \
+            "$(human_kb "$CACHE_KB"), below its $(human_kb "$CACHE_FLOOR_KB") floor. Deleting it would return" \
+            "$(human_kb "$CACHE_KB") of a $(human_kb "$USED_KB") fill and cost a full re-download." \
+            "" \
+            "This is the case this job cannot fix." \
+            "$(consumer_report "$USED_KB")" \
+            "" \
+            "Why it matters now: ./build.sh is the refinery's merge gate, and on a full volume" \
+            "it fails at the link step with 'no space left on device' — which reads like a" \
+            "broken branch. Full log: ${POGO_RECLAIM_LOG:-~/Library/Logs/pogo/pogo-reclaim.log}")"
+    [ "$BUILD_DEFERRED" = 1 ] && exit "$EXIT_DEFERRED"
+    exit "$EXIT_CANNOT_HELP"
+fi
+
+if defer_for_builds; then
     log "DEFERRED: $IN_FLIGHT_WHY. \`go clean -modcache\` deletes trees a running build is reading, so firing now would break that build with a missing-file error — the exact reading this job exists to prevent."
     log "  The next fire (every $((${POGO_RECLAIM_INTERVAL_SEC:-1800} / 60)) min) retries. Below $(human_kb "$CRITICAL_FREE_KB") free this deferral is skipped."
     exit "$EXIT_DEFERRED"
@@ -548,11 +865,12 @@ if [ "$FREE_AFTER_KB" -lt "$FREE_FLOOR_KB" ]; then
     alert "disk still low on $(hostname -s 2>/dev/null || echo this host) after the Go cache reclaim" \
         "$(printf '%s\n' \
             "com.pogo.reclaim (mg-b7c3) ran \`go clean -modcache\` and reclaimed $(human_kb "$RECLAIMED_KB")." \
+            "Build-cache trim (mg-925f7) on this fire: $BUILD_STATUS." \
             "" \
             "$MOUNT is STILL at $(capacity_pct "$USED_AFTER_KB" "$FREE_AFTER_KB")% capacity — $(human_kb "$FREE_AFTER_KB") free of $(human_kb "$TOTAL_KB")," \
             "below the $(human_kb "$FREE_FLOOR_KB") floor. The reclaim worked and was not enough." \
             "" \
-            "Largest consumers under \$HOME, measured $CONSUMERS_MEASURED: $CONSUMERS." \
+            "$(consumer_report "$USED_AFTER_KB")" \
             "" \
             "./build.sh is the refinery's merge gate; on a full volume it fails at the link" \
             "step with 'no space left on device', which reads like a broken branch." \
