@@ -16,7 +16,10 @@
 # go_trimpath_enable adds -trimpath to GOFLAGS, so every `go` the calling
 # script runs, and every child that inherits the environment (a test that shells
 # out to `go build`), records module-relative paths instead. A GOFLAGS the
-# caller already set is kept, and -trimpath is not added twice.
+# caller already set is kept, and -trimpath is not added twice. An explicit
+# -trimpath=false in the caller's GOFLAGS is an opt-out and is respected: GOFLAGS
+# is left exactly as it was (appending -trimpath after it would win, since the
+# last occurrence of a flag does).
 #
 # What -trimpath changes for code: runtime.Caller and stack traces report
 # "github.com/drellem2/pogo/internal/x/y.go" instead of an absolute path. A
@@ -31,10 +34,14 @@
 #
 #   test.sh   calls go_trimpath_enable. The test compile is the bulk of the
 #             per-worktree cache growth, and its binaries are thrown away.
-#   build.sh  does NOT. Its `go build`/`go install` produce the binaries the
-#             nightly deploy installs (`build.sh --install`), and they must keep
-#             their -ldflags record. A test that builds a binary standing in for
-#             build.sh's output passes -trimpath=false, which overrides GOFLAGS.
+#   build.sh  does NOT call it, and sets the flag per command instead: its
+#             ./bin `go build` passes -trimpath (per-worktree scratch, ~1M per
+#             extra worktree instead of ~60M, mg-21a96), and its `go install`
+#             passes -trimpath=false, because the installed binaries are what
+#             the nightly deploy ships and internal/selfdrift reads their
+#             -ldflags record. An explicit flag overrides GOFLAGS, so neither
+#             line depends on what the caller exported. A test that builds a
+#             binary standing in for an INSTALLED one passes -trimpath=false.
 #
 # Scope: pogo's own gate. Other repos' gates are unchanged.
 #
@@ -45,7 +52,8 @@ go_trimpath_enable() {
     return 0
   fi
   case " ${GOFLAGS:-} " in
-    *" -trimpath "* | *" -trimpath=true "* | *" --trimpath "*) ;;
+    *" -trimpath "* | *" -trimpath=true "* | *" --trimpath "* | *" --trimpath=true "*) ;;
+    *" -trimpath=false "* | *" --trimpath=false "*) ;;
     *) GOFLAGS="${GOFLAGS:+$GOFLAGS }-trimpath" ;;
   esac
   export GOFLAGS

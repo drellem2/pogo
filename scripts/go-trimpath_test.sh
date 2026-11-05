@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
-# Controls on scripts/lib/go-trimpath.sh (drellem2/pogo#282): build.sh and
-# test.sh run go with -trimpath, so polecat worktrees at different paths share
-# build-cache entries.
+# Controls on scripts/lib/go-trimpath.sh (drellem2/pogo#282): test.sh runs go
+# with -trimpath, and build.sh's ./bin `go build` passes -trimpath itself, so
+# polecat worktrees at different paths share build-cache entries. build.sh's
+# `go install` stays untrimmed (mg-21a96).
 #
 #   (a) An unset/empty GOFLAGS becomes "-trimpath", exported to children.
 #   (b) A GOFLAGS the caller set is kept, with -trimpath appended.
 #   (c) -trimpath already present (bare or =true) is not added twice.
 #   (d) POGO_NO_TRIMPATH=1 leaves GOFLAGS exactly as it was.
+#   (h) An explicit -trimpath=false in GOFLAGS is an opt-out: GOFLAGS is left
+#       exactly as it was. Appending -trimpath would override it, since go
+#       takes the last occurrence of a flag.
 #   (e) test.sh sources the library and calls go_trimpath_enable, after
 #       go_toolchain_resolve. Without this case, deleting the call would leave
 #       (a)-(d) green and the test compile untrimmed.
-#   (f) build.sh does NOT call it: the binaries it builds and installs must keep
-#       their -ldflags build-info record, which -trimpath drops and
-#       internal/selfdrift reads (see the library's header).
-#   (g) build.sh's go build / go install pass -trimpath=false, so an inherited
-#       GOFLAGS=-trimpath (test.sh runs a nested ./build.sh --install) cannot
-#       strip that record either.
+#   (f) build.sh does NOT call it: the binaries it installs must keep their
+#       -ldflags build-info record, which -trimpath drops and internal/selfdrift
+#       reads (see the library's header).
+#   (g) build.sh's ./bin go build passes -trimpath (per-worktree scratch, the
+#       ~60M-per-worktree cost), and its go install passes -trimpath=false, so
+#       an inherited GOFLAGS=-trimpath (test.sh runs a nested ./build.sh
+#       --install) cannot strip the installed binaries' record.
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +64,12 @@ check "(c) bare -trimpath not added twice" "-mod=mod -trimpath" "GOFLAGS=-mod=mo
 check "(c) -trimpath=true not added twice" "-trimpath=true" "GOFLAGS=-trimpath=true"
 check "(d) POGO_NO_TRIMPATH=1 leaves GOFLAGS unset" "<unset>" POGO_NO_TRIMPATH=1
 check "(d) POGO_NO_TRIMPATH=1 leaves a caller's GOFLAGS untouched" "-mod=mod" POGO_NO_TRIMPATH=1 GOFLAGS=-mod=mod
+check "(h) explicit -trimpath=false is respected" "-trimpath=false" GOFLAGS=-trimpath=false
+check "(h) explicit -trimpath=false among other flags is respected" "-mod=mod -trimpath=false -count=1" "GOFLAGS=-mod=mod -trimpath=false -count=1"
+check "(h) explicit --trimpath=false is respected" "--trimpath=false" GOFLAGS=--trimpath=false
+# Control for (h): the same matcher must not mistake a different flag for the
+# opt-out, or (h) would pass by never appending anything.
+check "(h) control: -trimpathX=false is not an opt-out" "-trimpathX=false -trimpath" GOFLAGS=-trimpathX=false
 
 # (e) test.sh calls it, after go is resolved.
 f="$REPO_ROOT/test.sh"
@@ -84,16 +95,18 @@ else
     pass "(f) build.sh does not call go_trimpath_enable (control: the pattern finds test.sh's)"
 fi
 
-# (g) build.sh's go build and go install pass -trimpath=false, so a GOFLAGS
-# =-trimpath inherited from the caller cannot reach the binaries either.
-for verb in build install; do
+# (g) build.sh's ./bin go build passes -trimpath; its go install passes
+# -trimpath=false, so a GOFLAGS=-trimpath inherited from the caller cannot reach
+# the installed binaries. The explicit flag is what matters: it overrides GOFLAGS.
+for pair in "build -trimpath" "install -trimpath=false"; do
+    verb="${pair%% *}" want="${pair#* }"
     line="$(grep -E "^[^#]*gate_step \"go $verb \./cmd/\.\.\.\" go $verb " "$REPO_ROOT/build.sh")"
     if [ -z "$line" ]; then
         fail "(g) build.sh: no 'go $verb ./cmd/...' gate step found (the check below cannot be trusted)"
-    elif printf '%s\n' "$line" | grep -q -- ' -trimpath=false '; then
-        pass "(g) build.sh's go $verb passes -trimpath=false"
+    elif printf '%s\n' "$line" | grep -q -- " go $verb $want "; then
+        pass "(g) build.sh's go $verb passes $want"
     else
-        fail "(g) build.sh's go $verb does not pass -trimpath=false: an inherited GOFLAGS=-trimpath would strip its -ldflags record"
+        fail "(g) build.sh's go $verb does not pass $want explicitly: $line"
     fi
 done
 

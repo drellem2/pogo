@@ -26,8 +26,9 @@ func TestEnthVCSMatchesTheVersionPackage(t *testing.T) {
 // Go stamped a git vcs.revision that is not the build's — the -X VCS=enth flag
 // must win over it. The control is the same build without the flag.
 //
-// -trimpath=false stands this binary in for build.sh's output, which is built
-// untrimmed. It overrides the GOFLAGS=-trimpath that test.sh exports
+// -trimpath=false stands this binary in for `build.sh --install`'s output, which
+// is built untrimmed (its ./bin build is trimmed; selfdrift never reads that
+// one). It overrides the GOFLAGS=-trimpath that test.sh exports
 // (drellem2/pogo#282); TestATrimmedEnthBuildIsNotRecognised says why it must.
 func TestBinaryRevRecognisesAnEnthBuild(t *testing.T) {
 	repo, plain, rev := gitRepoWithBinary(t)
@@ -46,12 +47,13 @@ func TestBinaryRevRecognisesAnEnthBuild(t *testing.T) {
 	}
 }
 
-// TestATrimmedEnthBuildIsNotRecognised pins the reason build.sh builds its
-// binaries WITHOUT -trimpath while test.sh uses it (drellem2/pogo#282): Go does
+// TestATrimmedEnthBuildIsNotRecognised pins the reason build.sh INSTALLS its
+// binaries WITHOUT -trimpath while test.sh and the ./bin build use it
+// (drellem2/pogo#282, mg-21a96): Go does
 // not record -ldflags in a -trimpath binary's build info (go.dev/issue/52372),
 // so enthStamped has nothing to read and the outer repo's vcs.revision wins.
 // If this starts failing, Go began recording -ldflags under -trimpath, and
-// build.sh may then be able to trim too (scripts/lib/go-trimpath.sh).
+// build.sh's install may then be able to trim too (scripts/lib/go-trimpath.sh).
 func TestATrimmedEnthBuildIsNotRecognised(t *testing.T) {
 	repo, _, rev := gitRepoWithBinary(t)
 	enth := filepath.Join(t.TempDir(), "enthtrimmed")

@@ -261,18 +261,28 @@ trap 'gate_profile_report' EXIT
 . "$BUILD_SH_DIR/scripts/lib/go-toolchain.sh"
 go_toolchain_resolve || exit $?
 
-# NO -trimpath HERE, deliberately (drellem2/pogo#282). test.sh turns it on for
-# its own go commands, which is where the per-worktree build-cache growth is.
-# The binaries below must stay untrimmed: Go drops the -ldflags setting from a
-# binary's build info under -trimpath (go.dev/issue/52372), and
-# internal/selfdrift reads that setting to recognise an enth build. `build.sh
-# --install` is what the nightly deploy runs, so a trimmed build here would make
-# every enth-built pogo binary read as its outer repo's git revision.
+# -trimpath: ON for the ./bin build, OFF for --install (drellem2/pogo#282).
 #
-# The build and install lines pass -trimpath=false EXPLICITLY, which overrides
-# GOFLAGS: a GOFLAGS=-trimpath inherited from the caller (test.sh exports one,
-# and its enth-stamp row runs a nested `./build.sh --install`) must not reach
-# them. See scripts/lib/go-trimpath.sh.
+# The ./bin build is per-worktree scratch: without -trimpath every package's
+# action ID carries the worktree's absolute path, so each polecat worktree
+# compiled and cached a private copy of every pogo package. Measured
+# 2026-11-05 (mg-21a96), `go build ./cmd/...` of one tree at a second path with
+# a shared GOCACHE: +60472K untrimmed, +1092K trimmed. Trimmed, it also shares
+# the package compiles test.sh's (trimmed) run already made.
+#
+# The INSTALLED binaries must stay untrimmed: Go drops the -ldflags setting from
+# a binary's build info under -trimpath (go.dev/issue/52372), and
+# internal/selfdrift reads that setting on the installed binaries (GOBIN) to
+# recognise an enth build. `build.sh --install` is what the nightly deploy runs,
+# so a trimmed install would make every enth-built pogo binary read as its outer
+# repo's git revision. The -X values themselves still reach a trimmed binary, so
+# `./bin/pogo version` is correct either way; only `go version -m` / buildinfo
+# on ./bin loses the -ldflags line, and nothing reads ./bin that way.
+#
+# Both lines pass the flag EXPLICITLY, which overrides GOFLAGS: a
+# GOFLAGS=-trimpath inherited from the caller (test.sh exports one, and its
+# enth-stamp row runs a nested `./build.sh --install`) must not reach the
+# install. See scripts/lib/go-trimpath.sh.
 
 # The step labels below are the profile's row names, and fmt.sh/test.sh print
 # their own "Step N:" banners — so these are named for what the row IS rather
@@ -313,7 +323,7 @@ fi
 
 echo "Step 3: Building binaries into ${build_dir}..."
 mkdir -p "$build_dir"
-gate_step "go build ./cmd/..." go build -trimpath=false ${buildvcs_flags[@]+"${buildvcs_flags[@]}"} -ldflags "$ldflags" -o "${build_dir%/}/" ./cmd/... || exit $?
+gate_step "go build ./cmd/..." go build -trimpath ${buildvcs_flags[@]+"${buildvcs_flags[@]}"} -ldflags "$ldflags" -o "${build_dir%/}/" ./cmd/... || exit $?
 
 if [ "$do_install" = true ]; then
   echo "Step 4: Installing binaries into GOBIN..."
