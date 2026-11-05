@@ -759,8 +759,14 @@ Install outside the 02:00–06:00 window, or check `~/.pogo/deploy.lock.d` and
 
 ## Disk Reclaim Agent (`com.pogo.reclaim`)
 
-Samples free space every 30 minutes and runs `go clean -modcache` when — and
-only when — **both** a free-space floor and a cache-size floor are crossed.
+Samples free space every 30 minutes. Two arms, in this order:
+
+1. **Build-cache trim (mg-925f7).** When free space is under the floor **or** the
+   Go build cache is over its cap, delete build-cache entries no build has used
+   for 24h. Never `go clean -cache`.
+2. **Module-cache reclaim (mg-b7c3).** If free space is still under the floor,
+   run `go clean -modcache` when — and only when — the module cache is also over
+   its floor.
 
 ```bash
 pogo service install-reclaim      # install / re-install
@@ -793,26 +799,43 @@ That is measured, not hypothetical. The volume was watched dropping on
 /var/folders/.../go-build*         accumulating, ~100M per build
 ```
 
-### The 34G Go cache this job does not touch
+### The build cache: trimmed by age, never wiped (mg-925f7)
 
 There are **two** Go caches on this box and they differ by a factor of fifty:
 
 | Path | Size | Reclaimed by | This job? |
 |---|---|---|---|
-| `~/go/pkg/mod` | 680M | `go clean -modcache` | **yes** |
-| `~/Library/Caches/go-build` | 34G | `go clean -cache` | **no** |
+| `~/go/pkg/mod` | 680M–2G | `go clean -modcache` | yes, arm 2 |
+| `~/Library/Caches/go-build` | 34–53G | entries unused for 24h | yes, arm 1 |
 
-"The Go cache is large" is therefore ambiguous, and the larger reading is the one
-this job does nothing about. It is named here, in the script header, and in every
-scope note the job prints, so that nobody concludes the 34G is covered because
-something with "reclaim" in its name is installed.
+Until mg-925f7 this job left the build cache alone, because the only tool on
+offer was `go clean -cache`: it discards every compiled package on the box, so
+the next `./build.sh` — which *is* the refinery's merge gate — recompiles the
+world. The job still never runs it.
 
-**Not touching it is deliberate.** `go clean -cache` discards every compiled
-package on the box, so the next `./build.sh` — which *is* the refinery's merge
-gate — recompiles the world. That trades a disk problem for a gate-latency
-problem on every merge until the cache refills. If the build cache deserves
-reclaiming, it deserves its own ticket with its own argument about what a cold
-gate costs.
+What changed is the measurement (drellem2/pogo#282, triage mg-2fa77). Go already
+trims entries unused for 5 days, and on 2026-11-04 that trim had run, yet the
+whole 53G cache was under 3 days old. Without `-trimpath`, every polecat worktree
+cached a private copy of pogo's packages; change A of #282 (mg-b69a6) builds the
+gate with `-trimpath`, and this arm is the backstop.
+
+**Why the age trim is safe.** Go refreshes an entry's mtime each time a build
+uses it, at most once an hour (`cmd/go/internal/cache`, `mtimeInterval = 1h`).
+An entry untouched for 24h has not been read by any build in 23h, so the gate's
+working set survives, and a deleted entry is an ordinary cache miss. The race
+with a build reading an entry being deleted is narrowed by that refresh and by
+the in-flight deferral below. It is not closed.
+
+What it deletes: only `??/*-a` and `??/*-d` files in the two-hex shards, never
+`README`, `trim.txt`, `testexpire.txt` or `fuzz/`. It refuses outright, and
+says so, if `GOCACHE` has no Go README. A misresolved `GOCACHE` is a log line,
+not a `find -delete` across someone's files.
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `POGO_RECLAIM_BUILDCACHE_AGE_HOURS` | 24 | Entries older than this go. Clamped to at least 2, above Go's 1h refresh. |
+| `POGO_RECLAIM_BUILDCACHE_CAP_GB` | 40 | Over this, the trim runs on a healthy disk too. `0` disables the cap arm, and with it the one `du` a healthy-disk fire pays. |
+| `POGO_RECLAIM_BUILDCACHE` | `go env GOCACHE` | Override the cache location. |
 
 This job also does **not** delete polecat worktrees or refinery state, even
 though they are what actually grew in the window above. That is `gitgc`'s job and
@@ -874,9 +897,10 @@ interval` with `runs = 0` while the calendar jobs beside them fired (mg-50e0's
 wedge; mg-d8160).
 
 That is affordable only because the measurements are ordered cheap-first: one
-`df` per fire, and the `du` of a multi-gigabyte tree only once `df` has already
-established the disk is low. In the steady state a fire is one `df` and one log
-line. A nightly `StartCalendarInterval` was the alternative and is worse here:
+`df` per fire, and the `du` of the module cache and the consumer report only
+once `df` has already established the disk is low. In the steady state a fire is
+one `df`, one bounded `du` of the build cache for the cap check, and a log line;
+`POGO_RECLAIM_BUILDCACHE_CAP_GB=0` drops it back to one `df`. A nightly `StartCalendarInterval` was the alternative and is worse here:
 the volume went from healthy to 571 MiB free inside a working day.
 
 ### It defers while something is building
@@ -910,14 +934,36 @@ in-flight build fails whether or not this job runs.
 
 ### What it does not fix, and why the job says so out loud
 
-**This job reclaims the Go module cache and nothing else.** On the box that
-prompted it, that is 7.3G of a 422G fill. Largest consumers under `/Users/daniel`
-measured 2026-08-12:
+**This job trims the Go build cache and reclaims the Go module cache, and
+nothing else.** Every low-disk log and alert carries a **live** per-path `du`,
+taken on that fire, of what pogo and its agents write to (mg-925f7; it replaced
+a list hardcoded on 2026-08-12 that was still being mailed in November):
 
 ```
-Library 73G   tools 15G   chrome 12G   research 9.8G
-go 8.0G       .pogo 6.4G  Virtual Machines 5.0G   dev 4.6G
+Measured on this fire (du -sk, each bounded at 60s):
+      4.2G  Go build cache  /Users/daniel/Library/Caches/go-build
+      2.1G  Go module cache  /Users/daniel/go/pkg/mod
+      9.1G  polecat worktrees  /Users/daniel/.pogo/polecats
+      2.5G  refinery  /Users/daniel/.pogo/refinery
+      3.0G  Claude scratch root  /private/tmp/claude-501
+      2.1G  ~/.cache  /Users/daniel/.cache
+     14.1G  $TMPDIR, all of it  /var/folders/.../T
+       93M      of which Go test fixtures (Test*, go-build*)
+      2.6G      of which mktemp -d dirs (tmp.*)
+These rows sum to 37.1G of the 363.7G used; the other 326.6G is NOT attributed here.
+This is the list of paths this job knows to look at, NOT an account of the volume.
+...swap in /System/Volumes/VM (pogo#258) takes free space from this
+volume while appearing in none of these paths.
+Swap now (sysctl vm.swapusage): total = 5120.00M  used = 3681.56M  ...
 ```
+
+(A dry run on this box at 2026-11-05 16:46Z, the day after a manual reclaim.)
+Each `du` is bounded by `POGO_RECLAIM_DU_TIMEOUT_SEC` (60). A `du` that runs out
+is printed as `TIMED OUT`, never as a size, and the sum becomes "at least". The
+report is deliberately not an account of the volume. On 2026-11-05 the largest
+grower was fseventsd swap in `/System/Volumes/VM` (pogo#258), which no `du` of
+the Data volume can see. `POGO_RECLAIM_TMPDIR` and `POGO_RECLAIM_CLAUDE_TMP`
+override two of the paths.
 
 So every path through the script that could be mistaken for "the disk is
 handled" states the opposite, computed from the run's own numbers rather than
@@ -926,9 +972,11 @@ fixed:
 - A **successful reclaim** prints a `WHAT THIS DOES NOT FIX` block with the
   post-run fill, and — if the volume is still under the floor — logs
   `STILL BELOW THE FLOOR` and mails `human`.
-- A **low disk with a small cache** does not fire at all. It exits **4**, logs
-  `the Go module cache is NOT what is filling this volume`, and mails `human`
-  (rate-limited to once per 24h).
+- A **low disk with a small module cache** does not run `go clean`. After the
+  build-cache trim has run (or been deferred), it exits **4** (or **5** if
+  the trim was deferred), logs `the Go module cache is NOT what is filling this
+  volume`, and mails `human` (rate-limited to once per 24h). The mail says
+  what the trim did.
 
 On this host *today* the free-space arm is satisfied continuously (99% used,
 ~6.9 GiB free), so the cache-size arm is the only one deciding and every sample
@@ -942,8 +990,8 @@ when someone reclaims part of the ~414G this job does not own.
 | 0 | Nothing to do (above the floor), or a reclaim that happened |
 | 1 | `go clean -modcache` ran and failed |
 | 3 | UNKNOWN — could not measure (no `go`, unreadable `df`/`du`). Never a pass. |
-| 4 | CANNOT HELP — disk is low and the cache is not what is filling it |
-| 5 | DEFERRED — a build is in flight and free space is not yet critical |
+| 4 | CANNOT HELP — disk is low, the build-cache trim has done what it can, and the module cache is not what is filling it |
+| 5 | DEFERRED — a build is in flight and free space is not yet critical (including a deferred build-cache trim on a still-low disk) |
 
 ### Merging this does not install it
 
@@ -969,8 +1017,12 @@ standing trap the nightly deploy runner has.
 
 Two things make that visible instead of silent:
 
-- Every fire logs `runner: <path> (mtime …)`, so a log answers *which copy ran*
-  without anybody trusting main.
+- Every fire logs `runner: <path> (mtime …, sha256 …)`, so a log answers *which
+  copy ran* without anybody trusting main. To check that a merged change is live,
+  compare `shasum -a 256 ~/.pogo/bin/pogo-reclaim.sh` (or the `sha256` on the
+  newest `runner:` line of `~/Library/Logs/pogo/pogo-reclaim.log`) against
+  `git show origin/main:scripts/launchd/pogo-reclaim.sh | shasum -a 256`.
+  `install-reclaim` prints the digest it just installed.
 - `com.pogo.reclaim` is registered in `managedLaunchAgents()`, so `pogo doctor`
   compares the installed **plist** against what the current build renders, and
   in `managedPayloadScripts()` (mg-30f8), so the `launchd payload` row compares
@@ -987,7 +1039,10 @@ Two things make that visible instead of silent:
 POGO_RECLAIM_DRY_RUN=1 POGO_RECLAIM_FREE_FLOOR_GB=999 ~/.pogo/bin/pogo-reclaim.sh
 ```
 
-Takes both measurements, prints the verdict and the scope note, removes nothing.
+Takes every measurement, prints the verdict, the trim count it *would* remove
+and the scope note, and removes nothing. It can still send the cannot-help
+mail. Point `POGO_RECLAIM_STATE_DIR` at a scratch directory holding a fresh
+`last_alert` stamp to keep it quiet.
 
 ## Revision Probe Agent (`com.pogo.revisionprobe`)
 

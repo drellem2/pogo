@@ -304,3 +304,26 @@ func TestReclaimStateIsUnderPogoHome(t *testing.T) {
 		t.Errorf("reclaimScriptInstallPath() = %s; want %s", reclaimScriptInstallPath(), want)
 	}
 }
+
+// TestFileSHA256MatchesShasum pins the digest InstallReclaim prints to the one
+// pogo-reclaim.sh logs on its `runner:` line (`shasum -a 256`). If the two
+// disagreed on encoding — upper-case hex, a trailing filename — an operator
+// comparing them to answer "is the merged runner live" would read a live copy as
+// stale (mg-925f7).
+func TestFileSHA256MatchesShasum(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(p, []byte("abc"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := fileSHA256(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// sha256("abc"), as `shasum -a 256` prints it.
+	if want := "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"; got != want {
+		t.Errorf("fileSHA256 = %s; want %s", got, want)
+	}
+	if _, err := fileSHA256(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("fileSHA256 of a missing file returned no error")
+	}
+}
