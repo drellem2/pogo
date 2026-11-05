@@ -992,8 +992,8 @@ reports when a detector did not arm or the job stops reporting.`,
 
 	var cmdServiceInstallReclaim = &cobra.Command{
 		Use:   "install-reclaim",
-		Short: "Install the size-triggered Go module cache reclaim LaunchAgent (com.pogo.reclaim)",
-		Long: `Install com.pogo.reclaim — the launchd job that fires ~/.pogo/bin/pogo-reclaim.sh every 30 minutes and runs ` + "`go clean -modcache`" + ` when free space AND cache size have both crossed their floors.
+		Short: "Install the size-triggered Go cache reclaim LaunchAgent (com.pogo.reclaim)",
+		Long: `Install com.pogo.reclaim — the launchd job that fires ~/.pogo/bin/pogo-reclaim.sh every 30 minutes. It trims Go BUILD-cache entries unused for 24h when free space is low or the build cache is over its cap, and runs ` + "`go clean -modcache`" + ` when free space AND module-cache size have both crossed their floors.
 
 WHY IT EXISTS. On 2026-08-12 this box sat at 100% (571 MiB free of 460G) with a
 7.3G module cache, and ./build.sh — which is the refinery's merge gate — failed
@@ -1012,13 +1012,25 @@ The schedule is a SAMPLER, not the trigger: launchd has no size trigger, so the
 job wakes on an interval and the size decides. A fire costs one ` + "`df`" + `; the
 ` + "`du`" + ` of the cache is only paid once the disk is already known to be low.
 
-WHAT IT DOES NOT DO. It reclaims the Go module cache and nothing else. On the
-box that prompted it that was 7.3G of a 422G fill — headroom, not a fix. When
-free space is low and the cache is not why, the job refuses to fire, exits 4,
-and says so in the log and in a rate-limited mail.
+THE BUILD-CACHE ARM (mg-925f7). Go refreshes a build-cache entry's mtime each
+time a build uses it (at most hourly), so deleting entries older than 24h keeps
+the merge gate's working set; it never runs ` + "`go clean -cache`" + `. It defers while a
+build is in flight, like the module-cache arm, and refuses a GOCACHE that lacks
+Go's own README. Knobs: POGO_RECLAIM_BUILDCACHE_AGE_HOURS (24),
+POGO_RECLAIM_BUILDCACHE_CAP_GB (40; 0 disables the cap arm).
+
+WHAT IT DOES NOT DO. It trims the Go build cache and reclaims the Go module
+cache, and nothing else — headroom, not a fix. When free space is still low
+after the trim and the module cache is not why, the job exits 4 and says so in
+the log and in a rate-limited mail, with a live, time-bounded du of the paths
+pogo and its agents write to (both Go caches, ~/.pogo/polecats,
+~/.pogo/refinery, $TMPDIR, /private/tmp/claude-<uid>, ~/.cache) and the swap
+reading. That list is not an account of the volume, and the mail says so.
 
 ~/.pogo/bin/pogo-reclaim.sh is a STATIC COPY: a merge to main does not refresh
-it. Re-run this command after any change to the runner.`,
+it. Re-run this command after any change to the runner. Every fire logs the
+sha256 of the copy that ran, to compare against
+` + "`shasum -a 256 scripts/launchd/pogo-reclaim.sh`" + ` on main.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := service.InstallReclaim(); err != nil {
@@ -1029,7 +1041,7 @@ it. Re-run this command after any change to the runner.`,
 
 	var cmdServiceUninstallReclaim = &cobra.Command{
 		Use:   "uninstall-reclaim",
-		Short: "Remove the Go module cache reclaim LaunchAgent (com.pogo.reclaim)",
+		Short: "Remove the Go cache reclaim LaunchAgent (com.pogo.reclaim)",
 		Long:  `Stop and remove com.pogo.reclaim. State under ~/.pogo/reclaim (the alert-cooldown stamp) is left in place.`,
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {

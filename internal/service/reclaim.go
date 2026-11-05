@@ -2,6 +2,8 @@ package service
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -268,16 +270,33 @@ func InstallReclaim() error {
 
 	fmt.Printf("Reclaim agent installed: %s\n", plistPath)
 	fmt.Printf("Script:   %s\n", dst)
-	fmt.Printf("Sampling: every %d min (at %s past each hour); the reclaim itself fires only when free space AND cache size both cross their floors\n", data.IntervalSeconds/60, joinMinutes(data.Minutes))
+	fmt.Printf("Sampling: every %d min (at %s past each hour); the build-cache trim fires on low disk OR an over-cap build cache, the module-cache reclaim only when free space AND module-cache size both cross their floors\n", data.IntervalSeconds/60, joinMinutes(data.Minutes))
 	fmt.Printf("Logs:     %s\n", ReclaimLogPath())
+	if sum, err := fileSHA256(dst); err == nil {
+		fmt.Printf("sha256:   %s  (every fire logs the sha256 of the copy that ran; compare the two)\n", sum)
+	}
 	fmt.Printf("\n")
-	fmt.Printf("This job reclaims the Go module cache and nothing else. On the box that\n")
-	fmt.Printf("prompted it, that was 7.3G of a 422G fill — headroom, not a fix. When the\n")
-	fmt.Printf("volume is low and the cache is not why, it refuses to fire and says so.\n")
+	fmt.Printf("This job trims Go build-cache entries unused for 24h and reclaims the Go\n")
+	fmt.Printf("module cache, and nothing else — headroom, not a fix. When the volume is\n")
+	fmt.Printf("still low and the caches are not why, it exits 4 and says so, with a live\n")
+	fmt.Printf("du of the paths pogo and its agents write to.\n")
 	fmt.Printf("\n")
 	fmt.Printf("%s is a STATIC COPY: a merge to main does not refresh it.\n", dst)
 	fmt.Printf("Re-run `pogo service install-reclaim` after any change to the runner.\n")
 	return nil
+}
+
+// fileSHA256 is the hex sha256 of a file. InstallReclaim prints it for the copy
+// it just wrote, and pogo-reclaim.sh logs the same digest of whichever copy
+// actually ran (its `runner:` line), so "is the merged fix live" is a string
+// comparison rather than a judgement about mtimes (mg-925f7).
+func fileSHA256(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // UninstallReclaim removes the reclaim plist and stops the agent. State under
