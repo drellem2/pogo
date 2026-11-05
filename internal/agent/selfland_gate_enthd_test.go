@@ -39,6 +39,7 @@ var selfLandAttestToken = regexp.MustCompile(`"token":"(enth_[0-9a-f]+)"`)
 type selfLandRig struct {
 	s       *enthdtest.Server
 	bin     string // PATH prefix: the stub pogo, enth-land-gate, then the enth binaries
+	enthBin string // the enth binaries of s.BinDir, without any enth-land-gate beside them
 	runs    string
 	landLog string
 	fn      string // the rendered self_land function
@@ -66,7 +67,12 @@ func newSelfLandRig(t *testing.T) *selfLandRig {
 	s.Token = m[1]
 	t.Setenv("ENTH_TOKEN", s.Token)
 
-	r := &selfLandRig{s: s, bin: t.TempDir(), runs: filepath.Join(t.TempDir(), "runs"), landLog: filepath.Join(t.TempDir(), "landed")}
+	r := &selfLandRig{s: s, bin: t.TempDir(), enthBin: t.TempDir(), runs: filepath.Join(t.TempDir(), "runs"), landLog: filepath.Join(t.TempDir(), "landed")}
+	// s.BinDir is wherever enthd is installed, and enth's install.sh puts
+	// enth-land-gate in that same directory (~/.local/bin). The rig puts on
+	// PATH a copy of that directory with the gate left out, so the only gate
+	// it can see is its own in r.bin (mg-32843).
+	linkEnthBinaries(t, s.BinDir, r.enthBin)
 	if out, err := exec.Command("go", "build", "-o", filepath.Join(r.bin, "enth-land-gate"), "../../cmd/enth-land-gate").CombinedOutput(); err != nil {
 		t.Fatalf("building enth-land-gate: %v\n%s", err, out)
 	}
@@ -112,7 +118,7 @@ func (r *selfLandRig) selfLand(t *testing.T, dir, stack, race string) (int, stri
 	c := exec.Command("bash", "-c", script)
 	c.Dir = dir
 	c.Env = append(os.Environ(),
-		"PATH="+r.bin+string(os.PathListSeparator)+r.s.BinDir+string(os.PathListSeparator)+pathWithoutLandGate(os.Getenv("PATH")),
+		"PATH="+r.bin+string(os.PathListSeparator)+r.enthBin+string(os.PathListSeparator)+pathWithoutLandGate(os.Getenv("PATH")),
 		"ENTH_REMOTE="+r.s.URL, "ENTH_REPO="+r.s.Repo, "ENTH_TOKEN="+r.s.Token,
 		"STACK="+stack, "LAND_LOG="+r.landLog, "GATE_RUNS="+r.runs,
 		"RACE_LAND="+race, "RACE_DONE="+filepath.Join(filepath.Dir(r.runs), "race-done-"+stack[:8]))
@@ -128,7 +134,8 @@ func (r *selfLandRig) selfLand(t *testing.T, dir, stack, race string) (int, stri
 // pathWithoutLandGate drops every entry of path that holds an
 // enth-land-gate. The only gate a rig may see is its own copy in r.bin. A gate
 // installed on the host (~/.local/bin is on pogod's PATH) otherwise turns the
-// "without the gate" case into a GATED land (mg-ca090).
+// "without the gate" case into a GATED land (mg-ca090). The enth binaries
+// themselves come from r.enthBin, which never holds a gate (mg-32843).
 func pathWithoutLandGate(path string) string {
 	var keep []string
 	for _, d := range filepath.SplitList(path) {
@@ -228,6 +235,15 @@ func TestSelfLandWithoutTheGateLandsUntestedAndSaysSo(t *testing.T) {
 	if p, err := exec.LookPath("enth-land-gate"); err != nil || p != filepath.Join(host, "enth-land-gate") {
 		t.Fatalf("control: the planted host gate is not on the inherited PATH (%q, %v)", p, err)
 	}
+	// And plant one NEXT TO enthd, which is where enth's install.sh puts it
+	// (~/.local/bin). enthdtest.BinDir resolves to that directory, so the
+	// gate there reaches the rig through s.BinDir, not through PATH
+	// (mg-32843: the case mg-ca090's control missed).
+	nextTo := gateNextToEnthd(t, host)
+	t.Setenv("POGO_ENTH_BIN_DIR", nextTo)
+	if got := enthdtest.BinDir(t); got != nextTo {
+		t.Fatalf("control: enthdtest.BinDir is %q, not the dir with the gate beside enthd (%q)", got, nextTo)
+	}
 	r := newSelfLandRig(t)
 	os.Remove(filepath.Join(r.bin, "enth-land-gate"))
 	c, cdir := r.s.Work(t, "mg-c", "", "C", map[string]string{"use.txt": "call f\n"})
@@ -237,6 +253,43 @@ func TestSelfLandWithoutTheGateLandsUntestedAndSaysSo(t *testing.T) {
 	}
 	if !strings.Contains(out, "LANDED as") || r.runCount() != 0 || strings.Contains(out, "HOST GATE RAN") {
 		t.Fatalf("want an ungated land (gate runs %d)\n%s", r.runCount(), out)
+	}
+}
+
+// gateNextToEnthd is a bin dir holding the real enth binaries and a fake
+// enth-land-gate whose script is the one in host: an install with the gate
+// beside enthd.
+func gateNextToEnthd(t *testing.T, host string) string {
+	t.Helper()
+	real := enthdtest.BinDir(t)
+	dir := t.TempDir()
+	linkEnthBinaries(t, real, dir)
+	b, err := os.ReadFile(filepath.Join(host, "enth-land-gate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "enth-land-gate"), b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// linkEnthBinaries symlinks enth, enthd and every enth-* in from into to,
+// except enth-land-gate.
+func linkEnthBinaries(t *testing.T, from, to string) {
+	t.Helper()
+	ents, err := os.ReadDir(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		n := e.Name()
+		if n == "enth-land-gate" || e.IsDir() || n != "enth" && n != "enthd" && !strings.HasPrefix(n, "enth-") {
+			continue
+		}
+		if err := os.Symlink(filepath.Join(from, n), filepath.Join(to, n)); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
