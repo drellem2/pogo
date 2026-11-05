@@ -65,10 +65,27 @@ GB=1048576 # KB in a GiB
 #   cache             what `du -sk` reports, in KB ("" = du fails)
 #   clean_rc          exit code of `go clean -modcache`
 #   clean_frees       KB that free space gains when the clean succeeds
+#   trim_frees        KB that free space gains once the build-cache trim has
+#                     removed gocache/00/old1-a (the trim itself is REAL: a real
+#                     `find -delete` against real files with real mtimes)
+#   du.map            "<path>\t<kb>" rows for any path other than the module
+#                     cache; kb "hang" makes that du sleep past any bound
 fixture() {
     WORK="$(mktemp -d)"
     STUBS="$WORK/bin"
     mkdir -p "$STUBS" "$WORK/modcache" "$WORK/state"
+    : > "$WORK/du.map"
+
+    # A real Go build cache, laid out as Go lays it out. Ages in seconds.
+    local gc="$WORK/gocache"
+    mkdir -p "$gc/00" "$gc/ab" "$gc/fuzz"
+    printf '%s\n' "This directory holds cached build artifacts from the Go build system." > "$gc/README"
+    echo 1700000000 > "$gc/trim.txt"
+    for f in 00/old1-a 00/old1-d ab/stale-d ab/new-a 00/notanentry fuzz/old-a; do echo x > "$gc/$f"; done
+    age() { perl -e '$t = time - shift; utime $t, $t, @ARGV' "$@"; }
+    age $((3 * 86400)) "$gc/00/old1-a" "$gc/00/old1-d" "$gc/00/notanentry" "$gc/fuzz/old-a" "$gc/README" "$gc/trim.txt"
+    age $((25 * 3600)) "$gc/ab/stale-d"
+    age $((60 * 60)) "$gc/ab/new-a" # used an hour ago: today's working set
 
     echo "0" > "$WORK/clean_rc"
     echo "0" > "$WORK/clean_frees"
@@ -82,6 +99,9 @@ echo "df $*" >> "$WORK_DIR/calls.log"
 [ -s "$WORK_DIR/df.broken" ] && { echo "df: nope" >&2; exit 1; }
 free="$(cat "$WORK_DIR/free")"
 total="$(cat "$WORK_DIR/total")"
+if [ -s "$WORK_DIR/trim_frees" ] && [ ! -e "$WORK_DIR/gocache/00/old1-a" ]; then
+    free=$((free + $(cat "$WORK_DIR/trim_frees")))
+fi
 if [ -s "$WORK_DIR/used" ]; then used="$(cat "$WORK_DIR/used")"; else used=$((total - free)); fi
 echo "Filesystem 1024-blocks Used Available Capacity Mounted-on"
 echo "/dev/fake $total $used $free 99% /Fake/Volume"
@@ -90,9 +110,23 @@ EOF
     cat > "$STUBS/du" <<'EOF'
 #!/usr/bin/env bash
 echo "du $*" >> "$WORK_DIR/calls.log"
-kb="$(cat "$WORK_DIR/cache" 2>/dev/null)"
-[ -z "$kb" ] && { echo "du: cannot read" >&2; exit 1; }
-printf '%s\t%s\n' "$kb" "${!#}"
+for a in "$@"; do
+    case "$a" in -*) continue ;; esac
+    if [ "$a" = "$WORK_DIR/modcache" ]; then
+        kb="$(cat "$WORK_DIR/cache" 2>/dev/null)"
+        [ -z "$kb" ] && { echo "du: cannot read" >&2; exit 1; }
+    else
+        kb="$(awk -F '\t' -v p="$a" '$1 == p { print $2 }' "$WORK_DIR/du.map")"
+        [ -z "$kb" ] && kb=0
+    fi
+    [ "$kb" = hang ] && exec sleep 30
+    printf '%s\t%s\n' "$kb" "$a"
+done
+EOF
+
+    cat > "$STUBS/sysctl" <<'EOF'
+#!/usr/bin/env bash
+[ "$*" = "-n vm.swapusage" ] && echo "total = 5120.00M  used = 3737.56M  free = 1382.44M  (encrypted)"
 EOF
 
     cat > "$STUBS/go" <<'EOF'
@@ -100,6 +134,7 @@ EOF
 echo "go $*" >> "$WORK_DIR/calls.log"
 case "$1 ${2:-}" in
     "env GOMODCACHE") echo "$WORK_DIR/modcache" ;;
+    "env GOCACHE") echo "$WORK_DIR/gocache" ;;
     "clean -modcache")
         rc="$(cat "$WORK_DIR/clean_rc")"
         if [ "$rc" = "0" ]; then
@@ -153,6 +188,9 @@ run() {
         POGO_RECLAIM_FREE_FLOOR_GB="${FREE_FLOOR:-20}" \
         POGO_RECLAIM_CACHE_FLOOR_GB="${CACHE_FLOOR:-5}" \
         POGO_RECLAIM_CRITICAL_FREE_GB="${CRITICAL_FREE:-2}" \
+        POGO_HOME="$WORK/pogo" \
+        POGO_RECLAIM_TMPDIR="$WORK/tmp" \
+        POGO_RECLAIM_CLAUDE_TMP="$WORK/claude" \
         env "$@" bash "$SCRIPT" 2>&1
     )"
     RC=$?
@@ -161,6 +199,8 @@ run() {
 cleanup() { [ -n "$WORK" ] && rm -rf "$WORK"; }
 
 called() { grep -q "^$1" "$WORK/calls.log"; }
+gc_has() { [ -e "$WORK/gocache/$1" ]; }
+du_map() { printf '%s\t%s\n' "$1" "$2" >> "$WORK/du.map"; }
 
 # ---------------------------------------------------------------------------
 # 1. HEALTHY DISK — the steady state, and the case that must cost nothing
@@ -175,7 +215,18 @@ echo $((460 * GB)) > "$WORK/total"
 echo $((7 * GB)) > "$WORK/cache" # large cache — and irrelevant, because ANDed
 run
 [ "$RC" -eq 0 ] && pass "exits 0" || fail "expected 0, got $RC"
-called du && fail "measured the cache on a healthy disk (the du must be paid only when the disk is low)" || pass "never paid for the du"
+called "du -sk $WORK/modcache" && fail "measured the module cache on a healthy disk (that du must be paid only when the disk is low)" || pass "never paid for the module-cache du"
+called "du -sk $WORK/gocache" && pass "paid exactly the build-cache cap du (the cap arm is on by default)" || fail "the cap arm did not measure the build cache"
+gc_has 00/old1-a && pass "under the cap: trimmed nothing on a healthy disk" || fail "trimmed the build cache on a healthy disk with the cache under its cap"
+cleanup
+
+echo "-- 1b. healthy disk with the cap arm off: one df, and no du at all --"
+fixture
+echo $((200 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+run POGO_RECLAIM_BUILDCACHE_CAP_GB=0
+[ "$RC" -eq 0 ] && pass "exits 0" || fail "expected 0, got $RC"
+called du && fail "paid for a du on a healthy disk with the cap disabled" || pass "never paid for any du"
 called "go clean" && fail "reclaimed a 7G cache on a box with 200G free" || pass "did not reclaim"
 case "$OUT" in *"above the floor"*) pass "says why it did nothing" ;; *) fail "no explanation: $OUT" ;; esac
 cleanup
@@ -198,7 +249,7 @@ case "$OUT" in *"is NOT what is filling this volume"*) pass "names the cache as 
 case "$OUT" in *"needs a human, not a cron"*) pass "says what it cannot do" ;; *) fail "no cannot-fix statement" ;; esac
 case "$OUT" in *"680M"*) pass "quotes the measured cache size" ;; *) fail "no cache size in output" ;; esac
 grep -q "mg mail send human" "$WORK/mail.log" && pass "alerted a human" || fail "nobody was told outside the log"
-grep -q "not the disk problem\|does not own\|Largest consumers" "$WORK/mail.log" && pass "the mail carries the scope caveat too" || fail "the caveat did not travel into the mail"
+grep -q "NOT an account of the volume" "$WORK/mail.log" && pass "the mail carries the scope caveat too" || fail "the caveat did not travel into the mail"
 cleanup
 
 # ---------------------------------------------------------------------------
@@ -531,35 +582,207 @@ case "$OUT" in *"% used"*) fail "still calls it '% used' — the number is a cap
 cleanup
 
 # ---------------------------------------------------------------------------
-# 12. THE 34G SIBLING CACHE IS NAMED, NOT LEFT TO BE ASSUMED
+# 12. THE BUILD-CACHE ARM (mg-925f7): an age trim, never `go clean -cache`
 # ---------------------------------------------------------------------------
-# There are two Go caches on this box and they differ by a factor of fifty:
-# ~/go/pkg/mod (680M, what this job reclaims) and ~/Library/Caches/go-build
-# (34G, which `go clean -modcache` does not reach). "The Go cache is large" is
-# ambiguous, and the reading this job does nothing about is the larger one — so
-# a reader who sees a job called "reclaim" installed must not be left to infer
-# the 34G is covered. Both the log and the mail have to say it.
-echo "-- 12. the build cache this job does not touch is named --"
+# The trim runs a REAL `find -delete` against a fixture laid out as Go lays out
+# its cache, with real mtimes. What it must delete: *-a/*-d entries in the
+# two-hex shards older than 24h. What it must not: an entry a build used an
+# hour ago, Go's own README/trim.txt, a non-entry file, the fuzz cache.
+echo "-- 12. low disk: the build-cache trim runs first, and can be enough --"
+fixture
+echo $((10 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
+echo $((15 * GB)) > "$WORK/trim_frees" # 25G free afterwards: above the 20G floor
+run
+[ "$RC" -eq 0 ] && pass "exits 0 once the trim brings free space above the floor" || fail "expected 0, got $RC: $OUT"
+gc_has 00/old1-a || gc_has 00/old1-d || gc_has ab/stale-d && fail "left an entry older than 24h in place" || pass "removed every entry older than 24h (3d and 25h)"
+gc_has ab/new-a && pass "kept the entry a build used an hour ago" || fail "deleted today's working set"
+gc_has README && gc_has trim.txt && pass "kept Go's README and trim.txt" || fail "deleted Go's own bookkeeping"
+gc_has 00/notanentry && gc_has fuzz/old-a && pass "kept the non-entry file and the fuzz cache" || fail "deleted outside the *-a/*-d shard entries"
+called "go clean -cache" && fail "ran go clean -cache" || pass "never ran go clean -cache"
+called "du -sk $WORK/modcache" && fail "measured the module cache after the trim had already fixed the disk" || pass "did not pay for the module-cache du"
+case "$OUT" in *"removed 3 entries unused for >24h"*) pass "says how many entries it removed and the age" ;; *) fail "no trim count: $OUT" ;; esac
+case "$OUT" in *"brought free space above the floor"*) pass "says the trim was enough" ;; *) fail "did not say why it stopped: $OUT" ;; esac
+cleanup
+
+echo "-- 12a. low disk: the trim is not enough, the module cache is small -> CANNOT HELP --"
 fixture
 echo $((7 * GB)) > "$WORK/free"
 echo $((460 * GB)) > "$WORK/total"
 echo $((680 * 1024)) > "$WORK/cache"
+echo $((2 * GB)) > "$WORK/trim_frees"
 run
-case "$OUT" in *"go-build"*) pass "the scope note names ~/Library/Caches/go-build" ;; *) fail "the 34G sibling cache is not named: $OUT" ;; esac
-case "$OUT" in *"does not reach it"*) pass "says go clean -modcache does not reach it" ;; *) fail "did not say the command does not reach it" ;; esac
-grep -q "go-build" "$WORK/mail.log" && pass "it travels into the mail too" || fail "the mail omits the larger cache"
+[ "$RC" -eq 4 ] && pass "exits 4 only after the trim has done what it can" || fail "expected 4, got $RC: $OUT"
+gc_has 00/old1-a && fail "reached CANNOT HELP without trimming" || pass "trimmed before the verdict"
+grep -q "Build-cache trim (mg-925f7) on this fire: removed 3 entries" "$WORK/mail.log" && pass "the alert says what the trim did" || fail "the alert does not say what the build-cache trim did"
+grep -q "7.0G -> 9.0G" "$WORK/mail.log" && pass "the alert quotes the trim's measured free-space change" || fail "no before/after free figure in the alert"
 cleanup
 
-# The same disclosure has to survive the SUCCESS path, which is the path a
-# reader reaches when the job has just done something and is most inclined to
-# believe the disk is handled.
+echo "-- 12b. a build in flight defers the trim, and the alert still goes out --"
+# Exiting 5 at the first sign of a build would silence the alert on a box that is
+# always building — which this one is. So the trim defers, the module-cache
+# verdict is still reached, and a human is still told.
 fixture
-echo $((10 * GB)) > "$WORK/free"
+echo $((7 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
+echo "4242" > "$WORK/pgrep.go"
+run
+[ "$RC" -eq 5 ] && pass "exits 5 (DEFERRED): the job may yet help on the next fire" || fail "expected 5, got $RC: $OUT"
+gc_has 00/old1-a && pass "deleted nothing while a build was running" || fail "trimmed the build cache under a running build"
+grep -q "Build-cache trim (mg-925f7) on this fire: DEFERRED" "$WORK/mail.log" && pass "the alert says the trim was deferred, and why" || fail "the deferral did not reach the alert"
+cleanup
+
+echo "-- 12c. the critical floor overrides the trim's deferral --"
+fixture
+echo $((1 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
+echo "4242" > "$WORK/pgrep.go"
+run
+gc_has 00/old1-a && fail "deferred the trim at 1G free" || pass "trims anyway below the critical floor"
+[ "$(printf '%s\n' "$OUT" | grep -c 'NOT deferring')" -eq 1 ] && pass "states the override once" || fail "the override was stated $(printf '%s\n' "$OUT" | grep -c 'NOT deferring') times"
+cleanup
+
+echo "-- 12d. a GOCACHE without Go's README is refused, not trimmed --"
+fixture
+rm -f "$WORK/gocache/README"
+echo $((7 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
+run
+gc_has 00/old1-a && pass "deleted nothing from an untrusted directory" || fail "ran find -delete in a directory that is not provably a Go build cache"
+case "$OUT" in *"REFUSED"*"no Go build-cache README"*) pass "says why it refused" ;; *) fail "silent refusal: $OUT" ;; esac
+cleanup
+
+echo "-- 12e. the cap arm: an over-cap cache is trimmed on a healthy disk --"
+fixture
+echo $((200 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+du_map "$WORK/gocache" $((45 * GB))
+run
+[ "$RC" -eq 0 ] && pass "exits 0" || fail "expected 0, got $RC: $OUT"
+gc_has 00/old1-a && fail "an over-cap cache was not trimmed" || pass "trimmed an over-cap cache"
+gc_has ab/new-a && pass "the cap arm kept today's working set too" || fail "the cap arm deleted today's working set"
+case "$OUT" in *"over its 40.0G cap"*) pass "names the cap" ;; *) fail "did not name the cap: $OUT" ;; esac
+called "du -sk $WORK/modcache" && fail "a healthy-disk fire measured the module cache" || pass "did not touch the module-cache arm"
+cleanup
+
+fixture
+echo $((200 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+du_map "$WORK/gocache" $((45 * GB))
+run POGO_RECLAIM_BUILDCACHE_CAP_GB=50
+gc_has 00/old1-a && pass "the cap is configurable (45G under a 50G cap: untouched)" || fail "ignored POGO_RECLAIM_BUILDCACHE_CAP_GB"
+cleanup
+
+echo "-- 12f. the free floor is configurable for the trim too --"
+fixture
+echo $((30 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
+FREE_FLOOR=40 run POGO_RECLAIM_ALERT_COOLDOWN=999999
+gc_has 00/old1-a && fail "30G free under a 40G floor did not trim" || pass "POGO_RECLAIM_FREE_FLOOR_GB moves the trim's trigger"
+cleanup
+
+echo "-- 12g. dry run and the age knob --"
+fixture
+echo $((7 * GB)) > "$WORK/free"
 echo $((460 * GB)) > "$WORK/total"
 echo $((7 * GB)) > "$WORK/cache"
-echo $((7 * GB)) > "$WORK/clean_frees"
+run POGO_RECLAIM_DRY_RUN=1
+gc_has 00/old1-a && gc_has ab/stale-d && pass "a dry run deleted nothing from the build cache" || fail "a dry run trimmed the build cache"
+case "$OUT" in *"DRY RUN: would remove 3 build-cache entries"*) pass "a dry run counts what it would remove" ;; *) fail "no dry-run count: $OUT" ;; esac
+cleanup
+
+fixture
+echo $((7 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
+run POGO_RECLAIM_BUILDCACHE_AGE_HOURS=48
+gc_has ab/stale-d && ! gc_has 00/old1-a && pass "AGE_HOURS=48 keeps a 25h entry and removes a 3d one" || fail "the age knob was not honoured"
+cleanup
+
+fixture
+echo $((7 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
+run POGO_RECLAIM_BUILDCACHE_AGE_HOURS=0
+gc_has ab/new-a && pass "AGE_HOURS=0 is clamped: an entry used an hour ago survives" || fail "an age under Go's 1h mtime refresh deleted a live entry"
+cleanup
+
+# ---------------------------------------------------------------------------
+# 13. THE CONSUMER REPORT IS MEASURED ON THE FIRE, NOT QUOTED FROM AUGUST
+# ---------------------------------------------------------------------------
+# The alert used to quote "Library 73G, tools 15G, ..." measured 2026-08-12, and
+# was still mailing it in November. It must now be a du taken on the fire, of
+# the paths pogo and its agents write to — and it must not pretend the list
+# accounts for the volume (swap in /System/Volumes/VM, pogo#258, is invisible
+# to any du of the Data volume).
+echo "-- 13. live per-path du in the alert --"
+fixture
+mkdir -p "$WORK/pogo/polecats" "$WORK/pogo/refinery" "$WORK/claude" "$WORK/tmp/TestFoo123" "$WORK/tmp/go-build42" "$WORK/tmp/tmp.abc"
+du_map "$WORK/gocache" $((12 * GB))
+du_map "$WORK/pogo/polecats" $((15 * GB))
+du_map "$WORK/pogo/refinery" $((3 * GB))
+du_map "$WORK/claude" $((20 * GB))
+du_map "$WORK/tmp" $((9 * GB))
+du_map "$WORK/tmp/TestFoo123" $((1 * GB))
+du_map "$WORK/tmp/go-build42" $((1 * GB))
+du_map "$WORK/tmp/tmp.abc" $((6 * GB))
+echo $((7 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
 run
-case "$OUT" in *"go-build"*) pass "named on the successful-reclaim path too" ;; *) fail "the success path omits it — and that is the path that reads as 'handled'" ;; esac
+# row LABEL VALUE: some ONE line of the output names LABEL and carries VALUE.
+row() { printf '%s\n' "$OUT" | grep -F -- "$1" | grep -qF -- "$2"; }
+for spec in "Go build cache  $WORK/gocache|12.0G" "polecat worktrees  $WORK/pogo/polecats|15.0G" \
+    "refinery  $WORK/pogo/refinery|3.0G" "Claude scratch root  $WORK/claude|20.0G" \
+    "\$TMPDIR, all of it  $WORK/tmp|9.0G" "of which Go test fixtures (Test*, go-build*)|2.0G" \
+    "of which mktemp -d dirs (tmp.*)|6.0G" "Go module cache  $WORK/modcache|680M" "~/.cache  |absent"; do
+    row "${spec%|*}" "${spec##*|}" && pass "row: ${spec%%  *} = ${spec##*|}" || fail "no row '${spec%|*}' carrying '${spec##*|}': $OUT"
+done
+grep -qF "20.0G  Claude scratch root  $WORK/claude" "$WORK/mail.log" && grep -q "polecat worktrees" "$WORK/mail.log" && pass "the rows travel into the mail" || fail "the mail does not carry the live rows"
+# 12 + 15 + 3 + 20 + 9 + 0.66 = 59.66G; the breakdown rows are not double-counted.
+grep -q "These rows sum to 59.7G of the 453.0G used; the other 393.3G is NOT attributed here" "$WORK/mail.log" \
+    && pass "states the sum, the used figure and the unattributed rest (breakdown rows not double-counted)" \
+    || fail "no sum/unattributed line: $(grep 'rows sum' "$WORK/mail.log")"
+grep -q "NOT an account of the volume" "$WORK/mail.log" && pass "says the list is not an account of the volume" || fail "the list reads as a full account"
+grep -q "/System/Volumes/VM" "$WORK/mail.log" && pass "names swap on the VM volume as invisible to this du" || fail "does not mention the VM volume"
+grep -q "Swap now (sysctl vm.swapusage): total = 5120.00M" "$WORK/mail.log" && pass "quotes sysctl vm.swapusage" || fail "no swap reading"
+grep -q "2026-08-12\|Library 73G" "$WORK/mail.log" && fail "still mails the hardcoded August list" || pass "the August list is gone from the mail"
+case "$OUT" in *"Library 73G"*) fail "still logs the hardcoded August list" ;; *) pass "the August list is gone from the log" ;; esac
+[ "$(grep -c "^du -sk $WORK/claude" "$WORK/calls.log")" -eq 1 ] && pass "each path is measured once per fire, though the log and the mail both print it" || fail "measured the same path $(grep -c "^du -sk $WORK/claude" "$WORK/calls.log") times"
+cleanup
+
+echo "-- 13a. a du that hangs is bounded and reported, never a size --"
+fixture
+mkdir -p "$WORK/claude"
+du_map "$WORK/claude" hang
+echo $((7 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
+T0="$(date +%s)"
+run POGO_RECLAIM_DU_TIMEOUT_SEC=1
+T1="$(date +%s)"
+[ "$RC" -eq 4 ] && pass "the fire completes with its verdict" || fail "expected 4, got $RC: $OUT"
+[ $((T1 - T0)) -lt 15 ] && pass "bounded: $((T1 - T0))s, not the stub's 30s" || fail "took $((T1 - T0))s — the du was not bounded"
+row "Claude scratch root  $WORK/claude" "TIMED OUT after 1s" && pass "reports the timed-out row as TIMED OUT" || fail "the hung row was not reported: $OUT"
+grep -q "sum to at least" "$WORK/mail.log" && pass "the sum is a lower bound when a row is unmeasured" || fail "the sum reads as exact despite a missing row"
+cleanup
+
+# ---------------------------------------------------------------------------
+# 14. "MERGED IS NOT LIVE" CAN BE CHECKED BY A HASH
+# ---------------------------------------------------------------------------
+echo "-- 14. the runner line carries the copy's sha256 --"
+fixture
+echo $((200 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+run
+SHA="$(shasum -a 256 "$SCRIPT" 2>/dev/null || sha256sum "$SCRIPT")"
+SHA="${SHA%% *}"
+case "$OUT" in *"runner: $SCRIPT"*"sha256 $SHA"*) pass "logs sha256 $SHA" ;; *) fail "no sha256 on the runner line: $OUT" ;; esac
 cleanup
 
 echo "=== $PASS passed, $FAIL failed ==="
