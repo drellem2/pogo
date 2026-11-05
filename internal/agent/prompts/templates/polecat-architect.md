@@ -216,9 +216,10 @@ Even ephemeral, your context is where your *judgment* lives. Don't fill it with 
            { echo "REFUSED: could not read the repo's declared gate command — nothing landed"; return 1; }
          echo "GATE COMMAND: $gate"
        fi
-       # The pre-land check (mg-c184d) prints the stack to land, or refuses.
+       # The pre-land check (mg-c184d) prints the stack to land, or refuses. It prints the ids on ONE line,
+       # space-separated (Pogo-Supersedes reuses that line), so split on any whitespace, not per line (mg-88ece).
        ids=$(pogo presubmit --item="$item" --print-stack) || return 1
-       stack=(); while read -r id; do [ -n "$id" ] && stack+=("$id"); done <<< "$ids"
+       stack=(); while read -r id; do [ -n "$id" ] && stack+=("$id"); done <<< "$(printf '%s' "$ids" | tr -s '[:space:]' '\n')"
        [ ${#stack[@]} -gt 0 ] || { echo "REFUSED: pogo presubmit printed no stack — nothing landed"; return 1; }
        n=$(cat "$st.attempt" 2>/dev/null || echo 0)
        # A land whose answer was lost is re-issued under its SAME request id:

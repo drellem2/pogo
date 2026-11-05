@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/drellem2/pogo/internal/vcs/enthvcs"
 )
 
 // The rendered self_land run under the shell agents actually use (zsh -c, and
@@ -258,7 +260,10 @@ func TestSelfLandPassesSeparateArgvUnderZsh(t *testing.T) {
 				t.Run(fmt.Sprintf("%d-change/%s/%s", len(ids), shell, tmpl), func(t *testing.T) {
 					r := newArgvRig(t, "")
 					fn := selfLandFn(t, tmpl, r.id, r.fixture)
-					code, out, calls := r.run(t, shell, fn, strings.Join(ids, "\n"))
+					// What the real producer prints: one line, space-separated (mg-88ece).
+					// A newline-joined stub stack is how this test once passed while
+					// every real 2-Change land failed.
+					code, out, calls := r.run(t, shell, fn, enthvcs.PrintStackLine(ids))
 					// 1. the stack is one arg per Change id, to the gate and to the land.
 					g := calls["enth-land-gate"]
 					if len(g) != 1 || len(g[0]) < len(ids) || strings.Join(g[0][len(g[0])-len(ids):], " ") != strings.Join(ids, " ") {
@@ -327,5 +332,77 @@ func TestSelfLandFallsBackToBuildShAndSaysSo(t *testing.T) {
 				t.Fatalf("enth-land-gate argv %q: want --gate=./build.sh", g)
 			}
 		})
+	}
+}
+
+// oldStackReader is the self_land reader before mg-88ece: one id per LINE.
+const oldStackReader = `stack=(); while read -r id; do [ -n "$id" ] && stack+=("$id"); done <<< "$ids"`
+
+// stackReaderLine lifts the line of fn that turns $ids into the stack array.
+func stackReaderLine(t *testing.T, fn string) string {
+	t.Helper()
+	var got []string
+	for _, l := range strings.Split(fn, "\n") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, "stack=();") {
+			got = append(got, l)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("want exactly one stack-reader line in self_land, got %q", got)
+	}
+	return got[0]
+}
+
+// countStack runs reader under shell with ids set to printed, the way
+// self_land's ids=$(pogo presubmit --print-stack) sets it, and returns the
+// stack's elements.
+func countStack(t *testing.T, shell, reader, printed string) []string {
+	t.Helper()
+	script := "local_ids() { local ids id; local -a stack\n" +
+		"ids=$(printf '%s\\n' \"$PRINTED\")\n" + reader + "\n" +
+		`for id in "${stack[@]}"; do printf '[%s]\n' "$id"; done` + "\n}\nlocal_ids\n"
+	c := exec.Command(shell, "-c", script)
+	c.Env = append(os.Environ(), "PRINTED="+printed)
+	out, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s: %v\n%s", shell, err, out)
+	}
+	var els []string
+	for _, l := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+		if strings.HasPrefix(l, "[") && strings.HasSuffix(l, "]") {
+			els = append(els, l[1:len(l)-1])
+		} else if l != "" {
+			t.Fatalf("%s: unexpected output line %q\n%s", shell, l, out)
+		}
+	}
+	return els
+}
+
+// A 2-Change stack, as --print-stack really prints it (ONE line, space-
+// separated), becomes 2 stack elements under zsh and bash (mg-88ece). The
+// positive control: the pre-fix reader, under the same harness, yields 1
+// element "id1 id2" — the failure enth-land-gate refused as "not a Change id".
+func TestSelfLandSplitsTheOneLinePrintStack(t *testing.T) {
+	ids := []string{"7dc1aaaa", "7db1bbbb"}
+	printed := enthvcs.PrintStackLine(ids)
+	for _, shell := range selfLandShells(t) {
+		t.Run(shell+"/control", func(t *testing.T) {
+			if got := countStack(t, shell, oldStackReader, printed); len(got) != 1 || got[0] != printed {
+				t.Fatalf("control: the per-line reader gave %q for %q, want the single joined element — the harness cannot see the bug", got, printed)
+			}
+		})
+		for _, tmpl := range []string{"polecat.md", "polecat-architect.md"} {
+			t.Run(shell+"/"+tmpl, func(t *testing.T) {
+				reader := stackReaderLine(t, selfLandFn(t, tmpl, "mg-x", "/r"))
+				for _, in := range []string{printed, "7dc1aaaa\n7db1bbbb", "  7dc1aaaa \t 7db1bbbb  "} {
+					if got := countStack(t, shell, reader, in); strings.Join(got, ",") != strings.Join(ids, ",") {
+						t.Fatalf("%s reader gave %q for %q, want %q", tmpl, got, in, ids)
+					}
+				}
+				if got := countStack(t, shell, reader, enthvcs.PrintStackLine(ids[:1])); len(got) != 1 || got[0] != ids[0] {
+					t.Fatalf("%s reader gave %q for a 1-Change stack", tmpl, got)
+				}
+			})
+		}
 	}
 }

@@ -185,7 +185,8 @@ func TestEnthRenderCarriesTheEnthProtocol(t *testing.T) {
 				// The self-land of enth-vcs §6 (mg-5b904), whole.
 				`ids=$(pogo presubmit --item="$item" --print-stack) || return 1`,
 				// Arrays, so zsh passes one argv entry per id and per flag (mg-c07a5).
-				`stack=(); while read -r id; do [ -n "$id" ] && stack+=("$id"); done <<< "$ids"`,
+				// --print-stack prints ONE line, space-separated: split on any whitespace (mg-88ece).
+				`stack=(); while read -r id; do [ -n "$id" ] && stack+=("$id"); done <<< "$(printf '%s' "$ids" | tr -s '[:space:]' '\n')"`,
 				`lreq=(); [ -n "$req" ] && lreq=(--require "$job")`,
 				// The gate is the repo's declared one (mg-c07a5).
 				`gate=$(pogo refinery gate --repo=/r --worktree="$PWD")`,

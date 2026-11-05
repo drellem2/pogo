@@ -75,3 +75,15 @@ func workerOr(w string) string {
 	}
 	return w
 }
+
+// PrintStackLine is what `pogo presubmit --print-stack` prints on stdout: the
+// approved stack's Change ids, bottom first, on ONE line, separated by single
+// spaces. Two consumers rely on exactly this (mg-88ece): the polecat
+// templates' self_land, which splits it on any whitespace into one argument per
+// id, and the CONFLICT/RED re-make step, which puts it whole into a
+// Pogo-Supersedes trailer value — which must stay on one line, and which
+// vcs.DropSuperseded splits back into ids with strings.Fields. Change it and
+// both break.
+func PrintStackLine(ids []string) string {
+	return strings.Join(ids, " ")
+}

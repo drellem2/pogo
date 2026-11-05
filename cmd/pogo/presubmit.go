@@ -60,10 +60,13 @@ In an enth checkout (a directory holding .enth/checkout) --item is required:
     refinery ran on enth work before workers landed their own (mg-5b904).
 Changes are durable on enthd when made, so there is nothing to push.
 
---print-stack (enth only) prints the approved stack's Change ids, bottom first
-and space-separated, on stdout, and every message on stderr: what the worker's
-own land takes as its arguments (enth land $(pogo presubmit --item=X
---print-stack) --request-id …). It prints nothing on stdout when it refuses.
+--print-stack (enth only) prints the approved stack's Change ids, bottom first,
+on stdout as ONE line separated by single spaces, and every message on stderr.
+It prints nothing on stdout when it refuses. That one-line format is a
+contract with two consumers (mg-88ece): the worker's own land, which splits it
+on any whitespace into one argument per id (enth land <ids> --request-id …),
+and a re-made Change's Pogo-Supersedes trailer, whose value it is verbatim and
+which must stay on one line. A consumer must not read it one id per line.
 
 A check that cannot run (git, enth or worktree-dirty failing) refuses: it
 never reads as clean.`,
@@ -88,7 +91,7 @@ never reads as clean.`,
 	cmd.Flags().StringVar(&item, "item", "", "Work item the submission is for (required on an enth repo)")
 	cmd.Flags().StringVar(&target, "target", "main", "Target ref the work will be merged into")
 	cmd.Flags().StringVar(&worker, "worker", "", "Worker whose Changes to list on enth (default $POGO_AGENT_NAME)")
-	cmd.Flags().BoolVar(&printStack, "print-stack", false, "enth: print the approved stack's Change ids (bottom first) on stdout, messages on stderr — the arguments of the worker's own enth land")
+	cmd.Flags().BoolVar(&printStack, "print-stack", false, "enth: print the approved stack's Change ids (bottom first) on stdout as ONE line, single-space-separated, messages on stderr — the arguments of the worker's own enth land, and the value of a re-make's Pogo-Supersedes trailer")
 	return cmd
 }
 
@@ -185,7 +188,9 @@ func presubmitEnthStack(ctx context.Context, root, item, worker string, msgs io.
 }
 
 // printPresubmitStack is --print-stack: the check's messages on stderr, the
-// stack's ids on stdout, and nothing on stdout when it refuses.
+// stack's ids on stdout as one space-separated line (enthvcs.PrintStackLine,
+// the contract self_land and Pogo-Supersedes rely on), and nothing on stdout
+// when it refuses.
 func printPresubmitStack(ctx context.Context, dir, item, worker string, stdout, stderr io.Writer) bool {
 	kind, root, err := enthvcs.Detect(dir)
 	if err != nil {
@@ -200,6 +205,6 @@ func printPresubmitStack(ctx context.Context, dir, item, worker string, stdout, 
 	if !ok {
 		return false
 	}
-	fmt.Fprintln(stdout, strings.Join(ids, " "))
+	fmt.Fprintln(stdout, enthvcs.PrintStackLine(ids))
 	return true
 }
