@@ -243,7 +243,8 @@ Follow these steps exactly, in order. Skipping any step is a failure.
    - **`CONFLICT` (exit 3)** — someone landed an edit to a path your Change touches, and the conflict lines above name each path. Re-make your work on the new trunk, in a fresh checkout (an enth checkout cannot be moved), naming the Change it replaces so the old one is retired rather than left as a second stack:
      ```bash
      OLD=$(pogo presubmit --item={{.Id}} --print-stack)   # the Change(s) being replaced; run it where you ran self_land
-     REMAKE=$(mktemp -d)/w
+     N=1; while [ -e "{{.WorktreeDir}}-remake$N" ]; do N=$((N+1)); done
+     REMAKE="{{.WorktreeDir}}-remake$N"   # beside your checkout, where gc reaps it: never $TMPDIR, which nothing reaps (pogo#282)
      enth checkout {{if .Branch}}{{.Branch}}{{else}}main{{end}} "$REMAKE" && cd "$REMAKE"
      # Re-apply your work here: every file your Change touched, from the checkout you made it in.
      # The paths the conflict named: merge your edit into the trunk's version by hand.
