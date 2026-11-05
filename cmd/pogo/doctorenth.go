@@ -291,8 +291,8 @@ func enthGateLines(projs []project.Project, installed bool, declared func(dir st
 			if err == nil {
 				why = "./build.sh is not executable"
 			}
-			rows = append(rows, enthLoginRow{"warn", fmt.Sprintf("%s (%s): no gate declared in .pogo/refinery.toml and %s, so with enth-land-gate installed every self_land is refused. Land a gate with the repo's next Change: a .pogo/refinery.toml with quality_gate = \"<a command that checks the repo>\", or an executable build.sh. If the trunk already has one, this checkout is behind it: enth update %s",
-				dir, p.Enth.Repo, why, dir)})
+			rows = append(rows, enthLoginRow{"warn", fmt.Sprintf("%s (%s): no gate declared in .pogo/refinery.toml and %s, so with enth-land-gate installed every self_land is refused. Land a gate with the repo's next Change: a .pogo/refinery.toml with quality_gate = \"<a command that checks the repo>\", or an executable build.sh. If the trunk already has one, this checkout is behind it: enth --remote %s --repo %s checkout update %s",
+				dir, p.Enth.Repo, why, p.Enth.Remote, p.Enth.Repo, dir)})
 		}
 	}
 	return rows

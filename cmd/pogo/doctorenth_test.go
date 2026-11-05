@@ -207,7 +207,7 @@ func TestEnthGateLines(t *testing.T) {
 			t.Errorf("row %d = %+v, want %s containing %q", i, rows[i], w.status, w.sub)
 		}
 	}
-	if !strings.Contains(rows[0].detail, "enth update "+empty) {
+	if !strings.Contains(rows[0].detail, "enth --remote https://e --repo o/empty checkout update "+empty) {
 		t.Errorf("the warning does not name the stale-checkout remedy: %q", rows[0].detail)
 	}
 }

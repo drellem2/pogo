@@ -191,6 +191,15 @@ while IFS= read -r line; do
             else
                 bad "4    doctor enth rows: $(grep -i enth "$S/doctor.out")"
             fi
+            # #287: the recipe leaves x with no gate until its first item
+            # lands one, and the sandbox's enth-land-gate is installed, so
+            # doctor must say so. An enth without land --require is ungated.
+            if enth land --help 2>&1 | grep -q -- '--require'; then
+                grep 'enth land gate' "$S/doctor.out" | sed 's/^/      /'
+                grep 'enth land gate' "$S/doctor.out" | grep -qF "$X ($OWNER/x): no gate declared" \
+                    && ok "4    pogo doctor --check: enth land gate warns that x has no gate yet" \
+                    || bad "4    doctor did not flag x's missing gate: $(grep -i 'enth land gate' "$S/doctor.out")"
+            fi
             ;;
         "pogo project add "*)
             # pogod's visit refuses a path under a temp root (isEphemeralPath),
@@ -243,8 +252,9 @@ as_worker() {
         POGO_HOME="$POGO_HOME" MG_ROOT="$MG_ROOT" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" TMPDIR="$TMPDIR" "$@" )
 }
 echo "# x" > "$D/README.md"
-# The repo's merge gate, declared in the first Change. The gated land runs it
-# on a checkout of the merged tree, so it passes only if the Change is in it.
+# The repo's merge gate, declared in the first Change, as the coordinator's
+# recipe tells the first item to do (#287). The gated land runs it on a
+# checkout of the merged tree, so it passes only if the Change is in it.
 mkdir -p "$D/.pogo"
 echo 'quality_gate = "test -f README.md"' > "$D/.pogo/refinery.toml"
 COUT="$(as_worker bash -c "$(sed 's/<type>: <description>/docs: add a README/' "$S/px.change")" 2>&1)" \
@@ -261,6 +271,16 @@ for _ in $(seq 1 100); do [ "$(mg show "$ITEM" 2>/dev/null | sed -n 's/^Status: 
 [ "$(mg show "$ITEM" 2>/dev/null | sed -n 's/^Status: *//p' | head -1)" = done ] && ok "5    $ITEM is done" || bad "5    $ITEM is $(mg show "$ITEM" 2>&1 | sed -n 's/^Status: *//p')"
 enth --remote "$URL" --repo "$OWNER/x" query cat README.md --rev refs/heads/main 2>/dev/null | grep -q '# x' \
     && ok "5    README.md is on $OWNER/x's trunk" || bad "5    trunk: $(enth --remote "$URL" --repo "$OWNER/x" query log 2>&1)"
+
+# ... and once the gate is on the trunk, x's checkout carries it and doctor's
+# row passes (#287). pogo keeps the checkout fresh; update it here so the
+# observation does not wait on that.
+if enth land --help 2>&1 | grep -q -- '--require'; then
+    UOUT="$(enth --remote "$URL" --repo "$OWNER/x" checkout update "$X" 2>&1)" || bad "5    enth checkout update $X: $UOUT"
+    pogo doctor --check 2>&1 | grep 'enth land gate' | grep -qF "$X ($OWNER/x): declared gate \"test -f README.md\"" \
+        && ok "5    pogo doctor --check: enth land gate passes on x once its gate landed" \
+        || bad "5    doctor gate row after the land: $(pogo doctor --check 2>&1 | grep 'enth land gate')"
+fi
 
 step "6. the auto-registration trap: an indexed enth checkout is recorded as git"
 enth repo create "$OWNER/y" >/dev/null 2>&1 || bad "6    repo create y"
