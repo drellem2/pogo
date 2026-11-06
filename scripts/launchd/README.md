@@ -822,9 +822,18 @@ gate with `-trimpath`, and this arm is the backstop.
 **Why the age trim is safe.** Go refreshes an entry's mtime each time a build
 uses it, at most once an hour (`cmd/go/internal/cache`, `mtimeInterval = 1h`).
 An entry untouched for 24h has not been read by any build in 23h, so the gate's
-working set survives, and a deleted entry is an ordinary cache miss. The race
-with a build reading an entry being deleted is narrowed by that refresh and by
-the in-flight deferral below. It is not closed.
+working set survives, and a deleted entry is an ordinary cache miss.
+
+**It does not wait for running builds (mg-ae217).** It used to defer whenever
+any `go`/`compile`/`link` process was alive. Sampled on this box on 2026-11-06
+(every 6s for 10 minutes, 22 agents up), 45 of 100 samples had a `go` process.
+So the arm deferred on about half of all fires, mostly in the busy hours that
+fill the disk. Go's own `Trim` deletes entries by mtime in the same way, from
+every `go` command, with no lock against the builds running beside it. An entry
+a running build has used is under 1h old, and this arm never goes below 2h. The
+race that remains is the one Go accepts: a build first reads an entry between
+`find` reading its mtime and deleting it. The module-cache reclaim below still
+defers.
 
 What it deletes: only `??/*-a` and `??/*-d` files in the two-hex shards, never
 `README`, `trim.txt`, `testexpire.txt` or `fuzz/`. It refuses outright, and
@@ -903,7 +912,7 @@ one `df`, one bounded `du` of the build cache for the cap check, and a log line;
 `POGO_RECLAIM_BUILDCACHE_CAP_GB=0` drops it back to one `df`. A nightly `StartCalendarInterval` was the alternative and is worse here:
 the volume went from healthy to 571 MiB free inside a working day.
 
-### It defers while something is building
+### The module-cache reclaim defers while something is building
 
 `go clean -modcache` deletes module trees a running build is **reading**, so a
 racing build does not get slower — it fails, with a missing-file error that
@@ -958,8 +967,11 @@ Swap now (sysctl vm.swapusage): total = 5120.00M  used = 3681.56M  ...
 ```
 
 (A dry run on this box at 2026-11-05 16:46Z, the day after a manual reclaim.)
-Each `du` is bounded by `POGO_RECLAIM_DU_TIMEOUT_SEC` (60). A `du` that runs out
-is printed as `TIMED OUT`, never as a size, and the sum becomes "at least". The
+Each `du` is bounded by `POGO_RECLAIM_DU_TIMEOUT_SEC` (60). That includes the
+module-cache `du` that decides the verdict (mg-ae217), which is taken once and
+reused for its report row. A row `du` that runs out is printed as `TIMED OUT`,
+never as a size, and the sum becomes "at least". A module-cache `du` that runs
+out exits **3** UNKNOWN. The
 report is deliberately not an account of the volume. On 2026-11-05 the largest
 grower was fseventsd swap in `/System/Volumes/VM` (pogo#258), which no `du` of
 the Data volume can see. `POGO_RECLAIM_TMPDIR` and `POGO_RECLAIM_CLAUDE_TMP`
@@ -973,8 +985,7 @@ fixed:
   post-run fill, and — if the volume is still under the floor — logs
   `STILL BELOW THE FLOOR` and mails `human`.
 - A **low disk with a small module cache** does not run `go clean`. After the
-  build-cache trim has run (or been deferred), it exits **4** (or **5** if
-  the trim was deferred), logs `the Go module cache is NOT what is filling this
+  build-cache trim has run, it exits **4**, logs `the Go module cache is NOT what is filling this
   volume`, and mails `human` (rate-limited to once per 24h). The mail says
   what the trim did.
 
@@ -991,7 +1002,7 @@ when someone reclaims part of the ~414G this job does not own.
 | 1 | `go clean -modcache` ran and failed |
 | 3 | UNKNOWN — could not measure (no `go`, unreadable `df`/`du`). Never a pass. |
 | 4 | CANNOT HELP — disk is low, the build-cache trim has done what it can, and the module cache is not what is filling it |
-| 5 | DEFERRED — a build is in flight and free space is not yet critical (including a deferred build-cache trim on a still-low disk) |
+| 5 | DEFERRED — the module-cache reclaim is due, a build is in flight, and free space is not yet critical |
 
 ### Merging this does not install it
 
@@ -1040,9 +1051,10 @@ POGO_RECLAIM_DRY_RUN=1 POGO_RECLAIM_FREE_FLOOR_GB=999 ~/.pogo/bin/pogo-reclaim.s
 ```
 
 Takes every measurement, prints the verdict, the trim count it *would* remove
-and the scope note, and removes nothing. It can still send the cannot-help
-mail. Point `POGO_RECLAIM_STATE_DIR` at a scratch directory holding a fresh
-`last_alert` stamp to keep it quiet.
+and the scope note, and removes nothing. It mails nobody: in its place it logs
+`DRY RUN: alert NOT sent — a real fire would mail …`, and it leaves the
+`last_alert` cooldown stamp untouched (mg-ae217; before that, a dry run sent the
+real cannot-help mail).
 
 ## Revision Probe Agent (`com.pogo.revisionprobe`)
 

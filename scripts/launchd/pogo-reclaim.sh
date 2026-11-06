@@ -82,10 +82,24 @@
 # (cmd/go/internal/cache: mtimeInterval = 1h). An entry untouched for 24h has
 # not been read by any build in 23h, so the gate's working set — everything a
 # merge built today — survives. A deleted entry is an ordinary cache miss, not
-# an error. The window in which a build reads an entry this trim is deleting is
-# narrowed by the 1h refresh and by the same in-flight deferral the module-cache
-# arm uses; it is not closed. The age is clamped to at least 2h so a knob turned
-# too far cannot reach entries Go has not yet had the chance to refresh.
+# an error. The age is clamped to at least 2h so a knob turned too far cannot
+# reach entries Go has not yet had the chance to refresh.
+#
+# IT DOES NOT WAIT FOR RUNNING BUILDS (mg-ae217). It used to defer whenever any
+# `go`, `compile` or `link` process was alive, the same test the module-cache
+# arm uses. Sampled on this box on 2026-11-06 (every 6s for 10 min, 22 agents
+# up): 45 of 100 samples had a `go` process alive. So the arm deferred on about
+# half of all fires, and most on exactly the busy hours that fill the disk. The
+# arm existed, and it mostly did nothing.
+# The deferral also protected nothing that Go does not already leave exposed.
+# Go's own Trim (cmd/go/internal/cache, called from every `go` command's Close)
+# deletes `-a`/`-d` entries by mtime in exactly this way, with no lock against
+# other `go` processes running beside it. Any entry a running build has used
+# carries an mtime under 1h old, and this arm's floor is 2h. What remains is the
+# race Go itself accepts: an entry is first read in the instant between `find`
+# reading its mtime and deleting it. The result is a cache miss or, at worst, one
+# failed build. The module-cache arm STILL defers: `go clean -modcache` deletes
+# source trees regardless of their age.
 #
 # It also refuses to delete anything from a directory without Go's own README
 # ("This directory holds cached build artifacts from the Go build system"), so a
@@ -147,7 +161,9 @@
 # script does not get slower — it fails, with a missing-file error that reads
 # like a broken branch. Which is this ticket's own complaint.
 #
-# So the fire defers while a build is running. Two honest limits on that check:
+# So the module-cache reclaim defers while a build is running. The build-cache
+# trim does not (mg-ae217; see "IT DOES NOT WAIT FOR RUNNING BUILDS"). Two
+# honest limits on that check:
 #
 #   - It covers the refinery queue and any `go`/`compile`/`link` process on the
 #     box. It does NOT know about a build that is about to start one second
@@ -178,8 +194,9 @@
 #   3  UNKNOWN — could not measure (no `go`, unreadable df/du). Never a pass.
 #   4  CANNOT HELP — disk is low, the build-cache trim has done what it can, and
 #      the module cache is not what is filling it
-#   5  DEFERRED — a build is in flight and free space is not yet critical (also
-#      when the build-cache trim was deferred and the disk is still low)
+#   5  DEFERRED — the module-cache reclaim is due, a build is in flight, and free
+#      space is not yet critical. (The build-cache trim never defers since
+#      mg-ae217, so a CANNOT HELP fire is always 4.)
 
 set -u
 
@@ -247,9 +264,10 @@ DRY_RUN="${POGO_RECLAIM_DRY_RUN:-0}"
 #                            healthy-disk fire pays. 40G sits under the 53G
 #                            measured on 2026-11-04 and well over what a
 #                            -trimpath gate should need.
-#   DU_TIMEOUT_SEC=60        Bound on EACH `du` this script runs for its
-#                            consumer report and the cap check. A `du` that runs
-#                            out is reported as such, never as a size.
+#   DU_TIMEOUT_SEC=60        Bound on EACH `du` this script runs: the consumer
+#                            report, the cap check, and the module-cache size
+#                            (mg-ae217). A `du` that runs out is reported as
+#                            such, never as a size.
 BUILDCACHE_AGE_HOURS="${POGO_RECLAIM_BUILDCACHE_AGE_HOURS:-24}"
 BUILDCACHE_CAP_GB="${POGO_RECLAIM_BUILDCACHE_CAP_GB:-40}"
 DU_TIMEOUT_SEC="${POGO_RECLAIM_DU_TIMEOUT_SEC:-60}"
@@ -403,6 +421,7 @@ consumer_row() {
 # shell — not inside $(...) or a pipe — or the rows it takes are thrown away
 # with the subshell and the next caller pays for every `du` again.
 CONSUMERS_MEASURED=0
+MODCACHE_KB_KNOWN=""
 measure_consumers() {
     local t
     if [ "$CONSUMERS_MEASURED" = 0 ]; then
@@ -411,7 +430,14 @@ measure_consumers() {
         CONSUMER_SUM_KB=0
         CONSUMER_UNMEASURED=0
         consumer_row "Go build cache  ${GOCACHE_DIR:-<unknown>}" 0 ${GOCACHE_DIR:+"$GOCACHE_DIR"}
-        consumer_row "Go module cache  $MODCACHE" 0 "$MODCACHE"
+        if [ -n "$MODCACHE_KB_KNOWN" ]; then
+            # Step 2 already walked it, under the same bound; walking it again
+            # would double the one cost this report most needs to keep down.
+            CONSUMER_REPORT="$CONSUMER_REPORT$(printf '  %8s  %s' "$(human_kb "$MODCACHE_KB_KNOWN")" "Go module cache  $MODCACHE")"$'\n'
+            CONSUMER_SUM_KB=$((CONSUMER_SUM_KB + MODCACHE_KB_KNOWN))
+        else
+            consumer_row "Go module cache  $MODCACHE" 0 "$MODCACHE"
+        fi
         consumer_row "polecat worktrees  $POGO_DIR/polecats" 0 "$POGO_DIR/polecats"
         consumer_row "refinery  $POGO_DIR/refinery" 0 "$POGO_DIR/refinery"
         consumer_row "Claude scratch root  $CLAUDE_TMP" 0 "$CLAUDE_TMP"
@@ -530,7 +556,6 @@ else
     GOCACHE_DIR="$(go env GOCACHE 2>/dev/null)"
 fi
 GOCACHE_OK=0
-BUILD_DEFERRED=0
 BUILD_STATUS="not attempted"
 if [ -z "$GOCACHE_DIR" ] || [ "$GOCACHE_DIR" = "off" ]; then
     BUILD_STATUS="not attempted: the build cache is not located (go env GOCACHE = '${GOCACHE_DIR:-<empty>}')"
@@ -608,8 +633,8 @@ builds_in_flight() {
 
 
 # defer_for_builds answers "should a deletion wait for a running build", once
-# per fire: the module-cache arm and the build-cache arm ask the same question
-# and a second `pogo refinery queue` would only add a second PARTIAL line.
+# per fire. Only the module-cache arm asks now: the build-cache arm stopped
+# deferring in mg-ae217 (see the header).
 INFLIGHT_ASKED=0
 INFLIGHT=0
 CRITICAL_LOGGED=0
@@ -671,12 +696,8 @@ build_cache_trim() {
         log "build-cache trim: $BUILD_STATUS"
         return 0
     fi
-    if defer_for_builds; then
-        BUILD_DEFERRED=1
-        BUILD_STATUS="DEFERRED: $IN_FLIGHT_WHY; the next fire retries"
-        log "build-cache trim DEFERRED ($why): $IN_FLIGHT_WHY. A build reading an entry this deletes would see a cache miss at best and a missing file at worst."
-        return 0
-    fi
+    # No in-flight deferral here (mg-ae217): see "IT DOES NOT WAIT FOR RUNNING
+    # BUILDS" in the header.
     # Entries only: the two-hex-digit shards, *-a (action) and *-d (output).
     # Never README, trim.txt, testexpire.txt or fuzz/ — Go's own bookkeeping.
     if [ "$DRY_RUN" != "0" ]; then
@@ -710,7 +731,6 @@ if [ "$LOW_DISK" = 0 ]; then
                 if [ "$GOCACHE_KB" -gt "$BUILDCACHE_CAP_KB" ]; then
                     log "build cache $GOCACHE_DIR: $(human_kb "$GOCACHE_KB") is over its $(human_kb "$BUILDCACHE_CAP_KB") cap"
                     build_cache_trim "cache over its cap"
-                    [ "$BUILD_DEFERRED" = 1 ] && exit "$EXIT_DEFERRED"
                     exit "$EXIT_OK"
                 fi
                 log "build cache $GOCACHE_DIR: $(human_kb "$GOCACHE_KB"), under its $(human_kb "$BUILDCACHE_CAP_KB") cap"
@@ -730,13 +750,23 @@ if [ "$FREE_KB" -ge "$FREE_FLOOR_KB" ]; then
 fi
 
 # --- step 2: the expensive measurement -------------------------------------
-CACHE_KB="$(du -sk "$MODCACHE" 2>/dev/null | awk 'NR == 1 { print $1 }')"
-case "${CACHE_KB:-}" in
-    '' | *[!0-9]*)
-        log "UNKNOWN: could not measure $MODCACHE (du -sk returned '${CACHE_KB:-<empty>}') — free space IS below the floor and this fire did not establish whether the cache is why"
+# Bounded like every other `du` here (mg-ae217): it was the one uncapped walk on
+# the low-disk path, so a report's worst case was 7 bounded walks PLUS however
+# long this one took. Its number is reused for the consumer report's module-cache
+# row, so the tree is walked once per fire, not twice.
+CACHE_KB="$(bounded_du "$MODCACHE")"
+case $? in
+    0) ;;
+    2)
+        log "UNKNOWN: measuring $MODCACHE TIMED OUT after ${DU_TIMEOUT_SEC}s — free space IS below the floor and this fire did not establish whether the cache is why"
+        exit "$EXIT_UNKNOWN"
+        ;;
+    *)
+        log "UNKNOWN: could not measure $MODCACHE (du -sk returned no size) — free space IS below the floor and this fire did not establish whether the cache is why"
         exit "$EXIT_UNKNOWN"
         ;;
 esac
+MODCACHE_KB_KNOWN="$CACHE_KB"
 log "module cache $MODCACHE: $(human_kb "$CACHE_KB"); cache floor $(human_kb "$CACHE_FLOOR_KB")"
 
 # scope_note is the sentence this ticket exists for as much as the `go clean`
@@ -765,6 +795,13 @@ scope_note() {
 # Best-effort throughout: a box without `mg` still gets the full log.
 alert() {
     local subject="$1" body="$2" now last
+    # A dry run is a question about what this job WOULD do; a mail to a human is
+    # a thing it DID (mg-ae217). It must not fire, and must not stamp the
+    # cooldown either, or a dry run would silence the next real alert for a day.
+    if [ "$DRY_RUN" != "0" ]; then
+        log "DRY RUN: alert NOT sent — a real fire would mail $ALERT_TO: $subject"
+        return 0
+    fi
     now="$(date +%s)"
     last=0
     [ -f "$ALERT_STAMP" ] && last="$(cat "$ALERT_STAMP" 2>/dev/null || echo 0)"
@@ -789,7 +826,7 @@ if [ "$CACHE_KB" -lt "$CACHE_FLOOR_KB" ]; then
     # THE CASE THAT MUST NOT READ AS SUCCESS.
     #
     # Free space is below the floor, the build-cache trim has done what it can
-    # (or was deferred — said in BUILD_STATUS), and the module cache is not why.
+    # (said in BUILD_STATUS), and the module cache is not why.
     # A free-space-only trigger would fire here, delete a small cache, exit 0,
     # and leave a log line that an operator reads as "the disk job ran". Every
     # subsequent full-disk build failure then gets attributed to the branch,
@@ -814,7 +851,6 @@ if [ "$CACHE_KB" -lt "$CACHE_FLOOR_KB" ]; then
             "Why it matters now: ./build.sh is the refinery's merge gate, and on a full volume" \
             "it fails at the link step with 'no space left on device' — which reads like a" \
             "broken branch. Full log: ${POGO_RECLAIM_LOG:-~/Library/Logs/pogo/pogo-reclaim.log}")"
-    [ "$BUILD_DEFERRED" = 1 ] && exit "$EXIT_DEFERRED"
     exit "$EXIT_CANNOT_HELP"
 fi
 

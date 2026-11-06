@@ -252,6 +252,20 @@ grep -q "mg mail send human" "$WORK/mail.log" && pass "alerted a human" || fail 
 grep -q "NOT an account of the volume" "$WORK/mail.log" && pass "the mail carries the scope caveat too" || fail "the caveat did not travel into the mail"
 cleanup
 
+echo "-- 2b. a DRY RUN of the CANNOT HELP case mails nobody (mg-ae217) --"
+# §2 above is the positive control: the same world, not a dry run, does mail.
+fixture
+echo $((7 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
+run POGO_RECLAIM_DRY_RUN=1
+[ "$RC" -eq 4 ] && pass "a dry run still reports the verdict it would reach (4)" || fail "expected 4, got $RC: $OUT"
+[ -s "$WORK/mail.log" ] && fail "a dry run sent a real alert: $(head -1 "$WORK/mail.log")" || pass "a dry run sent no mail"
+[ -e "$WORK/state/last_alert" ] && fail "a dry run stamped the alert cooldown, silencing the next real alert" || pass "a dry run left the cooldown stamp alone"
+case "$OUT" in *"DRY RUN: alert NOT sent"*"mail human"*) pass "says which alert it would have sent" ;; *) fail "the suppressed alert is not in the log: $OUT" ;; esac
+case "$OUT" in *"alert sent to"*) fail "the log claims an alert was sent" ;; *) pass "the log does not claim a send" ;; esac
+cleanup
+
 # ---------------------------------------------------------------------------
 # 3. THE RECLAIM ITSELF — disk low, cache large
 # ---------------------------------------------------------------------------
@@ -619,29 +633,44 @@ grep -q "Build-cache trim (mg-925f7) on this fire: removed 3 entries" "$WORK/mai
 grep -q "7.0G -> 9.0G" "$WORK/mail.log" && pass "the alert quotes the trim's measured free-space change" || fail "no before/after free figure in the alert"
 cleanup
 
-echo "-- 12b. a build in flight defers the trim, and the alert still goes out --"
-# Exiting 5 at the first sign of a build would silence the alert on a box that is
-# always building — which this one is. So the trim defers, the module-cache
-# verdict is still reached, and a human is still told.
+echo "-- 12b. a build in flight does NOT defer the trim (mg-ae217), and the alert still goes out --"
+# The trim used to defer on any live `go` process. On this box that was ~45% of
+# samples (2026-11-06), so the arm mostly did nothing. Go's own Trim deletes by
+# age beside running builds, and an entry a build uses is under 1h old.
 fixture
 echo $((7 * GB)) > "$WORK/free"
 echo $((460 * GB)) > "$WORK/total"
 echo $((680 * 1024)) > "$WORK/cache"
 echo "4242" > "$WORK/pgrep.go"
 run
-[ "$RC" -eq 5 ] && pass "exits 5 (DEFERRED): the job may yet help on the next fire" || fail "expected 5, got $RC: $OUT"
-gc_has 00/old1-a && pass "deleted nothing while a build was running" || fail "trimmed the build cache under a running build"
-grep -q "Build-cache trim (mg-925f7) on this fire: DEFERRED" "$WORK/mail.log" && pass "the alert says the trim was deferred, and why" || fail "the deferral did not reach the alert"
+[ "$RC" -eq 4 ] && pass "exits 4 (CANNOT HELP): a running build no longer turns the verdict into DEFERRED" || fail "expected 4, got $RC: $OUT"
+gc_has 00/old1-a && fail "a running build deferred the age trim" || pass "trimmed the >24h entries while a build was running"
+gc_has ab/new-a && pass "kept the entry a build used an hour ago, build or no build" || fail "deleted today's working set under a running build"
+case "$OUT" in *"build-cache trim DEFERRED"*) fail "the trim still logs DEFERRED: $OUT" ;; *) pass "the trim does not log DEFERRED" ;; esac
+grep -q "Build-cache trim (mg-925f7) on this fire: removed 3 entries" "$WORK/mail.log" && pass "the alert says what the trim did" || fail "the trim result did not reach the alert"
 cleanup
 
-echo "-- 12c. the critical floor overrides the trim's deferral --"
+echo "-- 12b2. ...while the module-cache reclaim STILL defers for that build --"
+fixture
+echo $((7 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((7 * GB)) > "$WORK/cache"
+echo "4242" > "$WORK/pgrep.go"
+run
+[ "$RC" -eq 5 ] && pass "exits 5: the module-cache reclaim deferred" || fail "expected 5, got $RC: $OUT"
+called "go clean" && fail "ran go clean -modcache under a running build" || pass "did not run go clean -modcache under a running build"
+gc_has 00/old1-a && fail "the build-cache trim deferred too" || pass "the build-cache trim ran on the same fire"
+cleanup
+
+echo "-- 12c. the critical floor overrides the module-cache deferral, stated once --"
 fixture
 echo $((1 * GB)) > "$WORK/free"
 echo $((460 * GB)) > "$WORK/total"
-echo $((680 * 1024)) > "$WORK/cache"
+echo $((7 * GB)) > "$WORK/cache"
 echo "4242" > "$WORK/pgrep.go"
 run
-gc_has 00/old1-a && fail "deferred the trim at 1G free" || pass "trims anyway below the critical floor"
+gc_has 00/old1-a && fail "did not trim at 1G free" || pass "trims at 1G free"
+called "go clean -modcache" && pass "reclaims the module cache anyway below the critical floor" || fail "deferred the module-cache reclaim at 1G free: $OUT"
 [ "$(printf '%s\n' "$OUT" | grep -c 'NOT deferring')" -eq 1 ] && pass "states the override once" || fail "the override was stated $(printf '%s\n' "$OUT" | grep -c 'NOT deferring') times"
 cleanup
 
@@ -770,6 +799,31 @@ T1="$(date +%s)"
 [ $((T1 - T0)) -lt 15 ] && pass "bounded: $((T1 - T0))s, not the stub's 30s" || fail "took $((T1 - T0))s — the du was not bounded"
 row "Claude scratch root  $WORK/claude" "TIMED OUT after 1s" && pass "reports the timed-out row as TIMED OUT" || fail "the hung row was not reported: $OUT"
 grep -q "sum to at least" "$WORK/mail.log" && pass "the sum is a lower bound when a row is unmeasured" || fail "the sum reads as exact despite a missing row"
+cleanup
+
+echo "-- 13b. the module-cache du is bounded too, and paid once per fire (mg-ae217) --"
+fixture
+echo $((7 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo $((680 * 1024)) > "$WORK/cache"
+run
+[ "$RC" -eq 4 ] && pass "control: the fire reaches its verdict" || fail "expected 4, got $RC: $OUT"
+[ "$(grep -c "^du -sk $WORK/modcache\$" "$WORK/calls.log")" -eq 1 ] && pass "the module cache is walked once, though the verdict and the report both use it" \
+    || fail "walked the module cache $(grep -c "^du -sk $WORK/modcache\$" "$WORK/calls.log") times"
+grep -qF "680M  Go module cache  $WORK/modcache" "$WORK/mail.log" && pass "the report row carries step 2's measurement" || fail "no module-cache row in the mail"
+cleanup
+
+fixture
+echo $((7 * GB)) > "$WORK/free"
+echo $((460 * GB)) > "$WORK/total"
+echo hang > "$WORK/cache"
+T0="$(date +%s)"
+run POGO_RECLAIM_DU_TIMEOUT_SEC=1
+T1="$(date +%s)"
+[ "$RC" -eq 3 ] && pass "a hung module-cache du exits 3 UNKNOWN" || fail "expected 3, got $RC: $OUT"
+[ $((T1 - T0)) -lt 15 ] && pass "bounded: $((T1 - T0))s, not the stub's 30s" || fail "took $((T1 - T0))s — the module-cache du was not bounded"
+case "$OUT" in *"measuring $WORK/modcache TIMED OUT after 1s"*) pass "says the measurement timed out" ;; *) fail "the timeout is not named: $OUT" ;; esac
+called "go clean" && fail "reclaimed a cache it could not measure" || pass "did not reclaim an unmeasured cache"
 cleanup
 
 # ---------------------------------------------------------------------------
