@@ -563,6 +563,12 @@ func newestWriteWithin(worktreeDir string, budget time.Duration) (time.Time, err
 	return newest, err
 }
 
+// walkEntryHook, when non-nil, is called with each path newestWriteWalk visits,
+// before the entry is judged. It exists only so that a test can remove a
+// directory between the moment its parent lists it and the moment WalkDir
+// reads it, which is the race mg-c9311 measured. Production leaves it nil.
+var walkEntryHook func(path string)
+
 // newestWriteWalk is the one implementation of the walk. budget and ctx are two
 // independent bounds — the first this package's own (ErrWalkBudget), the second
 // the caller's — and skipDirs is NewestWrite's opt-in list. The int is the
@@ -590,7 +596,26 @@ func newestWriteWalk(ctx context.Context, worktreeDir string, budget time.Durati
 			return fmt.Errorf("%s: age walk abandoned: %w (reached %s after %d entries)", worktreeDir, cerr, path, visited)
 		}
 		visited++
+		if walkEntryHook != nil {
+			walkEntryHook(path)
+		}
 		if err != nil {
+			if path != worktreeDir && errors.Is(err, fs.ErrNotExist) {
+				// A directory that was LISTED and then removed before WalkDir
+				// could read it (mg-c9311). That is the tree's own churn, not
+				// an enumeration failure: test temp dirs under target/tmp come
+				// and go every second of a cargo test run, and before this
+				// they made a live worker read as "worktree unreadable"
+				// (measured 2026-11-05/06: p1041b, p18094, pa1e9f). Nothing
+				// still on disk is hidden. Whatever the directory held is gone,
+				// so it cannot raise the maximum, and its removal moved the
+				// parent's mtime, which the walk has already counted.
+				//
+				// Only a NON-root path. A missing ROOT is a different fact, a
+				// reaped tree. cmd/pogod's worktreeGone states it on its own,
+				// and every other caller must still see it as an error.
+				return nil
+			}
 			// A directory we cannot read. Report no age at all rather than a
 			// maximum over the part we happened to see — a partial walk would
 			// silently answer "untouched 30 days" about a tree whose recently

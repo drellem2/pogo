@@ -158,3 +158,70 @@ func TestCancelledWalkReturnsNoPartialMaximum(t *testing.T) {
 		t.Errorf("control: a live context must walk the tree, got %v", err)
 	}
 }
+
+// TestSubdirRemovedMidWalkIsNotAnEnumerationFailure is mg-c9311. A directory
+// listed by its parent and then removed before WalkDir reads it (a test temp
+// dir under target/tmp) used to fail the whole walk with ENOENT, which made a
+// live worker read as "worktree unreadable". The removal is forced at exactly
+// that point through walkEntryHook. The walk must still answer, and must still
+// count what survives.
+func TestSubdirRemovedMidWalkIsNotAnEnumerationFailure(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	fresh := time.Now().Add(-1 * time.Minute).Truncate(time.Second)
+	doomed := filepath.Join(dir, "target", "tmp", "build-kill9-1")
+	if err := os.MkdirAll(filepath.Join(doomed, "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "src", "main.rs")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(src, fresh, fresh); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every directory is old, so the only fresh entry is src/main.rs. The
+	// parents of doomed are visited before it, so the mtime its removal moves
+	// is never read.
+	for _, p := range []string{dir, filepath.Join(dir, "target"), filepath.Join(dir, "target", "tmp"), doomed, filepath.Join(doomed, "inner"), filepath.Join(dir, "src")} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removed := false
+	walkEntryHook = func(path string) {
+		if path == doomed && !removed {
+			removed = true
+			if err := os.RemoveAll(doomed); err != nil {
+				t.Errorf("remove mid-walk: %v", err)
+			}
+		}
+	}
+	t.Cleanup(func() { walkEntryHook = nil })
+
+	newest, err := NewestWrite(context.Background(), dir, nil)
+	if !removed {
+		t.Fatal("control: the hook never reached the doomed directory, so the race was not exercised")
+	}
+	if err != nil {
+		t.Fatalf("a subdir removed mid-walk failed the walk: %v", err)
+	}
+	if !newest.Equal(fresh) {
+		t.Errorf("newest = %v, want the surviving fresh file's %v", newest, fresh)
+	}
+}
+
+// TestMissingRootStillFailsTheWalk is the boundary of the mg-c9311 skip. Only
+// a NON-root ENOENT is churn. A missing root is a reaped tree and must stay an
+// error that wraps fs.ErrNotExist.
+func TestMissingRootStillFailsTheWalk(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "reaped")
+	if _, err := NewestWrite(context.Background(), gone, nil); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing root: err = %v, want fs.ErrNotExist", err)
+	}
+}
