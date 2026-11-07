@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/hermeticgit"
 )
 
 // The commit-msg hook is a shell script, so it is tested by running it. That
@@ -222,35 +224,12 @@ func TestCommitMsgHookVerdicts(t *testing.T) {
 	})
 }
 
-// hermeticWorkTreeEnv returns environment overrides that make workTree a git
-// work tree backed by a fresh repository in a temp dir, without touching
-// workTree itself. It also turns off VCS stamping for the hook's `go run`
-// route, which would otherwise ask that empty repository for a HEAD commit.
+// hermeticWorkTreeEnv returns hermeticgit.WorkTreeEnv's overrides for
+// workTree, plus one this test needs on top: VCS stamping off for the hook's
+// `go run` route, which would otherwise ask that empty repository for a HEAD
+// commit.
 func hermeticWorkTreeEnv(t *testing.T, workTree string) []string {
 	t.Helper()
-	gitDir := filepath.Join(t.TempDir(), "repo.git")
-	if out, err := exec.Command("git", "init", "-q", "--bare", gitDir).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v (%s)", err, out)
-	}
-	env := []string{
-		"GIT_DIR=" + gitDir,
-		"GIT_WORK_TREE=" + workTree,
-		"GIT_CEILING_DIRECTORIES=",
-		"GOFLAGS=" + strings.TrimSpace(os.Getenv("GOFLAGS")+" -buildvcs=false"),
-	}
-	// Positive control: the override must actually yield a work tree rooted
-	// at workTree, or the hook fails for a reason this test does not cover.
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	cmd.Dir = workTree
-	cmd.Env = append(os.Environ(), env...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("hermetic work tree setup: git rev-parse failed: %v (%s)", err, out)
-	}
-	got, _ := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
-	want, _ := filepath.EvalSymlinks(workTree)
-	if got != want {
-		t.Fatalf("hermetic work tree resolves to %q, want %q", got, want)
-	}
-	return env
+	return append(hermeticgit.WorkTreeEnv(t, workTree),
+		"GOFLAGS="+strings.TrimSpace(os.Getenv("GOFLAGS")+" -buildvcs=false"))
 }

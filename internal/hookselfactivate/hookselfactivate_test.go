@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/drellem2/pogo/internal/hermeticgit"
 )
 
 // The controls are ordered deliberately. TestCatchesTheOriginalHook — the
@@ -47,13 +49,70 @@ func specimen(t *testing.T, name string) string {
 	return string(b)
 }
 
+// repoRoot finds the module root by walking up from the package directory to
+// go.mod. It deliberately does not ask git: a checkout that is not a git work
+// tree (a tarball or an export) still has a root, and still has hooks/ to check.
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	dir, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("locate repo root: %v", err)
+		t.Fatalf("getwd: %v", err)
 	}
-	return strings.TrimSpace(string(out))
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("locate repo root: no go.mod above the package directory")
+		}
+		dir = parent
+	}
+}
+
+// trackedHooks lists the files under root/hooks that git counts as tracked,
+// NUL-separated as `git ls-files -z` prints them.
+//
+// When root is itself a git work tree, that is the real index: an untracked
+// scratch file in hooks/ is nobody's deploy hazard and stays out. When it is
+// not (a tarball or an export, which has no .git), there is no index to ask,
+// so git is given a throwaway repository with GIT_WORK_TREE at root and hooks/
+// is added to its index. That counts every non-ignored file there as tracked,
+// which in an export is exactly right: an export contains only tracked files.
+//
+// "root is a work tree" means git's top level IS root. A checkout unpacked
+// somewhere under an unrelated repository must not borrow that repository's
+// index, where hooks/ would list as empty or as something else entirely.
+func trackedHooks(t *testing.T, root string) []byte {
+	t.Helper()
+	top, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").Output()
+	if err == nil && hermeticgit.SamePath(strings.TrimSpace(string(top))) == hermeticgit.SamePath(root) {
+		out, err := exec.Command("git", "-C", root, "ls-files", "-z", "hooks").Output()
+		if err != nil {
+			t.Fatalf("git ls-files hooks: %v", err)
+		}
+		return out
+	}
+
+	t.Logf("%s is not a git work tree; listing hooks/ through a throwaway repository", root)
+	env := append(os.Environ(), hermeticgit.WorkTreeEnv(t, root)...)
+	run := func(args ...string) []byte {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = env
+		out, err := cmd.Output()
+		if err != nil {
+			var stderr []byte
+			if ee, ok := err.(*exec.ExitError); ok {
+				stderr = ee.Stderr
+			}
+			t.Fatalf("git %s: %v (%s)", strings.Join(args, " "), err, stderr)
+		}
+		return out
+	}
+	run("add", "--", "hooks")
+	return run("ls-files", "-z", "hooks")
 }
 
 func kinds(fs []Finding) []Kind {
@@ -132,13 +191,11 @@ func TestPassesTheFixedHook(t *testing.T) {
 //
 // It enumerates via `git ls-files` rather than walking the directory, because
 // the rule is about TRACKED files — those are the ones that go live at merge.
-// An untracked scratch file in hooks/ is nobody's deploy hazard.
+// An untracked scratch file in hooks/ is nobody's deploy hazard. It does not
+// need the checkout to be a git work tree; see trackedHooks.
 func TestTrackedHooksSelfActivate(t *testing.T) {
 	root := repoRoot(t)
-	out, err := exec.Command("git", "-C", root, "ls-files", "-z", "hooks").Output()
-	if err != nil {
-		t.Fatalf("git ls-files hooks: %v", err)
-	}
+	out := trackedHooks(t, root)
 
 	var checked int
 	for _, rel := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
