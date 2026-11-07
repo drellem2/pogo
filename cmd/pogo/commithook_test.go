@@ -94,12 +94,14 @@ func wrappedRefBody(t *testing.T) string {
 
 // execCommitMsgHook executes the hook at hookPath with working directory dir (which is
 // what `git rev-parse --show-toplevel` resolves against) and PATH set to
-// exactly pathDirs. Returns exit code and combined output.
-func execCommitMsgHook(t *testing.T, hookPath, dir, msgFile string, pathDirs []string) (int, string) {
+// exactly pathDirs. extraEnv entries are appended last, so they override the
+// inherited environment. Returns exit code and combined output.
+func execCommitMsgHook(t *testing.T, hookPath, dir, msgFile string, pathDirs []string, extraEnv ...string) (int, string) {
 	t.Helper()
 	cmd := exec.Command(hookPath, msgFile)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PATH="+strings.Join(pathDirs, string(os.PathListSeparator)))
+	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	code := 0
 	if err != nil {
@@ -181,6 +183,12 @@ func TestCommitMsgHookStaleBinariesDoNotSatisfyTheGate(t *testing.T) {
 // requires it to reach both verdicts. Whichever route wins here is whichever
 // route a developer on this checkout actually gets.
 //
+// The hook asks git for the repo root, so it needs a work tree. The test does
+// not depend on the checkout being one (it may be a tarball or an export with
+// no .git): it gives git a throwaway repository of its own via GIT_DIR and
+// points GIT_WORK_TREE at the real tree. The hook therefore resolves the same
+// root, and takes the same route, either way.
+//
 // Asserting only that the hazard is refused is how mg-2627 shipped: a gate that
 // refuses everything passes that assertion. The benign case is the load-bearing
 // one.
@@ -192,10 +200,11 @@ func TestCommitMsgHookVerdicts(t *testing.T) {
 	hook := filepath.Join(root, "hooks", "commit-msg")
 	tmp := t.TempDir()
 	path := []string{hookToolDir(t, "git"), hookToolDir(t, "go")}
+	env := hermeticWorkTreeEnv(t, root)
 
 	t.Run("benign body passes", func(t *testing.T) {
 		msg := writeHookMsg(t, tmp, "benign.txt", citationOnlyBody)
-		code, out := execCommitMsgHook(t, hook, root, msg, path)
+		code, out := execCommitMsgHook(t, hook, root, msg, path, env...)
 		if code != 0 {
 			t.Errorf("ordinary body with a Refs citation rejected: exit %d\n%s", code, out)
 		}
@@ -203,7 +212,7 @@ func TestCommitMsgHookVerdicts(t *testing.T) {
 
 	t.Run("wrapped hazard body is rejected", func(t *testing.T) {
 		msg := writeHookMsg(t, tmp, "hazard.txt", wrappedRefBody(t))
-		code, out := execCommitMsgHook(t, hook, root, msg, path)
+		code, out := execCommitMsgHook(t, hook, root, msg, path, env...)
 		if code == 0 {
 			t.Errorf("wrapped closing ref accepted: exit 0\n%s", out)
 		}
@@ -211,4 +220,37 @@ func TestCommitMsgHookVerdicts(t *testing.T) {
 			t.Errorf("rejected, but not for the wrap:\n%s", out)
 		}
 	})
+}
+
+// hermeticWorkTreeEnv returns environment overrides that make workTree a git
+// work tree backed by a fresh repository in a temp dir, without touching
+// workTree itself. It also turns off VCS stamping for the hook's `go run`
+// route, which would otherwise ask that empty repository for a HEAD commit.
+func hermeticWorkTreeEnv(t *testing.T, workTree string) []string {
+	t.Helper()
+	gitDir := filepath.Join(t.TempDir(), "repo.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", gitDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	env := []string{
+		"GIT_DIR=" + gitDir,
+		"GIT_WORK_TREE=" + workTree,
+		"GIT_CEILING_DIRECTORIES=",
+		"GOFLAGS=" + strings.TrimSpace(os.Getenv("GOFLAGS")+" -buildvcs=false"),
+	}
+	// Positive control: the override must actually yield a work tree rooted
+	// at workTree, or the hook fails for a reason this test does not cover.
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = workTree
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("hermetic work tree setup: git rev-parse failed: %v (%s)", err, out)
+	}
+	got, _ := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	want, _ := filepath.EvalSymlinks(workTree)
+	if got != want {
+		t.Fatalf("hermetic work tree resolves to %q, want %q", got, want)
+	}
+	return env
 }
