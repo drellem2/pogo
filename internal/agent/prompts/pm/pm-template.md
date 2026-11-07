@@ -597,8 +597,18 @@ for repo in <repos>; do
     # mg-9324: that is a refused value, `2>/dev/null` hid the error, and the
     # empty stdout made grep find nothing — so the dedup never fired and a
     # duplicate got filed every sweep.
-    mg list --tag=release-cut --json 2>/dev/null \
-      | jq -r 'select(.status != "done") | .title' | grep -q "$slug" && continue
+    #
+    # --all IS LOAD-BEARING (mg-2a5d0): plain `mg list` omits SHELVED items, and
+    # a release cut a PM deliberately parked (assignee parked, shelved, awaiting
+    # Daniel's GO) is shelved. Without --all it was invisible here, so while the
+    # repo stayed over threshold it was re-filed on EVERY sweep in every PM
+    # (mg-a12b4 duplicated the parked mg-ee519). A shelved item is a decision to
+    # hold, not an absence: anything not done/archived (available, claimed,
+    # pending, shelved) counts as already tracked. --all also returns archived
+    # items, which is why archived is excluded alongside done.
+    mg list --tag=release-cut --all --json 2>/dev/null \
+      | jq -r 'select(.status != "done" and .status != "archived") | .title' \
+      | grep -q "$slug" && continue
     # This body interpolates $tag/$days/$ahead, so it is composed with printf and
     # fed on stdin: a quoted heredoc would not expand them, and an UNQUOTED one
     # carries exactly the --body="..." hazard. printf keeps the values in argv
