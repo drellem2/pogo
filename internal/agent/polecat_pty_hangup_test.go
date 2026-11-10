@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/drellem2/pogo/internal/testtmp"
+	"github.com/drellem2/pogo/internal/agenttest"
 )
 
 // This file pins the premise that makes pogod's mail-check reap safe for
@@ -84,6 +84,11 @@ import (
 const (
 	fakePogodEnv    = "POGO_TEST_FAKE_POGOD"
 	fakePogodCmdEnv = "POGO_TEST_FAKE_POGOD_CMD"
+	// fakePogodDirEnv names the fake pogod's socket dir. The PARENT makes it,
+	// short, under /tmp (agenttest.SocketDir): a dir under $TMPDIR overran
+	// sun_path on a runner with a deep work tree (114 bytes against linux's
+	// 108), and both tests below failed to bind before measuring anything.
+	fakePogodDirEnv = "POGO_TEST_FAKE_POGOD_DIR"
 	hupIgnorerEnv   = "POGO_TEST_HUP_IGNORING_POLECAT"
 	readyFileEnv    = "POGO_TEST_POLECAT_READY_FILE"
 
@@ -126,13 +131,15 @@ func TestFakePogodHelper(t *testing.T) {
 	if os.Getenv(fakePogodEnv) == "" {
 		t.Skip("helper process for TestPolecatDoesNotOutlivePogod; not a standalone test")
 	}
-	// testtmp, not os.MkdirTemp: this helper is DESIGNED to be killed — the
-	// whole point of the test below is a pogod that dies with no teardown — so
-	// t.Cleanup and defer are both unreachable here by construction. testtmp's
-	// sweep removes it once this pid is gone (mg-de3c).
-	dir, err := testtmp.Dir("fakepogod")
-	if err != nil {
-		fmt.Println("HELPER-ERR", err)
+	// The dir comes from the parent, not from here: this helper is DESIGNED to
+	// be killed — the whole point of the test below is a pogod that dies with
+	// no teardown — so t.Cleanup and defer are unreachable here by
+	// construction, and the parent's t.Cleanup removes it instead. It must not
+	// live under $TMPDIR: "<dir>/outliver.sock" has to fit sun_path however
+	// deep the checkout or runner work tree is.
+	dir := os.Getenv(fakePogodDirEnv)
+	if dir == "" {
+		fmt.Println("HELPER-ERR", fakePogodDirEnv, "is not set")
 		os.Exit(1)
 	}
 	reg, err := NewRegistry(dir)
@@ -161,10 +168,14 @@ func TestFakePogodHelper(t *testing.T) {
 // cannot be waited on honestly (see that type's comment).
 func startFakePogod(t *testing.T, polecatCmd ...string) (pogod *exec.Cmd, polecat polecatTarget) {
 	t.Helper()
+	// Made before the kill below is registered, so (t.Cleanup is LIFO) the
+	// dir is removed only after the fake pogod is dead.
+	sockDir := agenttest.SocketDir(t)
 	pogod = exec.Command(os.Args[0], "-test.run=TestFakePogodHelper", "-test.timeout=120s")
 	pogod.Env = append(os.Environ(),
 		fakePogodEnv+"=1",
 		fakePogodCmdEnv+"="+strings.Join(polecatCmd, "\x1f"),
+		fakePogodDirEnv+"="+sockDir,
 	)
 	stdout, err := pogod.StdoutPipe()
 	if err != nil {
