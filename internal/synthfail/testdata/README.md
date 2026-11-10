@@ -32,6 +32,14 @@ class. It proves the presence of legitimate history does not mask a live
 failure, and that the reader does not simply key on "the file has an error in it
 somewhere".
 
+`weekly-reset-recovered-2026-11-10.jsonl` is mg-e0d76's incident, mixed: the
+five weekly-limit failure turns are **verbatim** (harness text only), and the
+real turns pm-poset completed after the 00:00Z reset are **structural** — their
+real timestamps, model id and token usage, with the prose replaced. It proves
+errors the agent has since answered past are history: at pogod's 00:02:26Z
+suppression the scan must read quiet, while a reading taken before 00:01:20Z
+still reads all five as current failure.
+
 ## Live verification, and its decay date
 
 The checked-in fixtures are what CI runs. `TestScan_LiveIncidentTranscripts` in

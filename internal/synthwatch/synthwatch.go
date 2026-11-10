@@ -319,6 +319,39 @@ func (w *Watcher) Report(name string) (synthfail.Report, bool) {
 	return r, ok
 }
 
+// Current returns the verdict a restart decision should rest on for the named
+// agent, and whether the watcher holds one.
+//
+// It is Report plus one re-read. The cached verdict is from the last scan, up
+// to Interval old, and an agent can recover inside that gap: on 2026-11-10
+// pm-poset's verdict was taken at ~23:57:35Z, before its weekly cap lifted at
+// 00:00Z, and pogod acted on it at 00:02:26Z although the agent had been
+// completing real turns since 00:01:20Z (mg-e0d76). So when the watcher holds a
+// FAILING verdict, Current re-reads the transcript, and a fresh reading that
+// shows a successful turn newer than every failure the cache counted replaces
+// it. Only positive evidence of recovery replaces it: a fresh read that is
+// unavailable, or still failing, leaves the cached verdict in force, so this
+// can lift a suppression but never invent one.
+//
+// It does not touch episode state; the next Check folds the quiet reading in
+// as usual.
+func (w *Watcher) Current(name, workdir string, now time.Time) (synthfail.Report, bool) {
+	cached, ok := w.Report(name)
+	if !ok || !cached.SuppressRestart() || w.opts.Globs == nil {
+		return cached, ok
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	scanOpts := w.opts.ScanOptions
+	scanOpts.Now = now
+	fresh := w.opts.Scan(w.opts.Home, w.opts.Globs(workdir), scanOpts)
+	if fresh.State == synthfail.StateQuiet && fresh.LastSuccess.After(cached.Last) {
+		return fresh, true
+	}
+	return cached, true
+}
+
 // SuppressRestart reports whether restart-based remediation must be withheld
 // for the named agent, and emits the audit event when it withholds one.
 //

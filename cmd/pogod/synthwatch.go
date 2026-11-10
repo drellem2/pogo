@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"time"
 
 	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/providers"
@@ -69,7 +70,10 @@ func (s synthScanner) ScanTranscript(name, workdir string) synthfail.Report {
 	if s.w == nil {
 		return synthfail.Report{}
 	}
-	if rep, ok := s.w.Report(name); ok {
+	// Current, not Report: a cached failing verdict can predate a recovery by
+	// up to the scan interval, and an agent exiting inside that gap was refused
+	// its respawn on errors it had already answered past (mg-e0d76).
+	if rep, ok := s.w.Current(name, workdir, time.Time{}); ok {
 		return rep
 	}
 	return synthfail.Scan(homeDir(), providers.SessionTranscriptGlobs(workdir), synthfail.Options{})
