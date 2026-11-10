@@ -88,7 +88,7 @@ cap and `load_gate_fleet_share = 0` for the host load gate.
 | `[first_turn]` | `enabled` | on | observes | Mails when an agent never completes its first turn. See [first-turn](#the-first-completed-turn-floor-first-turn). |
 | `[synth_watch]` | `enabled` | on | observes | Pages `human` when an agent's turns fail synthetically. `off` stops only the page. The respawn suppression that stops pogod restarting such an agent stays on, and has no key. See [Switching off synthwatch, refusal-watch and turn-watch](#switching-off-synthwatch-refusal-watch-and-turn-watch). |
 | `[refusal_watch]` | `enabled` | on | observes | Mails on a run of consecutive refused turns. It never restarts or nudges. |
-| `[turn_watch]` | `enabled` | on | observes | Mails when agents stop completing turns (the fleet-down floor). |
+| `[turn_watch]` | `enabled` | on | observes | Mails when agents stop completing turns (the fleet-down floor). `max_age` (3h) and `hold_down` (30m) set how soon; see [Switching off synthwatch, refusal-watch and turn-watch](#switching-off-synthwatch-refusal-watch-and-turn-watch). |
 | `[wedge_watch]` | `enabled` | on | observes | Emits events for agents parked at a dead-end prompt or with a frozen work counter. It sends no mail. See [wedge-watch](#the-wedged-agent-detector-wedge-watch). |
 | `[midsession_wedge]` | `enabled` | on | ACTS | Types a bare Return into an agent whose composer holds an unsubmitted message. The attempts are bounded, and when they run out it mails the coordinator. `report_only = true` withholds the Return. See [mid-session wedge](#the-mid-session-wedge-detector-midsession_wedge). |
 | `[done_reap]` | `enabled` | on | ACTS | Stops a polecat whose work item is done, or parked at `stage: gated`, once its terminal has been quiet for `idle_grace` — or, for a done item, 10m after it was first seen done. See [done-reap](#the-done-item-polecat-reaper-done-reap). |
@@ -4347,7 +4347,22 @@ enabled = true    # default true. false = the alarm is not built or ticked
 
 [turn_watch]
 enabled = true    # default true. false = no pogod-resident turn-completion reader
+max_age = "3h"    # default 3h. A crew agent whose last completed turn is older reads stale
+hold_down = "30m" # default 30m. A stale/silent reading must persist this long before it is mailed
 ```
+
+**`max_age` and `hold_down` set how soon turn-watch escalates.** An agent goes
+red `max_age` after its last completed turn and is announced once it has stayed
+red for `hold_down`, so the defaults escalate a coordinator that stopped
+completing turns after about 3.5h — to the escalation box, never to the
+coordinator, and without restarting anything (pogo#296). Shorter values mean
+faster escalation and more false alarms on agents whose turns are legitimately
+long. Both must be positive Go durations (`"90m"`, `"1h"`); a value that is not,
+including `"0s"` or a negative one, is rejected at startup with a
+`pogod: CONFIG ERROR: [turn_watch] <key> = ... rejected` line and the default
+stays in force. The startup line `pogod: turn-watch enabled (... max_age=...
+hold_down=...)` names the values actually in force. `pogo check-turns` keeps its
+own `--max-age` flag and does not read this key.
 
 **`[synth_watch] enabled = false` silences the page, not the respawn gate.**
 synthwatch does two jobs: it pages `human` when an agent answers every nudge

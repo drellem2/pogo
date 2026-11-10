@@ -10,6 +10,19 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ## [Unreleased]
 
+### Added
+
+- **`[turn_watch] max_age` and `hold_down` are configurable (pogo#296).**
+  turn-watch escalates a crew agent that stopped completing turns — the
+  coordinator to the escalation box — after `max_age` (default 3h) plus
+  `hold_down` (default 30m). Both keys now accept a positive duration, so an
+  operator can get a faster escalation without any restart. Shorter means
+  faster escalation and more false alarms on agents whose turns are
+  legitimately long. A non-positive or unparseable value is rejected with a
+  `CONFIG ERROR` line at startup and the default stays in force; the
+  `turn-watch enabled` startup line names the values in force. Defaults are
+  unchanged.
+
 ### Fixed
 
 - **An agent always talks to the pogod that spawned it (mg-0c1a5).** pogod now

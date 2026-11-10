@@ -3009,6 +3009,13 @@ Flags:
 	// reason logged is the operator's switch, not a missing registry that would
 	// not have mattered.
 	turnWatcher := armDetector(cfg.TurnWatch.Enabled, turnWatchNotArmedLine, logLine, func() *turnwatch.Watcher {
+		// [turn_watch] max_age / hold_down (pogo#296). A rejected key is said
+		// LOUDLY and the default stays in force: refusing to start pogod over a
+		// mistyped alarm threshold would take down every other detector with it.
+		win := resolveTurnWatchWindows(cfg.TurnWatch)
+		for _, line := range win.Rejected {
+			log.Print(line)
+		}
 		if agentRegistry == nil {
 			// Said out loud, because a detector that is silently off is this
 			// package's own subject matter one level up. Without the registry there
@@ -3018,42 +3025,34 @@ Flags:
 				"read turn-completion artifacts against. Nothing is watching whether crew agents complete turns")
 			return nil
 		}
-		w := turnwatch.New(turnwatch.Options{
-			Enabled: cfg.TurnWatch.Enabled,
-			Scan: func(now time.Time) (turnlog.Report, error) {
-				return turnlog.Scan(turnlog.Options{
-					Now: now,
-					Population: func() ([]turnlog.Present, error) {
-						// Crew only. Polecat prompts carry no turn-completion
-						// clause — their work is evidenced by the claim
-						// re-stamp, the branch and the merge — so including
-						// them would produce a permanent red that means
-						// nothing, which is how a detector becomes ignorable.
-						var out []turnlog.Present
-						for _, a := range agentRegistry.List() {
-							if a.Type != agent.TypeCrew {
-								continue
-							}
-							if a.Status != agent.StatusRunning && a.Status != agent.StatusRestarting {
-								continue
-							}
-							out = append(out, turnlog.Present{
-								Name: a.Name, Type: string(a.Type), StartedAt: a.StartTime,
-							})
-						}
-						return out, nil
-					},
+		population := func() ([]turnlog.Present, error) {
+			// Crew only. Polecat prompts carry no turn-completion
+			// clause — their work is evidenced by the claim
+			// re-stamp, the branch and the merge — so including
+			// them would produce a permanent red that means
+			// nothing, which is how a detector becomes ignorable.
+			var out []turnlog.Present
+			for _, a := range agentRegistry.List() {
+				if a.Type != agent.TypeCrew {
+					continue
+				}
+				if a.Status != agent.StatusRunning && a.Status != agent.StatusRestarting {
+					continue
+				}
+				out = append(out, turnlog.Present{
+					Name: a.Name, Type: string(a.Type), StartedAt: a.StartTime,
 				})
-			},
-			Mail:        alerts.Transport,
-			Coordinator: coordinator,
-			HumanBox:    escalationBox,
-			StartedAt:   time.Now(),
-		})
+			}
+			return out, nil
+		}
+		w := turnwatch.New(turnWatchOptions(cfg.TurnWatch.Enabled, win, "", population,
+			alerts.Transport, coordinator, escalationBox, time.Now()))
+		// The effective max_age / hold_down are named here, whether defaulted
+		// or configured, so an operator can see what is in force (pogo#296).
 		log.Printf("pogod: turn-watch enabled (interval=%s max_age=%s grace=%s hold_down=%s; "+
 			"coordinator findings route to %s, never to %s — report-only)",
-			turnwatch.DefaultInterval, turnlog.DefaultMaxAge, turnwatch.DefaultGrace,
-			turnwatch.DefaultHoldDown, escalationBox, coordinator)
+			turnwatch.DefaultInterval, win.MaxAge, turnwatch.DefaultGrace,
+			win.HoldDown, escalationBox, coordinator)
 		return w
 	})
 

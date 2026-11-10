@@ -2196,6 +2196,24 @@ type RefusalWatchConfig struct {
 type TurnWatchConfig struct {
 	// Enabled arms the reader. Defaults to true.
 	Enabled bool
+	// MaxAge is `max_age`: how long since an agent's last completed turn before
+	// it reads stale. Zero means "not set" — pogod then uses
+	// turnlog.DefaultMaxAge (3h). Only a positive duration is ever stored here.
+	MaxAge time.Duration
+	// HoldDown is `hold_down`: how long a red reading must persist, unbroken,
+	// before it is announced. Zero means "not set" — pogod then uses
+	// turnwatch.DefaultHoldDown (30m). Only a positive duration is stored.
+	//
+	// Shorter values for either key escalate a coordinator that stopped
+	// completing turns sooner, and raise more false alarms on agents whose
+	// turns are legitimately long (pogo#296).
+	HoldDown time.Duration
+	// MaxAgeInvalid / HoldDownInvalid hold the raw value of a key that was
+	// present but rejected (not a duration, or not > 0). The key is then left
+	// unset, so the default stays in force, and pogod names the rejection at
+	// startup. A later valid layer clears it.
+	MaxAgeInvalid   string
+	HoldDownInvalid string
 }
 
 // WedgeWatchConfig configures pogod's wedged-agent DETECTOR (mg-fc8d): the
@@ -3317,6 +3335,10 @@ func Load() *Config {
 		if fileCfg.turnWatchEnabledSet {
 			cfg.TurnWatch.Enabled = fileCfg.TurnWatch.Enabled
 		}
+		cfg.TurnWatch.MaxAge = fileCfg.TurnWatch.MaxAge
+		cfg.TurnWatch.HoldDown = fileCfg.TurnWatch.HoldDown
+		cfg.TurnWatch.MaxAgeInvalid = fileCfg.TurnWatch.MaxAgeInvalid
+		cfg.TurnWatch.HoldDownInvalid = fileCfg.TurnWatch.HoldDownInvalid
 		if fileCfg.midSessionWedgeEnabledSet {
 			cfg.MidSessionWedge.Enabled = fileCfg.MidSessionWedge.Enabled
 		}
@@ -3966,6 +3988,17 @@ func loadConfigFiles() (*parsedConfig, error) {
 // parseConfigFileInto parses one TOML config file into cfg, overwriting only
 // the fields whose keys the file names. Only the minimal subset pogo needs is
 // understood; unknown sections and keys are ignored.
+// positiveDuration parses s as a Go duration and accepts it only when it is
+// greater than zero. Used by keys where zero or a negative value is nonsense
+// rather than a meaningful "off" ([turn_watch] max_age / hold_down).
+func positiveDuration(s string) (time.Duration, bool) {
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
 func parseConfigFileInto(cfg *parsedConfig, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -4554,9 +4587,22 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				cfg.refusalWatchEnabledSet = true
 			}
 		case "turn_watch":
-			if key == "enabled" {
+			switch key {
+			case "enabled":
 				cfg.TurnWatch.Enabled = val == "true"
 				cfg.turnWatchEnabledSet = true
+			case "max_age":
+				if d, ok := positiveDuration(unquotedVal); ok {
+					cfg.TurnWatch.MaxAge, cfg.TurnWatch.MaxAgeInvalid = d, ""
+				} else {
+					cfg.TurnWatch.MaxAge, cfg.TurnWatch.MaxAgeInvalid = 0, unquotedVal
+				}
+			case "hold_down":
+				if d, ok := positiveDuration(unquotedVal); ok {
+					cfg.TurnWatch.HoldDown, cfg.TurnWatch.HoldDownInvalid = d, ""
+				} else {
+					cfg.TurnWatch.HoldDown, cfg.TurnWatch.HoldDownInvalid = 0, unquotedVal
+				}
 			}
 		case "wedge_watch":
 			switch key {
