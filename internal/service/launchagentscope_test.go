@@ -161,3 +161,23 @@ func TestConfigbackupIsOwnedByPogoConfig(t *testing.T) {
 		t.Errorf("com.pogo.configbackup: reason %q does not name the pogo-config repo that ships its plist", r)
 	}
 }
+
+// TestBridgetPruneAndGhCIHaveOwners pins mg-5d319: the 11-09 and 11-10
+// activation reports listed com.pogo.bridget-prune and com.pogo.gh-ci as
+// "2 with NONE". bridget-prune is installed by bridget's install.sh
+// --prune-launchd (mg-eb78f); gh-ci by pogo-reminders' install.sh (mg-9fcc8).
+// Each reason must name that owner. The unknown label is the positive control
+// that the loud default still fires.
+func TestBridgetPruneAndGhCIHaveOwners(t *testing.T) {
+	s := scopeLaunchAgents(nil, []string{"com.pogo.bridget-prune", "com.pogo.gh-ci", "com.pogo.some-new-thing"})
+	un := s.Unexplained()
+	if len(un) != 1 || un[0].Label != "com.pogo.some-new-thing" {
+		t.Errorf("Unexplained = %+v, want only the unruled control job", un)
+	}
+	reasons := launchAgentExclusionReasons()
+	for label, owner := range map[string]string{"com.pogo.bridget-prune": "bridget", "com.pogo.gh-ci": "pogo-reminders"} {
+		if !strings.Contains(reasons[label], owner) {
+			t.Errorf("%s: reason %q does not name the owning repo %q", label, reasons[label], owner)
+		}
+	}
+}

@@ -150,6 +150,9 @@ func launchAgentExclusionReasons() map[string]string {
 		"com.pogo.watchdog":  ownedByReminders,
 		"com.pogo.wifi":      ownedByReminders,
 		"com.pogo.gh-issues": ownedByReminders,
+		// CI-red watcher (mg-9fcc8): bin/poll-gh-ci.sh, plist at
+		// launchd/com.pogo.gh-ci.plist, installed by pogo-reminders' install.sh.
+		"com.pogo.gh-ci": ownedByReminders,
 
 		"com.pogo.pa-calendar": ownedByPogoPA,
 		"com.pogo.pa-heyfeed":  ownedByPogoPA,
@@ -157,6 +160,9 @@ func launchAgentExclusionReasons() map[string]string {
 		"com.pogo.sleepwake": ownedBySleepwake,
 
 		"com.pogo.bridget": ownedByBridget,
+		// Daily log-channel prune (mg-eb78f, bridget 3a5e811), installed by
+		// bridget's `install.sh --prune-launchd`.
+		"com.pogo.bridget-prune": ownedByBridget,
 
 		// Pogo-owned but still outside: the plist is tracked in this repo
 		// (scripts/launchd/com.pogo.mgbackup.plist) and installed by hand per
