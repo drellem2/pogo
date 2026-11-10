@@ -3854,6 +3854,25 @@ run_e2e() {   # run_e2e LABEL GIT_BIN GIT_TIMEOUT RUN_DEADLINE [BOOTSTRAP_REPO] 
     # only because the fallback section needs ONE arm where a bounce script can
     # actually be found, and putting that script under $E2E/src instead would
     # change the `ok` arm's gate 6 as a side effect.
+    #
+    # DEADLINE_GRACE IS THE RUNNER'S OWN DEFAULT (30s), NOT A SHORT TEST VALUE.
+    # The grace is the budget the killed run's EXIT trap gets between the
+    # watchdog's SIGTERM and its SIGKILL, and in this fixture that trap spawns
+    # about ten fixture processes (`mg version`, two `pogo events emit` through
+    # run_bounded, the ps walk that disarms the watchdog) before it writes `end`.
+    # That is ~0.3s on an idle box. It was 2s, and on a loaded one the same
+    # spawns ran past it: the run was SIGKILLed mid-trap, exited 137 and wrote no
+    # terminal line, failing the acceptance below for a reason that was the
+    # fixture's, not the runner's. Delaying only the two `events emit` calls by
+    # 1.5s reproduced exactly that 10/10, and 10/10 passed with the grace at 30.
+    # A longer grace costs a passing run nothing — on_exit kills the watchdog
+    # (and the grace sleep inside it) once the bookkeeping is done — and a run
+    # that really does outlive it is still SIGKILLed and still fails here.
+    #
+    # POGO_DEPLOY_SERVER_URL points at a port nothing serves, so the runner's
+    # pogod reads (the liveness hop, the exit path's /agents/drain) get an
+    # immediate refusal instead of asking the LIVE daemon on this box what its
+    # fleet is doing — which made every arm's log depend on pogod being up.
     rm -rf "$E2E/lock" "$E2E/mail.log" "$E2E/stamp"
     HOME="$E2E" POGO_HOME="$E2E" \
     GOBIN="$E2E/go/bin" GOPATH="$E2E/go" GOMODCACHE="$E2E_GOMODCACHE" \
@@ -3868,7 +3887,8 @@ run_e2e() {   # run_e2e LABEL GIT_BIN GIT_TIMEOUT RUN_DEADLINE [BOOTSTRAP_REPO] 
     POGO_DEPLOY_FIRE_HOURS="3" \
     POGO_DEPLOY_GIT_TIMEOUT="$3" \
     POGO_DEPLOY_RUN_DEADLINE="$4" \
-    POGO_DEPLOY_DEADLINE_GRACE=2 \
+    POGO_DEPLOY_DEADLINE_GRACE=30 \
+    POGO_DEPLOY_SERVER_URL="http://127.0.0.1:9" \
     POGO_DEPLOY_SYNC_ATTEMPTS=1 \
     POGO_DEPLOY_SYNC_VIGIL=0 \
     POGO_DEPLOY_ALERT_TO=mayor \
@@ -3894,7 +3914,7 @@ grep -q 'KILLED: the nightly run exceeded' "$E2E/mail.log" 2>/dev/null \
     || fail "the killed run sent no mail (mail.log: $(cat "$E2E/mail.log" 2>/dev/null))"
 grep -q 'pogo-deploy: end (rc=' "$E2E/hang.log" \
     && pass "ACCEPTANCE: the killed run writes a TERMINAL LINE with an exit code — 'no exit code' was the whole defect" \
-    || fail "the killed run wrote no terminal line: $(tail -3 "$E2E/hang.log")"
+    || fail "the killed run wrote no terminal line$(grep -q 'survived SIGTERM' "$E2E/hang.log" && echo " — its exit trap outran the 30s grace and it was SIGKILLed mid-bookkeeping"): $(tail -3 "$E2E/hang.log")"
 [ "$E2E_RC" -ne 0 ] \
     && pass "ACCEPTANCE: a killed run exits non-zero ($E2E_RC), so the night is not recorded as a success" \
     || fail "the killed run exited 0"
