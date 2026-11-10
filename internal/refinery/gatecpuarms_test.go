@@ -262,14 +262,20 @@ func (a subtreeCPUArms) complaints() []string {
 // Both arms are built from this one template so that the ONLY difference
 // between them is n. A ratio between two arms that differed in any other way
 // would not be a measurement of injected work.
-func spinGate(n int) string {
+func spinGate(n int) string { return spinGateFor(n, 2*time.Second) }
+
+// spinGateFor is spinGate with the hold time named: the same template, held
+// for `hold` (whole seconds) instead of two. Only the blinded control uses it
+// directly, to widen the window a loaded host gets to produce readings in.
+func spinGateFor(n int, hold time.Duration) string {
 	starts := make([]string, 0, n)
 	pids := make([]string, 0, n)
 	for i := 1; i <= n; i++ {
 		starts = append(starts, fmt.Sprintf("(while :; do :; done) & p%d=$!", i))
 		pids = append(pids, fmt.Sprintf("$p%d", i))
 	}
-	return strings.Join(starts, "; ") + "; sleep 2; kill " + strings.Join(pids, " ") + "; exit 0"
+	return strings.Join(starts, "; ") + fmt.Sprintf("; sleep %d; kill ", int(hold/time.Second)) +
+		strings.Join(pids, " ") + "; exit 0"
 }
 
 // runGateArms executes several gates AT THE SAME TIME and returns, per gate,
@@ -674,13 +680,32 @@ func TestGateWatchRulesGoRedWhenTheWalkMissesTheSubtree(t *testing.T) {
 	}
 	t.Cleanup(func() { psSnapshot = prev })
 
-	blinded := runGateArms(t, heartbeat, spinGate(1), spinGate(cpuArmSpinners))
-	one, many := settledCPU(blinded[0]), settledCPU(blinded[1])
-	logArm(t, "blind-one", one)
-	logArm(t, "blind-many", many)
-	if len(one) == 0 || len(many) == 0 {
-		t.Fatalf("the blinded arms produced no settled readings (one=%d many=%d) — the control cannot "+
-			"speak to the rules", len(one), len(many))
+	// THE GATE'S LIFETIME IS A BOUND, AND ON A LOADED HOST IT WAS TOO SHORT.
+	// A settled reading needs two process-table reads a heartbeat apart, both
+	// landing while the gate still runs, and each read is a `ps` exec. A 2s
+	// gate fits that easily on a quiet box (~10ms per ps); with ps delayed to
+	// 1.0s it produced no settled readings 10/10, the exact failure a loaded
+	// box showed once (0.3s and 0.6s passed 10/10). So when — and ONLY when —
+	// the arms come back with no readings at all, they are rerun with the
+	// hold doubled, up to 8s. A run that HAS readings is judged on the first
+	// attempt: widening never gets a second chance at a verdict the rules
+	// already gave, only at producing data the rules can be applied to.
+	var one, many []StepProgress
+	const maxHold = 8 * time.Second
+	for hold := 2 * time.Second; ; hold *= 2 {
+		blinded := runGateArms(t, heartbeat, spinGateFor(1, hold), spinGateFor(cpuArmSpinners, hold))
+		one, many = settledCPU(blinded[0]), settledCPU(blinded[1])
+		logArm(t, "blind-one", one)
+		logArm(t, "blind-many", many)
+		if len(one) > 0 && len(many) > 0 {
+			break
+		}
+		if hold >= maxHold {
+			t.Fatalf("the blinded arms produced no settled readings (one=%d many=%d) even with the gates "+
+				"held %s — the control cannot speak to the rules", len(one), len(many), hold)
+		}
+		t.Logf("no settled readings with the gates held %s (one=%d many=%d) — the process table was too slow "+
+			"to read twice inside the gate's life; retrying with %s", hold, len(one), len(many), 2*hold)
 	}
 
 	arms := subtreeCPUArms{
