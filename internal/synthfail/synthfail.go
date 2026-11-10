@@ -51,6 +51,7 @@ package synthfail
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -94,8 +95,8 @@ const (
 	futureTolerance = 2 * time.Minute
 
 	// syntheticModel is the model attribution a harness writes when it answered
-	// a turn locally instead of calling the API. Used only as a cheap
-	// pre-filter and then re-verified structurally after decoding.
+	// a turn locally instead of calling the API. Part of the structural test
+	// for a failure, and the attribution a success must NOT carry.
 	syntheticModel = "<synthetic>"
 )
 
@@ -190,6 +191,26 @@ type Report struct {
 	// First and Last bound those turns.
 	First time.Time `json:"first,omitempty"`
 	Last  time.Time `json:"last,omitempty"`
+
+	// LastSuccess is the newest turn the model actually answered (a real
+	// model, no API-error flag), at or before the scan's horizon. Zero when none
+	// was seen. It is stamped on StateQuiet as well as StateFailing, because it
+	// is the evidence that turns a window full of errors into HISTORY.
+	//
+	// # Why a failure followed by a success does not count (mg-e0d76)
+	//
+	// A suppression must rest on CURRENT failure. Count, First and Last cover
+	// only failing turns NEWER than LastSuccess: an error the agent has since
+	// answered past is not state, whatever window it sits in. Without this the
+	// detector judged the window, not the agent. On 2026-11-10 pm-poset failed 5
+	// turns on its weekly cap (23:32–23:54Z), the cap lifted at 00:00Z, it
+	// completed real turns from 00:01:20Z on, and its 00:02:22Z crew-reset exit
+	// was still refused a respawn at 00:02:26Z because the 5 errors were inside
+	// the 30-minute window. It stayed down ~16m until absent-watch caught it.
+	// Every crew agent exiting in the first window-length after any cap lifts
+	// hit the same refusal. Shrinking the window narrows that gap and never
+	// closes it; judging only the turns after the newest success closes it.
+	LastSuccess time.Time `json:"last_success,omitempty"`
 
 	// Reasons counts every reason seen in the window, so a page can show a
 	// mixed picture instead of flattening it to the winner.
@@ -390,12 +411,12 @@ type turn struct {
 	Error     string `json:"error"`
 	IsAPIErr  bool   `json:"isApiErrorMessage"`
 	Message   struct {
-		Model   string `json:"model"`
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		Usage struct {
+		Model string `json:"model"`
+		// Content is decoded lazily (see text): since mg-e0d76 every assistant
+		// turn is decoded to find successes, and a real turn's content can be
+		// most of a large line that nothing here reads.
+		Content json.RawMessage `json:"content"`
+		Usage   struct {
 			InputTokens         int `json:"input_tokens"`
 			OutputTokens        int `json:"output_tokens"`
 			CacheCreationTokens int `json:"cache_creation_input_tokens"`
@@ -419,8 +440,25 @@ func (t *turn) isSyntheticFailure() bool {
 	return t.IsAPIErr
 }
 
+// isSuccess reports whether the model really answered this turn: an assistant
+// record attributed to a real model and not flagged as an API error. It is the
+// structural opposite of isSyntheticFailure and, like it, keys on no string.
+func (t *turn) isSuccess() bool {
+	if t.Type != "assistant" || t.IsAPIErr {
+		return false
+	}
+	return t.Message.Model != "" && t.Message.Model != syntheticModel
+}
+
 func (t *turn) text() string {
-	for _, c := range t.Message.Content {
+	var content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if len(t.Message.Content) == 0 || json.Unmarshal(t.Message.Content, &content) != nil {
+		return ""
+	}
+	for _, c := range content {
 		if c.Type == "text" && c.Text != "" {
 			return c.Text
 		}
@@ -532,6 +570,10 @@ func Scan(home string, globs []string, opts Options) Report {
 
 	horizon := now.Add(futureTolerance)
 	rep := Report{State: StateQuiet, Reasons: map[Reason]int{}}
+	// Failing turns are collected first and counted only once every file has
+	// been read, because the newest success that makes them history can sit in
+	// a LATER file — a restarted agent's new session — than the errors do.
+	var obs observations
 	var readErr error
 	for _, p := range paths {
 		st, err := os.Stat(p)
@@ -545,7 +587,7 @@ func Scan(home string, globs []string, opts Options) Report {
 		if st.ModTime().Before(cutoff) {
 			continue
 		}
-		if err := scanFile(p, cutoff, horizon, &rep); err != nil {
+		if err := scanFile(p, cutoff, horizon, &obs); err != nil {
 			readErr = err
 		}
 	}
@@ -558,11 +600,28 @@ func Scan(home string, globs []string, opts Options) Report {
 		return stamp(Report{Unavailable: msg})
 	}
 
+	rep.LastSuccess = obs.lastSuccess
+	for _, f := range obs.failures {
+		// History, not state: the agent has answered a real turn since (mg-e0d76).
+		if !f.ts.After(obs.lastSuccess) {
+			continue
+		}
+		rep.Count++
+		rep.Reasons[f.reason]++
+		if rep.First.IsZero() || f.ts.Before(rep.First) {
+			rep.First = f.ts
+		}
+		if f.ts.After(rep.Last) {
+			rep.Last = f.ts
+			rep.Detail = truncate(f.text, 200)
+		}
+	}
+
 	if rep.Count < minTurns {
 		// Below threshold is QUIET, not failing — but the turns we did see are
 		// dropped from the report so a caller cannot mistake a stray transient
 		// for the class.
-		return stamp(Report{State: StateQuiet, Files: rep.Files})
+		return stamp(Report{State: StateQuiet, Files: rep.Files, LastSuccess: rep.LastSuccess})
 	}
 
 	rep.State = StateFailing
@@ -570,8 +629,22 @@ func Scan(home string, globs []string, opts Options) Report {
 	return stamp(rep)
 }
 
-// scanFile appends the failing turns in one transcript file to rep.
-func scanFile(path string, cutoff, horizon time.Time, rep *Report) error {
+// failure is one failing turn inside the window, held until the newest success
+// across every file is known.
+type failure struct {
+	ts     time.Time
+	reason Reason
+	text   string
+}
+
+// observations is what one scan collects before it judges anything.
+type observations struct {
+	failures    []failure
+	lastSuccess time.Time
+}
+
+// scanFile appends the failing turns and successes in one transcript file to obs.
+func scanFile(path string, cutoff, horizon time.Time, obs *observations) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -582,7 +655,7 @@ func scanFile(path string, cutoff, horizon time.Time, rep *Report) error {
 	for {
 		line, err := readLine(r)
 		if len(line) > 0 {
-			consider(line, cutoff, horizon, rep)
+			consider(line, cutoff, horizon, obs)
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -593,26 +666,41 @@ func scanFile(path string, cutoff, horizon time.Time, rep *Report) error {
 	}
 }
 
-// consider decodes one line if it could plausibly be a synthetic failure turn.
-// The substring pre-filter is an optimisation only: everything it lets through
-// is re-verified structurally by isSyntheticFailure, so a harness that renames
-// the marker loses speed, not correctness — it would report StateQuiet, which
-// is the same degraded-to-today's-behaviour answer as an absent file.
-func consider(line []byte, cutoff, horizon time.Time, rep *Report) {
-	if !containsSynthetic(line) {
+// consider decodes one line if it could plausibly be an assistant turn — a
+// synthetic failure or a real success. The substring pre-filter is an
+// optimisation only: everything it lets through is re-verified structurally by
+// isSyntheticFailure / isSuccess.
+//
+// A success that is MISSED (an oversized line skipped by readLine, or a harness
+// that renames its fields) leaves the earlier failures counted — the same answer
+// the detector gave before mg-e0d76, never a new false negative.
+func consider(line []byte, cutoff, horizon time.Time, obs *observations) {
+	if !containsAssistant(line) {
 		return
 	}
 	var t turn
 	if err := json.Unmarshal(line, &t); err != nil {
 		return
 	}
-	if !t.isSyntheticFailure() {
+	failing := t.isSyntheticFailure()
+	if !failing && !t.isSuccess() {
 		return
 	}
 	ts, err := time.Parse(time.RFC3339Nano, t.Timestamp)
 	if err != nil {
 		// A turn we cannot date cannot be placed inside the window. Counting it
-		// would let ancient history page a live human.
+		// would let ancient history page a live human — and an undatable success
+		// cannot be placed after the failures it would retire.
+		return
+	}
+	if !failing {
+		// A success beyond the horizon is the same clock-skew/historical-scan
+		// artefact as a failure there, and must not retire the window's errors.
+		// No lower bound: a success before the cutoff precedes every counted
+		// failure, so it retires nothing.
+		if !ts.After(horizon) && ts.After(obs.lastSuccess) {
+			obs.lastSuccess = ts
+		}
 		return
 	}
 	// The window is bounded at BOTH ends. A turn before the cutoff is history;
@@ -624,19 +712,13 @@ func consider(line []byte, cutoff, horizon time.Time, rep *Report) {
 	}
 
 	text := t.text()
-	rep.Count++
-	rep.Reasons[classify(t.Error, text)]++
-	if rep.First.IsZero() || ts.Before(rep.First) {
-		rep.First = ts
-	}
-	if ts.After(rep.Last) {
-		rep.Last = ts
-		rep.Detail = truncate(text, 200)
-	}
+	obs.failures = append(obs.failures, failure{ts: ts, reason: classify(t.Error, text), text: text})
 }
 
-func containsSynthetic(line []byte) bool {
-	return strings.Contains(string(line), syntheticModel)
+// containsAssistant is consider's cheap pre-filter. It matches the bare word
+// rather than `"type":"assistant"` because harnesses differ in JSON spacing.
+func containsAssistant(line []byte) bool {
+	return bytes.Contains(line, []byte("assistant"))
 }
 
 // readLine returns the next line without its terminator, skipping any line

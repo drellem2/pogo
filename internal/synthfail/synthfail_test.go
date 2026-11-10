@@ -385,3 +385,137 @@ func TestReason_HumanIsAlwaysPopulated(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// A SUPPRESSION RESTS ON CURRENT FAILURE (mg-e0d76). Errors the agent has since
+// answered past are history, whatever window they sit in.
+// ---------------------------------------------------------------------------
+
+// writeTurns writes hand-built synthetic-failure and success records into a
+// fake home and returns (home, glob).
+func writeTurns(t *testing.T, failures, successes []time.Time) (home, glob string) {
+	t.Helper()
+	home = t.TempDir()
+	dir := filepath.Join(home, ".harness", "projects", "agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, ts := range failures {
+		b.WriteString(`{"type":"assistant","timestamp":"` + ts.Format(time.RFC3339Nano) + `",` +
+			`"error":"rate_limit","isApiErrorMessage":true,` +
+			`"message":{"model":"<synthetic>","role":"assistant",` +
+			`"content":[{"type":"text","text":"You've hit your weekly limit · resets 12am"}],` +
+			`"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}` + "\n")
+	}
+	for _, ts := range successes {
+		b.WriteString(`{"type": "assistant", "timestamp": "` + ts.Format(time.RFC3339Nano) + `", ` +
+			`"message": {"model": "claude-opus-5-5", "role": "assistant", ` +
+			`"content": [{"type": "text", "text": "real work"}], ` +
+			`"usage": {"input_tokens": 2, "output_tokens": 196, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 27525}}}` + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "s.jsonl"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return home, filepath.Join(".harness", "projects", "agent", "*.jsonl")
+}
+
+func TestScan_ErrorsFollowedByASuccessDoNotSuppress(t *testing.T) {
+	now := time.Date(2026, 11, 10, 0, 2, 26, 0, time.UTC)
+	var failures []time.Time
+	for i := 0; i < 5; i++ {
+		failures = append(failures, now.Add(-25*time.Minute+time.Duration(i)*4*time.Minute))
+	}
+	home, glob := writeTurns(t, failures, []time.Time{now.Add(-time.Minute)})
+
+	got := Scan(home, []string{glob}, Options{Now: now})
+	if got.State != StateQuiet {
+		t.Fatalf("state = %v, want StateQuiet: 5 limit errors followed by a successful turn are history (report: %+v)", got.State, got)
+	}
+	if got.SuppressRestart() {
+		t.Error("SuppressRestart() = true on errors the agent has since answered past")
+	}
+	if want := now.Add(-time.Minute); !got.LastSuccess.Equal(want) {
+		t.Errorf("LastSuccess = %v, want %v", got.LastSuccess, want)
+	}
+}
+
+// The positive control: the same N errors with no later success still suppress.
+// If this fails, the test above proves nothing.
+func TestScan_ErrorsWithNoLaterSuccessStillSuppress(t *testing.T) {
+	now := time.Date(2026, 11, 10, 0, 2, 26, 0, time.UTC)
+	var failures []time.Time
+	for i := 0; i < 5; i++ {
+		failures = append(failures, now.Add(-25*time.Minute+time.Duration(i)*4*time.Minute))
+	}
+	// A success that PRECEDES the errors retires nothing.
+	home, glob := writeTurns(t, failures, []time.Time{now.Add(-28 * time.Minute)})
+
+	got := Scan(home, []string{glob}, Options{Now: now})
+	if got.State != StateFailing || !got.SuppressRestart() {
+		t.Fatalf("state = %v, want StateFailing: no success after the errors (report: %+v)", got.State, got)
+	}
+	if got.Count != 5 {
+		t.Errorf("count = %d, want 5", got.Count)
+	}
+}
+
+// Only the turns after the newest success are judged: a success between two
+// runs of errors retires the first run, and the second run still fires on its
+// own merit.
+func TestScan_OnlyTurnsAfterTheNewestSuccessAreJudged(t *testing.T) {
+	now := time.Date(2026, 11, 10, 0, 30, 0, 0, time.UTC)
+	failures := []time.Time{
+		now.Add(-28 * time.Minute), now.Add(-26 * time.Minute), now.Add(-24 * time.Minute),
+		now.Add(-6 * time.Minute), now.Add(-3 * time.Minute),
+	}
+	home, glob := writeTurns(t, failures, []time.Time{now.Add(-20 * time.Minute)})
+
+	got := Scan(home, []string{glob}, Options{Now: now})
+	if got.State != StateFailing {
+		t.Fatalf("state = %v, want StateFailing: 2 errors after the success (report: %+v)", got.State, got)
+	}
+	if got.Count != 2 || !got.First.Equal(failures[3]) || !got.Last.Equal(failures[4]) {
+		t.Errorf("count/first/last = %d/%v/%v, want 2/%v/%v — the run before the success is history",
+			got.Count, got.First, got.Last, failures[3], failures[4])
+	}
+}
+
+// A success timestamped beyond the horizon is a clock-skew artefact, not
+// evidence of recovery, and must not retire live errors.
+func TestScan_FutureSuccessDoesNotRetireErrors(t *testing.T) {
+	now := time.Date(2026, 11, 10, 0, 30, 0, 0, time.UTC)
+	home, glob := writeTurns(t,
+		[]time.Time{now.Add(-6 * time.Minute), now.Add(-3 * time.Minute)},
+		[]time.Time{now.Add(time.Hour)})
+
+	if got := Scan(home, []string{glob}, Options{Now: now}); got.State != StateFailing {
+		t.Fatalf("state = %v, want StateFailing (report: %+v)", got.State, got)
+	}
+}
+
+// TestScan_WeeklyResetRecovered_2026_11_10 reproduces mg-e0d76 from the real
+// event sequence: pm-poset's 5 weekly-limit turns (verbatim), then the real
+// turns it completed after the 00:00Z reset (structural; prose removed). At
+// pogod's 00:02:26Z suppression the scan must read QUIET.
+func TestScan_WeeklyResetRecovered_2026_11_10(t *testing.T) {
+	const fixture = "weekly-reset-recovered-2026-11-10.jsonl"
+	home, glob := installFixture(t, fixture)
+	suppressedAt := time.Date(2026, 11, 10, 0, 2, 26, 471292000, time.UTC)
+
+	got := Scan(home, []string{glob}, Options{Now: suppressedAt})
+	if got.State != StateQuiet || got.SuppressRestart() {
+		t.Fatalf("state = %v at the 11-10 suppression, want StateQuiet: pm-poset had been completing turns since 00:01:20Z (report: %+v)", got.State, got)
+	}
+	if want := time.Date(2026, 11, 10, 0, 2, 25, 665000000, time.UTC); !got.LastSuccess.Equal(want) {
+		t.Errorf("LastSuccess = %v, want %v", got.LastSuccess, want)
+	}
+
+	// Positive control on the same fixture: a reading taken before the first
+	// post-reset turn — the 23:57:35Z scan whose verdict pogod actually acted
+	// on — still reads all 5 as current failure, weekly_limit.
+	before := Scan(home, []string{glob}, Options{Now: time.Date(2026, 11, 9, 23, 57, 35, 0, time.UTC)})
+	if before.State != StateFailing || before.Count != 5 || before.Reason != ReasonWeeklyLimit {
+		t.Fatalf("pre-recovery reading = %v/%d/%q, want failing/5/weekly_limit (report: %+v)", before.State, before.Count, before.Reason, before)
+	}
+}

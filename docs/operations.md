@@ -56,7 +56,7 @@ This is the failure that took the fleet down for 23h30m on 2026-07-22, and the r
 
 ### What to do
 
-**Do not restart. Do not nudge.** A restart cannot fix any member of this class — the replacement session inherits the same dead credential or exhausted limit — while it *does* discard the live session's accumulated context (pm-pogo held 2339 messages when it failed) and overwrite the transcript the diagnosis depends on. A nudge is just one more turn to fail. pogod suppresses respawn for affected agents automatically, and the mayor's stall-watch has a mandatory pre-restart check; neither is something to work around.
+**Do not restart. Do not nudge.** A restart cannot fix any member of this class — the replacement session inherits the same dead credential or exhausted limit — while it *does* discard the live session's accumulated context (pm-pogo held 2339 messages when it failed) and overwrite the transcript the diagnosis depends on. A nudge is just one more turn to fail. pogod suppresses respawn for affected agents automatically, and the mayor's stall-watch has a mandatory pre-restart check; neither is something to work around. The suppression rests on **current** failure only: errors the agent has since answered past with a real turn are history, whatever window they sit in, so an agent that recovered when a limit lifted and then exits is respawned normally. pogod re-reads the transcript before acting on a cached failing verdict, so the scan interval cannot hide a recovery either (mg-e0d76).
 
 Each reason needs a human or the passage of time:
 
