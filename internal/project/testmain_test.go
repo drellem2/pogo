@@ -97,3 +97,19 @@ func TestStateRootIsSandboxed(t *testing.T) {
 			"write the registry into the real ~/.pogo", projectFile, sandbox.Root)
 	}
 }
+
+// useEphemeralRoots replaces the temp-dir roots isEphemeralPath refuses with
+// roots, for the duration of t. The fixture repos (_testdata/*) live inside
+// the checkout, so a checkout under $TMPDIR makes the production classifier
+// refuse them as "ephemeral path" for reasons unrelated to the test. A test
+// that needs the fixtures registered calls this with a root it owns (or none),
+// so the result no longer depends on where the tree was checked out. The
+// production roots are restored on cleanup; tests that assert the production
+// refusal itself (TestIsEphemeralPath, TestVisitRefusesEphemeralRepo) must NOT
+// call it.
+func useEphemeralRoots(t *testing.T, roots ...string) {
+	t.Helper()
+	orig := ephemeralTempRoots
+	ephemeralTempRoots = func() []string { return roots }
+	t.Cleanup(func() { ephemeralTempRoots = orig })
+}

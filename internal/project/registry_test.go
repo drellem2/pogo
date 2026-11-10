@@ -19,7 +19,15 @@ func TestPruneRegistryRemovesStaleEntries(t *testing.T) {
 		t.Fatalf("could not resolve a-service: %v", err)
 	}
 
-	tempRepo := t.TempDir() // exists, but ephemeral (under os.TempDir())
+	// The ephemeral root is injected rather than taken from os.TempDir(): if
+	// the checkout itself is under $TMPDIR, the production roots would also
+	// classify a-service as ephemeral and prune the entry this test keeps.
+	ephemeralRoot := t.TempDir()
+	useEphemeralRoots(t, ephemeralRoot)
+	tempRepo := filepath.Join(ephemeralRoot, "repo") // exists, but ephemeral
+	if err := os.Mkdir(tempRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	nonexistent := "/Users/pogo/definitely/not/here/repo-xyz/"
 
 	projects = []Project{
@@ -41,6 +49,7 @@ func TestPruneRegistryRemovesStaleEntries(t *testing.T) {
 // TestPruneRegistryNoOpWhenClean verifies GC leaves a clean registry untouched.
 func TestPruneRegistryNoOpWhenClean(t *testing.T) {
 	ProjectFileName = "projects-prune-clean-test.json"
+	useEphemeralRoots(t) // the checkout may be under $TMPDIR; see useEphemeralRoots
 	Init()
 	defer RemoveSaveFile()
 
@@ -144,5 +153,22 @@ func TestVisitRefusesEphemeralRepo(t *testing.T) {
 	}
 	if len(projects) != numBefore {
 		t.Errorf("ephemeral repo must not be auto-registered; projects went %d -> %d", numBefore, len(projects))
+	}
+}
+
+// TestEphemeralRootsOverrideIsRestored guards the test seam: an override made
+// by useEphemeralRoots must not outlive its test, or the production refusal
+// asserted by TestIsEphemeralPath / TestVisitRefusesEphemeralRepo would be
+// silently disabled by whichever test ran first.
+func TestEphemeralRootsOverrideIsRestored(t *testing.T) {
+	tmp := t.TempDir()
+	t.Run("override", func(t *testing.T) {
+		useEphemeralRoots(t)
+		if isEphemeralPath(tmp) {
+			t.Fatalf("with no injected roots, %s should not be ephemeral", tmp)
+		}
+	})
+	if !isEphemeralPath(tmp) {
+		t.Errorf("after the override's test ended, OS temp dir %s should be ephemeral again", tmp)
 	}
 }

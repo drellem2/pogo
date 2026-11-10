@@ -164,6 +164,23 @@ func PruneRegistry() {
 	logger.Info("registry GC: pruned stale entries", "pruned", pruned, "remaining", len(projects))
 }
 
+// ephemeralTempRoots returns the temp-dir roots isEphemeralPath refuses.
+// It is a variable only so tests can substitute a root they control: the
+// package's fixture repos live inside the checkout, so a checkout that itself
+// sits under $TMPDIR would otherwise have every fixture refused because of
+// where the tree lives rather than what the test exercises. Production code
+// never reassigns it.
+var ephemeralTempRoots = defaultEphemeralTempRoots
+
+func defaultEphemeralTempRoots() []string {
+	return []string{
+		filepath.Clean(os.TempDir()),
+		"/tmp",
+		"/private/tmp",
+		"/private/var/folders",
+	}
+}
+
 // isEphemeralPath reports whether path lives under a directory whose contents
 // are transient by nature — OS temp dirs and the polecat worktree dir. Such
 // repos must never persist in the registry: they are created and destroyed
@@ -171,13 +188,7 @@ func PruneRegistry() {
 func isEphemeralPath(path string) bool {
 	clean := filepath.Clean(path)
 
-	tempRoots := []string{
-		filepath.Clean(os.TempDir()),
-		"/tmp",
-		"/private/tmp",
-		"/private/var/folders",
-	}
-	for _, root := range tempRoots {
+	for _, root := range ephemeralTempRoots() {
 		if root == "" || root == "." {
 			continue
 		}

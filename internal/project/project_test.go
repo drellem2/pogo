@@ -210,6 +210,9 @@ func testFileInNewProjectAddsProject(path string, t *testing.T) {
 }
 
 func TestFileInNewProjectAddsProject(t *testing.T) {
+	// b-service lives inside the checkout, which may be under $TMPDIR; the
+	// production roots would then refuse it as ephemeral. See useEphemeralRoots.
+	useEphemeralRoots(t)
 	files := []string{
 		"",
 		readme,
