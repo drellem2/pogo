@@ -33,7 +33,8 @@ func TestPolecatTreeReposNamesEachTreesOwnRepository(t *testing.T) {
 	addWorktree(t, two, polecats, "e5f6", "polecat-e5f6")
 
 	// A reaped shell: files, no .git. The orphan-dir scan's business.
-	if err := os.MkdirAll(filepath.Join(polecats, "0047", "bin"), 0o755); err != nil {
+	shell := filepath.Join(polecats, "0047")
+	if err := os.MkdirAll(filepath.Join(shell, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// A .git pointer at a repository that no longer exists.
@@ -67,7 +68,10 @@ func TestPolecatTreeReposNamesEachTreesOwnRepository(t *testing.T) {
 	if !strings.Contains(joined, clone) {
 		t.Errorf("a full clone under the polecats dir is not a source repository and must be reported; skipped:\n%s", joined)
 	}
-	if strings.Contains(joined, "0047") {
+	// Match the shell by its own path, never by its bare name: every entry
+	// carries the full temp path, and a temp root such as
+	// /private/tmp/pogo-gate-tmp.10047.xxxx contains "0047" by itself (mg-7092c).
+	if namesTree(skipped, shell) {
 		t.Errorf("a reaped shell with no .git is the orphan scan's business and must be skipped silently; skipped:\n%s", joined)
 	}
 }
@@ -109,4 +113,16 @@ func TestPolecatTreeReposDoesNotNameTheEnclosingRepository(t *testing.T) {
 	if joined := strings.Join(skipped, "\n"); !strings.Contains(joined, half) {
 		t.Errorf("the tree whose .git git would not accept must be reported, got skipped:\n%s", joined)
 	}
+}
+
+// namesTree reports whether any skipped entry is about tree: PolecatTreeRepos
+// formats each entry as "<tree path>: <reason>". The path is compared whole, so
+// digits that happen to occur elsewhere in a temp path cannot match.
+func namesTree(skipped []string, tree string) bool {
+	for _, s := range skipped {
+		if s == tree || strings.HasPrefix(s, tree+":") || strings.HasPrefix(s, tree+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
