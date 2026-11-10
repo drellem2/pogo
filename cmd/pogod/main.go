@@ -3936,6 +3936,13 @@ Flags:
 	if *portFlag != 0 {
 		cfg.Port = *portFlag
 	}
+	// The API is unauthenticated and can spawn agents: refuse a non-loopback
+	// bind unless the operator opted in (mg-233d8, bindguard.go).
+	if warn, err := checkBindExposure(cfg.Bind, os.Getenv); err != nil {
+		fatalf("%v", err)
+	} else if warn != "" {
+		log.Print(warn)
+	}
 	addr := cfg.ListenAddr()
 	ln, listenErr := net.Listen("tcp", addr)
 	if listenErr != nil {

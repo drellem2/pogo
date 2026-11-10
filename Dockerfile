@@ -32,6 +32,12 @@ COPY --from=builder /pogod /usr/local/bin/pogod
 
 USER pogo
 
+# pogod's HTTP API has no authentication and can spawn agents, so pogod refuses
+# to listen on a non-loopback address unless POGO_ALLOW_UNAUTHENTICATED_BIND is
+# set (mg-233d8). This image binds 0.0.0.0 but does NOT set the opt-in: started
+# as-is it exits with an explanation. Run it behind a gateway, authenticating
+# proxy, or private network that controls who can reach port 10000, then pass
+# `-e POGO_ALLOW_UNAUTHENTICATED_BIND=1` to accept the exposure deliberately.
 ENV POGO_MODE=cloud \
     POGO_BIND=0.0.0.0 \
     POGO_PORT=10000 \

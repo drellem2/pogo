@@ -260,6 +260,30 @@ Two consequences worth knowing:
 Environment variables (`POGO_PORT`, `POGO_AGENT_COMMAND`, `POGO_AGENT_PROVIDER`,
 `POGO_EXTRA_PATH`, `POGO_AGENT_AUTOSTART`, …) override both files.
 
+## Listen address and the unauthenticated-bind opt-in
+
+pogod listens on `127.0.0.1:10000` by default. Set the address with
+`[server] bind` / `port`, the `POGO_BIND` / `POGO_PORT` environment variables, or
+the `--bind` / `--port` flags (flags win).
+
+pogod's HTTP API has **no authentication**, and it can spawn agents, so anyone
+who can reach the port can run commands as the pogod user. Its trust model is
+loopback. pogod therefore **refuses to start** when the bind address is not
+loopback, which includes `0.0.0.0`, `::`, an empty bind, a LAN address, or a
+hostname that does not resolve only to loopback. It exits non-zero with a
+message naming the opt-in:
+
+```
+POGO_ALLOW_UNAUTHENTICATED_BIND=1
+```
+
+With the opt-in set (`1`, `true`, `yes` or `on`), pogod listens on the address
+and logs a `WARNING: serving an UNAUTHENTICATED API` line at every start. Set it
+only when something in front of pogod, such as a gateway, an authenticating
+proxy, or a private network, controls who can reach the port. The shipped
+`Dockerfile` binds `0.0.0.0` but does not set the opt-in, so a container
+started without `-e POGO_ALLOW_UNAUTHENTICATED_BIND=1` exits at startup.
+
 ## Coordinator name
 
 The coordinator role is called "mayor" by default, but the name is policy, not
