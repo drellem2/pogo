@@ -3909,6 +3909,15 @@ E2E_RC="$(cat "$E2E/hang.rc")"
 grep -q 'DEADLINE EXCEEDED' "$E2E/hang.log" \
     && pass "ACCEPTANCE: the deadline says so LOUDLY in the log" \
     || fail "no DEADLINE line in the log of a killed run"
+# The runner's OWN account of the SIGTERM (mg-14fe1). The deadline lands while
+# the fetch is inside git_step, whose `2>"$f"` is still in force when the TERM
+# trap runs; the trap's line used to go into that capture, which on_exit then
+# deletes, so it never reached this log. The DEADLINE line above is the
+# watchdog's, written from its own process — this one is the line that tells a
+# reader the run was terminated rather than hung, and only the run can write it.
+grep -q 'terminated (SIGTERM) — the run deadline or an operator ended this run' "$E2E/hang.log" \
+    && pass "the killed run's TERM trap line reaches the log even though the SIGTERM landed mid git_step" \
+    || fail "the TERM trap's 'terminated (SIGTERM)' line is missing from the log of a run SIGTERMed mid git_step — it went to wherever stderr pointed (git_step's capture, deleted by on_exit): $(tail -3 "$E2E/hang.log")"
 grep -q 'KILLED: the nightly run exceeded' "$E2E/mail.log" 2>/dev/null \
     && pass "ACCEPTANCE: the deadline MAILS — the 08-08 hang sent nothing, ever" \
     || fail "the killed run sent no mail (mail.log: $(cat "$E2E/mail.log" 2>/dev/null))"

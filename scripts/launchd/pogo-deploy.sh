@@ -5689,9 +5689,18 @@ report_dispatch_state() {
 # a fire that started and never came back. LOCK_HELD is what makes the earlier
 # arming safe: an unlocked fire must not rmdir the lock the RUNNING deploy holds.
 LOCK_HELD=false
+# True once main() has saved the run's own stderr on fd 8 (mg-14fe1). on_exit
+# restores fd 2 from it only then, so a path that reached on_exit without it
+# (none today) keeps its stderr rather than failing on a closed descriptor.
+RUN_ERR_SAVED=false
 
 on_exit() {
     local rc="$1" elapsed=0
+    # Back to the run's own stderr before anything else writes (mg-14fe1): a
+    # TERM that interrupted git_step leaves its `2>"$f"` in force here, so every
+    # err below — including the exit-path TERM line and a failed attempt record
+    # — would otherwise go into the capture this function deletes two lines on.
+    $RUN_ERR_SAVED && exec 2>&8
     # A TERM from here on — the deadline watchdog, mid fleet-mg build — must not
     # abandon the bookkeeping below: `exit` inside an EXIT trap ends the shell
     # without re-running it, which would leave the lock held and no terminal
@@ -5799,11 +5808,28 @@ main() {
     # healthy, and which without one look exactly like a run that never came
     # back (mg-56ac). It does not touch the lock until LOCK_HELD says this run
     # owns it.
+    #
+    # The run's own stderr, kept on fd 8 for the traps (mg-14fe1). A
+    # trap runs with whatever redirections are in force at the moment the signal
+    # lands, and the deadline lands inside git_step, whose `2>"$f"` sends stderr
+    # into a scratch capture that on_exit then deletes (mg-b9621). So the TERM
+    # line below — the runner's own account that it was terminated, which is
+    # what tells a reader "terminated" from "hung" — was written into that file
+    # and destroyed on every deadline-ended night. Measured: a SIGTERM mid
+    # git_step exited 124 with no such line in the log. The traps write here,
+    # and on_exit restores fd 2 from here, so neither depends on where stderr
+    # happens to point when the signal arrives. If stderr is not open at all
+    # the fd goes to /dev/null rather than leaving the traps a bad descriptor.
+    # NOT `{ exec 8>&2; } 2>/dev/null`: the group's redirection is in force
+    # inside it, so that form saves /dev/null onto fd 8 — measured, the line
+    # was still missing with it.
+    exec 8>&2 || exec 8>/dev/null
+    RUN_ERR_SAVED=true
     trap 'on_exit $?' EXIT
     # So a TERM — from the deadline watchdog, or from an operator — leaves
     # through the trap above with a status of its own, instead of killing the
     # shell outright and leaving the night unrecorded and the lock held.
-    trap 'err "terminated (SIGTERM) — the run deadline or an operator ended this run"; exit '"$DEADLINE_RC" TERM
+    trap 'err "terminated (SIGTERM) — the run deadline or an operator ended this run" 2>&8; exit '"$DEADLINE_RC" TERM
 
     # --mg-only: section 8c alone — no window, no pogod, no attempt record.
     if $MG_ONLY; then
