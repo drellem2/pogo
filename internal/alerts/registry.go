@@ -179,6 +179,7 @@ const (
 	StallWatchWorkedUnclaimed   Name = "stall_watch.worked_unclaimed"
 	StallWatchPreservedWorktree Name = "stall_watch.preserved_worktree"
 	StallWatchStrandedPush      Name = "stall_watch.stranded_push"
+	StallWatchOrphanedClaim     Name = "stall_watch.orphaned_claim"
 
 	StrandedWorkBranch Name = "stranded_work.branch"
 
@@ -241,6 +242,7 @@ var nudges = map[Name]bool{
 	StallWatchWorkedUnclaimed:   true,
 	StallWatchPreservedWorktree: true,
 	StallWatchStrandedPush:      true,
+	StallWatchOrphanedClaim:     true,
 	// Delivery mechanics typed into a terminal.
 	WakeWatchPointer:       true,
 	AgentKickoff:           true,
@@ -323,6 +325,7 @@ var registry = []Def{
 	{StallWatchWorkedUnclaimed, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a work item is being worked but nobody claimed it"},
 	{StallWatchPreservedWorktree, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a preserved worktree is waiting on a decision"},
 	{StallWatchStrandedPush, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a pushed branch was never submitted"},
+	{StallWatchOrphanedClaim, ClassAlert, RoleCoordinator, StallWatchAgentKey, "a work item is claimed by a dead pid and no agent is on it"},
 	{StrandedWorkBranch, ClassAlert, RoleCoordinator + " and the repo's pm-<repo>, if it exists", "", "a stopped polecat left unmerged work"},
 	{SynthWatchHit, ClassAlert, RoleEscalationBox, "", "synthetic error messages are being emitted"},
 	{SynthWatchCleared, ClassAlert, RoleEscalationBox, "", "a synthetic-error episode is over"},

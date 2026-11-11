@@ -533,7 +533,7 @@ in `--json`) reading `nudge`:
 
 | Nudge | Default recipient |
 |-------|-------------------|
-| `stall_watch.unclaimed_items`, `.priority_wake`, `.unread_mail`, `.indefinite_hold`, `.worked_unclaimed`, `.preserved_worktree`, `.stranded_push` | the agent `[stall_watch] agent` watches (the coordinator by default) |
+| `stall_watch.unclaimed_items`, `.priority_wake`, `.unread_mail`, `.indefinite_hold`, `.worked_unclaimed`, `.preserved_worktree`, `.stranded_push`, `.orphaned_claim` | the agent `[stall_watch] agent` watches (the coordinator by default) |
 | `stall_watch.blocked_reminder` | the agent an item is blocked on |
 | `condition.wake` | the condition's addressee, woken to read the notice |
 | `crew_reset.pointer` | the crew agent (sent only when wake-watch is off) |

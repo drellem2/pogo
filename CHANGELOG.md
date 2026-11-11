@@ -12,6 +12,15 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Added
 
+- **stall-watch reports claims held by a dead pid with no live agent
+  (mg-5dec2).** A new `orphaned_claim` notice to the coordinator names every
+  `claimed/` item whose claim pid is not alive and that no live polecat
+  (registry or witness) is on, once the state has held for 10 minutes. Until
+  now nothing read `claimed/`: on 2026-11-08 a nightly pogod restart killed
+  eight polecats, and seven of their claims sat unreported for three and a
+  half days. Dispatch-gated assignees are skipped. Mutable and routable as
+  `stall_watch.orphaned_claim`.
+
 - **`[turn_watch] max_age` and `hold_down` are configurable (pogo#296).**
   turn-watch escalates a crew agent that stopped completing turns — the
   coordinator to the escalation box — after `max_age` (default 3h) plus

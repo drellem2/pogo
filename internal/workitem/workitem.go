@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -152,6 +153,17 @@ type WorkItem struct {
 	// all. Callers should count those separately rather than fold them into
 	// either verdict.
 	CompletedAt time.Time `json:"completed_at,omitempty"`
+	// ClaimPID is the pid a claim stamped on the item's filename — claimed/
+	// holds `<id>.md.<pid>` — or zero when the name carries no numeric pid
+	// suffix. It is populated only by the listings that can see claim-suffixed
+	// names at all (ListAllFrom), so zero from ListFrom means "not looked at",
+	// never "unclaimed".
+	//
+	// The stall watcher reads it to find claims held by a process that no
+	// longer exists (mg-5dec2): the pid is the only thing in the store that
+	// says WHO holds a claim, and an item whose holder is dead is invisible to
+	// dispatch, which skips claimed/, and to every check that reads available/.
+	ClaimPID int `json:"claim_pid,omitempty"`
 }
 
 // TagList splits the raw `tags:` frontmatter value into individual tags. mg
@@ -277,6 +289,9 @@ func listFrom(root string, includeClaimSuffixed bool, statuses ...string) ([]Wor
 			}
 			if info, err := e.Info(); err == nil {
 				item.ModTime = info.ModTime()
+			}
+			if includeClaimSuffixed {
+				item.ClaimPID = claimSuffixPID(e.Name())
 			}
 			if sd.status == "done" {
 				item.CompletedAt = resultFileTime(dir, e.Name())
@@ -443,6 +458,20 @@ func itemFileName(name string, includeClaimSuffixed bool) bool {
 		return true
 	}
 	return includeClaimSuffixed && strings.Contains(name, ".md.")
+}
+
+// claimSuffixPID returns the pid in a claim-suffixed filename `<id>.md.<pid>`,
+// or zero when the name has no suffix or the suffix is not a positive integer.
+func claimSuffixPID(name string) int {
+	i := strings.LastIndex(name, ".md.")
+	if i < 0 {
+		return 0
+	}
+	pid, err := strconv.Atoi(name[i+len(".md."):])
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
 }
 
 // findByPrefix returns the first entry in dir whose name starts with prefix. A

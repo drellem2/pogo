@@ -216,6 +216,9 @@ type Options struct {
 	// a re-block (drellem2/pogo#300). pogod sets it to BlockedStatePath(home).
 	// Left empty the counts are kept in memory only.
 	BlockedStatePath string
+	// PIDAlive answers whether a claim pid names a running process, for the
+	// orphaned-claim check (mg-5dec2). Defaults to signal 0; tests script it.
+	PIDAlive PIDAlive
 }
 
 // Sender is the From: every stall-watch mail carries. pogod's nudger passes it
@@ -272,6 +275,13 @@ type Watcher struct {
 	// the store is that the cap outlives restarts. See blockedRecord.
 	blocked     map[string]blockedRecord
 	blockedPath string
+
+	// pidAlive probes claim pids for the orphaned-claim check (mg-5dec2).
+	pidAlive PIDAlive
+	// orphanSince records, per (item, claim pid), when the claim was first
+	// seen orphaned, so a claim is reported only after it has stayed orphaned
+	// for orphanedClaimGrace. Pruned every sample to the current orphans.
+	orphanSince map[string]time.Time
 }
 
 // fireRecord is the per-key cooldown state: when the key last fired, and how
@@ -356,6 +366,11 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		eventsPath = filepath.Join(filepath.Dir(workRoot), "events.jsonl")
 	}
 
+	pidAlive := opts.PIDAlive
+	if pidAlive == nil {
+		pidAlive = defaultPIDAlive
+	}
+
 	emit := opts.Emit
 	if emit == nil {
 		emit = func(e events.Event) { events.Emit(context.Background(), e) }
@@ -381,6 +396,9 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		blockedPath: opts.BlockedStatePath,
 
 		lastDispatchNotice: make(map[string]time.Time),
+
+		pidAlive:    pidAlive,
+		orphanSince: make(map[string]time.Time),
 	}
 }
 
@@ -397,6 +415,7 @@ func (w *Watcher) Check(now time.Time) {
 		return
 	}
 	w.checkUnclaimedItems(now)
+	w.checkOrphanedClaims(now)
 	w.checkUnreadMail(now)
 }
 
@@ -1435,6 +1454,8 @@ func (w *Watcher) deliver(category, recipient string, n Notice) (d Delivery, to,
 		d, muted, err = alerts.NudgeVia(alerts.StallWatchPreservedWorktree, recipient, n.Subject, send)
 	case categoryStrandedPush:
 		d, muted, err = alerts.NudgeVia(alerts.StallWatchStrandedPush, recipient, n.Subject, send)
+	case categoryOrphanedClaim:
+		d, muted, err = alerts.NudgeVia(alerts.StallWatchOrphanedClaim, recipient, n.Subject, send)
 	default:
 		// A category with no alert name would be a nudge nobody can mute.
 		// TestEveryCategoryIsAnAlert keeps this unreachable; refusing here
