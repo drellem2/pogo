@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -251,6 +252,19 @@ type DrainStatus struct {
 	// "cannot see", NOT "none" — the caller must not render the two the same
 	// way (mg-76e5).
 	UnreachableErr string `json:"unreachable_err,omitempty"`
+}
+
+// ResizeAPIRequest is the JSON body for POST /agents/{name}/resize. A remote
+// attach plane POSTs the client terminal size here so the raw unix attach
+// socket, which carries no resize frame of its own, can have the named agent's
+// PTY TIOCSWINSZ'd to match, ending the stairstep echo (drellem2/pogo#298).
+//
+// The fields are ints, not uint16, so the handler can reject out-of-range
+// values itself: decoding into uint16 rejects negatives and >65535 but turns a
+// missing field or an explicit 0 into a 0 that applyResize silently ignores.
+type ResizeAPIRequest struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
 }
 
 // NudgeAPIRequest is the JSON body for POST /agents/:name/nudge.
@@ -791,6 +805,7 @@ func (r *Registry) routes() []route {
 		{"/agents/{name}/wake", r.handleWake},
 		{"/agents/{name}/diagnose", r.handleDiagnose},
 		{"/agents/{name}/nudge", r.handleNudge},
+		{"/agents/{name}/resize", r.handleResize},
 		{"/agents/{name}/output", r.handleOutput},
 		{"/agents/{name}/terminal", r.handleTerminal},
 	}
@@ -1348,6 +1363,52 @@ func (r *Registry) handleNudge(w http.ResponseWriter, req *http.Request) {
 		Status: NudgeStatusDelivered,
 		Agent:  name,
 	})
+}
+
+// handleResize serves POST /agents/{name}/resize. It applies the client
+// terminal size to the named agent's PTY through the existing applyResize
+// (TIOCSWINSZ), so a pogo agent attach over the raw unix socket, which carries
+// no resize frame, honors the client's dimensions (drellem2/pogo#298).
+//
+// An unknown agent, one that is not running, or one with no PTY answers 404,
+// which the caller treats as an advisory no-op, matching nudge. A body that is
+// not JSON, or a cols/rows that is missing, <= 0 or > 65535, answers 400:
+// applyResize takes uint16 and would silently ignore a 0. Success is 204.
+// applyResize skips a resize to the size the PTY already has, so a redundant
+// call never sends a healthy TUI a SIGWINCH.
+func (r *Registry) handleResize(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "POST" {
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+
+	name := req.PathValue("name")
+	agent := r.Get(name)
+	if agent == nil || agent.Status != StatusRunning || !agent.hasPTY() {
+		http.Error(w, "agent not found or not running", http.StatusNotFound)
+		return
+	}
+
+	var resizeReq ResizeAPIRequest
+	if err := json.NewDecoder(req.Body).Decode(&resizeReq); err != nil {
+		req.Body.Close()
+		http.Error(w, "bad request: JSON body with cols and rows required", http.StatusBadRequest)
+		return
+	}
+	if !validPTYDim(resizeReq.Cols) || !validPTYDim(resizeReq.Rows) {
+		http.Error(w, fmt.Sprintf("bad request: cols and rows must each be 1..%d (got cols=%d rows=%d)",
+			math.MaxUint16, resizeReq.Cols, resizeReq.Rows), http.StatusBadRequest)
+		return
+	}
+
+	agent.applyResize(uint16(resizeReq.Cols), uint16(resizeReq.Rows))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// validPTYDim reports whether n is a terminal dimension applyResize will act
+// on: positive and representable in the uint16 a winsize carries.
+func validPTYDim(n int) bool {
+	return n > 0 && n <= math.MaxUint16
 }
 
 // DefaultOutputBytes is how much of an agent's PTY ring GET

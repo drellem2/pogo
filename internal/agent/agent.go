@@ -2974,6 +2974,14 @@ func (a *Agent) applyResize(cols, rows uint16) {
 	pty.Setsize(master, &pty.Winsize{Cols: cols, Rows: rows})
 }
 
+// hasPTY reports whether the agent currently holds a PTY master, read under
+// a.mu as applyResize does.
+func (a *Agent) hasPTY() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.master != nil
+}
+
 // SocketPath returns the unix socket path for attach.
 func (a *Agent) SocketPath() string {
 	return a.socketPath

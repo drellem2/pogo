@@ -674,6 +674,8 @@ Two channels:
    | `not_running` | 404 | 1 | No running agent by that name; nothing was sent. Mail its box instead. |
    | `failed` | 500 | 1 | Any other error (PTY write error, unreadable receipt, mangled submission, pogod unreachable); `error` says which. |
 
+   **PTY resize over HTTP.** `POST /agents/{name}/resize` with a JSON `{"cols":N,"rows":N}` body sets the agent's PTY size through `Agent.applyResize` (TIOCSWINSZ), the path the framed attach protocol and the WebSocket terminal's `{"type":"resize"}` message already use. It exists for a remote attach plane whose raw unix-socket attach carries no resize frame (drellem2/pogo#298). The status codes: 204 means applied. 404 means the agent is unknown, not running, or holds no PTY, and the caller treats it as a no-op, as with nudge. 400 means the body is not JSON or a dimension is missing, `<= 0` or `> 65535`, which `applyResize` would otherwise drop silently. 405 means a method other than POST. A resize to the size the PTY already has sends no SIGWINCH. Code: `handleResize` in `internal/agent/api.go`.
+
 No direct RPC. No shared memory. No pub/sub. No tmux. Agents are processes that read files and run commands. pogod mediates interactive access because it owns their terminals.
 
 ### Mail to the human, and the optional representative relay
