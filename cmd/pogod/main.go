@@ -2285,6 +2285,10 @@ Flags:
 			// unread-mail check counts. Resolved late through the closure for
 			// the same reason orchResume's is: srv is built after this.
 			Paused: stallWatchPaused,
+			// Persist the blocked-reminder's per-(item, blocked-on) counts so
+			// max_notices survives the nightly restart and a re-block
+			// (drellem2/pogo#300). A bad file fails open to no counts.
+			BlockedStatePath: stallwatch.BlockedStatePath(config.PogoHome()),
 		})
 		log.Printf("pogod: stall watcher enabled (agent=%s item_age=%s mail_age=%s max_mail=%d cooldown=%s fallback_cap=%d priority_wake=%t wake_delay=%s wake_cooldown=%s unclaimed_item_cooldown=%s dispatch_notice_interval=%s fast_priorities=%s non_dispatchable=%s indefinite_hold=%t hold_age=%s hold_cooldown=%s)",
 			cfg.StallWatch.Agent, cfg.StallWatch.UnclaimedItemAgeThreshold,

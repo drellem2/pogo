@@ -211,6 +211,11 @@ type Options struct {
 	// Every backoff is forgotten when the pause ends, so the first tick after a
 	// resume fires fresh — see Check. Left nil the watcher never pauses.
 	Paused func() bool
+	// BlockedStatePath is the file the blocked-reminder persists its per-(item,
+	// blocked-on) notice counts to, so max_notices survives a pogod restart and
+	// a re-block (drellem2/pogo#300). pogod sets it to BlockedStatePath(home).
+	// Left empty the counts are kept in memory only.
+	BlockedStatePath string
 }
 
 // Sender is the From: every stall-watch mail carries. pogod's nudger passes it
@@ -260,6 +265,13 @@ type Watcher struct {
 	// silent ("waived" or "self_set") as of the last sample, so the event that
 	// records the silence is emitted on entry rather than on every tick.
 	quietBlocks map[string]string
+	// blocked is the blocked-reminder's notice count per (item, blocked-on
+	// agent), persisted at blockedPath (drellem2/pogo#300). It is NOT forgotten
+	// on a resume from pause, unlike lastNudge: these notices go to the blocked
+	// agents, not to the coordinator the pause stops, and the whole point of
+	// the store is that the cap outlives restarts. See blockedRecord.
+	blocked     map[string]blockedRecord
+	blockedPath string
 }
 
 // fireRecord is the per-key cooldown state: when the key last fired, and how
@@ -364,6 +376,9 @@ func New(cfg config.StallWatchConfig, opts Options) *Watcher {
 		setters:   newBlockSetterLog(eventsPath),
 		lastNudge: make(map[string]fireRecord),
 		selfMail:  make(map[string]bool),
+
+		blocked:     loadBlockedCounts(opts.BlockedStatePath),
+		blockedPath: opts.BlockedStatePath,
 
 		lastDispatchNotice: make(map[string]time.Time),
 	}

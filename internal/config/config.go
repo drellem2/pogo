@@ -269,6 +269,12 @@ const (
 	// long past the point where "the agent never knew" is a live explanation, and
 	// everything after it is nagging an agent who has already decided to wait.
 	DefaultBlockedReminderMaxNotices = 4
+	// DefaultBlockedReminderCountTTL is how long the blocked-reminder keeps an
+	// (item, blocked-on agent) notice count after the block clears
+	// (drellem2/pogo#300). A re-block on the same agent inside it resumes the
+	// count instead of starting the max_notices cap over; a different agent
+	// starts fresh. 24h was set by the product owner (pm-pogo, 2026-11-11).
+	DefaultBlockedReminderCountTTL = 24 * time.Hour
 	// DefaultIndefiniteHoldAgeThreshold is how long an assignee-gated work item
 	// must have sat untouched before the indefinite-hold report names it
 	// (mg-f398).
@@ -1172,6 +1178,11 @@ type StallWatchConfig struct {
 	// before the reminder goes quiet about it permanently. Zero falls back to
 	// DefaultBlockedReminderMaxNotices; a negative value means no cap.
 	BlockedReminderMaxNotices int
+	// BlockedReminderCountTTL is how long a blocked item's notice count is kept
+	// after the block clears, so a re-block on the same agent resumes the cap
+	// rather than restarting it (drellem2/pogo#300). Zero falls back to
+	// DefaultBlockedReminderCountTTL.
+	BlockedReminderCountTTL time.Duration
 	// BlockedReminderWaiverTags are the visible "I am waiting on purpose"
 	// acknowledgement (drellem2/pogo#161): a `blocked:<agent>` item carrying one
 	// of these tags draws no blocked-reminder. Empty falls back to
@@ -2728,6 +2739,7 @@ func Load() *Config {
 			BlockedReminderEnabled:    true,
 			BlockedReminderCooldown:   DefaultBlockedReminderCooldown,
 			BlockedReminderMaxNotices: DefaultBlockedReminderMaxNotices,
+			BlockedReminderCountTTL:   DefaultBlockedReminderCountTTL,
 			BlockedReminderWaiverTags: DefaultBlockedReminderWaiverTags,
 
 			// Default-on (mg-f398). A reader that ships disarmed is the finding
@@ -3476,6 +3488,9 @@ func Load() *Config {
 		if len(fileCfg.StallWatch.BlockedReminderWaiverTags) > 0 {
 			cfg.StallWatch.BlockedReminderWaiverTags = fileCfg.StallWatch.BlockedReminderWaiverTags
 		}
+		if fileCfg.StallWatch.BlockedReminderCountTTL > 0 {
+			cfg.StallWatch.BlockedReminderCountTTL = fileCfg.StallWatch.BlockedReminderCountTTL
+		}
 		if fileCfg.indefiniteHoldEnabledSet {
 			cfg.StallWatch.IndefiniteHoldReportEnabled = fileCfg.StallWatch.IndefiniteHoldReportEnabled
 		}
@@ -4192,6 +4207,10 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				}
 			case "blocked_reminder_waiver_tags":
 				cfg.StallWatch.BlockedReminderWaiverTags = parseStringArray(val)
+			case "blocked_reminder_count_ttl":
+				if d, err := time.ParseDuration(unquotedVal); err == nil {
+					cfg.StallWatch.BlockedReminderCountTTL = d
+				}
 			case "indefinite_hold_report_enabled":
 				cfg.StallWatch.IndefiniteHoldReportEnabled = val == "true"
 				cfg.indefiniteHoldEnabledSet = true

@@ -1148,9 +1148,13 @@ blocked_reminder_enabled = false
 blocked_reminder_cooldown = "20m"
 blocked_reminder_max_notices = -1
 blocked_reminder_waiver_tags = ["hold-ack", "deliberate"]
+blocked_reminder_count_ttl = "6h"
 `), 0644)
 
 	cfg := Load()
+	if cfg.StallWatch.BlockedReminderCountTTL != 6*time.Hour {
+		t.Errorf("count ttl = %v, want 6h", cfg.StallWatch.BlockedReminderCountTTL)
+	}
 	if got := cfg.StallWatch.BlockedReminderWaiverTags; len(got) != 2 || got[0] != "hold-ack" || got[1] != "deliberate" {
 		t.Errorf("waiver tags = %v, want [hold-ack deliberate]", got)
 	}

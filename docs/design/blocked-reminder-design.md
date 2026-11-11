@@ -145,8 +145,10 @@ It waives a **notice**, nothing else, and only for a reachable blocker: a waived
 item whose name is a typo still sends the coordinator its "fix the assignee"
 notice. The item stays gated by its assignee, and
 dispatch is refused at the spawn point regardless of tags. Removing the tag
-re-arms the reminder: the item's backoff key was pruned when it left the
-candidate set, so its next notice is a first notice and fires at once.
+re-arms the reminder. If the item had never drawn a notice, its next one is a
+first notice and fires at once; if it had, the count it carried is resumed (see
+"The count outlives the block" below), so waiving and un-waiving does not reset
+the cap.
 
 ## Self-set blocks draw nothing (drellem2/pogo#161)
 
@@ -259,11 +261,35 @@ root.
   **"nothing IN MG"**, and `TestBlockedReminderScopesItsClaimToMG` fails if either
   reverts. The general rule, worth applying to any operator-facing sentence: say
   which system you are speaking for, especially when the answer is "only mine".
-- **It does not persist across a pogod restart.** The backoff state is
-  in-process, like every other stall-watch category, so a restart re-notifies each
-  blocked item once and the count starts over. That is consistent with the
-  existing design (a restart is when the coordinator's own picture is also gone),
-  and it means the 4-notice cap is per-process, not per-block.
+- **It did not persist across a pogod restart — until drellem2/pogo#300.** See
+  the next section.
+
+## The count outlives the block (drellem2/pogo#300)
+
+The count used to live in stall-watch's in-memory `lastNudge`, keyed by item and
+pruned the moment the item stopped being a candidate. So the cap was per blocked
+*period*, not per block: an item reassigned, claimed, waived or self-set for one
+tick and then blocked again read as new and drew all four notices again, and the
+nightly deploy's pogod restart reset every count. One item drew 10 notices in 15
+hours against a cap of 4.
+
+Now the count is kept per **(item, blocked-on agent)** and persisted at
+`$POGO_HOME/stallwatch/blocked-reminders.json`:
+
+- When the pair stops being a candidate, its record is kept for
+  `blocked_reminder_count_ttl` (default **24h**), then dropped. It is dropped
+  early when the item reaches `done/`.
+- A re-block on the **same** agent inside that window **resumes** the count, and
+  its backoff: no fresh first notice.
+- A re-block on a **different** agent starts fresh — that agent has never been
+  told.
+- A missing, unreadable, malformed or wrong-version state file **fails open**:
+  pogod starts with no counts and logs why. A broken store must never silence a
+  reminder nobody has received.
+- The counts are not forgotten on a resume from index-only pause, unlike the
+  coordinator-facing categories: these notices go to the blocked agents.
+
+The other stall-watch categories keep their in-memory, restart-forgets state.
 
 ## A note on the evidence, worth keeping
 

@@ -88,10 +88,10 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 	}
 
 	// Candidates are every `blocked:<agent>` item, INCLUDING ones already past
-	// the notice cap. They must stay in the candidate set because selectDue
-	// prunes any key whose item is no longer a candidate — dropping a capped item
-	// here would forget its count, and it would read as new next tick and start
-	// the four notices over. The cap is applied to the message below instead.
+	// the notice cap. They must stay in the candidate set because
+	// selectBlockedDue retires any record whose pair is no longer a candidate —
+	// dropping a capped item here would start its retention clock while it is
+	// still blocked. The cap is applied to the message below instead.
 	//
 	// Two kinds of `blocked:<agent>` item whose agent is REACHABLE are NOT
 	// candidates, and both leave the set before selectDue so that neither draws
@@ -102,9 +102,11 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 	//   - one whose current assignee the named agent wrote ITSELF: that value is
 	//     a statement the agent made, not a request it received.
 	//
-	// Leaving the set prunes the item's key, so if the waiver is removed or
-	// someone else re-writes the block, the item reads as new and its first
-	// notice fires immediately — exactly what either change means.
+	// Leaving the set retires the item's count rather than forgetting it
+	// (drellem2/pogo#300): if the waiver is removed, or someone else re-writes
+	// a block on the same agent, within blocked_reminder_count_ttl, the count
+	// resumes where it was — so toggling a waiver cannot reset the cap. An item
+	// that never drew a notice still gets its first one immediately.
 	waivers := w.blockedReminderWaiverTags()
 	readSetters := false
 	var blocked []workitem.WorkItem
@@ -146,7 +148,7 @@ func (w *Watcher) checkBlockedReminders(now time.Time, items []workitem.WorkItem
 	sort.Slice(blocked, func(i, j int) bool { return blocked[i].ID < blocked[j].ID })
 	w.recordQuietBlocks(waived, selfSet, waivers)
 
-	due, sel := w.selectDue(categoryBlockedReminder, blocked, now, w.blockedReminderCooldown())
+	due, sel := w.selectBlockedDue(blocked, now, w.blockedReminderCooldown())
 
 	// Apply the notice cap. A first notice has count 1 and is omitted from
 	// sel.repeats, so an absent id means one.

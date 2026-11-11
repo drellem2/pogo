@@ -913,6 +913,11 @@ fast_priorities = ["high"]              # Priority values that trigger the wake
 blocked_reminder_enabled = true         # default true
 blocked_reminder_cooldown = "1h"        # base of the per-item backoff
 blocked_reminder_max_notices = 4        # notices per item (negative = no cap)
+blocked_reminder_count_ttl = "24h"      # keep an item's count this long after the
+                                        # block clears; a re-block on the SAME
+                                        # agent resumes it, a different agent
+                                        # starts fresh. Persisted across restarts
+                                        # (drellem2/pogo#300)
 blocked_reminder_waiver_tags = ["waiting-on-purpose"]
                                         # an item carrying one draws no reminder;
                                         # it waives the NOTICE, the item stays
