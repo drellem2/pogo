@@ -231,16 +231,59 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 	if n := runtime.NumCPU(); n < spinners {
 		spinners = n
 	}
-	gates := []string{spinGate(1), `sleep 2`}
-	if spinners > 1 {
-		gates = append(gates, spinGate(spinners))
-	} else {
+	if spinners <= 1 {
 		t.Logf("host has %d cpu; skipping the injected-work arm — it cannot inject parallel work",
 			runtime.NumCPU())
 		spinners = 0
 	}
-	records := runGateArms(t, heartbeat, gates...)
-	busyRecords, idleRecords := records[0], records[1]
+	gatesFor := func(hold time.Duration) []string {
+		gates := []string{spinGateFor(1, hold), fmt.Sprintf("sleep %d", int(hold/time.Second))}
+		if spinners > 1 {
+			gates = append(gates, spinGateFor(spinners, hold))
+		}
+		return gates
+	}
+
+	// THE GATE'S LIFETIME IS A BOUND, AND ON A LOADED HOST IT WAS TOO SHORT
+	// (mg-ad6db, the sibling of mg-e44db). A settled reading needs two
+	// process-table reads a heartbeat apart, both landing while the gate still
+	// runs, and each read is a `ps` exec. Under load 7.4 a 2s gate got 21
+	// records and not one settled reading — every one "not sampled yet" or
+	// "first sample of two"; a stub ps delayed 1.0s reproduces that exact
+	// failure 5/5 (0.6s passes 5/5). So when — and ONLY when — some arm comes
+	// back with no settled readings at all, every arm is rerun together with
+	// the hold doubled, up to 8s. A run that HAS readings on every arm is
+	// judged on its first attempt: widening never gets a second chance at a
+	// verdict the rules already gave, only at producing data they can be
+	// applied to. The arms stay concurrent and identical but for n, so the
+	// comparisons below mean what they meant at 2s.
+	const maxHold = 8 * time.Second
+	var records [][]StepProgress
+	var busyRecords, idleRecords []StepProgress
+	var hold time.Duration
+	for hold = 2 * time.Second; ; hold *= 2 {
+		records = runGateArms(t, heartbeat, gatesFor(hold)...)
+		busyRecords, idleRecords = records[0], records[1]
+		if !supported {
+			break // the unsupported path asserts on the records' reason, not on readings
+		}
+		short := []string{}
+		if len(settledCPU(busyRecords)) == 0 {
+			short = append(short, "one")
+		}
+		if len(settledCPU(idleRecords)) == 0 {
+			short = append(short, "idle")
+		}
+		if spinners > 1 && len(settledCPU(records[2])) == 0 {
+			short = append(short, "many")
+		}
+		if len(short) == 0 || hold >= maxHold {
+			break
+		}
+		t.Logf("no settled readings on arm(s) %s with the gates held %s — the process table was too slow "+
+			"to read twice inside the gate's life; retrying every arm with %s",
+			strings.Join(short, ","), hold, 2*hold)
+	}
 
 	last := busyRecords[len(busyRecords)-1]
 	t.Logf("busy gate: pid=%d source=%s readings=%d", last.GatePID, last.CPUSource, len(busyRecords))
@@ -269,8 +312,8 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 
 	busy := settledCPU(busyRecords)
 	if len(busy) == 0 {
-		t.Fatalf("a 2s gate at a %s heartbeat produced no settled measurement on %s (last unavailable=%q)",
-			heartbeat, procSource, last.CPUUnavailable)
+		t.Fatalf("a %s gate at a %s heartbeat produced no settled measurement on %s (last unavailable=%q)",
+			hold, heartbeat, procSource, last.CPUUnavailable)
 	}
 
 	// The negative arm. A sleeping gate consumes nothing, and the record must
@@ -281,7 +324,7 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 	logArm(t, "idle", idleRecords)
 	idle := settledCPU(idleRecords)
 	if len(idle) == 0 {
-		t.Fatalf("a 2s sleeping gate at a %s heartbeat produced no settled measurement on %s", heartbeat, procSource)
+		t.Fatalf("a %s sleeping gate at a %s heartbeat produced no settled measurement on %s", hold, heartbeat, procSource)
 	}
 
 	// The injected-work arm: the same template with four spinners instead of
@@ -293,8 +336,8 @@ func TestGateWatchMeasuresARealSubtreesCPU(t *testing.T) {
 		logArm(t, fmt.Sprintf("many(%d)", spinners), manyRecords)
 		many = settledCPU(manyRecords)
 		if len(many) == 0 {
-			t.Fatalf("a 2s %d-spinner gate at a %s heartbeat produced no settled measurement on %s",
-				spinners, heartbeat, procSource)
+			t.Fatalf("a %s %d-spinner gate at a %s heartbeat produced no settled measurement on %s",
+				hold, spinners, heartbeat, procSource)
 		}
 	}
 

@@ -765,15 +765,29 @@ func (w *gateWatch) runCPU() {
 		select {
 		case <-w.stop:
 			return
-		case now := <-t.C:
-			w.sampleCPU(now)
+		case <-t.C:
+			// The tick's own timestamp is NOT passed on. A ticker buffers one
+			// tick, so after a `ps` that outlived the interval the next value
+			// received is stale by up to that whole exec — and a window
+			// measured between two tick stamps then reads 400ms over
+			// snapshots ~1s apart, over-reporting a spinner as 2.4 cores
+			// (mg-ad6db). sampleCPU stamps the reading itself.
+			w.sampleCPU()
 		}
 	}
 }
 
 // sampleCPU takes one process-table reading and folds it against the previous
 // one, publishing the result for snapshot to pick up.
-func (w *gateWatch) sampleCPU(now time.Time) {
+//
+// The reading is stamped when the process table came BACK, not when the read
+// was asked for. A rate is CPU-delta over time-delta, and the CPU figures
+// describe the instant `ps` read the table; on a loaded host the exec can take
+// longer than the heartbeat, so a stamp taken before it (or a stale ticker
+// value) puts the window and the CPU delta on different clocks. The
+// post-return stamp errs by `ps`'s own output-and-exit tail only — on a
+// quiet box a few ms, the same for both ends of the window.
+func (w *gateWatch) sampleCPU() {
 	pid := int(w.pid.Load())
 	if pid <= 0 {
 		w.publishCPU(nil, cpuReading{Unavailable: "gate process not started yet"})
@@ -785,7 +799,11 @@ func (w *gateWatch) sampleCPU(now time.Time) {
 
 	// The `ps` exec happens OUTSIDE the lock: it is the slow part, and holding
 	// a lock across it would put the delay back on whatever reads the record.
-	cur, err := sampleSubtree(pid, now)
+	cur, err := sampleSubtree(pid, time.Time{})
+	now := time.Now()
+	if cur != nil {
+		cur.At = now
+	}
 	if err != nil {
 		w.publishCPU(nil, cpuReading{Unavailable: "reading the process table failed: " + err.Error()})
 		return

@@ -277,3 +277,62 @@ func TestSampleSubtreeSurfacesPSFailure(t *testing.T) {
 		t.Fatal("expected an error when the process table cannot be read")
 	}
 }
+
+// TestASlowProcessTableDoesNotInflateTheRate pins the clock a rate is measured
+// on (mg-ad6db). The subtree below burns exactly one core of wall time, and
+// reading the table takes longer than the sampler's interval — what a loaded
+// host does to `ps`. The sampler used to stamp each reading with the ticker's
+// value, and a ticker buffers one tick: after a slow read the next value is
+// stale by most of that read, so the window said 200ms over snapshots ~600ms
+// apart and the one-core subtree read ~3 cores. That is the over-report that
+// made TestGateWatchMeasuresARealSubtreesCPU's ceiling fire under injected
+// `ps` latency once its gates lived long enough to produce readings at all.
+func TestASlowProcessTableDoesNotInflateTheRate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real timing")
+	}
+	const (
+		interval = 200 * time.Millisecond
+		psDelay  = 600 * time.Millisecond
+	)
+	start := time.Now()
+	prev := psSnapshot
+	psSnapshot = func() ([]procRow, error) {
+		time.Sleep(psDelay)
+		// The table is read at the END of the exec, and the subtree has had
+		// exactly the wall time since start: one core, by construction.
+		return []procRow{{PID: 500, PPID: 1, PGID: 500, CPU: time.Since(start)}}, nil
+	}
+	t.Cleanup(func() { psSnapshot = prev })
+
+	w := &gateWatch{interval: interval, stop: make(chan struct{}), cpuDone: make(chan struct{})}
+	w.pid.Store(500)
+	go w.runCPU()
+
+	var got []cpuReading
+	deadline := time.Now().Add(10 * time.Second)
+	for len(got) < 3 && time.Now().Before(deadline) {
+		time.Sleep(interval / 4)
+		w.cpuMu.Lock()
+		c := w.cpu
+		w.cpuMu.Unlock()
+		if !c.At.IsZero() && (len(got) == 0 || !c.At.Equal(got[len(got)-1].At)) {
+			got = append(got, c)
+		}
+	}
+	close(w.stop)
+	<-w.cpuDone
+	if len(got) < 3 {
+		t.Fatalf("the sampler produced %d rates in 10s, want 3", len(got))
+	}
+	for _, c := range got {
+		t.Logf("cores=%.2f window=%s", c.Activity.Cores, c.Activity.Window)
+		// The only slack is the gap between ps returning and the stamp, which
+		// is a few instructions; 1.25 leaves room for a descheduled goroutine
+		// and still catches the stale-tick inflation (~3x here).
+		if c.Activity.Cores > 1.25 || c.Activity.Cores < 0.75 {
+			t.Errorf("a one-core subtree read %.2f cores over a %s window — the window and the CPU "+
+				"delta are on different clocks", c.Activity.Cores, c.Activity.Window)
+		}
+	}
+}
