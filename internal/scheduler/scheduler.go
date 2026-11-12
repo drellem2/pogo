@@ -437,6 +437,13 @@ const (
 	// NOTHING, because an earlier copy from the same run stands unread
 	// (mg-af83). Distinct from mail on purpose.
 	NudgeDeliveryMailCoalesced = "mail_coalesced"
+	// NudgeDeliverySuppressed: a mail-check fire whose terminal wake the
+	// wake-cycle policy declined (wake_suppressed), and which wrote NO mailbox
+	// copy either. A mail-check fire's whole content is "check your mail", so a
+	// mailed copy of it is a no-op turn (drellem2/pogo#299). Nothing was
+	// carried; distinct from mail_coalesced, which rides a copy already in the
+	// box. Only KindMailCheck fires end here — every other kind still mails.
+	NudgeDeliverySuppressed = "suppressed"
 )
 
 // DelivererFunc adapts an ordinary function to the Deliverer interface so the

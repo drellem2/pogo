@@ -53,8 +53,10 @@ func TestDeliverOutcomeNamesEachBranch(t *testing.T) {
 			want: DeliveryOutcome{Channel: NudgeDeliveryPTYUnconfirmed, NudgeError: queued.Error()}},
 		{name: "nudge_failed", running: true, nudgeErr: refusal, wantMails: 1,
 			want: DeliveryOutcome{Channel: NudgeDeliveryMailFallback, FallbackReason: fallbackReasonNudgeFail, NudgeError: refusal.Error()}},
-		{name: "wake_suppressed", running: true, nudgeErr: suppressed, wantMails: 1,
-			want: DeliveryOutcome{Channel: NudgeDeliveryMailFallback, FallbackReason: fallbackReasonSuppressed, NudgeError: suppressed.Error()}},
+		// A suppressed mail-check fire writes nothing: its body is "check your
+		// mail", so a mailed copy is a no-op turn (drellem2/pogo#299).
+		{name: "wake_suppressed", running: true, nudgeErr: suppressed, wantMails: 0,
+			want: DeliveryOutcome{Channel: NudgeDeliverySuppressed, FallbackReason: fallbackReasonSuppressed, NudgeError: suppressed.Error()}},
 		{name: "agent_not_running", wantMails: 1,
 			want: DeliveryOutcome{Channel: NudgeDeliveryMail, FallbackReason: fallbackReasonNotRunning}},
 		{name: "delivery_mail", delivery: DeliveryMail, running: true, wantMails: 1,
@@ -274,15 +276,18 @@ func TestPlainDelivererStampsNoChannel(t *testing.T) {
 func TestFallbackChannelMatchesStallWatch(t *testing.T) {
 	refusal := errors.New("agent still producing output after 30s")
 	suppressed := fmt.Errorf("%w: usage-limit episode ep-3 open", agent.ErrWakeSuppressed)
+	// A suppressed mail-check fire writes no copy at all (drellem2/pogo#299),
+	// so the wake-suppressed arm is pinned on a sweep, which still mails.
 	cases := []struct {
 		name     string
+		id       string
 		running  bool
 		nudgeErr error
 		want     string
 	}{
-		{"running, nudge failed", true, refusal, stallwatch.DeliveryMailFallback},
-		{"running, wake suppressed", true, suppressed, stallwatch.DeliveryMailFallback},
-		{"not running", false, nil, stallwatch.DeliveryMail},
+		{"running, nudge failed", "mail-check-p1", true, refusal, stallwatch.DeliveryMailFallback},
+		{"running, wake suppressed", "sweep-evening-p1", true, suppressed, stallwatch.DeliveryMailFallback},
+		{"not running", "mail-check-p1", false, nil, stallwatch.DeliveryMail},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -295,7 +300,7 @@ func TestFallbackChannelMatchesStallWatch(t *testing.T) {
 			if tc.running {
 				d.Registry = runningLookup{}
 			}
-			got, err := d.DeliverOutcome(context.Background(), mailCheckEntry("p1", "mail-check-p1"), fixedTime())
+			got, err := d.DeliverOutcome(context.Background(), mailCheckEntry("p1", tc.id), fixedTime())
 			if err != nil {
 				t.Fatal(err)
 			}

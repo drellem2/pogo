@@ -198,6 +198,13 @@ func (p *PogodDeliverer) DeliverOutcome(ctx context.Context, entry Entry, fireTi
 				note := "[scheduler] nudge failed: " + err.Error()
 				reason := fallbackReasonNudgeFail
 				if errors.Is(err, agent.ErrWakeSuppressed) {
+					if skipSuppressedFallback(entry) {
+						return DeliveryOutcome{
+							Channel:        NudgeDeliverySuppressed,
+							FallbackReason: fallbackReasonSuppressed,
+							NudgeError:     err.Error(),
+						}, nil
+					}
 					note = "[scheduler] terminal wake suppressed: " + err.Error()
 					reason = fallbackReasonSuppressed
 				}
@@ -246,12 +253,42 @@ func (p *PogodDeliverer) nudgeAgent(a *agent.Agent, body, corr string) error {
 //
 // ErrWakeSuppressed is NOT the exception and must not become one: a suppressed
 // wake wrote nothing at all, so mail is the only delivery rather than a second
-// one — which is the property mg-8184 built the suppression against.
+// one — which is the property mg-8184 built the suppression against. (A
+// suppressed mail-check fire skips the copy, but that is decided by the
+// schedule's KIND in skipSuppressedFallback, not here: this function answers
+// "was the fire delivered", and for a suppressed wake the answer stays no.)
 func mailAfterNudge(err error) bool {
 	if err == nil {
 		return false
 	}
 	return !errors.Is(err, agent.ErrNudgeQueued)
+}
+
+// skipSuppressedFallback reports whether a fire whose terminal wake the
+// wake-cycle policy declined should go WITHOUT its mailbox copy.
+//
+// Only a mail-check fire does (drellem2/pogo#299). Its entire content is "check
+// your mail and handle what is unread", so mailing it puts one more unread
+// message in the box whose only instruction is to read the box — the turn it
+// costs does nothing the next pointer or the next fire would not. Measured on
+// one fleet over 2026-11-04..10: ~107 such copies a day, essentially all of
+// them with reason wake_suppressed. Nothing is lost by dropping them: the mail
+// the fire would have pointed at is still unread, wakewatch still points at it,
+// and the next mail-check fire (a cron tick away) still lands.
+//
+// Every other kind keeps the copy, and that is the mg-8184 rationale above
+// mailAfterNudge, unchanged: a suppressed wake wrote nothing, so for a sweep or
+// a one-shot reminder the mailbox copy is the ONLY delivery of something the
+// agent cannot reconstruct by reading its mail. A dropped sweep is a lost day.
+//
+// The kind is read structurally, with the id inferred only for an entry that
+// never had one stamped (applyDefaults stamps every persisted entry).
+func skipSuppressedFallback(entry Entry) bool {
+	kind := entry.Kind
+	if kind == "" {
+		kind = inferKind(entry.ID)
+	}
+	return kind == KindMailCheck
 }
 
 // fallbackMail is the single door to the mail fallback. It writes a mailbox
