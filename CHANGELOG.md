@@ -26,7 +26,7 @@ is the curated, human-readable summary kept in sync at each release cut.
   `claimed/` item whose claim pid is not alive and that no live polecat
   (registry or witness) is on, once the state has held for 10 minutes. Until
   now nothing read `claimed/`: on 2026-11-08 a nightly pogod restart killed
-  eight enth polecats, and seven of their claims sat unreported for three and a
+  eight polecats, and seven of their claims sat unreported for three and a
   half days. Dispatch-gated assignees are skipped. Mutable and routable as
   `stall_watch.orphaned_claim`.
 
