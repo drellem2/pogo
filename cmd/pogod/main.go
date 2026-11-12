@@ -3671,6 +3671,12 @@ Flags:
 		if cfg.Refinery.MaxConcurrentMerges > 0 {
 			refineCfg.MaxConcurrentMerges = cfg.Refinery.MaxConcurrentMerges
 		}
+		// Host-local extra gates ([refinery.repos."<repo>"] extra_gates) are
+		// re-read from host config on every merge, so editing them takes
+		// effect on the next merge without restarting pogod (mg-fb7df).
+		refineCfg.ExtraGates = func(repoPath string) []string {
+			return config.Load().Refinery.ExtraGatesFor(repoPath)
+		}
 		var refErr error
 		mergeQueue, refErr = refinery.New(refineCfg)
 		if refErr != nil {
