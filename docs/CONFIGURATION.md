@@ -566,6 +566,58 @@ below), or `default`. A route whose box pogod could not find at startup shows
 its fallback in `EFFECTIVE`, and in `--json` as `route_invalid`. Muted alerts
 are listed first.
 
+### Quiet defaults
+
+Most of what a fleet spends on "alerting" is not alerts at all: it is
+scheduled fires and notices that wake an agent into a turn with nothing to do.
+These are the levers that cut those empty turns, roughly in order of volume
+(drellem2/pogo#299).
+
+| Lever | Where | Shipped default | Quieter setting |
+|-------|-------|-----------------|-----------------|
+| Crew mail-check cadence | each crew agent's `mail-check-<name>` schedule, registered by its prompt on startup | 30 minutes (`:02`/`:32`) for PMs; the doctor stays on 10 | wider still, or none for a pointer-woken agent (below) |
+| `mg schedule` sweep cadence | the coordinator's `mg-schedule-sweep` schedule | hourly | leave it — it is already a backstop |
+| Mute one alert | `[alerts."<name>"] mute = true` | nothing muted | e.g. `filer_notify.completed`, `stall_watch.mail_fallback` |
+| Wake agents by pointer | `[agents] wake = "pointer"` | `"mail-check"` | `"pointer"` |
+
+**Crew mail-check cadence.** A mail-check fire is a backstop, not the main
+wake channel: when mail lands, wake-watch already sends the recipient a short
+pointer nudge naming the sender and the command to run. The fire only catches
+mail a pointer missed, so its cadence is how long you let that case wait. Keep
+any cadence off the round minutes (`2,32`, not `*/30`) so a daily job someone
+later adds at a round hour cannot land in the same wake cycle. A schedule keeps
+the cadence it was registered with: an agent registered on an older cadence
+keeps it until it re-registers. Change one directly with `pogo schedule <agent>
+--cron "…" --id mail-check-<agent> …` (the same `--id` replaces the entry).
+
+A mail-check fire whose terminal wake the wake-cycle policy declines (the agent
+was already woken in this silence, or is inside a provider limit episode) is
+**dropped**, not mailed: a mailed "check your mail" is one more unread message
+whose only instruction is to read the box. It is recorded as
+`scheduler_fire_delivered` with `nudge_delivery = "suppressed"`. Every other
+kind of schedule — a sweep, a one-shot reminder — still falls back to a mailbox
+copy when its wake is declined, because that copy is the only delivery of
+something the agent cannot get by reading its mail.
+
+**`mg schedule` sweep cadence.** The sweep no longer has to be frequent. `mg`
+itself opens an elapsed snooze on every call (`mg list`, `mg show`, anything),
+and `mg done` opens the dependents of what it completes at that instant. The
+sweep only backs those up, so hourly is enough.
+
+**Mutes.** See the next section. The two most often muted for noise are
+`filer_notify.completed` (the "your filed item finished" notice to a
+non-coordinator filer — on by default, because for those agents it is the only
+completion notice they get) and `stall_watch.mail_fallback` (the mailed copy of
+a stall-watch nudge that could not be typed). Mutes are resolved **once, when
+pogod boots**: editing `[alerts]` in a running install does nothing until pogod
+restarts, and the startup line naming every muted alert is the confirmation.
+
+**Pointer wake.** `[agents] wake = "pointer"` (see "Wake mode default" below)
+declares that agents are woken by wake-watch pointers rather than a mail-check
+timer, so an agent with no mail-check schedule is not reported as missing one.
+It does not remove anyone's existing schedule; drop those with `pogo schedule
+rm mail-check-<name> --agent <name>` once the agents are declared pointer-woken.
+
 ### Muting an alert (`[alerts."<name>"] mute`)
 
 Any alert can be muted (drellem2/pogo#262). The name is quoted because it
@@ -935,8 +987,9 @@ indefinite_hold_report_cooldown = "24h" # gap before the same hold is named agai
 
 ### A hold with no driver is invisible
 
-`snooze` and `depends` are holds with a driver: mg's `*/15` sweep evaluates them
-and promotes what has opened. `parked` and `human` have none — nothing scheduled
+`snooze` and `depends` are holds with a driver: every `mg` call promotes an
+elapsed snooze, `mg done` promotes the dependents of what it completes, and an
+hourly `mg schedule` sweep backs both up. `parked` and `human` have none — nothing scheduled
 ever evaluates their release condition, so an indefinite hold persists until a
 person happens to look.
 
