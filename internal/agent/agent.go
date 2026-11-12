@@ -179,6 +179,17 @@ type Agent struct {
 	// secrets). Immutable after construction; safe to read without a.mu.
 	baseEnv []string
 
+	// promptSource and promptSynth are set only for an agent started by
+	// startCrewAgent: the operator-editable prompt (crew/<name>.md, or the
+	// coordinator's mayor.md) and the synthesized-prompt.md path it is merged
+	// into. respawn re-synthesizes from promptSource before re-exec, so a
+	// restart_on_crash restart (and so every crew-reset) launches on the
+	// prompt as it is on disk NOW, not on the copy written at the original
+	// start (drellem2/pogo#306). Empty for every other agent, which respawns
+	// on its PromptFile unchanged. Immutable after construction.
+	promptSource string
+	promptSynth  string
+
 	// queuedNudge records the last delivery pogod wrote to this agent's PTY and
 	// could not prove was submitted, because the harness was mid-turn (see
 	// queuednudge.go). nil means nothing is owed. Guarded by mu.
@@ -1116,6 +1127,12 @@ type SpawnRequest struct {
 	// the deliberate default; see internal/agent/model.go for the outage
 	// behind it.
 	Model string
+
+	// PromptSource is the operator-editable prompt PromptFile was synthesized
+	// from (crew only; set by startCrewAgent). When set, respawn regenerates
+	// PromptFile from it before re-exec instead of reusing the copy written at
+	// spawn. Empty means PromptFile is used as-is on every restart.
+	PromptSource string
 }
 
 // layerEnv assembles the layers pogo puts on top of pogod's own environment
@@ -1325,6 +1342,8 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		receiptFile:    receiptFile,
 		spawnEnv:       append([]string(nil), req.Env...),
 		baseEnv:        append([]string(nil), req.BaseEnv...),
+		promptSource:   req.PromptSource,
+		promptSynth:    promptSynthFor(req.PromptSource, req.PromptFile),
 		outputBuf:      NewRingBuffer(OutputRingBytes), // 64KB rolling buffer
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, req.Name+".sock"),
@@ -1856,9 +1875,20 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	restartCount := old.RestartCount + 1
 	old.mu.Unlock()
 
+	// Re-synthesize the crew prompt from its CURRENT source before re-exec
+	// (drellem2/pogo#306). old.Command names the prompt by path, so without
+	// this a restart_on_crash restart — which is also how every crew-reset
+	// comes back — re-reads the synthesized copy written at the original
+	// start, and a source edit made since is invisible until the next fresh
+	// start.
+	command, promptFile, err := refreshRespawnPrompt(old.Name, old.promptSource, old.promptSynth, old.PromptFile, old.Command)
+	if err != nil {
+		return nil, err
+	}
+
 	old.Cleanup()
 
-	cmd := exec.Command(old.Command[0], old.Command[1:]...)
+	cmd := exec.Command(command[0], command[1:]...)
 	if old.Dir != "" {
 		cmd.Dir = old.Dir
 	}
@@ -1872,7 +1902,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	// Same catalogue as the spawn path — a restart that injected a different
 	// set would be an environment nothing reports.
 	procName := ProcessName(old.Type, old.Name)
-	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, old.PromptFile, receiptFile, r.ServerPort()))
+	injectedEnv := envAssignments(agentIdentityEnv(old.Name, old.Type, procName, promptFile, receiptFile, r.ServerPort()))
 
 	// The caller's spawn env is re-applied AFTER the injected catalogue, in the
 	// same last-wins order as Spawn (drellem2/pogo#165). The order is load-
@@ -1882,7 +1912,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	// gh #263) goes back beneath the catalogue, as it went in on spawn.
 	cmd.Env = append(os.Environ(), layerEnv(old.baseEnv, injectedEnv, old.spawnEnv)...)
 	exportOwnPID(cmd)
-	seedHarnessProfile(old.provider, old.Name, old.Command, cmd.Env)
+	seedHarnessProfile(old.provider, old.Name, command, cmd.Env)
 
 	// A restart re-resolves to the agent's OWN provider (carried on old.provider
 	// from its original spawn), never the registry default — so a Codex agent
@@ -1892,7 +1922,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 
 	// Re-deliver the ContextFile persona for the respawned process (no-op for
 	// Claude). Idempotent — overwrites the same AGENTS.override.md.
-	if err := writeContextFilePrompt(provider, old.PromptFile, old.Dir); err != nil {
+	if err := writeContextFilePrompt(provider, promptFile, old.Dir); err != nil {
 		return nil, fmt.Errorf("context-file prompt injection: %w", err)
 	}
 
@@ -1908,11 +1938,11 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		PID:            cmd.Process.Pid,
 		Type:           old.Type,
 		StartTime:      time.Now(),
-		Command:        old.Command,
+		Command:        command,
 		Status:         StatusRunning,
 		RestartCount:   restartCount,
 		RestartOnCrash: old.RestartOnCrash,
-		PromptFile:     old.PromptFile,
+		PromptFile:     promptFile,
 		Dir:            old.Dir,
 		WorktreeDir:    old.WorktreeDir,
 		SourceRepo:     old.SourceRepo,
@@ -1929,6 +1959,8 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		receiptFile:    receiptFile,
 		spawnEnv:       old.spawnEnv,
 		baseEnv:        old.baseEnv,
+		promptSource:   old.promptSource,
+		promptSynth:    old.promptSynth,
 		outputBuf:      NewRingBuffer(OutputRingBytes),
 		attachConns:    make(map[io.Writer]struct{}),
 		socketPath:     filepath.Join(r.socketDir, old.Name+".sock"),

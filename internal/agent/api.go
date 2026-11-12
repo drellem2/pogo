@@ -1631,8 +1631,10 @@ func (r *Registry) startCrewAgent(name string, preflight *authPreflight) (*Agent
 
 	// If the crew prompt is an `extends <template> with config <config>`
 	// redirect (PM tier), synthesize the merged prompt to a stable per-agent
-	// path so restart-on-crash reuses it. Empty result means no directive —
-	// use the original prompt as-is.
+	// path. A restart-on-crash respawn re-synthesizes it from stubFile
+	// (SpawnRequest.PromptSource) rather than reusing this copy, so an edit to
+	// any source made after this start reaches the next restart. Empty result
+	// means no directive — use the original prompt as-is.
 	synth, err := SynthesizeExtendsPrompt(promptFile, filepath.Join(agentDir, "synthesized-prompt.md"))
 	if err != nil {
 		return nil, fmt.Errorf("synthesize extends prompt: %w", err)
@@ -1739,6 +1741,9 @@ func (r *Registry) startCrewAgent(name string, preflight *authPreflight) (*Agent
 		Provider:       provider,
 		Model:          model,
 		BaseEnv:        baseEnv,
+		// Lets respawn regenerate promptFile from the stub as it is on disk
+		// at restart time, not reuse the copy written here (drellem2/pogo#306).
+		PromptSource: stubFile,
 	})
 }
 

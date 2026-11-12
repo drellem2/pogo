@@ -41,6 +41,23 @@ is the curated, human-readable summary kept in sync at each release cut.
   `turn-watch enabled` startup line names the values in force. Defaults are
   unchanged.
 
+### Fixed
+
+- **A crew restart now launches on the prompt as it is on disk (#306).**
+  A restart_on_crash restart — which is also how an agent comes back after a
+  crew context-reset — re-ran the original command against the
+  `synthesized-prompt.md` written when the agent was first started, so an
+  edit to `crew/<name>.md`, an `extends` template, its TOML config or a
+  drop-in stayed invisible until the next fresh start (in practice, the
+  nightly redeploy). An agent whose boot rule is "register what is missing"
+  could re-register a schedule that had been switched off. Every restart now
+  re-synthesizes from the current sources first. If synthesis fails, pogod
+  logs an `ERROR`, emits `crew_prompt_regen_failed`, and launches on the
+  source file rather than the stale copy; if the source is gone, the restart
+  is refused. Fresh starts (`pogo agent start`, `wake`, auto-start) already
+  re-synthesized. Frontmatter-derived settings (`env`, `model`, provider) are
+  still the ones captured at start, as before.
+
 ## [0.13.0] - 2026-11-12
 
 ### Added

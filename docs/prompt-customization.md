@@ -125,6 +125,12 @@ worker names — see `[agents] coordinator` and `[agents] worker` in
 [CONFIGURATION.md](CONFIGURATION.md)). Run it before and after adding a
 drop-in to see the diff.
 
+pogod writes this synthesized prompt to
+`~/.pogo/agents/<name>/synthesized-prompt.md` whenever it starts a crew agent,
+and rewrites it from the current sources on every restart too (crash restarts
+and context-resets included), so an edit to the stub, template, config or a
+drop-in reaches the agent at its next start or restart — no redeploy needed.
+
 To inspect the source file alone without synthesis:
 
 ```bash
