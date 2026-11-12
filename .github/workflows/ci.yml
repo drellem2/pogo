@@ -138,58 +138,6 @@ jobs:
           POGO_PI_E2E: "1"
         run: go test ./internal/pi/ -v -timeout 300s
 
-  emacs-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # Installed from a pinned GitHub action, not apt (drellem2/pogo#302): on
-      # 2026-11-11 the Ubuntu mirrors were unreachable for ~2.5h across four
-      # attempts, apt's own mirror failover did not save it, and main stayed
-      # red on a tree whose Go jobs were all green. 29.3 is the version
-      # ubuntu-latest's apt was installing; pogo.el needs >= 29.1. The action
-      # is pinned by commit sha (v8.0); bump both deliberately.
-      - name: Install Emacs
-        uses: purcell/setup-emacs@bdc64dc730ae1fcba200bfd52cb1b4cf6159cbe5 # v8.0
-        with:
-          version: "29.3"
-
-      # Hard assert: a broken install must fail HERE, by name, not surface as
-      # a confusing error (or a pass) inside the test script.
-      - name: Assert Emacs is installed
-        run: |
-          command -v emacs || { echo "::error::emacs not on PATH after install"; exit 1; }
-          emacs --version
-
-      - name: Run Emacs Lisp tests
-        run: emacs/run-tests.sh
-
-  nvim-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # Installed from a pinned GitHub action, not apt — same outage, same
-      # reasoning as emacs-test above (drellem2/pogo#302). v0.9.5 is the
-      # version ubuntu-latest's apt was installing. Pinned by commit sha
-      # (v1.6.1); bump both deliberately.
-      - name: Install Neovim
-        uses: rhysd/action-setup-vim@febef33995d6649302e9d88dda81e071b68f16a7 # v1.6.1
-        with:
-          neovim: true
-          version: v0.9.5
-
-      # Load-bearing, not belt-and-braces: nvim/test_nvim.sh exits 0 with
-      # "SKIP: nvim not found" when nvim is missing, so without this step a
-      # broken install turns this job GREEN with zero tests run.
-      - name: Assert Neovim is installed
-        run: |
-          command -v nvim || { echo "::error::nvim not on PATH after install"; exit 1; }
-          nvim --version
-
-      - name: Run Neovim plugin tests
-        run: nvim/test_nvim.sh
-
   bash-test:
     runs-on: ubuntu-latest
     steps:

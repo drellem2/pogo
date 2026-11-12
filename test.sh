@@ -169,8 +169,6 @@ gate_step "Testing the merge gate's signal sender" bash scripts/tmpdir-leak-guar
 # not pushed, ...) are each paired with a passing control. ~1s.
 gate_step "Testing the local release script" bash scripts/tmpdir-leak-guard.sh bash scripts/release-local_test.sh
 
-gate_step "Testing neovim plugin" bash scripts/tmpdir-leak-guard.sh bash nvim/test_nvim.sh
-
 gate_step "Testing bash shell integration" bash scripts/tmpdir-leak-guard.sh bash shell/bashrc_test.sh
 
 gate_step "Testing pogo-self-deploy driver" bash scripts/tmpdir-leak-guard.sh bash scripts/pogo-self-deploy_test.sh

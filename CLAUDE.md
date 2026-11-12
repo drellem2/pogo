@@ -41,13 +41,11 @@ When working on docs or integration code, verify statuses match reality before w
 
 | Integration | Status | Code location |
 |-------------|--------|---------------|
-| Emacs | Supported | `emacs/pogo.el` |
 | Zsh | Supported | `shell/.zshrc` |
 | Bash | Supported | `shell/.bashrc` |
 | Fish | Supported | `shell/pogo.fish` |
 | tmux | Supported | `tmux/pogo.tmux` |
 | VS Code | Supported | `vscode/` |
-| Neovim | Supported | `nvim/` |
 
 If you add or advance an integration, update both `README.md` and this table.
 

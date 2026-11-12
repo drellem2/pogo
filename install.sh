@@ -2,7 +2,6 @@
 # Pogo install script
 # Usage: curl -fsSL https://raw.githubusercontent.com/drellem2/pogo/main/install.sh | sh
 #        curl -fsSL ... | sh -s -- --interactive
-#        curl -fsSL ... | sh -s -- --with-editors
 #        curl -fsSL ... | sh -s -- --no-pogo-install
 set -e
 
@@ -10,7 +9,6 @@ REPO="drellem2/pogo"
 INSTALL_DIR="${POGO_INSTALL_DIR:-/usr/local/bin}"
 BINARIES="pogo pogod lsp"
 INTERACTIVE=false
-WITH_EDITORS=false
 SKIP_POGO_INSTALL=false
 SHELL_SOURCE_URL="https://raw.githubusercontent.com/${REPO}/main/shell"
 TMUX_SOURCE_URL="https://raw.githubusercontent.com/${REPO}/main/tmux"
@@ -31,8 +29,6 @@ Usage:
 Flags:
   --interactive, --with-integrations
         Walk through shell, tmux, editor, and daemon-service setup.
-  --with-editors
-        Non-interactively install supported editor plugins (emacs, neovim).
   --no-pogo-install
         Skip the automatic 'pogo install' step at the end. The script will
         still place binaries on PATH; you remain responsible for running
@@ -53,9 +49,6 @@ for arg in "$@"; do
   case "$arg" in
     --interactive|--with-integrations)
       INTERACTIVE=true
-      ;;
-    --with-editors)
-      WITH_EDITORS=true
       ;;
     --no-pogo-install)
       SKIP_POGO_INSTALL=true
@@ -227,77 +220,9 @@ run_pogo_install_step() {
   fi
 }
 
-###############################################################################
-# Non-interactive editor setup (--with-editors)
-###############################################################################
-
-if [ "$WITH_EDITORS" = true ]; then
-  EDITOR_SOURCE_URL="https://raw.githubusercontent.com/${REPO}/main"
-
-  # Detect the repo root if running from a local checkout
-  SCRIPT_DIR=""
-  if [ -f "${0%/*}/emacs/pogo.el" ] 2>/dev/null; then
-    SCRIPT_DIR=$(cd "${0%/*}" && pwd)
-  fi
-
-  install_editor_file() {
-    src_subpath="$1"
-    dest="$2"
-    mkdir -p "$(dirname "$dest")"
-    if [ -n "$SCRIPT_DIR" ] && [ -f "${SCRIPT_DIR}/${src_subpath}" ]; then
-      ln -sf "${SCRIPT_DIR}/${src_subpath}" "$dest"
-    else
-      curl -fsSL -o "$dest" "${EDITOR_SOURCE_URL}/${src_subpath}"
-    fi
-  }
-
-  # Emacs
-  emacs_dir="$HOME/.emacs.d/site-lisp"
-  if [ -f "${emacs_dir}/pogo.el" ]; then
-    echo "  emacs: pogo.el already present in ${emacs_dir}, skipping."
-  else
-    if install_editor_file "emacs/pogo.el" "${emacs_dir}/pogo.el"; then
-      echo "  emacs: installed pogo.el to ${emacs_dir}"
-      echo "  Add to your init.el:"
-      echo "    (add-to-list 'load-path \"${emacs_dir}\")"
-      echo "    (require 'pogo)"
-    else
-      echo "  emacs: failed to install pogo.el" >&2
-    fi
-  fi
-
-  # Neovim
-  nvim_data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/pack/pogo/start/pogo"
-  if [ -d "$nvim_data_dir" ]; then
-    echo "  neovim: plugin already present in ${nvim_data_dir}, skipping."
-  else
-    mkdir -p "${nvim_data_dir}/lua/pogo"
-    mkdir -p "${nvim_data_dir}/plugin"
-    nvim_ok=true
-    for f in init.lua client.lua telescope.lua; do
-      if ! install_editor_file "nvim/lua/pogo/${f}" "${nvim_data_dir}/lua/pogo/${f}"; then
-        echo "  neovim: failed to install ${f}" >&2
-        nvim_ok=false
-      fi
-    done
-    if ! install_editor_file "nvim/plugin/pogo.lua" "${nvim_data_dir}/plugin/pogo.lua"; then
-      echo "  neovim: failed to install plugin/pogo.lua" >&2
-      nvim_ok=false
-    fi
-    if [ "$nvim_ok" = true ]; then
-      echo "  neovim: plugin installed to ${nvim_data_dir}"
-      echo "  Configure in your init.lua:"
-      echo "    require('pogo').setup({})"
-    fi
-  fi
-fi
-
 if [ "$INTERACTIVE" = false ]; then
-  if [ "$WITH_EDITORS" = false ]; then
-    echo ""
-    echo "Tip: Re-run with --interactive to set up shell and editor integrations,"
-    echo "     or --with-editors to install editor plugins non-interactively."
-  fi
+  echo ""
+  echo "Tip: Re-run with --interactive to set up shell, tmux and editor integrations."
   run_pogo_install_step
   exit 0
 fi
@@ -431,61 +356,6 @@ EDITOR_SOURCE_URL="https://raw.githubusercontent.com/${REPO}/main"
 
 echo "--- Editor Integrations ---"
 
-# Emacs
-if command -v emacs >/dev/null 2>&1; then
-  emacs_dir="$HOME/.emacs.d/site-lisp"
-
-  if [ -f "${emacs_dir}/pogo.el" ]; then
-    echo "  emacs: pogo.el already installed in ${emacs_dir}, skipping."
-  elif ask_yn "  Install Emacs integration (pogo.el) into ${emacs_dir}?"; then
-    mkdir -p "$emacs_dir"
-    if curl -fsSL -o "${emacs_dir}/pogo.el" "${EDITOR_SOURCE_URL}/emacs/pogo.el"; then
-      echo "  emacs: pogo.el installed to ${emacs_dir}"
-      echo ""
-      echo "  Add to your init.el:"
-      echo "    (add-to-list 'load-path \"${emacs_dir}\")"
-      echo "    (require 'pogo)"
-    else
-      echo "  emacs: failed to download pogo.el" >&2
-    fi
-  else
-    echo "  emacs: skipped."
-  fi
-  echo ""
-fi
-
-# Neovim
-if command -v nvim >/dev/null 2>&1; then
-  nvim_data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/pack/pogo/start/pogo"
-
-  if [ -d "$nvim_data_dir" ]; then
-    echo "  neovim: pogo plugin already installed in ${nvim_data_dir}, skipping."
-  elif ask_yn "  Install Neovim integration into ${nvim_data_dir}?"; then
-    mkdir -p "${nvim_data_dir}/lua/pogo"
-    mkdir -p "${nvim_data_dir}/plugin"
-    nvim_ok=true
-    for f in init.lua client.lua telescope.lua; do
-      if ! curl -fsSL -o "${nvim_data_dir}/lua/pogo/${f}" "${EDITOR_SOURCE_URL}/nvim/lua/pogo/${f}"; then
-        echo "  neovim: failed to download ${f}" >&2
-        nvim_ok=false
-      fi
-    done
-    if ! curl -fsSL -o "${nvim_data_dir}/plugin/pogo.lua" "${EDITOR_SOURCE_URL}/nvim/plugin/pogo.lua"; then
-      echo "  neovim: failed to download plugin/pogo.lua" >&2
-      nvim_ok=false
-    fi
-    if [ "$nvim_ok" = true ]; then
-      echo "  neovim: plugin installed to ${nvim_data_dir}"
-      echo ""
-      echo "  The plugin loads automatically. Configure in your init.lua:"
-      echo "    require('pogo').setup({})"
-    fi
-  else
-    echo "  neovim: skipped."
-  fi
-  echo ""
-fi
-
 # VS Code
 if command -v code >/dev/null 2>&1; then
   if code --list-extensions 2>/dev/null | grep -qi pogo; then
@@ -525,8 +395,8 @@ if command -v code >/dev/null 2>&1; then
   echo ""
 fi
 
-if ! command -v emacs >/dev/null 2>&1 && ! command -v nvim >/dev/null 2>&1 && ! command -v code >/dev/null 2>&1; then
-  echo "No supported editors detected (emacs, neovim, vscode)."
+if ! command -v code >/dev/null 2>&1; then
+  echo "No supported editors detected (vscode)."
 fi
 
 echo ""

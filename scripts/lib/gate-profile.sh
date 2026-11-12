@@ -76,7 +76,7 @@
 #   source "$SCRIPT_DIR/scripts/lib/gate-profile.sh"
 #   gate_profile_begin "test.sh"
 #   trap 'gate_profile_report' EXIT
-#   gate_step "Testing neovim plugin" bash nvim/test_nvim.sh
+#   gate_step "Testing bash shell integration" bash shell/bashrc_test.sh
 #
 #   `gate_step` echoes its label exactly as the bare `echo` it replaces did,
 #   runs the command in the CURRENT shell, and returns the command's status

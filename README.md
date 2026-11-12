@@ -87,7 +87,7 @@ Swap the prompts and set `[refinery] enabled = false` to drive research, content
 
 - **Refinery** — runs quality gates and merges polecat branches to `main`. Deterministic, not an agent. Disable with `[refinery] enabled = false`.
 - **Discovery** — `lsp` lists known repos as you visit them (`pogo visit`, the shell/editor hooks, or `[search] index_roots`). pogo does not search file contents; use `rg` or `git grep` over the paths `lsp` prints.
-- **Integrations** — shell, editor (Emacs, Neovim, VS Code), and tmux. Installer `--interactive`, or see [docs/](docs/).
+- **Integrations** — shell, editor (VS Code), and tmux. Installer `--interactive`, or see [docs/](docs/).
 
 ## Configuration
 

@@ -513,7 +513,6 @@ Every path in this repo that execs pogod:
 |---|---|---|
 | launchd `com.pogo.daemon` | boot, `KeepAlive`, `launchctl kickstart` (tier 2, the recovery job, the nightly deploy) | `~/Library/Logs/pogo/pogod.log` (plist `StandardOutPath`/`StandardErrorPath`) |
 | `internal/client.StartServer` | `pogo server start`, `pogo init` with no service installed, and **every `lsp`, `pogo visit`** when pogod is down (`RunWithHealthCheck`). The zsh/bash integration runs `pogo visit` on every `cd` | `~/Library/Logs/pogo/pogod.log`, stdin `/dev/null`. **Before mg-a7a1 it was a pipe read by the CLI, which exits the moment pogod answers `/health`.** |
-| Emacs `pogo-start` (`emacs/pogo.el`) | `pogo-mode` when no daemon answers | `pogo-server-log-file` (default the same log). Before mg-a7a1 it was a pipe Emacs read until Emacs exited. |
 
 No launchd job, recovery script or reminder script on this box execs pogod
 directly. `pogo-recovery.sh` and `pogo-deploy.sh` go through

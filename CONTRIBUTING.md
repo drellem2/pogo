@@ -636,7 +636,7 @@ switched off, which is worse than one that fires narrowly.
 
 - `cmd/` - CLI entry points (`pogo`, `lsp`, `pogod`)
 - `internal/` - Internal packages
-- `emacs/`, `nvim/`, `vscode/` - Editor integrations
+- `vscode/` - Editor integration
 - `shell/` - Shell integrations (zsh, bash, fish)
 - `tmux/` - tmux integration
 

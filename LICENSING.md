@@ -10,8 +10,6 @@ The following components are licensed under the [Apache License 2.0](LICENSE-APA
 
 - `cmd/pogo/` — CLI tool
 - `cmd/lsp/` — project listing tool
-- `emacs/` — Emacs integration
-- `nvim/` — Neovim integration
 - `vscode/` — VS Code extension
 - `tmux/` — tmux integration
 - `shell/` — shell integrations (bash, zsh, fish)
