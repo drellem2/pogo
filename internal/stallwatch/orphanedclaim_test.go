@@ -36,7 +36,7 @@ func orphanEnv(t *testing.T, workers Workers, alive map[int]bool) (*Watcher, *re
 // writeClaim writes claimed/<id>.md.<pid>, the name a claim leaves behind.
 func writeClaim(t *testing.T, workRoot, id, assignee string, pid int) {
 	t.Helper()
-	content := fmt.Sprintf("---\nid: %s\ntype: task\nassignee: %s\nrepo: /src/enth\n---\n# %s\n", id, assignee, id)
+	content := fmt.Sprintf("---\nid: %s\ntype: task\nassignee: %s\nrepo: /src/proj\n---\n# %s\n", id, assignee, id)
 	path := filepath.Join(workRoot, "claimed", fmt.Sprintf("%s.md.%d", id, pid))
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)

@@ -27,7 +27,7 @@ import (
 // are not stopped on the way out — the PTY hangup kills them (cmd/pogod/main.go,
 // mg-6b66) — and the successor pogod has no registry entry for any of them, so
 // neither release door is ever reachable again. On 2026-11-08 the 03:02Z
-// redeploy did exactly that to eight enth polecats that had sat behind a usage-
+// redeploy did exactly that to eight polecats that had sat behind a usage-
 // cap modal since 23:18Z; seven of their claims then sat under dead pids for
 // three and a half days, and three of them left uncommitted edits in retained
 // worktrees. The restart sweep saw all of them and counted them "clean",
@@ -60,7 +60,7 @@ import (
 //     unassigned item claimed by hand will be reported, and the notice says
 //     that is one of the possibilities. Crew claims are the same shape (no
 //     crew agent is in the in-flight probe, which counts polecats), and were
-//     measured before shipping: of 80 claims taken by mayor/pm-enth/pm-pogo
+//     measured before shipping: of 80 claims taken by mayor and the PMs
 //     between 2026-10-01 and 2026-11-11, 78 closed inside a minute and 2
 //     outlived the grace — one of them by ~70h, which is this defect.
 //   - A release in flight: a polecat exiting, and the reaper or Stop about to
