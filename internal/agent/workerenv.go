@@ -260,6 +260,13 @@ func PolecatEnv(budget WorkerBudget) []InjectedEnv {
 		}
 		out = append(out, e)
 	}
+	// POGO_PID is assigned by the exec trampoline, after every layer above;
+	// it is reported before POGO_ROLE only because the role is the last
+	// assignment cmd.Env carries. Its value is per-process, so the catalogue
+	// reports it set with the placeholder standing in for the value.
+	pid := ownPIDSpec.entry("")
+	pid.Set = true
+	out = append(out, pid)
 	return append(out, roleSpec.entry(string(TypePolecat)))
 }
 
