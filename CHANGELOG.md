@@ -12,6 +12,15 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Added
 
+- **Agents get their own pid as `$POGO_PID` (mg-4a941).** pogod starts every
+  agent through a `/bin/sh` exec trampoline that exports the process's own pid
+  (the pid `pogo agent list` shows) before exec'ing the harness, on spawn and on
+  restart. `mg claim`/`mg reclaim` record `$POGO_PID` as the claim owner, so a
+  polecat's re-stamped claim now names its live worker instead of mg's own
+  instantly-dead pid. Side effect, by mg's design: with `POGO_PID` set,
+  `mg new` inside an agent no longer auto-detects `--repo` from the cwd — pass
+  `--repo` explicitly. Reported by `pogo agent env`.
+
 - **stall-watch reports claims held by a dead pid with no live agent
   (mg-5dec2).** A new `orphaned_claim` notice to the coordinator names every
   `claimed/` item whose claim pid is not alive and that no live polecat

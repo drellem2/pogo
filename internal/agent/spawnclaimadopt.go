@@ -218,10 +218,12 @@ func (h claimHolder) sentence() string {
 //     working under pogod's pid legitimately, and for its whole life in the
 //     second case.
 //
-// Note what is NOT tested: whether the holder pid is ALIVE. A healthy worker's
-// re-stamped claim names the pid of the `mg reclaim` subprocess, which exits
-// immediately, so "the claim pid is dead" is the ordinary state of a perfectly
-// owned item and would condemn the entire fleet.
+// Note what is NOT tested: whether the holder pid is ALIVE. Until mg-4a941
+// exported $POGO_PID into agents, a healthy worker's re-stamped claim named the
+// pid of the `mg reclaim` subprocess, which exits immediately, so "the claim
+// pid is dead" was the ordinary state of a perfectly owned item — and it still
+// is for every claim stamped by an agent spawned before that change, or by a
+// human's shell.
 func (r *Registry) classifyClaimConflict(verdict ClaimVerdict, workItemID string) claimHolder {
 	if verdict.HolderPID == 0 || verdict.HolderPID != os.Getpid() {
 		return claimHolder{kind: "other"}

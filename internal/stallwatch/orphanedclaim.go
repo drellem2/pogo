@@ -37,9 +37,12 @@ import (
 //
 //   - The claim pid does not answer signal 0. This is the WEAK half, and it is
 //     weaker than it looks: mg records $POGO_PID, else its OWN pid, and
-//     POGO_PID is not set in agent shells — so a polecat's `mg reclaim` stamps
-//     a pid that exits the instant mg does (measured 2026-11-11: every claim in
-//     claimed/, including three under running polecats, was under a dead pid).
+//     POGO_PID was not set in agent shells — so a polecat's `mg reclaim`
+//     stamped a pid that exits the instant mg does (measured 2026-11-11: every
+//     claim in claimed/, including three under running polecats, was under a
+//     dead pid). mg-4a941 exports the agent's own pid as POGO_PID, so a claim
+//     re-stamped by an agent spawned after that names its live worker; claims
+//     taken by hand, and by agents spawned before it, still do not.
 //     The pid stays useful as a positive: pogod's claim-at-spawn stamps
 //     pogod's own pid, and a live pid there means "do not judge yet".
 //   - The in-flight probe — registry plus live witness, the same snapshot the

@@ -1265,6 +1265,10 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 	injectedEnv := envAssignments(agentIdentityEnv(req.Name, req.Type, procName, req.PromptFile, receiptFile, r.ServerPort()))
 
 	cmd.Env = append(os.Environ(), layerEnv(req.BaseEnv, injectedEnv, req.Env)...)
+	// And its own pid as $POGO_PID, which only the started process can know
+	// (mg-4a941): without it every claim mg stamps from inside the agent is
+	// under mg's own, instantly dead, pid.
+	exportOwnPID(cmd)
 
 	// Seed the harness's first-run state (Claude: hasCompletedOnboarding) into
 	// the profile this environment points at, so a token-only fresh install
@@ -1877,6 +1881,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	// same order keeps that true on a restart. The base env (crew frontmatter,
 	// gh #263) goes back beneath the catalogue, as it went in on spawn.
 	cmd.Env = append(os.Environ(), layerEnv(old.baseEnv, injectedEnv, old.spawnEnv)...)
+	exportOwnPID(cmd)
 	seedHarnessProfile(old.provider, old.Name, old.Command, cmd.Env)
 
 	// A restart re-resolves to the agent's OWN provider (carried on old.provider

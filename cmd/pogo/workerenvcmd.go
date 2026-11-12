@@ -135,7 +135,7 @@ func printAgentEnv(w io.Writer, vars []agent.InjectedEnv, budget agent.WorkerBud
 
 	for _, v := range vars {
 		value := v.Value
-		if !v.Set {
+		if !v.Set || v.Value == "" {
 			value = v.Placeholder
 		}
 		fmt.Fprintf(w, "  %s=%s\n", v.Name, value)
