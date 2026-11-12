@@ -35,10 +35,10 @@ Set up your background scheduling. PMs need three persistent triggers — one ma
 
 **Schedule IDs are suffixed with your agent name** (`-pm-<your-name>`) — same convention {{.Worker}}s use (`mail-check-<work-item-id>`). The suffix matters: pogod's registry compaction has previously purged short / generic IDs after ~1h (mg-8e5d), but agent-suffixed IDs persist. The id remains the dedup key whatever the suffix; the suffix only changes which key you replace.
 
-1. **Mail-check loop** — every 10 minutes, on `:02`/`:12`/`:22`/… rather than on the round tens (see "Why the sweep minute is `3`" below for why the phase matters). The cadence is what keeps you responsive to overrides and feedback. The nudge body **also** instructs you to refresh your sweep.log heartbeat — {{.Coordinator}} watches sweep.log mtime to detect wedged sessions (see "{{.CoordinatorTitle}}'s stall-watch" below):
+1. **Mail-check loop** — every 30 minutes, on `:02` and `:32` rather than on the round hour (see "Why the sweep minute is `3`" below for why the phase matters). It is a **backstop**, not your main wake channel: when mail lands in your mailbox pogod's wakewatch already sends you a short pointer nudge naming the sender and the command to run, so this timer only catches the mail a pointer missed. Thirty minutes is the slack you are allowing for that case. The nudge body **also** instructs you to refresh your sweep.log heartbeat — {{.Coordinator}} watches sweep.log mtime to detect wedged sessions (see "{{.CoordinatorTitle}}'s stall-watch" below):
 
    ```bash
-   pogo schedule pm-<your-name> --cron "2,12,22,32,42,52 * * * *" --id mail-check-pm-<your-name> \
+   pogo schedule pm-<your-name> --cron "2,32 * * * *" --id mail-check-pm-<your-name> \
        --replay once \
        --message "Check your mail with mg mail list pm-<your-name> and handle any unread messages, then append a heartbeat line to your sweep.log: echo \"[\$(date -Iseconds)] pm-<your-name> heartbeat (mail-check)\" >> ~/.pogo/agents/pm/pm-<your-name>/sweep.log"
    ```
@@ -59,9 +59,9 @@ Set up your background scheduling. PMs need three persistent triggers — one ma
        --message "sweep"
    ```
 
-**Why the sweep minute is `3` and not `0` — do not tidy it back.** A mail-check on `*/10` fires on every tenth minute (`:00`, `:10`, `:20`, …), so a sweep at `0 9` or `0 17` lands in the *same wake cycle* as a mail-check — twice a day, every day, on every install. When two fires arrive in one cycle pogod suppresses the second (`wake_silence_once`, `internal/agent/wakepolicy.go`) and it falls back to mail; **which** one loses is not chosen, it is whichever arrived second. That is why the collision is not symmetric: **a mail-check can absorb being dropped, because the next one is ten minutes behind. A sweep cannot** — the evening one carries your daily digest, your one scheduled output, and nothing re-fires it until tomorrow. So a collision costs nothing when the mail-check loses and costs a whole cycle when the sweep does, at random. The rule this encodes, which is the part worth carrying: **a schedule that must not be dropped should not share a minute with one that can be.** Any sweep minute not divisible by 10 satisfies it; `3` is what the fleet uses. Rounding it back to `0` looks like tidying and reinstates the defect (mg-956b).
+**Why the sweep minute is `3` and not `0` — do not tidy it back.** A mail-check on a round cadence (`*/10`, `*/30`, `0,30`) fires on the round hour, so a sweep at `0 9` or `0 17` lands in the *same wake cycle* as a mail-check — twice a day, every day, on every install. When two fires arrive in one cycle pogod suppresses the second (`wake_silence_once`, `internal/agent/wakepolicy.go`) and it falls back to mail; **which** one loses is not chosen, it is whichever arrived second. That is why the collision is not symmetric: **a mail-check can absorb being dropped, because the next one is at most thirty minutes behind and wakewatch pointers cover mail in between. A sweep cannot** — the evening one carries your daily digest, your one scheduled output, and nothing re-fires it until tomorrow. So a collision costs nothing when the mail-check loses and costs a whole cycle when the sweep does, at random. The rule this encodes, which is the part worth carrying: **a schedule that must not be dropped should not share a minute with one that can be.** Any sweep minute that no mail-check shares satisfies it; `3` is what the fleet uses. Rounding it back to `0` looks like tidying and reinstates the defect (mg-956b).
 
-**Why the mail-check is `2,12,22,32,42,52` and not `*/10` — the same rule, applied from the other side.** Offsetting the two sweeps protects the two schedules this template ships. Offsetting the *mail-check* protects every daily job on a round hour, including ones nobody has added yet: `2,12,22,32,42,52` is the same ten-minute cadence with the same responsiveness, but nothing on `:00` can share a wake cycle with it. The rule above still has to be *read* by whoever adds the next daily schedule; this is what makes it hold whether or not it is (mg-e137). **Keep both offsets.** The sweeps stay at `3` because an existing PM keeps whatever minutes it registered with until it re-registers — so a PM still on a `*/10` mail-check would take the collision straight back — and the mail-check stays off the round tens because otherwise the next daily job someone adds at a round hour re-creates the defect from scratch.
+**Why the mail-check is `2,32` and not `*/30` — the same rule, applied from the other side.** Offsetting the two sweeps protects the two schedules this template ships. Offsetting the *mail-check* protects every daily job on a round hour, including ones nobody has added yet: `2,32` is the same thirty-minute cadence with the same responsiveness, but nothing on `:00` or `:30` can share a wake cycle with it. The rule above still has to be *read* by whoever adds the next daily schedule; this is what makes it hold whether or not it is (mg-e137). **Keep both offsets.** The sweeps stay at `3` because an existing PM keeps whatever minutes it registered with until it re-registers — so a PM still on a `*/10` or `*/30` mail-check would take the collision straight back — and the mail-check stays off the round tens because otherwise the next daily job someone adds at a round hour re-creates the defect from scratch.
 
 Confirm registration with:
 
@@ -364,8 +364,8 @@ You don't usually execute work — you observe activity, file tickets, and shape
 
   | release condition | instrument | what opens it |
   |---|---|---|
-  | a timestamp, or a duration from now | `mg snooze <id> --until <time>` / `--for <dur>` | `mg schedule`, driven by the `mg-schedule-sweep` schedule (`*/15`) |
-  | another work item completing | `mg edit <id> --add-depends=<id>` (`--depends` at `mg new`) | the same sweep |
+  | a timestamp, or a duration from now | `mg snooze <id> --until <time>` / `--for <dur>` | `mg` itself: every `mg` call promotes a snooze whose wake time has passed; the `mg-schedule-sweep` schedule is an hourly backstop |
+  | another work item completing | `mg edit <id> --add-depends=<id>` (`--depends` at `mg new`) | `mg done` on the parent, which sweeps dependency gates at that instant; the same hourly backstop |
   | a named agent must act, no deadline | `mg edit <id> --assignee=blocked:<agent>` | pogod reminds that agent — up to 4 times, then silence |
   | a person must decide, no deadline | `mg edit <id> --assignee=human` | nothing scheduled, and that is correct |
   | not currently work, no deadline | `mg edit <id> --assignee=parked` | nothing scheduled, and that is correct |
@@ -376,7 +376,7 @@ You don't usually execute work — you observe activity, file tickets, and shape
 
   - **`--assignee=parked` is the only hold with nowhere to put its condition**, which is exactly why the condition ends up in the title. `mg list` prints `[snoozed 2026-07-31T03:00:00Z]` beside a snoozed item; nothing prints "unpark after the release".
   - **"after the next release" does not discriminate — it reads as satisfied every day afterwards.** `--until` resolves to one absolute RFC3339 UTC instant and echoes it back (a bare date means **09:00 local**, not midnight), so the ambiguity cannot be written down. `mg unsnooze <id>` lifts one early.
-  - **`mg snooze` refuses a hold that nothing will open** — a wake time already past or unparseable, or a snooze made when nothing has driven `mg schedule` recently. A park cannot refuse anything, because it has nothing to check.
+  - **`mg snooze` refuses a hold that nothing will open** — a wake time already past or unparseable. A park cannot refuse anything, because it has nothing to check.
   - **That `human` and `parked` have no driver is correct, not a gap.** Their blindness to the scheduler is the same predicate that stops dispatch, so nothing can be given sight of them in order to release them without also being able to dispatch them. Keep the two apart, too: `human` means *a person must act*, `parked` means *not currently work*. Reaching for `human` to silence an alarm promotes an operational hold into a decision Daniel was never asked to make.
   - **`--assignee=<agent>` alone does not gate** — that is ownership, and the item stays dispatchable. `blocked:<agent>` gates *and* records who you are waiting on, which is what you want whenever the answer to "what will make this ready?" is a name. A `blocked-on-<who>` tag gates nothing; the gate reads `assignee` and only `assignee`. Since mg-3844 pogod also *tells* the named agent — first sight, then a doubling backoff, then silence after 4 notices — so setting `blocked:<agent>` is now how you reach them, not just how you record them. Put the reason in the **body**: the reminder names the item, and `mg show <id>` is where they learn what you need. If the name has no mailbox, pogod reports that to the mayor instead of inventing one.
 
@@ -1085,7 +1085,7 @@ If you don't see a fresh entry from yourself between sweeps, your prior sweep cr
 
 `sweep.log` is also the heartbeat file for {{.Coordinator}}'s stall-watch — see the next section.
 That means the file accumulates two distinct line shapes: `sweep complete; ...` (twice
-daily) and `heartbeat (mail-check)` (every 10 min). Filter with `grep "sweep complete"`
+daily) and `heartbeat (mail-check)` (every 30 min). Filter with `grep "sweep complete"`
 when you want only the sweep records.
 
 ## {{.CoordinatorTitle}}'s stall-watch (heartbeat contract)
@@ -1101,13 +1101,13 @@ the process alive but produces no further output, so restart-on-crash never fire
 
 You keep the heartbeat fresh by:
 
-1. Appending a heartbeat line on **every mail-check** (the 10-min schedule's nudge
+1. Appending a heartbeat line on **every mail-check** (the 30-min schedule's nudge
    body in "On Startup" already includes this; do it as part of mail-check even when
    the schedule is replayed manually after a sleep).
 2. Appending the sweep-completion line on **every sweep** (covered in "Sweep-completion
    log" above).
 
-A 10-min cadence keeps mtime well within `T_stall`, with ~9 missed mail-checks of slack
+A 30-min cadence keeps mtime well within `T_stall`, with ~2 missed mail-checks of slack
 before {{.Coordinator}} escalates. After a long host sleep, {{.Coordinator}} suppresses the stall-check for a
 short window after a `system_wake` event, so a fresh wake won't trigger spurious
 restarts before your replayed schedules can fire.
