@@ -2582,6 +2582,30 @@ type RefineryConfig struct {
 	// repos may merge at the same time. Zero means the refinery's own default.
 	// One restores the historic single-slot behaviour.
 	MaxConcurrentMerges int
+	// ExtraGates holds host-local quality gates per repo, from
+	// `[refinery.repos."<repo>"] extra_gates = ["<command>", ...]`. The key is
+	// the repo's directory name (e.g. "pogo") or its absolute path. These run
+	// after the repo's in-tree gates, in the same worktree; see
+	// ExtraGatesFor and refinery.Config.ExtraGates.
+	//
+	// They exist for checks that must not live in the gated repo itself —
+	// policy that is local to this host, or whose own text would be refused
+	// by the check. Nil when no such section is configured.
+	ExtraGates map[string][]string
+}
+
+// ExtraGatesFor returns the host-local extra gates configured for the repo at
+// repoPath. An entry keyed by the repo's absolute path wins over one keyed by
+// its directory name; no entry returns nil.
+func (c RefineryConfig) ExtraGatesFor(repoPath string) []string {
+	if len(c.ExtraGates) == 0 || repoPath == "" {
+		return nil
+	}
+	clean := filepath.Clean(repoPath)
+	if g, ok := c.ExtraGates[clean]; ok {
+		return g
+	}
+	return c.ExtraGates[filepath.Base(clean)]
 }
 
 // parsedConfig is the intermediate result of reading the config layers.
@@ -2934,6 +2958,9 @@ func Load() *Config {
 		if fileCfg.Refinery.MaxConcurrentMerges > 0 {
 			cfg.Refinery.MaxConcurrentMerges = fileCfg.Refinery.MaxConcurrentMerges
 		}
+		// Accumulated across layers per repo key: a higher layer's section for
+		// a repo replaces that repo's list and leaves the others in place.
+		cfg.Refinery.ExtraGates = fileCfg.Refinery.ExtraGates
 		if fileCfg.Heartbeat.Interval > 0 {
 			cfg.Heartbeat.Interval = fileCfg.Heartbeat.Interval
 		}
@@ -4072,6 +4099,33 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 				a.Route = strings.TrimSpace(unquotedVal)
 				a.RouteSet = true
 				cfg.Alerts[name] = a
+			}
+			continue
+		}
+
+		// [refinery.repos."<repo>"] — host-local extra gates for one repo.
+		// The name is quoted because a repo key may be an absolute path; an
+		// unquoted header is accepted as written.
+		if rest, ok := strings.CutPrefix(currentSection, "refinery.repos."); ok {
+			name := unquote(strings.TrimSpace(rest))
+			if name == "" {
+				continue
+			}
+			// A bare directory name is matched against the repo path's base;
+			// a path key is normalised so it compares equal to a repo path.
+			if name == "~" || strings.HasPrefix(name, "~/") || filepath.IsAbs(name) {
+				name = filepath.Clean(expandTildePath(name))
+			}
+			switch key {
+			case "extra_gates":
+				if cfg.Refinery.ExtraGates == nil {
+					cfg.Refinery.ExtraGates = map[string][]string{}
+				}
+				var gates []string
+				for _, g := range parseStringArray(val) {
+					gates = append(gates, expandTildePath(g))
+				}
+				cfg.Refinery.ExtraGates[name] = gates
 			}
 			continue
 		}

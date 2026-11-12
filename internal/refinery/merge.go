@@ -946,11 +946,22 @@ func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, 
 	if len(gates) == 0 {
 		gates, note = defaultGates(wtDir)
 	}
+	// Host-local extra gates run AFTER the in-tree ones, in the same worktree
+	// (mg-fb7df). They are appended to the same list so every failure path
+	// below — classification, summary, timeout, heartbeat — treats them
+	// exactly like an in-tree gate.
+	extra := r.extraGates(repoPath)
+	inTree := len(gates)
+	gates = append(append([]string(nil), gates...), extra...)
 	if len(gates) == 0 {
 		// No gates configured — pass by default
 		return "(no quality gates configured)", nil, nil
 	}
 	timeout := cfg.gateTimeout()
+	var extraEnv []string
+	if len(extra) > 0 {
+		extraEnv = gateRangeEnv(wtDir, mr)
+	}
 
 	var allOutput strings.Builder
 	// A gate the defaults dropped is said out loud in the merge's own output.
@@ -961,7 +972,13 @@ func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, 
 	}
 	var ran []string
 	for i, gate := range gates {
-		allOutput.WriteString(fmt.Sprintf("=== Running: %s ===\n", gate))
+		var env []string
+		if i >= inTree {
+			allOutput.WriteString(fmt.Sprintf("=== Running: %s (host extra gate) ===\n", gate))
+			env = extraEnv
+		} else {
+			allOutput.WriteString(fmt.Sprintf("=== Running: %s ===\n", gate))
+		}
 		ran = append(ran, gate)
 
 		var deadline time.Time
@@ -969,7 +986,7 @@ func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, 
 			deadline = time.Now().Add(timeout)
 		}
 		watch := startGateWatch(r, mr, "quality-gates", gate, i+1, len(gates), deadline)
-		output, err := runGate(ctx, wtDir, gate, timeout, watch)
+		output, err := runGate(ctx, wtDir, gate, timeout, watch, env...)
 		watch.finish()
 
 		allOutput.WriteString(output)
@@ -1039,6 +1056,44 @@ func (r *Refinery) runQualityGates(ctx context.Context, wtDir, repoPath string, 
 	}
 
 	return allOutput.String(), ran, nil
+}
+
+// extraGates returns the host-local extra gates for repoPath, or nil when
+// none are configured.
+func (r *Refinery) extraGates(repoPath string) []string {
+	if r.cfg.ExtraGates == nil {
+		return nil
+	}
+	return r.cfg.ExtraGates(repoPath)
+}
+
+// gateRangeEnv is the environment a host extra gate runs with: the commit
+// range the merge would add, so a gate can scan the diff
+// (`git diff $POGO_GATE_BASE $POGO_GATE_HEAD`) and the commit messages
+// (`git log $POGO_GATE_BASE..$POGO_GATE_HEAD`).
+//
+// POGO_GATE_BASE is the target tip the branch was rebased onto and
+// POGO_GATE_HEAD is the rebased branch tip — the commits that would land. A
+// sha that cannot be resolved is passed as the empty string rather than
+// omitted, so a gate can refuse an unknown range instead of scanning nothing
+// and passing.
+func gateRangeEnv(wtDir string, mr *MergeRequest) []string {
+	target := "main"
+	if mr != nil && mr.TargetRef != "" {
+		target = mr.TargetRef
+	}
+	resolve := func(rev string) string {
+		out, err := gitCmdOutput(wtDir, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(out)
+	}
+	return []string{
+		"POGO_GATE_BASE=" + resolve("origin/"+target),
+		"POGO_GATE_HEAD=" + resolve("HEAD"),
+		"POGO_GATE_TARGET=" + target,
+	}
 }
 
 // loadGateConfig returns the quality gate commands to run.

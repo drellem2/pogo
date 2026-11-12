@@ -4904,6 +4904,45 @@ behind a single gate, seven of them for a repo the refinery was otherwise idle
 on — including the fixes for that day's outage. See
 [docs/design/refinery-concurrency-design.md](design/refinery-concurrency-design.md).
 
+**Host-local extra gates (`[refinery.repos."<repo>"] extra_gates`).** The gates
+above live in the repo being merged. Some checks cannot: a host-local policy, or a
+check whose own text the check would refuse. Name those in host config instead,
+per repo:
+
+```toml
+[refinery.repos."pogo"]            # by directory name ...
+extra_gates = ["/Users/me/.pogo/gates/scan.sh"]
+
+[refinery.repos."/srv/repos/other"]  # ... or by absolute path (wins over a name)
+extra_gates = ["~/gates/a.sh", "~/gates/b.sh"]
+```
+
+Each command runs **after** the repo's in-tree gates (and only if they pass), in
+the same worktree, through `sh -c`, with the same timeout, heartbeat and failure
+classification. A non-zero exit fails the merge like any gate, and its output
+appears in `pogo refinery show <mr>` under `=== Running: <cmd> (host extra gate) ===`.
+An extra gate also runs when the repo has no in-tree gates at all.
+
+Extra gates receive the commit range the merge would add:
+
+| Variable | Value |
+|---|---|
+| `POGO_GATE_BASE` | the target tip the branch was rebased onto (`origin/<target>`) |
+| `POGO_GATE_HEAD` | the rebased branch tip — what would land |
+| `POGO_GATE_TARGET` | the target branch name, e.g. `main` |
+
+so a gate can scan `git diff "$POGO_GATE_BASE" "$POGO_GATE_HEAD"` and
+`git log --format=%B "$POGO_GATE_BASE..$POGO_GATE_HEAD"`. A sha that could not be
+resolved is passed as an empty string; a gate should refuse an empty range rather
+than scan nothing and pass. In-tree gates do not get these variables.
+
+pogod re-reads host config on every merge, so adding or changing an entry takes
+effect on the next merge without a restart. With no such section, gating is
+exactly what the in-tree configuration gives. Like the in-tree gates, extra gates
+are skipped on a retry under `skip_on_retry`, and replayed rather than re-run when a
+retry rebases to a byte-identical tree. The array is single-line, so a command may
+not contain a comma; put anything elaborate in a script and name the script.
+
 **QA gate (hardcoded).** Before processing any MR, the refinery scans the
 macguffin workspace (`Config.MacguffinDir`, default `~/.macguffin/work`) for a
 work item with `type: qa` whose `source` matches the MR author (the work-item

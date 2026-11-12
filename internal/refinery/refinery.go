@@ -76,6 +76,13 @@ type Config struct {
 	// persisted so it survives pogod restarts. Empty disables persistence
 	// (used by most unit tests). Default: ~/.pogo/refinery-state.json
 	StatePath string
+	// ExtraGates returns host-local quality gates for the repo at repoPath,
+	// run after the repo's in-tree gates (see runQualityGates). It is a
+	// function rather than a list so pogod can re-read host config on every
+	// merge: editing the host config takes effect on the next merge without a
+	// restart. Nil, or a nil result, adds no gates — behaviour is then exactly
+	// what the in-tree configuration alone gives.
+	ExtraGates func(repoPath string) []string
 }
 
 // DefaultConfig returns a Config with sensible defaults. Pogo state paths

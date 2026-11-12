@@ -168,7 +168,7 @@ func (g *gateOutputWriter) Write(p []byte) (int, error) {
 // The gate is watched for as long as it runs (see gateWatch) and bounded by
 // timeout when one is set. ctx cancellation kills the gate — that is what
 // makes cancelling an in-flight merge request possible.
-func runGate(ctx context.Context, wtDir, command string, timeout time.Duration, w *gateWatch) (string, error) {
+func runGate(ctx context.Context, wtDir, command string, timeout time.Duration, w *gateWatch, extraEnv ...string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -185,7 +185,7 @@ func runGate(ctx context.Context, wtDir, command string, timeout time.Duration, 
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = wtDir
-	cmd.Env = append(os.Environ(), "POGO_REFINERY=1")
+	cmd.Env = append(append(os.Environ(), "POGO_REFINERY=1"), extraEnv...)
 	cmd.WaitDelay = gateWaitDelay
 
 	// Run the gate in its own process group and kill the group, not just the
