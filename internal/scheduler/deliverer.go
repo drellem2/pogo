@@ -281,6 +281,14 @@ func mailAfterNudge(err error) bool {
 // a one-shot reminder the mailbox copy is the ONLY delivery of something the
 // agent cannot reconstruct by reading its mail. A dropped sweep is a lost day.
 //
+// What it costs: the fire is still recorded as delivered (nudge_delivery =
+// suppressed), so it counts toward fires_delivered and unacked_streak like any
+// other. Unlike a coalesced fire, whose information IS in the mailbox, nothing
+// reached the agent here, so no ack can follow — while a mail-check's wakes are
+// being suppressed its completion ratio reads lower than it did when the copy
+// was mailed (some of those copies were acked). That is accepted: the ratio was
+// measuring acks of no-op turns.
+//
 // The kind is read structurally, with the id inferred only for an entry that
 // never had one stamped (applyDefaults stamps every persisted entry).
 func skipSuppressedFallback(entry Entry) bool {

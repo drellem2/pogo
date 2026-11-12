@@ -591,8 +591,9 @@ scheduler sweep. The cooldown map + mutex make overlapping checks safe.
 The two thresholds above watch the **dispatchable** population. This one watches
 part of what they skip, and it is the only check here that is not a nudge to act.
 
-`snooze` and `depends` are holds with a driver: mg's `*/15` sweep evaluates them
-and promotes what has opened. `parked` and `human` have none. Nothing scheduled
+`snooze` and `depends` are holds with a driver: every `mg` call promotes an
+elapsed snooze, `mg done` promotes the dependents of what it completes, and an
+hourly `mg schedule` sweep backs both up. `parked` and `human` have none. Nothing scheduled
 ever evaluates their release condition, so an indefinite hold persists until a
 person happens to look — and the release condition can be perfectly well-formed
 and change nothing, because nothing reads it.

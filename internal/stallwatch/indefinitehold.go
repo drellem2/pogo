@@ -23,8 +23,9 @@ const categoryIndefiniteHold = "indefinite_hold"
 //
 // # The finding
 //
-// `snooze` and `depends` are holds with a driver: mg's */15 sweep evaluates them
-// and promotes what has opened. `parked` and `human` have no driver — nothing
+// `snooze` and `depends` are holds with a driver: every mg call promotes an
+// elapsed snooze, `mg done` promotes the dependents of what it completes, and an
+// hourly `mg schedule` sweep backs both up. `parked` and `human` have no driver — nothing
 // scheduled ever evaluates their release condition, so an indefinite hold
 // persists until a person happens to look. The release condition can be
 // perfectly well-formed and it changes nothing, because nothing reads it.
