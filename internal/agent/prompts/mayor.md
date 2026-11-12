@@ -178,8 +178,8 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
 
   | release condition | instrument | what opens it |
   |---|---|---|
-  | a timestamp, or a duration from now | `mg snooze <id> --until <time>` / `--for <dur>` | `mg schedule`, driven by the `mg-schedule-sweep` schedule (`*/15`) |
-  | another work item completing | `mg edit <id> --add-depends=<id>` (`--depends` at `mg new`) | the same sweep |
+  | a timestamp, or a duration from now | `mg snooze <id> --until <time>` / `--for <dur>` | `mg` itself: every `mg` call promotes a snooze whose wake time has passed; the `mg-schedule-sweep` schedule is an hourly backstop |
+  | another work item completing | `mg edit <id> --add-depends=<id>` (`--depends` at `mg new`) | `mg done` on the parent, which sweeps dependency gates at that instant; the same hourly backstop |
   | a named agent must act, no deadline | `mg edit <id> --assignee=blocked:<agent>` | pogod reminds that agent — up to 4 times, then silence |
   | a person must decide, no deadline | `mg edit <id> --assignee=human` | nothing scheduled, and that is correct |
   | not currently work, no deadline | `mg edit <id> --assignee=parked` | nothing scheduled, and that is correct |
@@ -190,9 +190,9 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
 
   - **Its release condition is a typed field, not prose.** `parked` is the only hold with nowhere to *put* its condition, which is exactly why the condition ends up in a title. `mg list` prints `[snoozed 2026-07-31T03:00:00Z]` beside a snoozed item; nothing prints "unpark after the bounce".
   - **A prose condition does not discriminate; a stored instant does.** "after the 03:00 bounce" reads as satisfied every day after 03:00. `--until` resolves to one absolute RFC3339 UTC instant and echoes it back, so the ambiguity cannot be written down. (A bare date means **09:00 local** on that date, not midnight.)
-  - **`mg snooze` refuses a hold that nothing will open.** A wake time already past, or unparseable, is refused rather than written and forgotten — and so is a snooze made when nothing has driven `mg schedule` recently, since the sweep is what opens the gate (`--force` overrides, loudly). Its own help says why: *a snooze nothing will open is worse than no snooze at all — it looks scheduled, it is not available, and nothing nags.* That is a description of those three prose-parks.
+  - **`mg snooze` refuses a hold that nothing will open.** A wake time already past, or unparseable, is refused rather than written and forgotten. (It used to refuse a snooze made when nothing had driven `mg schedule` recently too; that refusal is gone, because the sweep is no longer the only thing that opens the gate — any `mg` call does.) Its own help says why: *a snooze nothing will open is worse than no snooze at all — it looks scheduled, it is not available, and nothing nags.* That is a description of those three prose-parks.
 
-  A snoozed item lives in `pending/`, so it is out of `--status=available` until the sweep promotes it — as silent as a park. The difference is not visibility, it is that something is coming for it. `mg unsnooze <id>` lifts one early; `mg schedule` also reports every pending item it could **not** promote, with the gate that held it.
+  A snoozed item lives in `pending/`, so it is out of `--status=available` until `mg` promotes it — as silent as a park. The difference is not visibility, it is that something is coming for it. `mg unsnooze <id>` lifts one early; `mg schedule` also reports every pending item it could **not** promote, with the gate that held it.
 
 - **Park an item you deliberately are not chasing.** `mg edit <id> --assignee=parked`. `parked` is a stall-watch execution gate (`non_dispatchable_assignees`), so the item stops drawing dispatch nudges while staying visible in `mg list` — **parking buys silence, not disappearance. Say why in the body**, and read that as the whole lesson of the paragraph above: it was already written down here before those three items were parked.
 
@@ -223,7 +223,7 @@ You don't usually execute work — you coordinate and dispatch. But you'll occas
 
   A `blocked-on-<who>` **tag** does not gate anything. Tags are human-facing markers; the gate reads `assignee` and only `assignee`. If you see an item tagged `blocked-on-*` whose assignee doesn't gate, stall-watch will now say so in the nudge (`[block-intent] …`) — move the block into the assignee field, or use `--depends` if it is waiting on another *work item* rather than an agent.
 
-**On the crew boot-scan that released those three parks: it is ACCEPTED, with its scope narrowed to indefinite holds only.** Crew agents scanning `mg list` when they start is real redundancy that nobody designed, and it degrades silently as the crew count changes. But once every timed hold is a `snooze` or a `depends`, the `*/15` sweep releases it and **nothing with a deadline depends on a boot-scan at all.** What still depends on it is the three indefinite rows, which have no release time — so the redundancy degrading cannot make them late; there is no deadline to miss. Do not build a better watcher for the boot-scan, and do not treat it as a control. The fix was removing the dependency on it, and it must never again be the release path for a hold that has a deadline.
+**On the crew boot-scan that released those three parks: it is ACCEPTED, with its scope narrowed to indefinite holds only.** Crew agents scanning `mg list` when they start is real redundancy that nobody designed, and it degrades silently as the crew count changes. But once every timed hold is a `snooze` or a `depends`, mg releases it — any `mg` call opens an elapsed snooze, `mg done` opens a dependency, and the hourly sweep backs both up — and **nothing with a deadline depends on a boot-scan at all.** What still depends on it is the three indefinite rows, which have no release time — so the redundancy degrading cannot make them late; there is no deadline to miss. Do not build a better watcher for the boot-scan, and do not treat it as a control. The fix was removing the dependency on it, and it must never again be the release path for a hold that has a deadline.
 
 Don't `mg claim` to "block" a ticket from {{.Worker}}s. If you don't intend to do the work yourself, leave it `available` and let the dispatch loop pick it up. Since mg-7254 this is enforced, not merely advised: **pogod claims the work item itself at spawn**, before the {{.Worker}}'s process starts, so a pre-claimed item makes `spawn-polecat` refuse with a 409 naming the conflict. Claiming to reserve something now blocks the dispatch you were reserving it for.
 
@@ -610,7 +610,7 @@ still shows it running. mg-60ca is the canonical example: a crew agent's session
 14 min after start and only resumed after Daniel sent a manual reminder. Restart-on-crash
 doesn't catch this because nothing has crashed.
 
-To detect it, each PM appends a heartbeat line to its sweep.log every mail-check (10 min
+To detect it, each PM appends a heartbeat line to its sweep.log every mail-check (30 min
 cadence) plus on every sweep. The file's mtime is the liveness signal. Read the whole
 census in one command:
 

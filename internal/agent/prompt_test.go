@@ -3239,11 +3239,20 @@ func TestPMTemplateIncludesSweepCronEntries(t *testing.T) {
 	// collisions the template ships; moving the mail-check off the round
 	// minutes is what stops the next daily job anyone adds at a round hour from
 	// re-creating the defect.
-	if !strings.Contains(s, `"2,12,22,32,42,52 * * * *"`) {
-		t.Error("pm-template.md: expected the mail-check cron `2,12,22,32,42,52 * * * *` — on `*/10` any daily schedule at a round hour collides with it (mg-e137)")
+	//
+	// The cadence is a 30-minute backstop (drellem2/pogo#299): wakewatch
+	// pointers are the primary wake channel for mail, so a ten-minute timer
+	// was mostly empty turns. The off-round-minute rule still holds.
+	if !strings.Contains(s, `"2,32 * * * *"`) {
+		t.Error("pm-template.md: expected the mail-check cron `2,32 * * * *` — a 30-minute backstop off the round minutes; on `*/30` any daily schedule at a round hour collides with it (mg-e137)")
 	}
-	if strings.Contains(s, `--cron "*/10 * * * *"`) {
-		t.Error("pm-template.md: the mail-check is registered on `*/10` again — that re-opens every round hour to a collision (mg-e137)")
+	for _, round := range []string{`--cron "*/10 * * * *"`, `--cron "*/30 * * * *"`, `--cron "0,30 * * * *"`} {
+		if strings.Contains(s, round) {
+			t.Errorf("pm-template.md: the mail-check is registered on %s again — that re-opens every round hour to a collision (mg-e137)", round)
+		}
+	}
+	if strings.Contains(s, `"2,12,22,32,42,52 * * * *"`) {
+		t.Error("pm-template.md: the mail-check is back on a ten-minute cadence — it is a 30-minute backstop behind wakewatch pointers (drellem2/pogo#299)")
 	}
 	if !strings.Contains(s, "Keep both offsets.") {
 		t.Error("pm-template.md: expected the note that BOTH offsets are load-bearing — moving either back reinstates a collision, the sweeps for PMs still on `*/10` and the mail-check for daily jobs added later (mg-e137)")
