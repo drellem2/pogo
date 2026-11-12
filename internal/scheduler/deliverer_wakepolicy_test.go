@@ -76,6 +76,10 @@ func spawnLiveAgent(t *testing.T, name string) (*agent.Registry, *agent.Agent) {
 // written to the terminal — and must still reach the recipient by mail, saying
 // that the wake was suppressed rather than that a nudge failed. The wake-cycle
 // policy suppresses the terminal wake, not the information.
+//
+// The fire is a sweep: its content is something the agent cannot reconstruct by
+// reading its mail. A suppressed MAIL-CHECK fire writes no copy (see
+// TestDelivererDropsSuppressedMailCheckInsideLimitEpisode below).
 func TestDelivererSuppressesWakeInsideLimitEpisode(t *testing.T) {
 	reg, a := spawnLiveAgent(t, "sched-suppressed")
 
@@ -86,10 +90,10 @@ func TestDelivererSuppressesWakeInsideLimitEpisode(t *testing.T) {
 	d := &PogodDeliverer{Registry: reg, Mail: mail.send}
 
 	entry := Entry{
-		ID:       "mail-check-x",
+		ID:       "sweep-evening-x",
 		Agent:    a.Name,
 		Message:  "Check your mail.",
-		Cron:     "*/10 * * * *",
+		Cron:     "3 17 * * *",
 		Delivery: DeliveryNudge,
 	}
 	if err := d.Deliver(context.Background(), entry, time.Now()); err != nil {
@@ -146,5 +150,47 @@ func TestDelivererDeliversWakeWhenNoEpisode(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if out := string(a.RecentOutput(4096)); !strings.Contains(out, "Check your mail.") {
 		t.Errorf("wake should have reached the PTY, output: %q", out)
+	}
+}
+
+// The same live agent and the same open limit episode, but the fire is a
+// mail-check: it reaches neither the terminal nor the mailbox. Its whole content
+// is "check your mail", so a mailed copy is a no-op turn (drellem2/pogo#299).
+// The sweep test above is this test's control — same policy, same suppression,
+// only the schedule's kind differs.
+func TestDelivererDropsSuppressedMailCheckInsideLimitEpisode(t *testing.T) {
+	reg, a := spawnLiveAgent(t, "sched-mc-suppressed")
+
+	agent.SetLimitEpisodeQuery(func() (bool, string) { return true, "usage-limit episode ep-8 open" })
+	t.Cleanup(func() { agent.SetLimitEpisodeQuery(nil) })
+
+	mail := &recordingMail{}
+	d := &PogodDeliverer{Registry: reg, Mail: mail.send}
+
+	entry := Entry{
+		ID:       "mail-check-z",
+		Agent:    a.Name,
+		Message:  "Check your mail.",
+		Cron:     "2,32 * * * *",
+		Delivery: DeliveryNudge,
+	}
+	out, err := d.DeliverOutcome(context.Background(), entry, time.Now())
+	if err != nil {
+		t.Fatalf("DeliverOutcome: %v", err)
+	}
+	if mail.count() != 0 {
+		_, _, body := mail.last()
+		t.Fatalf("a suppressed mail-check fire wrote %d mailbox copies, want 0:\n%s", mail.count(), body)
+	}
+	if out.Channel != NudgeDeliverySuppressed || out.FallbackReason != fallbackReasonSuppressed {
+		t.Errorf("outcome = %+v, want channel %q reason %q", out, NudgeDeliverySuppressed, fallbackReasonSuppressed)
+	}
+	if !strings.Contains(out.NudgeError, "ep-8") {
+		t.Errorf("outcome should carry the reason the policy gave, got %q", out.NudgeError)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	if got := string(a.RecentOutput(4096)); strings.Contains(got, "Check your mail.") {
+		t.Errorf("suppressed wake must not have been written to the PTY, output: %q", got)
 	}
 }

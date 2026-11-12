@@ -211,7 +211,9 @@ func TestFallbackRunClosesWhenAFireReachesThePTY(t *testing.T) {
 	mail := &failingMail{}
 	logPath := filepath.Join(t.TempDir(), "events.log")
 	d := &PogodDeliverer{Registry: reg, Mail: mail.send, LogPath: logPath}
-	entry := mailCheckEntry(a.Name, MailCheckIDPrefix+a.Name)
+	// A sweep, not a mail-check: a suppressed mail-check fire writes no copy at
+	// all (drellem2/pogo#299), so it cannot exercise the run this test is about.
+	entry := mailCheckEntry(a.Name, "sweep-evening-"+a.Name)
 
 	now := fixedTime()
 	// Two undelivered fires: one copy.
