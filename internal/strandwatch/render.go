@@ -224,7 +224,13 @@ func Render(rep Report, all bool) string {
 		if r.Pushed {
 			pushed = "pushed"
 		}
-		fmt.Fprintf(&b, "    branch %s (%s) vs %s\n", r.Branch, pushed, r.Target)
+		vs := r.Target
+		if r.TargetMissing {
+			// The remedy names --target=<SubmitTarget>; say why the comparison
+			// does not (mg-929cf).
+			vs += fmt.Sprintf(" (dispatch target %s is not on origin yet, so nothing can have merged into it)", r.SubmitTarget)
+		}
+		fmt.Fprintf(&b, "    branch %s (%s) vs %s\n", r.Branch, pushed, vs)
 		switch r.Kind {
 		case KindLandedNotClosed:
 			fmt.Fprintf(&b, "    %d commit(s) already in the target under a rewritten sha; 0 unmerged.\n", r.Equivalent)

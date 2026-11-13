@@ -329,7 +329,8 @@ run measured nothing.`,
 			"plus every repo a polecat worktree on this host points at). A value matching none of "+
 			"those exits "+fmt.Sprint(exitInstrumentFailure)+" rather than printing an all-clear")
 	cmd.Flags().StringVar(&target, "target", "",
-		"Ref to compare branches against (default: each repo's default branch)")
+		"Ref to compare branches against (default: each item's `branch:` field, else the repo's default branch). "+
+			"The printed submit's --target always follows the item's `branch:` field")
 	cmd.Flags().BoolVar(&noFetch, "no-fetch", false,
 		"Skip the remote refresh; answer from the refs this clone last saw")
 	cmd.Flags().BoolVar(&all, "all", false, "Also list the exclusions by name")

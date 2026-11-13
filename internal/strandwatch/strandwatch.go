@@ -127,6 +127,12 @@ type Item struct {
 	Repo     string `json:"repo"`
 	Assignee string `json:"assignee"`
 	Priority string `json:"priority"`
+	// Branch is the item's `branch:` field — the branch its work is dispatched
+	// to — and "" for the repo's default branch. Its stranded branch is judged
+	// against it, and the paste-ready submit carries it as --target (mg-929cf):
+	// `pogo refinery submit` defaults to main, so a remedy without it re-aims a
+	// release-branch item's work at main.
+	Branch string `json:"branch,omitempty"`
 }
 
 // OpenStatuses are the work-item statuses this sweep covers: the ones where the
@@ -671,7 +677,16 @@ type Row struct {
 	// names; see strandedwork.Finding.SubmitBranch.
 	SubmitAs string `json:"submit_as,omitempty"`
 	Target   string `json:"target"`
-	Kind     Kind   `json:"kind"`
+	// SubmitTarget is the item's dispatch target (its `branch:` field), "" for
+	// the repo default. The stranded remedy's submit carries it as --target
+	// (mg-929cf), through the same strandedwork.SubmitRemedyTo pogod's
+	// stranded mail uses (mg-faa29).
+	SubmitTarget string `json:"submit_target,omitempty"`
+	// TargetMissing is true when SubmitTarget is on neither origin nor this
+	// clone, so the branch was judged against the default branch instead —
+	// see strandedwork.InspectFor.
+	TargetMissing bool `json:"target_missing,omitempty"`
+	Kind          Kind `json:"kind"`
 
 	// Unmerged is how many commits `git cherry` says the target lacks.
 	Unmerged int `json:"unmerged"`
@@ -980,7 +995,7 @@ func (r Row) remedy() string {
 			"request",
 			r.Prior.MR, r.priorWhere(), r.priorWhy(), r.Target)
 	case KindStranded:
-		submit := strandedwork.SubmitRemedy(r.Item.Repo, r.Branch, r.Item.ID, r.submitAs())
+		submit := strandedwork.SubmitRemedyTo(r.Item.Repo, r.Branch, r.Item.ID, r.submitAs(), r.SubmitTarget)
 		if r.Cell != strandedwork.CellCheckByHand {
 			return fmt.Sprintf("%s   # do NOT dispatch at %s", submit, r.Item.ID)
 		}
@@ -1460,6 +1475,28 @@ type Options struct {
 	Target string
 }
 
+// inspectItemBranch judges one of item it's branches.
+//
+// override is Options.Target — the CLI's --target. When it is set it is the
+// comparison, as before, and a value that resolves to nothing is still an
+// error: the reader named that ref, and silently substituting another would
+// answer a question they did not ask. When it is empty the branch is judged
+// against the item's own `branch:` field via strandedwork.InspectFor, which is
+// the rule pogod's stranded checks use (mg-faa29): a release-branch item whose
+// branch merged into its release branch is not stranded just because main
+// lacks it. In both cases the finding's SubmitTarget is the item's branch,
+// because that — not the ref a reader chose to compare against — is where the
+// work is meant to merge.
+func inspectItemBranch(repo, branch string, it Item, override string) (strandedwork.Finding, error) {
+	dispatch := strings.TrimSpace(it.Branch)
+	if override == "" {
+		return strandedwork.InspectFor(repo, branch, dispatch)
+	}
+	f, err := strandedwork.Inspect(repo, branch, override)
+	f.SubmitTarget = dispatch
+	return f, err
+}
+
 // Durability is the reaper's verdict on whether a branch's commits survive the
 // deletion of its local ref. It mirrors gitgc.DurabilityVerdict without
 // importing it; cmd/pogo maps one onto the other.
@@ -1853,6 +1890,9 @@ func queueDisposition(queued map[string]QueuedRequest, repo, branch string, it I
 // case is narrow (it needs a quiet target at the moment of merge) and the
 // upstream repair in cmd/pogod/reap.go closes the item without consulting git at
 // all, which is the other reason that repair is the primary one.
+// THE COMPARISON IS AGAINST THE ITEM'S DISPATCH TARGET (mg-929cf) — see
+// inspectItemBranch.
+//
 // A THIRD SHAPE IS AN EXCLUSION RATHER THAN A ROW, and it is why this returns a
 // reason string as well (mg-1af2). A reviewer reviews by checking the branch
 // under review out, so its own worktree branch is a POINTER at the builder's
@@ -1862,7 +1902,7 @@ func queueDisposition(queued map[string]QueuedRequest, repo, branch string, it I
 // under the wrong authorship. It goes in Excluded rather than being dropped,
 // because a suppression nobody can see is indistinguishable from a miss.
 func classify(repo, branch string, it Item, target string, hv historyView) (*Row, string, error) {
-	f, err := strandedwork.Inspect(repo, branch, target)
+	f, err := inspectItemBranch(repo, branch, it, target)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1875,6 +1915,7 @@ func classify(repo, branch string, it Item, target string, hv historyView) (*Row
 	}
 	row := Row{
 		Item: it, Branch: branch, Ref: f.Ref, Pushed: f.Pushed, SubmitAs: f.SubmitBranch(), Target: f.Target,
+		SubmitTarget: f.SubmitTarget, TargetMissing: f.TargetMissing,
 		Unmerged: len(f.Unmerged), Equivalent: f.Equivalent,
 		PreRegistration: f.PreRegistration,
 		Rescue:          f.Rescue,

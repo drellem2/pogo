@@ -1898,6 +1898,18 @@ and a remedy that would have submitted it to main. A target that does not exist
 on origin yet (the refinery creates it at submit) is judged against the default
 branch, and the remedy still names the target.
 
+`pogo check-stranded` follows the same rule (mg-929cf). Each open item's
+branches are judged against the item's `branch:` field, and the `stranded` row's
+submit carries `--target=<branch>` when that field is set. An item with no
+`branch:` gets a submit with no `--target`. An explicit `--target` on the
+command line still overrides the comparison, but the printed submit still names
+the item's own branch, because that is where the work is meant to merge.
+
+Known limit, accepted as benign: when the target is not on origin, the branch
+is judged against the default branch. So a branch that reached main by some
+other route reports nothing. Nothing can have merged into a target that does not
+exist yet, and silence there costs at most a missed nudge, never a wrong remedy.
+
 #### `orphan_branch` — settled when it landed (drellem2/pogo#160)
 
 The row used to be gated on one question — is this commit object on some remote
