@@ -347,6 +347,20 @@ type Finding struct {
 	OriginProbeError string `json:"origin_probe_error,omitempty"`
 	// Target is the ref the branch was compared against.
 	Target string `json:"target"`
+	// SubmitTarget is the branch the work was DISPATCHED to, when the caller
+	// named one (a polecat spawned with --branch, or an item carrying a
+	// `branch:` field), and "" when the work is aimed at the repo's default
+	// branch. It is what the paste-ready submit remedy passes as --target
+	// (mg-faa29): `pogo refinery submit` defaults to main, so a remedy without
+	// it re-aims a release-branch cut at main — where, in the incident that
+	// filed this, it would have conflicted with the back-port already carrying
+	// the same change.
+	SubmitTarget string `json:"submit_target,omitempty"`
+	// TargetMissing is true when SubmitTarget resolves to no ref, so the branch
+	// was judged against the repo's default branch instead (InspectFor). Nothing
+	// can have merged into a branch that does not exist yet; the default is the
+	// closest stand-in, and the remedy still names SubmitTarget.
+	TargetMissing bool `json:"target_missing,omitempty"`
 	// Found is false when neither a remote-tracking ref nor a local head exists
 	// for Branch. Disposition is DispositionClean in that case, and it means
 	// "there is no branch", not "the branch is merged".
@@ -557,6 +571,14 @@ func (f Finding) SubmitBranch() string {
 // BranchMatchesItem: several callers depend on exactly this rule, and a second
 // copy is a second rule the day one of them changes.
 func SubmitRemedy(repo, branch, author, submitAs string) string {
+	return SubmitRemedyTo(repo, branch, author, submitAs, "")
+}
+
+// SubmitRemedyTo is SubmitRemedy aimed at target: a non-empty target adds
+// --target, which `pogo refinery submit` otherwise defaults to main. Pass
+// Finding.SubmitTarget — a remedy for a release-branch polecat that omits it
+// submits the work to the wrong branch (mg-faa29).
+func SubmitRemedyTo(repo, branch, author, submitAs, target string) string {
 	name := submitAs
 	if name == "" {
 		name = branch
@@ -564,6 +586,9 @@ func SubmitRemedy(repo, branch, author, submitAs string) string {
 	submit := fmt.Sprintf("pogo refinery submit %s --repo=%s", name, repo)
 	if author != "" {
 		submit += " --author=" + author
+	}
+	if target != "" {
+		submit += " --target=" + target
 	}
 	if submitAs != "" {
 		return submit
@@ -672,10 +697,42 @@ var workItemRe = regexp.MustCompile(`\(((?:mg|gh)-[A-Za-z0-9]{3,})\)`)
 func Inspect(repo, branch, target string) (Finding, error) {
 	targetRef, err := ResolveTarget(repo, target)
 	if err != nil {
-		return Finding{Repo: repo, Branch: branch, Disposition: DispositionClean}, err
+		return Finding{Repo: repo, Branch: branch, Disposition: DispositionClean, SubmitTarget: target}, err
 	}
-	return inspectResolved(repo, branch, targetRef)
+	f, err := inspectResolved(repo, branch, targetRef)
+	f.SubmitTarget = target
+	return f, err
 }
+
+// InspectFor is Inspect for a branch whose work was dispatched at target — the
+// polecat's spawn --branch, or its item's `branch:` field — with "" meaning
+// the repo's default branch (mg-faa29).
+//
+// THE TARGET IS THE WHOLE POINT. Every agent-driven stranded-work check used to
+// pass "" here, so a polecat cut for release/v0.13.0 whose MR had merged into
+// release/v0.13.0 was judged against main, reported as `[stranded-push] ... do
+// NOT dispatch`, and handed a remedy that submitted it to main. Any release-cut
+// or integration-branch polecat drew that false alarm.
+//
+// A target that resolves to no ref is not an error here: the refinery creates
+// the target at submit, so a target that does not exist yet means nothing has
+// merged into it. The branch is then judged against the default branch (the
+// closest stand-in, and the pre-mg-faa29 behaviour) with TargetMissing set,
+// and the remedy still names target. Any OTHER resolution failure is returned,
+// because "could not check" must never read as clean.
+func InspectFor(repo, branch, target string) (Finding, error) {
+	f, err := Inspect(repo, branch, target)
+	if err == nil || target == "" || !errors.Is(err, ErrNoTargetRef) {
+		return f, err
+	}
+	f, err = Inspect(repo, branch, "")
+	f.SubmitTarget, f.TargetMissing = target, true
+	return f, err
+}
+
+// ErrNoTargetRef is wrapped by ResolveTarget when an explicitly named target
+// exists neither on origin nor locally.
+var ErrNoTargetRef = errors.New("target resolves to no ref")
 
 // inspectResolved is Inspect against a target ref that is ALREADY resolved.
 //
@@ -1289,7 +1346,7 @@ func ResolveTarget(repo, target string) (string, error) {
 				return ref, nil
 			}
 		}
-		return "", fmt.Errorf("target %q resolves to no ref in %s (tried refs/remotes/origin/%s and refs/heads/%s)", target, repo, target, target)
+		return "", fmt.Errorf("target %q resolves to no ref in %s (tried refs/remotes/origin/%s and refs/heads/%s): %w", target, repo, target, target, ErrNoTargetRef)
 	}
 
 	if head, err := git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"); err == nil {

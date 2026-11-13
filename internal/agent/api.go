@@ -2729,6 +2729,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		InitialNudge:   nudgeMsg,
 		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypePolecat),
 		WorkItemID:     spawnReq.Id,
+		TargetBranch:   spawnReq.Branch,
 		// Tell start-verification that the claim it used to gate on is ours, not
 		// the polecat's (mg-7254). Without this the watcher would read pogod's
 		// own spawn-time claim as "the polecat started" on every dispatch and

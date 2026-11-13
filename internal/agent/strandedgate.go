@@ -467,7 +467,10 @@ func (r *Registry) reportStrandedWorkOnRelease(a *Agent, reason string) {
 		log.Printf("agent %s: could not refresh %s before checking %s for stranded work (%v) — "+
 			"checking against refs this clone last saw", a.Name, a.SourceRepo, branch, ferr)
 	}
-	f, err := strandedwork.Inspect(a.SourceRepo, branch, "")
+	// Judged against the branch the polecat was DISPATCHED to, not the repo
+	// default (mg-faa29): a release-cut polecat whose MR merged into its release
+	// branch is not stranded, and a remedy aimed at main would mis-submit it.
+	f, err := strandedwork.InspectFor(a.SourceRepo, branch, r.dispatchTargetFor(a.TargetBranch, a.WorkItemID))
 	if err != nil {
 		// "Could not check" must never be logged as "nothing was stranded".
 		log.Printf("agent %s: could NOT check branch %s for stranded work while releasing %s: %v — "+

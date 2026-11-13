@@ -663,3 +663,20 @@ func TestQueuedAttributionIsStampedOnTheEvent(t *testing.T) {
 		t.Errorf("a branch in no queue was stamped with a merge request: %#v", rows2[0])
 	}
 }
+
+// TestSubmitHintAimsAtTheItemsTarget: a release-branch item's paste-ready
+// submit carries --target, because `pogo refinery submit` defaults to main
+// (mg-faa29). The default-branch case carries none.
+func TestSubmitHintAimsAtTheItemsTarget(t *testing.T) {
+	b := StrandedBranch{Branch: "polecat-pfaa29", Ref: "refs/remotes/origin/polecat-pfaa29",
+		Pushed: true, Repo: "/r", SubmitTarget: "release/x"}
+	items := []workitem.WorkItem{{ID: "mg-faa29"}}
+	got := submitHint(items, map[string][]StrandedBranch{"mg-faa29": {b}})
+	if !strings.Contains(got, "--author=mg-faa29 --target=release/x`") {
+		t.Errorf("hint = %q, want a submit aimed at release/x", got)
+	}
+	b.SubmitTarget = ""
+	if got := submitHint(items, map[string][]StrandedBranch{"mg-faa29": {b}}); strings.Contains(got, "--target") {
+		t.Errorf("default-branch hint grew a --target: %q", got)
+	}
+}

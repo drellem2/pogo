@@ -115,6 +115,9 @@ type StrandedBranch struct {
 	Unmerged int
 	// Target is the ref the branch was compared against.
 	Target string
+	// SubmitTarget is the branch the item is dispatched to, "" for the repo
+	// default; the paste-ready submit passes it as --target (mg-faa29).
+	SubmitTarget string
 	// Repo is the repository the branch lives in, so the remedy is paste-ready.
 	Repo string
 	// PreRegistration is the sha of the oldest unmerged pre-registration commit,
@@ -204,6 +207,10 @@ type StrandedItem struct {
 	// Repo is the item's `repo:` frontmatter value. Empty for an item that names
 	// none, which is a gap and not a clean verdict.
 	Repo string
+	// Branch is the item's `branch:` frontmatter value — the branch its work is
+	// dispatched to — or "" for the repo's default. A polecat branch is judged
+	// against it, not against the default (mg-faa29).
+	Branch string
 }
 
 // Stranded probes which available work items already have work on a branch.
@@ -246,7 +253,7 @@ func (w *Watcher) probeStranded(items []workitem.WorkItem) StrandedWork {
 	ask := make([]StrandedItem, 0, len(items))
 	for _, it := range items {
 		if it.ID != "" {
-			ask = append(ask, StrandedItem{ID: it.ID, Repo: it.Repo})
+			ask = append(ask, StrandedItem{ID: it.ID, Repo: it.Repo, Branch: strings.TrimSpace(it.Branch)})
 		}
 	}
 	work, known := w.stranded.Branches(ask)
@@ -556,7 +563,11 @@ func submitHint(items []workitem.WorkItem, found map[string][]StrandedBranch) st
 		// one to read (mg-dbb75).
 		return "`pogo check-stranded` names the branch and the remedy for each"
 	}
-	return fmt.Sprintf("`pogo refinery submit %s --repo=%s --author=%s`", name, only.Repo, id)
+	target := ""
+	if only.SubmitTarget != "" {
+		target = " --target=" + only.SubmitTarget
+	}
+	return fmt.Sprintf("`pogo refinery submit %s --repo=%s --author=%s%s`", name, only.Repo, id, target)
 }
 
 // strandedDetails stamps the item->branch attribution onto the emitted event, so

@@ -98,6 +98,14 @@ type Agent struct {
 	// running-agent token cost to the right item without grepping events.
 	WorkItemID string `json:"work_item_id,omitempty"`
 
+	// TargetBranch is the branch this polecat's work is aimed at — the spawn's
+	// resolved target (--branch, or the item's `branch:` field; see
+	// resolveSpawnTarget) — and "" for the repo's default branch. The
+	// stranded-work checks judge the polecat's branch against it (mg-faa29):
+	// judged against the default instead, a release-cut polecat whose MR merged
+	// into its release branch reads as stranded, with a remedy aimed at main.
+	TargetBranch string `json:"target_branch,omitempty"`
+
 	// Model is the model selection resolved for this agent at spawn (mg-e7f5),
 	// or "" when none was requested and the harness's own configuration decides.
 	// Recorded so "which model is this agent on?" is answerable without parsing
@@ -1106,6 +1114,7 @@ type SpawnRequest struct {
 	InitialNudge   string   // if set, pogod sends this nudge after spawn to bypass the CLI interactive prompt
 	RestartOnCrash bool     // if true, pogod respawns this agent when it exits unexpectedly
 	WorkItemID     string   // mg work item id this agent is assigned to (polecats); empty for crew/general agents
+	TargetBranch   string   // branch the polecat's work is aimed at; "" = repo default (mg-faa29)
 	ClaimedAtSpawn bool     // pogod claimed WorkItemID before this process started (mg-7254); retires the claim as a started-signal
 
 	// Provider is the harness descriptor resolved for this one spawn. The
@@ -1332,6 +1341,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		SourceRepo:     req.SourceRepo,
 		RestartOnCrash: req.RestartOnCrash,
 		WorkItemID:     req.WorkItemID,
+		TargetBranch:   req.TargetBranch,
 		Model:          req.Model,
 		ClaimedAtSpawn: req.ClaimedAtSpawn,
 		master:         master,
@@ -1948,6 +1958,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		SourceRepo:     old.SourceRepo,
 		InitialNudge:   old.InitialNudge,
 		WorkItemID:     old.WorkItemID,
+		TargetBranch:   old.TargetBranch,
 		// Carried, not re-resolved: old.Command already carries the model argv,
 		// so a respawn must report the same model it re-execs with.
 		Model:          old.Model,

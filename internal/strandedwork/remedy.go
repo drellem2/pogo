@@ -128,7 +128,7 @@ func ReadRescueCommand(repo, target, ref string) string {
 // It starts lower-case so that callers can lead into it ("Instead, ..." /
 // "Either ..., or ...").
 func RemedyPhrase(c Cell, f Finding, author string) string {
-	submit := SubmitRemedy(f.Repo, f.Branch, author, f.SubmitBranch())
+	submit := SubmitRemedyTo(f.Repo, f.Branch, author, f.SubmitBranch(), f.SubmitTarget)
 	id := author
 	if id == "" {
 		id = f.WorkItemID

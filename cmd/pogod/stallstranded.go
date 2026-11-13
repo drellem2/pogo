@@ -61,11 +61,13 @@ func newStallStranded(queue func() *refinery.Refinery) stallwatch.Stranded {
 		inQueue, queueConsulted := refineryQueueByBranch(queue)
 
 		byRepo := map[string][]string{}
+		target := map[string]string{} // item id -> dispatch target (mg-faa29)
 		noRepo := 0
 		for _, it := range items {
 			if it.ID == "" {
 				continue
 			}
+			target[it.ID] = it.Branch
 			if it.Repo == "" {
 				noRepo++
 				continue
@@ -95,7 +97,10 @@ func newStallStranded(queue func() *refinery.Refinery) stallwatch.Stranded {
 					if !strandedwork.BranchMatchesItem(branch, id) {
 						continue
 					}
-					f, ierr := strandedwork.Inspect(repo, branch, "")
+					// Against the item's own target branch, not the default
+					// (mg-faa29): a release-branch item's merged branch is not
+					// stranded work.
+					f, ierr := strandedwork.InspectFor(repo, branch, target[id])
 					if ierr != nil {
 						// "Could not read" must never be recorded as "nothing was
 						// stranded". Same direction as the listing failure above.
@@ -118,6 +123,9 @@ func newStallStranded(queue func() *refinery.Refinery) stallwatch.Stranded {
 						Unmerged: len(f.Unmerged),
 						Target:   f.Target,
 						Repo:     repo,
+						// mg-faa29: the notice's submit must aim at the item's
+						// target, not refinery submit's default of main.
+						SubmitTarget: f.SubmitTarget,
 					}
 					if f.PreRegistration != nil {
 						b.PreRegistration = f.PreRegistration.SHA

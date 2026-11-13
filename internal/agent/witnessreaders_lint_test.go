@@ -54,7 +54,7 @@ import (
 var witnessAllTypesReaders = map[string]string{
 	"loadPolecatWitness": "the filter itself — it is the one function that must see every type in order " +
 		"to drop the ones that are not polecats. Nothing else in this package should look like this",
-	"RecordAgentWitness": "the WRITER's read-modify-write cycle: a polecat-only load would drop every " +
+	"recordAgentWitness": "the WRITER's read-modify-write cycle: a polecat-only load would drop every " +
 		"crew record on the next save, and would fail to replace-by-name for a crew respawn",
 	"noteWitnessExit": "the writer's other half: a polecat-only load would leave a crew record behind " +
 		"forever, answering from a pid pogod no longer owns",

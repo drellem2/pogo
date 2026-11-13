@@ -108,6 +108,12 @@ func TestSpawnTargetReachesTheTemplate(t *testing.T) {
 	if !strings.Contains(string(prompt), "submit --target=integ") {
 		t.Errorf("the prompt's submit target is not the item's branch:\n%s", prompt)
 	}
+	// And the agent records it, for the stranded-work checks to judge its
+	// branch against (mg-faa29).
+	if got := reg.Get("t7602").TargetBranch; got != "integ" {
+		t.Errorf("agent TargetBranch = %q, want integ — the stranded-work checks would judge this "+
+			"polecat against the default branch", got)
+	}
 }
 
 // TestSpawnRefusesABranchThatContradictsTheItem is the mismatch direction: an

@@ -122,6 +122,11 @@ type witnessRecord struct {
 	// unattributed and is NOT counted against any repo: guessing would refuse a
 	// correct dispatch, and this field is not evidence enough to guess with.
 	SourceRepo string `json:"source_repo,omitempty"`
+	// TargetBranch is the polecat's dispatch target ("" = repo default), so the
+	// restart sweep judges a survivor's branch against the branch its work was
+	// aimed at rather than the default (mg-faa29). Absent on records written
+	// before it existed; the sweep then falls back to the item's `branch:`.
+	TargetBranch string `json:"target_branch,omitempty"`
 }
 
 type witnessOnDisk struct {
@@ -492,7 +497,7 @@ func noteWitnessStart(a *Agent) {
 	if a == nil {
 		return
 	}
-	if err := RecordAgentWitness(a.Name, a.PID, a.Type, a.WorkItemID, a.SourceRepo); err != nil {
+	if err := recordAgentWitness(a.Name, a.PID, a.Type, a.WorkItemID, a.SourceRepo, a.TargetBranch); err != nil {
 		log.Printf("witness: %v — a future pogod may have no evidence %s %s was alive (mg-13a3, mg-f9e8)",
 			err, a.Type, a.Name)
 	}
@@ -531,6 +536,12 @@ func RecordPolecatWitness(name string, pid int, workItemID, sourceRepo string) e
 // have none at all; an empty value is stored as "unattributed" rather than as a
 // repo named "". See witnessRecord.SourceRepo.
 func RecordAgentWitness(name string, pid int, typ AgentType, workItemID, sourceRepo string) error {
+	return recordAgentWitness(name, pid, typ, workItemID, sourceRepo, "")
+}
+
+// recordAgentWitness is RecordAgentWitness carrying the polecat's dispatch
+// target as well (mg-faa29).
+func recordAgentWitness(name string, pid int, typ AgentType, workItemID, sourceRepo, targetBranch string) error {
 	start, ok := procStartFn(pid)
 	if !ok {
 		return fmt.Errorf("witness: cannot read start time for %s %s (pid=%d) — not recording; "+
@@ -555,12 +566,13 @@ func RecordAgentWitness(name string, pid int, typ AgentType, workItemID, sourceR
 		}
 	}
 	out = append(out, witnessRecord{
-		Name:       name,
-		PID:        pid,
-		Type:       typ,
-		StartTime:  start,
-		WorkItemID: workItemID,
-		SourceRepo: sourceRepo,
+		Name:         name,
+		PID:          pid,
+		Type:         typ,
+		StartTime:    start,
+		WorkItemID:   workItemID,
+		SourceRepo:   sourceRepo,
+		TargetBranch: targetBranch,
 	})
 	if err := saveWitness(out); err != nil {
 		return fmt.Errorf("witness: cannot persist %s %s (pid=%d): %w", typ, name, pid, err)

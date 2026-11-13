@@ -504,7 +504,7 @@ func (a StrandedAlert) cell() strandedwork.Cell {
 // beats a paragraph that qualifies it.
 func (a StrandedAlert) writeRemedy(b *strings.Builder) {
 	target := a.Finding.Target
-	submit := strandedwork.SubmitRemedy(a.Repo, a.Finding.Branch, a.WorkItemID, a.Finding.SubmitBranch())
+	submit := strandedwork.SubmitRemedyTo(a.Repo, a.Finding.Branch, a.WorkItemID, a.Finding.SubmitBranch(), a.Finding.SubmitTarget)
 	handCheck := strandedwork.HandCheckCommand(a.Repo, a.WorkItemID, target)
 	switch a.cell() {
 	case strandedwork.CellRescueUnbuilt:

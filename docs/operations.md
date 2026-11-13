@@ -1884,6 +1884,20 @@ Exit 0 clean, 1 at least one finding, 2 usage, 3 this run measured nothing.
 | `repo_unreadable` | the item's repo could not be listed, so no branch was looked for | fix the item's repo field; not a clean row |
 | `orphan_branch` | a polecat worktree on this host whose branch holds commits **no remote ref has**, named by no open item, and that **neither landedness test shows landed** (see below) | `git push origin <branch>` — there is no owner to ask and nothing to submit under |
 
+#### Which target pogod's own stranded checks judge against (mg-faa29)
+
+pogod's agent-driven stranded checks — the `[stranded-push]` mail on release,
+the restart sweep, and stall-watch's `stranded_push` notice — judge a polecat's
+branch against the branch it was **dispatched to**, not the repo's default: the
+target recorded at spawn (`--branch`, or the item's `branch:` field), falling
+back to the item's `branch:` for records that predate it. Their paste-ready
+`pogo refinery submit` carries `--target=<branch>` whenever that target is not
+the default. Before this, a release-cut polecat whose MR had merged into
+`release/vX` was mailed `do NOT dispatch` with `Target: refs/remotes/origin/main`
+and a remedy that would have submitted it to main. A target that does not exist
+on origin yet (the refinery creates it at submit) is judged against the default
+branch, and the remedy still names the target.
+
 #### `orphan_branch` — settled when it landed (drellem2/pogo#160)
 
 The row used to be gated on one question — is this commit object on some remote

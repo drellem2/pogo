@@ -170,3 +170,27 @@ func polecatBaseWarning(target, baseRef string, adopted bool) string {
 	return fmt.Sprintf("target %s not on origin — based on %s; the refinery will create %s at submit",
 		target, baseRef, target)
 }
+
+// dispatchTargetFor returns the branch a polecat's work was dispatched to, for
+// the stranded-work checks to judge its branch against (mg-faa29): the target
+// recorded at spawn when there is one, else the work item's `branch:` field,
+// else "" (the repo's default branch).
+//
+// The item fallback covers what the record cannot: an agent or witness record
+// written before TargetBranch existed. It cannot cover a bare --branch on an
+// item with no `branch:` field — only the record carries that — which is why
+// the record is consulted first and the item second.
+func (r *Registry) dispatchTargetFor(recorded, workItemID string) string {
+	if t := strings.TrimSpace(recorded); t != "" {
+		return t
+	}
+	if workItemID == "" {
+		return ""
+	}
+	var b WorkItemBrancher = MGWorkItemBrancher{}
+	if r != nil {
+		b = r.getWorkItemBrancher()
+	}
+	branch, _ := b.WorkItemBranch(workItemID)
+	return branch
+}

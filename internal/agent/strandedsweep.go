@@ -65,6 +65,9 @@ type UnadoptablePolecat struct {
 	StartTime  time.Time `json:"start_time"`
 	WorkItemID string    `json:"work_item_id,omitempty"`
 	SourceRepo string    `json:"source_repo,omitempty"`
+	// TargetBranch is the polecat's witnessed dispatch target; "" = the repo
+	// default, or a record that predates the field (mg-faa29).
+	TargetBranch string `json:"target_branch,omitempty"`
 	// Alive is true when the process still matches the witness. It does not
 	// change whether the branch is checked — a live orphan's pushed work is just
 	// as invisible — but it changes the advice in the mail.
@@ -112,12 +115,13 @@ func (r *Registry) UnadoptablePolecats() ([]UnadoptablePolecat, error) {
 			continue
 		}
 		out = append(out, UnadoptablePolecat{
-			Name:       w.Name,
-			PID:        w.PID,
-			StartTime:  w.StartTime,
-			WorkItemID: w.WorkItemID,
-			SourceRepo: w.SourceRepo,
-			Alive:      witnessVerdict(w) == WitnessAlive,
+			Name:         w.Name,
+			PID:          w.PID,
+			StartTime:    w.StartTime,
+			WorkItemID:   w.WorkItemID,
+			SourceRepo:   w.SourceRepo,
+			TargetBranch: w.TargetBranch,
+			Alive:        witnessVerdict(w) == WitnessAlive,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -218,7 +222,8 @@ func (r *Registry) ReportStrandedWorkAcrossRestart() StrandedSweepReport {
 			}
 		}
 		branch := gitgc.BranchPrefix + c.Name
-		f, ierr := strandedwork.Inspect(c.SourceRepo, branch, "")
+		// Against the dispatch target, not the default branch (mg-faa29).
+		f, ierr := strandedwork.InspectFor(c.SourceRepo, branch, r.dispatchTargetFor(c.TargetBranch, c.WorkItemID))
 		if ierr != nil {
 			rep.Unjudged++
 			log.Printf("strandedwork: startup sweep could NOT judge branch %s in %s: %v — UNJUDGED, "+
