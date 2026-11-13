@@ -258,3 +258,81 @@ func TestBlockedReminderDropsCountWhenItemCloses(t *testing.T) {
 		t.Fatalf("closed item still holds %d blocked-reminder record(s)", n)
 	}
 }
+
+// TestBlockedReminderRetiredCountExpiresAcrossDowntime is the mg-78e34 follow-up
+// to #300's review: a record retired before pogod stopped, with pogod down for
+// longer than the TTL and the item re-blocked meanwhile, reached the first tick
+// after restart as a LIVE pair. The prune only visits pairs that are not live,
+// so the stale record was resumed — cooldown and count included — instead of
+// starting fresh. No tick ran while the block was clear past the window.
+func TestBlockedReminderRetiredCountExpiresAcrossDowntime(t *testing.T) {
+	cfg := blockedCfg()
+	cfg.BlockedReminderCountTTL = 2 * time.Hour
+	w, rec, workRoot, mailRoot, _, restart := persistentEnv(t, cfg)
+	makeMailbox(t, mailRoot, "pm-pogo")
+	now := time.Now()
+	writeItem(t, workRoot, "mg-a", "blocked:pm-pogo", now)
+	w.Check(now)
+	writeItem(t, workRoot, "mg-a", "mayor", now)
+	w.Check(now.Add(time.Minute)) // retired, then pogod stops
+
+	// Down for longer than the TTL; re-blocked while down.
+	w = restart()
+	writeItem(t, workRoot, "mg-a", "blocked:pm-pogo", now)
+	w.Check(now.Add(3 * time.Hour))
+	got := blockedNudges(rec)
+	if len(got) != 2 {
+		t.Fatalf("re-block after >TTL downtime drew %d notices total, want 2 (a fresh first notice)", len(got))
+	}
+	if strings.Contains(got[1].message, "[repeat]") {
+		t.Errorf("the post-downtime notice is marked as a repeat: %q", got[1].message)
+	}
+
+	// Positive control: the same downtime INSIDE the window still resumes.
+	cfg2 := blockedCfg()
+	cfg2.BlockedReminderCountTTL = 6 * time.Hour
+	w2, rec2, workRoot2, mailRoot2, _, restart2 := persistentEnv(t, cfg2)
+	makeMailbox(t, mailRoot2, "pm-pogo")
+	writeItem(t, workRoot2, "mg-a", "blocked:pm-pogo", now)
+	w2.Check(now)
+	writeItem(t, workRoot2, "mg-a", "mayor", now)
+	w2.Check(now.Add(time.Minute))
+	w2 = restart2()
+	writeItem(t, workRoot2, "mg-a", "blocked:pm-pogo", now)
+	w2.Check(now.Add(3 * time.Hour))
+	got2 := blockedNudges(rec2)
+	if len(got2) != 2 || !strings.Contains(got2[1].message, "[repeat]") {
+		t.Fatalf("inside the TTL the re-block should resume (second notice a repeat), got %+v", got2)
+	}
+}
+
+// TestBlockedReminderCountsSurvivePauseResume pins a decision, not an accident
+// (mg-78e34): unlike lastNudge, the blocked-reminder's counts are NOT forgotten
+// when index-only mode lifts. Those notices go to the blocked agents, not to the
+// coordinator a resume restarts, and a cap reset by every pause-resume is the
+// per-period cap #300 removed. See pausedNow.
+func TestBlockedReminderCountsSurvivePauseResume(t *testing.T) {
+	w, rec, workRoot, mailRoot := testEnv(t, blockedCfg())
+	makeMailbox(t, mailRoot, "pm-pogo")
+	paused := false
+	w.paused = func() bool { return paused }
+	now := time.Now()
+	writeItem(t, workRoot, "mg-a", "blocked:pm-pogo", now)
+	w.Check(now)
+	if got := len(blockedNudges(rec)); got != 1 {
+		t.Fatalf("positive control: %d notices before the pause, want 1", got)
+	}
+	paused = true
+	w.Check(now.Add(time.Minute))
+	paused = false
+	w.Check(now.Add(2 * time.Minute)) // inside the first notice's cooldown
+	if got := len(blockedNudges(rec)); got != 1 {
+		t.Fatalf("pause-resume drew %d notices, want 1 — the resume reset the count", got)
+	}
+	w.mu.Lock()
+	n := len(w.blocked)
+	w.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("after pause-resume %d blocked records, want 1", n)
+	}
+}

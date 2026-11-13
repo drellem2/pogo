@@ -432,6 +432,13 @@ func (w *Watcher) Check(now time.Time) {
 // picture of what it was holding is gone with the old process, so each still-
 // standing condition is reported once, fresh, rather than from deep inside a
 // backoff the new process never saw.
+//
+// The blocked-reminder's counts (w.blocked) are deliberately NOT forgotten
+// here, although before drellem2/pogo#300 they lived in lastNudge and were.
+// Those notices go to the blocked agents, not to the coordinator a resume
+// restarts, so the restart argument above does not apply to them; and a cap
+// that a pause-resume reset would be the per-period cap #300 removed. Pinned by
+// TestBlockedReminderCountsSurvivePauseResume.
 func (w *Watcher) pausedNow() bool {
 	paused := w.paused != nil && w.paused()
 	w.mu.Lock()

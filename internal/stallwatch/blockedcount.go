@@ -17,7 +17,8 @@ import (
 const blockedCountsFile = "blocked-reminders.json"
 
 // BlockedStatePath is where pogod keeps the blocked-reminder's counts under
-// pogoHome. It is exported so the daemon and its wiring test name one path.
+// pogoHome. It is exported so pogod (cmd/pogod/main.go) and the package's own
+// restart tests (persistentEnv in blockedcount_test.go) name one path.
 func BlockedStatePath(pogoHome string) string {
 	return filepath.Join(pogoHome, "stallwatch", blockedCountsFile)
 }
@@ -188,6 +189,16 @@ func (w *Watcher) selectBlockedDue(candidates []workitem.WorkItem, now time.Time
 	for i, it := range candidates {
 		k := keys[i]
 		r, seen := w.blocked[k]
+		if seen && !r.ClearedAt.IsZero() && now.Sub(r.ClearedAt) >= ttl {
+			// Retired, and past the window by the time we look again. The prune
+			// above only visits pairs that are NOT live, so a record whose window
+			// ran out while no tick ran at all — pogod down for longer than the
+			// TTL, its block cleared before the stop and re-set during it —
+			// reaches here still stamped. It is a new block, not a resume.
+			delete(w.blocked, k)
+			changed = true
+			seen = false
+		}
 		if seen && !r.ClearedAt.IsZero() {
 			// Re-blocked on the same agent inside the window: resume.
 			r.ClearedAt = time.Time{}
