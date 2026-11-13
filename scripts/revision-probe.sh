@@ -515,9 +515,10 @@ EOF
 # one is a witness that reports the wrong process's age under the right name.
 MATCH_PIDS=""
 MATCH_STARTS=""
+MATCH_CMDS=""      # one command line per line, positionally paired with the above
 match_subject_processes() {
     local pattern="$1" now_real="$2" pid etime cmd el start anchored=0
-    MATCH_PIDS=""; MATCH_STARTS=""
+    MATCH_PIDS=""; MATCH_STARTS=""; MATCH_CMDS=""
     case "$pattern" in *'$') anchored=1; pattern="${pattern%'$'}" ;; esac
     while read -r pid etime cmd; do
         [ -n "${cmd:-}" ] || continue
@@ -531,6 +532,8 @@ match_subject_processes() {
         start=$(( now_real - el ))
         MATCH_PIDS="$MATCH_PIDS $pid"
         MATCH_STARTS="$MATCH_STARTS $start"
+        MATCH_CMDS="$MATCH_CMDS$cmd
+"
     done <<EOF
 $PS_TABLE
 EOF
@@ -574,11 +577,131 @@ same_process() {
     [ "$d" -le "$IDENTITY_SLOP" ]
 }
 
+# --- what a subject's code IS (mg-2983a) -------------------------------------
+#
+# The process axis used to count EVERY commit in the checkout since the process
+# started. On 2026-11-12 that alerted twice, for bridget and for
+# bridget-supervise, on 3a5e811 — a commit that added bridget-prune plus docs,
+# tests and install.sh and touched neither subject's file. Both processes were
+# executing current code; the only remedy the alert offered was restarting the
+# Discord bridge for nothing, and it repeated every renotify interval.
+#
+# So the commits counted are those touching the subject's CODE: the file the
+# process image resolves to — the absolute path on its command line, followed
+# through symlinks (~/.pogo/bin/bridget-supervise -> ~/dev/bridget/...) into the
+# checkout — plus any repo-relative paths the registry's optional fifth field
+# declares as its dependencies (bridget imports bridget_core; a file-only scope
+# would miss a change there, which is the defect's mirror image: silence).
+#
+# WHERE THE SCOPE CANNOT BE RESOLVED, THE WHOLE REPO IS COUNTED, AND THE REPORT
+# SAYS SO. No absolute command-line word lands inside the checkout (a subject
+# running a DEPLOYED COPY, like the pogo-reminders pollers), or a declared
+# dependency does not exist in the checkout (a typo that would otherwise narrow
+# the scope to nothing, silently): either way the probe keeps the old,
+# over-counting behaviour rather than a narrower one it cannot vouch for. A
+# registry field of `*` asks for the whole repo on purpose.
+
+# resolve_real follows symlinks to the real path of an existing file, without
+# `realpath`/`readlink -f`, whose presence and flags differ between darwin and
+# GNU. Non-zero when the path does not resolve.
+resolve_real() {
+    local p="$1" target n=0 dir
+    while [ -L "$p" ]; do
+        n=$(( n + 1 )); [ "$n" -le 40 ] || return 1
+        target="$(readlink "$p")" || return 1
+        case "$target" in /*) p="$target" ;; *) p="$(dirname -- "$p")/$target" ;; esac
+    done
+    [ -e "$p" ] || return 1
+    dir="$(cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)" || return 1
+    echo "$dir/$(basename -- "$p")"
+}
+
+# resolve_subject_scope sets SCOPE_PATHS (newline-separated, repo-top-relative;
+# empty = whole repo) and SCOPE_NOTE (one line for the report and ledger).
+SCOPE_PATHS=""
+SCOPE_NOTE=""
+resolve_subject_scope() {
+    local repo="$1" cmd="$2" deps="$3" top word real exe="" d IFS_SAVE
+    SCOPE_PATHS=""; SCOPE_NOTE=""
+    if [ "$deps" = "*" ]; then
+        SCOPE_NOTE="whole repo (the registry asks for it with '*')"
+        return 0
+    fi
+    top="$("$GIT" -C "$repo" rev-parse --show-toplevel 2>/dev/null)"
+    top="$(cd -P -- "$top" 2>/dev/null && pwd -P)"
+    if [ -z "$top" ]; then
+        SCOPE_NOTE="whole repo (the checkout's top level could not be resolved)"
+        return 0
+    fi
+    # Absolute words only: a relative word (`bash`, `python3`) would be resolved
+    # against THIS probe's working directory, which has nothing to do with the
+    # subject's.
+    # set -f: a `*` on a command line is a word, not a glob for this shell.
+    set -f
+    for word in $cmd; do
+        case "$word" in /*) ;; *) continue ;; esac
+        [ -f "$word" ] || continue
+        real="$(resolve_real "$word")" || continue
+        case "$real" in "$top"/*) exe="${real#"$top"/}"; break ;; esac
+    done
+    set +f
+    if [ -z "$exe" ]; then
+        SCOPE_NOTE="whole repo (no path on the command line resolves into $top — a deployed copy, or a path with spaces — so every commit is counted)"
+        return 0
+    fi
+    SCOPE_PATHS="$exe"
+    if [ -n "$deps" ]; then
+        IFS_SAVE="$IFS"; IFS=,
+        set -- $deps
+        IFS="$IFS_SAVE"
+        for d in "$@"; do
+            [ -n "$d" ] || continue
+            case "$d" in /*|*..*)
+                SCOPE_PATHS=""
+                SCOPE_NOTE="whole repo (declared dependency '$d' is not a repo-relative path)"
+                return 0 ;;
+            esac
+            if [ ! -e "$top/$d" ]; then
+                SCOPE_PATHS=""
+                SCOPE_NOTE="whole repo (declared dependency '$d' does not exist in $top — counting it as nothing would narrow the scope silently)"
+                return 0
+            fi
+            SCOPE_PATHS="$SCOPE_PATHS
+$d"
+        done
+    fi
+    SCOPE_NOTE="commits touching $(printf '%s\n' "$SCOPE_PATHS" | paste -sd ' ' -) (the executable the process resolves to$( [ -n "$deps" ] && echo ', plus declared dependencies'))"
+}
+
+# scoped_log runs `git log` limited to SCOPE_PATHS (whole repo when empty).
+scoped_log() {
+    local repo="$1"; shift
+    if [ -z "$SCOPE_PATHS" ]; then
+        "$GIT" -C "$repo" log "$@" 2>/dev/null
+        return
+    fi
+    local specs=() p
+    while IFS= read -r p; do
+        [ -n "$p" ] && specs+=(":(top,literal)$p")
+    done <<EOF
+$SCOPE_PATHS
+EOF
+    "$GIT" -C "$repo" log "$@" -- "${specs[@]}" 2>/dev/null
+}
+
+# scope_args_for_humans renders the same pathspec for a copy-pasteable command.
+scope_args_for_humans() {
+    [ -n "$SCOPE_PATHS" ] || return 0
+    printf ' --'
+    printf '%s\n' "$SCOPE_PATHS" | while IFS= read -r p; do [ -n "$p" ] && printf ' %s' "$p"; done
+}
+
 # --- one subject ------------------------------------------------------------
 
 check_process_subject() {
-    local name="$1" repo="$2" ref="$3" pattern="$4"
-    local now_real refsha oldest_pid oldest_start nmatched st
+    local name="$1" repo="$2" ref="$3" pattern="$4" deps="${5:-}"
+    local now_real refsha oldest_pid oldest_start oldest_cmd nmatched st
+    local repo_wide scope_detail
     local newer count oldest_ct age age_label stamp
     local st_since st_id st_ref st_mailed mailed_at identity
     local subject body detail
@@ -626,11 +749,20 @@ check_process_subject() {
         if [ -z "$oldest_start" ] || [ "$st" -lt "$oldest_start" ]; then
             oldest_start="$st"
             oldest_pid="$(printf '%s\n' $MATCH_PIDS | sed -n "${nmatched}p")"
+            oldest_cmd="$(printf '%s' "$MATCH_CMDS" | sed -n "${nmatched}p")"
         fi
     done
 
-    newer="$("$GIT" -C "$repo" log --format='%ct %h %cs %s' --since="@$oldest_start" "$refsha" 2>/dev/null)"
+    resolve_subject_scope "$repo" "$oldest_cmd" "$deps"
+    newer="$(scoped_log "$repo" --format='%ct %h %cs %s' --since="@$oldest_start" "$refsha")"
+    scope_detail="scope=$( [ -n "$SCOPE_PATHS" ] && printf '%s\n' "$SCOPE_PATHS" | paste -sd , - || echo repo)"
     if [ -z "$newer" ]; then
+        # The repo-wide count is reported alongside, so a reader can see what the
+        # scope excluded rather than having to trust that it excluded nothing.
+        repo_wide=""
+        if [ -n "$SCOPE_PATHS" ]; then
+            repo_wide="$("$GIT" -C "$repo" log --format=%h --since="@$oldest_start" "$refsha" 2>/dev/null | grep -c '^')"
+        fi
         # NOT-DISPROVEN, never OK. No commit has landed since this process
         # started, so nothing here shows it stale — and nothing here shows it
         # current either: the image it exec'd may have been built from an older
@@ -639,9 +771,9 @@ check_process_subject() {
         # word that reads as health is the thing a reader acts on.
         rm -f "${STAMP}.${name}" 2>/dev/null
         subject_record 0 "$name" NOT-DISPROVEN \
-            "pid=$oldest_pid started=$(fmt_epoch "$oldest_start") ref=$(printf '%.8s' "$refsha") newer=0" \
-            "no commit in $repo is newer than this process — that does NOT establish it is current"
-        say "revision-probe: $name — NOT-DISPROVEN. pid $oldest_pid started $(fmt_epoch "$oldest_start"); no commit in $repo since. This does not prove it is current; the process axis can only disprove."
+            "pid=$oldest_pid started=$(fmt_epoch "$oldest_start") ref=$(printf '%.8s' "$refsha") newer=0 $scope_detail${repo_wide:+ repo_newer=$repo_wide}" \
+            "no commit in $repo newer than this process — scope: $SCOPE_NOTE — that does NOT establish it is current"
+        say "revision-probe: $name — NOT-DISPROVEN. pid $oldest_pid started $(fmt_epoch "$oldest_start"); no commit in $repo since, counting $SCOPE_NOTE.${repo_wide:+ ($repo_wide commit(s) elsewhere in the repo since, none touching it.)} This does not prove it is current; the process axis can only disprove."
         return 0
     fi
 
@@ -659,7 +791,7 @@ check_process_subject() {
     identity="p${oldest_pid}@${oldest_start}"
     stamp="${STAMP}.${name}"
 
-    detail="pid=$oldest_pid started=$(fmt_epoch "$oldest_start") ref=$(printf '%.8s' "$refsha") newer=$count age=$age_label threshold=$STALE_AFTER_RAW"
+    detail="pid=$oldest_pid started=$(fmt_epoch "$oldest_start") ref=$(printf '%.8s' "$refsha") newer=$count age=$age_label threshold=$STALE_AFTER_RAW $scope_detail"
 
     build_process_report() {
         cat <<EOF
@@ -668,6 +800,7 @@ MEASURED — PROCESS AXIS, WHICH IS THE WEAKER OF THE TWO
   process            pid $oldest_pid, started $(fmt_epoch "$oldest_start")
                      $nmatched process(es) matched '$pattern'; the OLDEST is the subject
   checkout           $repo at $ref ($refsha)
+  counting           $SCOPE_NOTE
   commits since it   $count, the oldest dated $(fmt_epoch "$oldest_ct")
 $(printf '%s\n' "$newer" | head -5 | sed 's/^[0-9]* /                     /')
   behind for         $age_label  (threshold $(format_age "$STALE_AFTER"))
@@ -682,7 +815,7 @@ WHAT THIS PROVES, AND WHAT IT DOES NOT
 
 WHAT TO DO
   ps -o pid,lstart,command -p $oldest_pid
-  git -C $repo log --oneline --since=@$oldest_start $ref
+  git -C $repo log --oneline --since=@$oldest_start $ref$(scope_args_for_humans)
   # then restart the subject — and check whether it runs the repo directly (a
   # symlink, as ~/.pogo/bin/bridget is) or a DEPLOYED COPY. For a copy, a
   # restart alone re-execs the same stale files and the finding survives it.
@@ -756,7 +889,7 @@ expand_home() {
 }
 
 run_process_subjects() {
-    local file name repo ref pattern rest line lineno=0 seen=0
+    local file name repo ref pattern deps rest line lineno=0 seen=0
 
     case "$SUBJECTS_RAW" in
         none|off|disabled)
@@ -787,7 +920,7 @@ run_process_subjects() {
         lineno=$(( lineno + 1 ))
         case "$line" in ''|'#'*) continue ;; esac
         # shellcheck disable=SC2086
-        read -r name repo ref pattern rest <<EOF
+        read -r name repo ref pattern deps rest <<EOF
 $line
 EOF
         if [ -z "${pattern:-}" ]; then
@@ -798,7 +931,7 @@ EOF
         repo="$(expand_home "$repo")"
         pattern="$(expand_home "$pattern")"
         seen=$(( seen + 1 ))
-        check_process_subject "$name" "$repo" "$ref" "$pattern"
+        check_process_subject "$name" "$repo" "$ref" "$pattern" "${deps:-}"
     done < "$file"
 
     if [ "$seen" -eq 0 ]; then

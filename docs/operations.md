@@ -1371,14 +1371,28 @@ The process axis can only *disprove*:
 The exit status is the **worst across all subjects**: a run that found `pogod`
 current and bridget absent has not found this box healthy.
 
-Registry format — four whitespace-separated fields, `#` comments; a leading `~/`
-or `$HOME` is expanded and nothing is `eval`ed:
+Registry format — four whitespace-separated fields and an optional fifth, `#`
+comments; a leading `~/` or `$HOME` is expanded and nothing is `eval`ed:
 
 ```
-# name            repo                      ref     pattern
-bridget           $HOME/dev/bridget         HEAD    /dev/bridget/bridget$
+# name            repo                      ref     pattern                              deps
+bridget           $HOME/dev/bridget         HEAD    /dev/bridget/bridget$                bridget_core
 notify-mail       $HOME/dev/pogo-reminders  HEAD    /pogo-reminders/bin/poll-mail.sh$
 ```
+
+**Only commits touching the subject's code count (mg-2983a).** The probe takes
+the absolute path on the matched command line, follows it through symlinks
+(`~/.pogo/bin/bridget-supervise` → `~/dev/bridget/bridget-supervise`) into the
+checkout, and runs `git log --since=<start> -- <that file> <deps…>`. `deps` lists
+extra repo-relative paths the process loads, comma-separated; `*` counts every
+commit. Before this, a commit that only added `bridget-prune` (3a5e811) alerted
+on both bridget rows although neither was running stale code. Where the scope
+cannot be resolved — no command-line path lands in the checkout (a deployed copy,
+as for the notifier pollers), or a declared dependency does not exist — the probe
+counts the **whole repo** as before, and the report's `counting` line says which
+scope was used and why. A clean verdict also reports how many repo-wide commits
+the scope set aside. **An undeclared dependency is a missed alert:** a module the
+process imports that `deps` omits can change without the probe noticing.
 
 `pattern` is a **fixed substring** of the full command line, not a regex; a
 trailing `$` anchors it to the end, which several entries need because

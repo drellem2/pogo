@@ -1087,6 +1087,111 @@ else
     fail "a garbage etime produced exit $rc — if that is 0, the subject was silently certified healthy: $out"
 fi
 
+# --- 14m. ONLY COMMITS TOUCHING THE SUBJECT'S CODE COUNT (mg-2983a) ----------
+#
+# On 2026-11-12 the probe alerted for bridget AND bridget-supervise on 3a5e811,
+# a commit that added bridget-prune and touched neither subject's file. The
+# fixture is that shape: the subject runs through a SYMLINK (as
+# ~/.pogo/bin/bridget-supervise does) into a checkout where the only commit
+# newer than the process touches a sibling program. That must not alert. The
+# positive control — a commit touching the subject's own file — still must,
+# or the negative says nothing about the instrument.
+#
+# The sections above use a pattern that names no real file, so they exercise the
+# whole-repo FALLBACK; that is deliberate and is asserted explicitly in 14m-v.
+SCOPEBIN="$SANDBOX/scopebin"
+mkdir -p "$SCOPEBIN"
+scope_repo() {   # $1 = dir; $2 = path the post-start commit touches
+    local d="$1" touched="$2"
+    rm -rf "$d"; mkdir -p "$d/lib"
+    git init --quiet "$d"
+    git -C "$d" symbolic-ref HEAD refs/heads/main
+    echo reader > "$d/thereader"; echo sib > "$d/sibling"; echo mod > "$d/lib/mod"
+    git -C "$d" add -A
+    GIT_AUTHOR_DATE="@$(( PROC_START - 86400 )) +0000" GIT_COMMITTER_DATE="@$(( PROC_START - 86400 )) +0000" \
+        git -C "$d" commit --quiet -m "before the process started"
+    mkdir -p "$(dirname "$d/$touched")"
+    echo changed >> "$d/$touched"
+    git -C "$d" add -A
+    GIT_AUTHOR_DATE="@$PROC_MISSED_AT +0000" GIT_COMMITTER_DATE="@$PROC_MISSED_AT +0000" \
+        git -C "$d" commit --quiet -m "touches $touched after the process started"
+    ln -sfn "$d/thereader" "$SCOPEBIN/thereader"
+}
+SCOPE_SUBJ="$SANDBOX/scope-subjects.conf"
+SCOPE_REPO="$SANDBOX/scoperepo"
+scope_conf() { printf 'thereader %s main /scopebin/thereader$ %s\n' "$SCOPE_REPO" "${1:-}" > "$SCOPE_SUBJ"; }
+fake_ps $(( 3 * 86400 )) "bash $SCOPEBIN/thereader"
+
+# 14m-i. THE MEASURED FALSE POSITIVE: the only new commit touches a sibling.
+scope_repo "$SCOPE_REPO" sibling; scope_conf
+out="$(run_proc_probe --subjects "$SCOPE_SUBJ" --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'NOT-DISPROVEN'; then
+    pass "a commit touching only a SIBLING file does not alert — the process is executing current code (mg-2983a, 3a5e811)"
+else
+    fail "a sibling-only commit produced exit $rc, want 0 NOT-DISPROVEN — output: $out"
+fi
+if printf '%s' "$out" | grep -q '1 commit(s) elsewhere in the repo since, none touching it'; then
+    pass "the clean verdict shows the repo-wide commits the scope set aside, rather than hiding them"
+else
+    fail "the scoped verdict does not say what it excluded — output: $out"
+fi
+
+# 14m-ii. POSITIVE CONTROL: the subject's own file changed. Reached through the
+# symlink, so this also proves the symlink is followed into the checkout.
+scope_repo "$SCOPE_REPO" thereader; scope_conf
+out="$(run_proc_probe --subjects "$SCOPE_SUBJ" --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'commits touching thereader'; then
+    pass "a commit touching the subject's OWN file (resolved through its symlink) still alerts — the scope narrows, it does not blind"
+else
+    fail "a commit to the subject's own file exited $rc, want 1 naming the scope — output: $out"
+fi
+if printf '%s' "$out" | grep -q -- "--since=@[0-9]* main -- thereader"; then
+    pass "the WHAT TO DO command carries the same pathspec the probe counted with"
+else
+    fail "the suggested git log does not match the scope it reported — output: $out"
+fi
+
+# 14m-iii. A DECLARED DEPENDENCY counts. bridget imports bridget_core; a commit
+# there changes what the process would run, and omitting it would be silence.
+scope_repo "$SCOPE_REPO" lib/mod; scope_conf
+out="$(run_proc_probe --subjects "$SCOPE_SUBJ" --now "$RNOW")"; rc=$?
+scope_conf lib
+out2="$(run_proc_probe --subjects "$SCOPE_SUBJ" --now "$RNOW")"; rc2=$?
+if [ "$rc" -eq 0 ] && [ "$rc2" -eq 1 ]; then
+    pass "a commit to a module alerts once the registry declares it as a dependency (exit $rc undeclared, $rc2 declared)"
+else
+    fail "dependency field: undeclared exited $rc (want 0), declared exited $rc2 (want 1) — output: $out2"
+fi
+
+# 14m-iv. A DECLARED DEPENDENCY THAT DOES NOT EXIST must widen, not narrow: a
+# typo would otherwise drop the dependency without a word.
+scope_repo "$SCOPE_REPO" sibling; scope_conf no-such-dir
+out="$(run_proc_probe --subjects "$SCOPE_SUBJ" --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "whole repo (declared dependency 'no-such-dir' does not exist"; then
+    pass "a declared dependency that does not exist falls back to the WHOLE repo and says so"
+else
+    fail "a missing declared dependency exited $rc (want 1, whole-repo, announced) — output: $out"
+fi
+scope_conf '*'
+out="$(run_proc_probe --subjects "$SCOPE_SUBJ" --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "whole repo (the registry asks for it"; then
+    pass "'*' asks for the whole repo on purpose — the old behaviour, still reachable"
+else
+    fail "'*' exited $rc (want 1, whole repo) — output: $out"
+fi
+
+# 14m-v. AN UNRESOLVABLE EXECUTABLE keeps today's behaviour and says so: the
+# command line names no file in the checkout (a deployed copy).
+scope_conf
+fake_ps $(( 3 * 86400 )) "bash /fixture/deployed/copy/thereader"
+printf 'thereader %s main /copy/thereader$\n' "$SCOPE_REPO" > "$SCOPE_SUBJ"
+out="$(run_proc_probe --subjects "$SCOPE_SUBJ" --now "$RNOW")"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'whole repo (no path on the command line resolves into'; then
+    pass "a subject whose executable does not resolve into the checkout counts every commit, and the report says why"
+else
+    fail "the unresolvable case exited $rc (want 1, whole repo, announced) — output: $out"
+fi
+
 # --- tally -------------------------------------------------------------------
 echo
 echo "=== scripts/revision-probe.sh controls ==="

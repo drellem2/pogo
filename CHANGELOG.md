@@ -43,6 +43,17 @@ is the curated, human-readable summary kept in sync at each release cut.
 
 ### Fixed
 
+- **revision-probe's process axis counts only commits touching the subject's
+  code (mg-2983a).** It counted every commit in the checkout since the process
+  started, so 3a5e811 — which only added `bridget-prune` — alerted on both
+  `bridget` and `bridget-supervise` every renotify interval, with restarting the
+  Discord bridge for nothing as the only remedy. The probe now resolves the
+  executable on the command line through its symlink into the checkout and runs
+  `git log --since=<start> -- <file> <deps>`; an optional fifth registry field
+  declares further dependencies (`bridget_core` for bridget) or `*` for the whole
+  repo. An unresolvable executable or a missing declared dependency falls back to
+  the whole repo, and the report says which scope it counted.
+
 - **A crew restart now launches on the prompt as it is on disk (#306).**
   A restart_on_crash restart — which is also how an agent comes back after a
   crew context-reset — re-ran the original command against the
