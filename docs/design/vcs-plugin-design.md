@@ -196,7 +196,7 @@ the path. On git this returns nil.
 
 ### 3.4 The worker protocol in prompts
 
-This is the hardest of the four, and it carries a stealth requirement of its
+This is the hardest of the four, and it carries a naming requirement of its
 own. The polecat templates teach the worker how to save, check and hand off
 work: commit, push, presubmit, submit or land, review checkout. Today the fork
 writes the alternate backend's arm **inline in core's templates**.
@@ -236,7 +236,7 @@ toward verbs over time.
 | Per-call cost | Nil | One RPC | One fork/exec. pogo already has 70 `git` exec sites, and the seam's calls are coarse (spawn, land, sweep) |
 | Versioning | Compile time | Handshake plus protobuf evolution | `pogo-vcs-<kind> capabilities --json` → `{protocol: 1, land_mode, blocks, …}` |
 | Language | Go only | Any, with gRPC | Any |
-| Stealth | The backend's code is inside pogo's binary | Separate binary | Separate binary |
+| Genericity | The backend's code is inside pogo's binary | Separate binary | Separate binary |
 | Track record **in pogo** | The seam (works) | Deleted for disuse (858ae31e) | `mg` is integrated this way already, under a named-clause contract (`docs/design/mg-contract.md`) |
 
 ### 4.2 Recommendation
@@ -318,11 +318,11 @@ stay byte-identical against a base revision.
    (§2.2). Mitigation: from Phase A on, new alternate-backend work lands on
    main **as generic capabilities**, or not at all. A fork-only branch site
    added after Phase A counts as a regression against the exit measure.
-2. **Stealth (high, procedural).** Every upstreamed name must be generic, and
+2. **Genericity (high, procedural).** Every upstreamed name must be generic, and
    so must every test fixture and every changelog entry. Prompt-block text for
    the alternate backend must never be committed to this repo. Mitigation: the
-   alternate backend's arms move into the plugin (§3.4), and a CI grep for the
-   backend's names runs on main (with a positive control).
+   alternate backend's arms move into the plugin (§3.4), and names are checked
+   before merge (with a positive control).
 3. **Git regression (medium).** It is contained by keeping git in-process and
    by the byte-identity tests. The largest exposure is §3.4's template
    rewrite, which already has a proven test pattern on the fork.
