@@ -360,3 +360,159 @@ func TestEventEnvelope(t *testing.T) {
 		}
 	}
 }
+
+// assertWorkItemID checks the envelope's work_item_id: equal to want when want
+// is non-empty, and ABSENT (not "" and not null) when want is empty —
+// docs/event-log.md says an agent with no item omits the field entirely.
+func assertWorkItemID(t *testing.T, ev map[string]any, want string) {
+	t.Helper()
+	got, present := ev["work_item_id"]
+	if want == "" {
+		if present {
+			t.Errorf("%v for an agent with no work item carries work_item_id=%v; want the field absent", ev["event_type"], got)
+		}
+		return
+	}
+	if got != want {
+		t.Errorf("%v work_item_id: want %q, got %v (present=%v)", ev["event_type"], want, got, present)
+	}
+}
+
+// mg-1bc90 (part of drellem2/pogo#307): agent_spawned, agent_stopped,
+// agent_crashed and agent_restarted were emitted without work_item_id although
+// docs/event-log.md documents it on them — 0 of 1798 agent_spawned on the live
+// log carried it. Each case below spawns once with a work item and once
+// without, so the test pins both halves: the item is recorded when there is
+// one, and the field stays absent (never a wrong value) when there is not.
+
+func TestAgentSpawnedCarriesWorkItemID(t *testing.T) {
+	path := useTempEventLog(t)
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetClaimReleaser(&recordingReleaser{})
+
+	for _, tc := range []struct{ name, item string }{
+		{"wi-spawned-item", "mg-1bc90"},
+		{"wi-spawned-none", ""},
+	} {
+		if _, err := reg.Spawn(SpawnRequest{
+			Name: tc.name, Type: TypePolecat, Command: []string{"cat"}, WorkItemID: tc.item,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		ev := waitForEvent(t, path, "agent_spawned", "cat-"+tc.name, 2*time.Second)
+		if ev == nil {
+			t.Fatalf("no agent_spawned event for %s", tc.name)
+		}
+		assertWorkItemID(t, ev, tc.item)
+	}
+}
+
+func TestAgentStoppedCarriesWorkItemID(t *testing.T) {
+	path := useTempEventLog(t)
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetClaimReleaser(&recordingReleaser{})
+
+	// Both branches of emitExit's agent_stopped: a clean exit (task_complete)
+	// and a requested stop.
+	for _, tc := range []struct {
+		name, item string
+		requested  bool
+	}{
+		{"wi-clean-item", "mg-1bc90", false},
+		{"wi-clean-none", "", false},
+		{"wi-stop-item", "mg-1bc90", true},
+		{"wi-stop-none", "", true},
+	} {
+		cmd := []string{"true"}
+		if tc.requested {
+			cmd = []string{"sleep", "30"}
+		}
+		a, err := reg.Spawn(SpawnRequest{
+			Name: tc.name, Type: TypePolecat, Command: cmd, WorkItemID: tc.item,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.requested {
+			if err := reg.Stop(tc.name, 2*time.Second); err != nil {
+				t.Fatal(err)
+			}
+		}
+		<-a.Done()
+		ev := waitForEvent(t, path, "agent_stopped", "cat-"+tc.name, 3*time.Second)
+		if ev == nil {
+			t.Fatalf("no agent_stopped event for %s", tc.name)
+		}
+		assertWorkItemID(t, ev, tc.item)
+	}
+}
+
+func TestAgentCrashedCarriesWorkItemID(t *testing.T) {
+	path := useTempEventLog(t)
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.StopAll(2 * time.Second)
+	reg.SetClaimReleaser(&recordingReleaser{})
+
+	for _, tc := range []struct{ name, item string }{
+		{"wi-crash-item", "mg-1bc90"},
+		{"wi-crash-none", ""},
+	} {
+		a, err := reg.Spawn(SpawnRequest{
+			Name: tc.name, Type: TypePolecat, Command: []string{"false"}, WorkItemID: tc.item,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-a.Done()
+		ev := waitForEvent(t, path, "agent_crashed", "cat-"+tc.name, 2*time.Second)
+		if ev == nil {
+			t.Fatalf("no agent_crashed event for %s", tc.name)
+		}
+		assertWorkItemID(t, ev, tc.item)
+	}
+}
+
+func TestAgentRestartedCarriesWorkItemID(t *testing.T) {
+	testsandbox.Isolate(t)
+	path := useTempEventLog(t)
+	reg, err := NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.StopAll(2 * time.Second)
+
+	// Respawn is the crew path; a crew agent holding a claim is the case the
+	// field exists for, and the no-item crew is the common one.
+	for _, tc := range []struct{ name, item string }{
+		{"wi-restart-item", "mg-1bc90"},
+		{"wi-restart-none", ""},
+	} {
+		a, err := reg.Spawn(SpawnRequest{
+			Name: tc.name, Type: TypeCrew, Command: []string{"true"}, WorkItemID: tc.item,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-a.Done()
+		a.Command = []string{"sleep", "10"}
+		if _, err := reg.Respawn(tc.name); err != nil {
+			t.Fatal(err)
+		}
+		ev := waitForEvent(t, path, "agent_restarted", "crew-"+tc.name, 2*time.Second)
+		if ev == nil {
+			t.Fatalf("no agent_restarted event for %s", tc.name)
+		}
+		assertWorkItemID(t, ev, tc.item)
+	}
+}

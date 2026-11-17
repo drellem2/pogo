@@ -88,7 +88,8 @@ In every example, the line is shown wrapped for readability. The actual on-disk 
 A crew or polecat process has been started by pogod (PTY allocated, Claude Code launched).
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
-- **Optional envelope:** `work_item_id` (set for polecats with an assigned item), `repo` (the polecat's worktree, if any)
+- **Optional envelope:** `work_item_id` (set for any agent with an assigned item — every dispatched polecat; absent for crew, which have none), `repo` (the agent's source repository, if any)
+  Records written before mg-1bc90 lack `work_item_id` on `agent_spawned`, `agent_stopped`, `agent_crashed` and `agent_restarted` even for polecats: the field was documented but never emitted (0 of 1798 `agent_spawned` on the live log, as measured by triage mg-61d84 on 2026-11-17). Its absence in an old record does not mean the agent had no item.
 - **`details` fields:**
   - `agent_type` (string, required): `"crew"` or `"polecat"`
   - `pid` (int, required): operating system PID
@@ -147,6 +148,7 @@ Note the identity: `agent` names the polecat that was *intended*. It does not ex
 An agent process exited cleanly (received stop signal, completed task, or `pogo agent stop` was issued).
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **Optional envelope:** `work_item_id` (same rule as `agent_spawned`: present when the agent has an assigned item, absent otherwise), `repo`
 - **`details` fields:**
   - `pid` (int, required)
   - `exit_code` (int, required): process exit code (0 for clean exit)
@@ -177,6 +179,7 @@ containing it are likewise silent.
 An agent process exited unexpectedly (non-zero exit code, killed by signal other than SIGTERM, or pogod detected hang).
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **Optional envelope:** `work_item_id` (same rule as `agent_spawned`: present when the agent has an assigned item, absent otherwise), `repo`
 - **`details` fields:**
   - `pid` (int, required)
   - `exit_code` (int, required): non-zero, or -1 if killed by signal
@@ -189,7 +192,7 @@ An agent process exited unexpectedly (non-zero exit code, killed by signal other
 
 #### `agent_early_exit`
 
-A **polecat** exited during its cold start: nobody asked it to stop, and it died inside its provider's cold-start budget (the initial nudge's `InitialNudgeTimeout`, 60s by default) ([internal/agent/earlyexit.go](../internal/agent/earlyexit.go), mg-f394). Written **in addition to** `agent_stopped` / `agent_crashed`, which say how the process ended; this one says the worker never got going, and — unlike them — it carries the work item.
+A **polecat** exited during its cold start: nobody asked it to stop, and it died inside its provider's cold-start budget (the initial nudge's `InitialNudgeTimeout`, 60s by default) ([internal/agent/earlyexit.go](../internal/agent/earlyexit.go), mg-f394). Written **in addition to** `agent_stopped` / `agent_crashed`, which say how the process ended; this one says the worker never got going. (Before mg-1bc90 it was also the only one of the three to carry the work item; all three now do.)
 
 It exists because of drellem2/pogo#177. Claude Code's trust dialog was answered "No, exit", the harness exited 1 about three seconds in, and every other record read healthy: the spawn had returned ok, the item was claimed at spawn, and the worktree was reaped on exit like any finished polecat's. The spawn's HTTP result cannot carry this — it is written the moment the process exists — so the death is surfaced here and in a mail from `pogod` to the coordinator.
 
@@ -215,6 +218,7 @@ The exit status is not part of the test: Codex refusing its trust dialog exits 0
 A crew agent that crashed has been automatically restarted by pogod's supervisor loop. Polecats are never restarted (they're ephemeral) — this event applies only to crew.
 
 - **Required envelope:** `schema_version`, `timestamp`, `event_type`, `agent`, `details`
+- **Optional envelope:** `work_item_id` (same rule as `agent_spawned`: present when the agent has an assigned item, absent otherwise), `repo`
 - **`details` fields:**
   - `previous_pid` (int, required): PID of the crashed process
   - `new_pid` (int, required): PID of the new process

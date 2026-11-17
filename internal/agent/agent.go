@@ -413,10 +413,11 @@ func (a *Agent) emitSpawned() {
 		details["worktree"] = a.WorktreeDir
 	}
 	events.Emit(context.Background(), events.Event{
-		EventType: "agent_spawned",
-		Agent:     a.eventAgent(),
-		Repo:      a.SourceRepo,
-		Details:   details,
+		EventType:  "agent_spawned",
+		Agent:      a.eventAgent(),
+		WorkItemID: a.WorkItemID,
+		Repo:       a.SourceRepo,
+		Details:    details,
 	})
 }
 
@@ -2009,9 +2010,10 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 
 	a.emitSpawned()
 	events.Emit(context.Background(), events.Event{
-		EventType: "agent_restarted",
-		Agent:     a.eventAgent(),
-		Repo:      a.SourceRepo,
+		EventType:  "agent_restarted",
+		Agent:      a.eventAgent(),
+		WorkItemID: a.WorkItemID,
+		Repo:       a.SourceRepo,
 		Details: map[string]any{
 			"previous_pid":  old.PID,
 			"new_pid":       a.PID,
@@ -2443,10 +2445,11 @@ func (a *Agent) emitExit(stopRequested bool, stopCause string, exitCode int, dur
 			details["stop_cause"] = stopCause
 		}
 		events.Emit(context.Background(), events.Event{
-			EventType: "agent_stopped",
-			Agent:     a.eventAgent(),
-			Repo:      a.SourceRepo,
-			Details:   details,
+			EventType:  "agent_stopped",
+			Agent:      a.eventAgent(),
+			WorkItemID: a.WorkItemID,
+			Repo:       a.SourceRepo,
+			Details:    details,
 		})
 		return
 	}
@@ -2458,10 +2461,11 @@ func (a *Agent) emitExit(stopRequested bool, stopCause string, exitCode int, dur
 		details["last_output"] = string(last)
 	}
 	events.Emit(context.Background(), events.Event{
-		EventType: "agent_crashed",
-		Agent:     a.eventAgent(),
-		Repo:      a.SourceRepo,
-		Details:   details,
+		EventType:  "agent_crashed",
+		Agent:      a.eventAgent(),
+		WorkItemID: a.WorkItemID,
+		Repo:       a.SourceRepo,
+		Details:    details,
 	})
 }
 
