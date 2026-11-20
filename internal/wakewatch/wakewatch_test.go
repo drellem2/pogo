@@ -59,8 +59,10 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-func (h *harness) watcher() *Watcher {
-	return New(Params{}, Deps{
+func (h *harness) watcher() *Watcher { return h.watcherWith(Params{}) }
+
+func (h *harness) watcherWith(p Params) *Watcher {
+	return New(p, Deps{
 		EventsPath:  h.path,
 		StatePath:   h.state,
 		Agents:      func() []AgentRef { return h.fleet },
@@ -1133,5 +1135,49 @@ func TestCoordinatorIsNotMailedAboutItself(t *testing.T) {
 	}
 	if d := h.last(EventUnconsumed); d["recipient"] != "mayor" || d["notified"] != false || d["reason"] != "recipient_is_coordinator" {
 		t.Errorf("unconsumed event = %v", d)
+	}
+}
+
+// drellem2/pogo#307: with Params.Corr set (pogod sets it exactly when
+// [events] corr_tag_prefix is configured), wake_pointer_sent carries
+// details.corr equal to its msg_id, keeping msg_id. Unset, there is no corr;
+// and a pointer about an assignment, which has no msg_id, has no corr either.
+func TestPointerSentCorr(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		corr bool
+	}{{"mapping set", true}, {"mapping unset", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			w := h.watcherWith(Params{Corr: tc.corr})
+			w.Start()
+			h.mailSent("mayor", "pe00c", "m1")
+			w.Poll()
+			d := h.last(EventPointerSent)
+			if d["msg_id"] != "m1" {
+				t.Fatalf("msg_id = %v, want m1 (kept regardless of corr); event = %v", d["msg_id"], d)
+			}
+			got, present := d["corr"]
+			if tc.corr && got != "m1" {
+				t.Errorf("corr = %v (present=%v), want m1", got, present)
+			}
+			if !tc.corr && present {
+				t.Errorf("corr = %v with no mapping configured; want it absent", got)
+			}
+		})
+	}
+
+	h := newHarness(t)
+	h.items["mg-5678"] = Item{Title: "new work", Assignee: "pm-pogo"}
+	w := h.watcherWith(Params{Corr: true})
+	w.Start()
+	h.append(map[string]any{"type": "work.created", "item_id": "mg-5678", "actor": "mayor", "to_status": "available"})
+	w.Poll()
+	d := h.last(EventPointerSent)
+	if d["trigger"] != "work.created" {
+		t.Fatalf("positive control: no assignment pointer; event = %v", d)
+	}
+	if got, present := d["corr"]; present {
+		t.Errorf("assignment pointer carries corr = %v; it has no msg_id, so want none", got)
 	}
 }

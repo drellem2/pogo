@@ -132,6 +132,12 @@ type Params struct {
 	RetryAfter time.Duration
 	// MaxRetries bounds those re-sends; past it the work is left to recovery.
 	MaxRetries int
+	// Corr, when true, adds `details.corr` equal to msg_id on
+	// wake_pointer_sent (drellem2/pogo#307), so a pointer joins on the same key
+	// as the lifecycle events of a worker filed from that mail. pogod sets it
+	// exactly when `[events] corr_tag_prefix` is configured; false (the zero
+	// value) leaves the event as it was. msg_id itself is always kept.
+	Corr bool
 }
 
 // Defaults.
@@ -823,6 +829,11 @@ func (w *Watcher) flushOne(recipient string) {
 		d["retry"] = retries
 	}
 	addIDs(d, batch)
+	if w.p.Corr {
+		if id, ok := d["msg_id"]; ok {
+			d["corr"] = id
+		}
+	}
 	w.sendPointer(recipient, latest.ItemID, text, d, batch, retries)
 }
 

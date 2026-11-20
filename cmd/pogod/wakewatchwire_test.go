@@ -22,7 +22,7 @@ func TestWakeWatchConfigDefaultsMatchPackageDefaults(t *testing.T) {
 		RenudgeEvery:     config.DefaultWakeWatchRenudgeEvery,
 		MaxRenudges:      config.DefaultWakeWatchMaxRenudges,
 		Lookback:         config.DefaultWakeWatchLookback,
-	})
+	}, config.EventsConfig{})
 	want := wakewatch.DefaultParams()
 	// Not configurable: Fresh and PollInterval, and the failed-pointer retry
 	// backoff and budget (mg-35a7e).
@@ -97,6 +97,19 @@ func TestWakeWatchArmedBanner(t *testing.T) {
 	for _, stale := range []string{"SHADOW", "shadow", "timers stay", "mail-check timer"} {
 		if strings.Contains(got, stale) {
 			t.Errorf("banner contains stale phrase %q: %q", stale, got)
+		}
+	}
+}
+
+// drellem2/pogo#307: wake_pointer_sent carries corr exactly when the
+// tag->corr mapping is configured, whatever the prefix.
+func TestWakeWatchParamsCorrFollowsEventsConfig(t *testing.T) {
+	for _, tc := range []struct {
+		prefix string
+		want   bool
+	}{{config.DefaultCorrTagPrefix, true}, {"src:", true}, {"", false}} {
+		if got := wakeWatchParams(config.WakeWatchConfig{}, config.EventsConfig{CorrTagPrefix: tc.prefix}).Corr; got != tc.want {
+			t.Errorf("corr_tag_prefix %q: Params.Corr = %v, want %v", tc.prefix, got, tc.want)
 		}
 	}
 }

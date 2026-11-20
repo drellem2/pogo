@@ -1856,7 +1856,12 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 	spawnStart := time.Now()
 	log.Printf("polecat %s: spawn requested (work item %q, repo %q, template %q)",
 		spawnReq.Name, spawnReq.Id, spawnReq.Repo, spawnReq.Template)
-	emitPolecatSpawnRequested(spawnReq)
+	// Read once, here, and carried on the SpawnRequest below so every
+	// lifecycle event of this polecat reports the same corr
+	// (drellem2/pogo#307). "" unless [events] corr_tag_prefix is set and the
+	// item carries a matching tag.
+	corr := r.corrForItem(spawnReq.Id)
+	emitPolecatSpawnRequested(spawnReq, corr)
 
 	// Drain gate: while the self-deploy driver is quiescing the fleet for a
 	// redeploy, refuse new polecat dispatch so the live count can reach zero
@@ -2730,6 +2735,7 @@ func (r *Registry) handleSpawnPolecat(w http.ResponseWriter, req *http.Request) 
 		RestartOnCrash: ResolveRestartOnCrash(promptFile, TypePolecat),
 		WorkItemID:     spawnReq.Id,
 		TargetBranch:   spawnReq.Branch,
+		Corr:           corr,
 		// Tell start-verification that the claim it used to gate on is ours, not
 		// the polecat's (mg-7254). Without this the watcher would read pogod's
 		// own spawn-time claim as "the polecat started" on every dispatch and
@@ -2799,21 +2805,25 @@ func failPolecatSpawn(w http.ResponseWriter, spawnReq SpawnPolecatAPIRequest, st
 //
 // Nothing consumes it. It is a record for readers of the spine; see the
 // comment at its call site for why stall-watch does not read it.
-func emitPolecatSpawnRequested(spawnReq SpawnPolecatAPIRequest) {
+//
+// corr is the item's correlation id (drellem2/pogo#307), "" for none.
+func emitPolecatSpawnRequested(spawnReq SpawnPolecatAPIRequest, corr string) {
 	actor := "pogod"
 	if spawnReq.Name != "" {
 		actor = "cat-" + spawnReq.Name
 	}
+	details := map[string]any{
+		"agent_type": string(TypePolecat),
+		"agent_name": spawnReq.Name,
+		"template":   spawnReq.Template,
+	}
+	addCorr(details, corr)
 	events.Emit(context.Background(), events.Event{
 		EventType:  "agent_spawn_requested",
 		Agent:      actor,
 		WorkItemID: spawnReq.Id,
 		Repo:       spawnReq.Repo,
-		Details: map[string]any{
-			"agent_type": string(TypePolecat),
-			"agent_name": spawnReq.Name,
-			"template":   spawnReq.Template,
-		},
+		Details:    details,
 	})
 }
 

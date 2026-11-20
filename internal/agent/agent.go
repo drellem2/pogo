@@ -106,6 +106,14 @@ type Agent struct {
 	// into its release branch reads as stranded, with a remedy aimed at main.
 	TargetBranch string `json:"target_branch,omitempty"`
 
+	// Corr is the correlation id read off the work item's tags at spawn under
+	// `[events] corr_tag_prefix` (drellem2/pogo#307), or "" when the mapping is
+	// unset or the item carries no matching tag. It is written as
+	// `details.corr` on this agent's agent_spawned, agent_stopped,
+	// agent_crashed and agent_restarted events. Resolved once at spawn and
+	// carried across respawns, like WorkItemID. Immutable after construction.
+	Corr string `json:"corr,omitempty"`
+
 	// Model is the model selection resolved for this agent at spawn (mg-e7f5),
 	// or "" when none was requested and the harness's own configuration decides.
 	// Recorded so "which model is this agent on?" is answerable without parsing
@@ -412,6 +420,7 @@ func (a *Agent) emitSpawned() {
 	if a.WorktreeDir != "" {
 		details["worktree"] = a.WorktreeDir
 	}
+	addCorr(details, a.Corr)
 	events.Emit(context.Background(), events.Event{
 		EventType:  "agent_spawned",
 		Agent:      a.eventAgent(),
@@ -592,6 +601,15 @@ type Registry struct {
 	// difference is deliberate: this gate carries one deployment's policy, not a
 	// platform rule. See dispatchpairing.go.
 	dispatchPairingGate DispatchPairingGate
+
+	// corrTagPrefix is `[events] corr_tag_prefix` (drellem2/pogo#307): the
+	// work-item tag prefix whose value becomes `details.corr` on a polecat's
+	// lifecycle events. "" — the zero value, and so every bare registry —
+	// means no event carries corr. See corr.go.
+	corrTagPrefix string
+	// corrStoreRoot overrides the macguffin store the corr lookup reads; ""
+	// resolves via macguffinStoreRoot. Tests only.
+	corrStoreRoot string
 
 	// strandedWorkGate refuses to dispatch a polecat onto a work item that
 	// already has pushed, unmerged work on a polecat branch (mg-b468). Nil means
@@ -1116,6 +1134,7 @@ type SpawnRequest struct {
 	RestartOnCrash bool     // if true, pogod respawns this agent when it exits unexpectedly
 	WorkItemID     string   // mg work item id this agent is assigned to (polecats); empty for crew/general agents
 	TargetBranch   string   // branch the polecat's work is aimed at; "" = repo default (mg-faa29)
+	Corr           string   // correlation id from the work item's tags (drellem2/pogo#307); "" = none, and no event carries corr
 	ClaimedAtSpawn bool     // pogod claimed WorkItemID before this process started (mg-7254); retires the claim as a started-signal
 
 	// Provider is the harness descriptor resolved for this one spawn. The
@@ -1343,6 +1362,7 @@ func (r *Registry) Spawn(req SpawnRequest) (*Agent, error) {
 		RestartOnCrash: req.RestartOnCrash,
 		WorkItemID:     req.WorkItemID,
 		TargetBranch:   req.TargetBranch,
+		Corr:           req.Corr,
 		Model:          req.Model,
 		ClaimedAtSpawn: req.ClaimedAtSpawn,
 		master:         master,
@@ -1960,6 +1980,7 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 		InitialNudge:   old.InitialNudge,
 		WorkItemID:     old.WorkItemID,
 		TargetBranch:   old.TargetBranch,
+		Corr:           old.Corr,
 		// Carried, not re-resolved: old.Command already carries the model argv,
 		// so a respawn must report the same model it re-execs with.
 		Model:          old.Model,
@@ -2009,16 +2030,18 @@ func (r *Registry) respawn(name string, gen uint64, checkGen bool) (*Agent, erro
 	r.invokeSessionHook(a)
 
 	a.emitSpawned()
+	restartDetails := map[string]any{
+		"previous_pid":  old.PID,
+		"new_pid":       a.PID,
+		"restart_count": restartCount,
+	}
+	addCorr(restartDetails, a.Corr)
 	events.Emit(context.Background(), events.Event{
 		EventType:  "agent_restarted",
 		Agent:      a.eventAgent(),
 		WorkItemID: a.WorkItemID,
 		Repo:       a.SourceRepo,
-		Details: map[string]any{
-			"previous_pid":  old.PID,
-			"new_pid":       a.PID,
-			"restart_count": restartCount,
-		},
+		Details:    restartDetails,
 	})
 
 	// Re-send initial nudge on respawn to bypass the CLI interactive prompt.
@@ -2444,6 +2467,7 @@ func (a *Agent) emitExit(stopRequested bool, stopCause string, exitCode int, dur
 		if stopRequested && stopCause != "" {
 			details["stop_cause"] = stopCause
 		}
+		addCorr(details, a.Corr)
 		events.Emit(context.Background(), events.Event{
 			EventType:  "agent_stopped",
 			Agent:      a.eventAgent(),
@@ -2460,6 +2484,7 @@ func (a *Agent) emitExit(stopRequested bool, stopCause string, exitCode int, dur
 	if last := a.outputBuf.Last(512); len(last) > 0 {
 		details["last_output"] = string(last)
 	}
+	addCorr(details, a.Corr)
 	events.Emit(context.Background(), events.Event{
 		EventType:  "agent_crashed",
 		Agent:      a.eventAgent(),

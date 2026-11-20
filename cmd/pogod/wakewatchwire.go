@@ -14,9 +14,12 @@ import (
 	"github.com/drellem2/pogo/internal/workitem"
 )
 
-// wakeWatchParams maps [wake_watch] onto the watcher's thresholds.
-func wakeWatchParams(c config.WakeWatchConfig) wakewatch.Params {
+// wakeWatchParams maps [wake_watch] onto the watcher's thresholds, and
+// [events] corr_tag_prefix onto whether wake_pointer_sent carries `corr`
+// (drellem2/pogo#307): set iff the tag->corr mapping is configured.
+func wakeWatchParams(c config.WakeWatchConfig, ev config.EventsConfig) wakewatch.Params {
 	return wakewatch.Params{
+		Corr:             ev.CorrEnabled(),
 		Coalesce:         c.Coalesce,
 		RecoveryInterval: c.RecoveryInterval,
 		RenudgeAfter:     c.RenudgeAfter,
@@ -27,9 +30,9 @@ func wakeWatchParams(c config.WakeWatchConfig) wakewatch.Params {
 }
 
 // newWakeWatcher builds the pointer waker (mg-e00c) against pogod's real seams.
-func newWakeWatcher(cfg config.WakeWatchConfig, reg *agent.Registry, coordinator string) *wakewatch.Watcher {
+func newWakeWatcher(cfg config.WakeWatchConfig, ev config.EventsConfig, reg *agent.Registry, coordinator string) *wakewatch.Watcher {
 	root := agent.MacguffinStoreRoot()
-	return wakewatch.New(wakeWatchParams(cfg), wakewatch.Deps{
+	return wakewatch.New(wakeWatchParams(cfg, ev), wakewatch.Deps{
 		EventsPath:  filepath.Join(root, "events.jsonl"),
 		StatePath:   filepath.Join(config.PogoHome(), "wakewatch", "state.json"),
 		Agents:      wakeWatchAgents(reg),
@@ -137,7 +140,7 @@ func emitWakeWatch(eventType, workItemID string, details map[string]any) {
 }
 
 // startWakeWatch arms the waker if [wake_watch] is enabled.
-func startWakeWatch(ctx context.Context, cfg config.WakeWatchConfig, reg *agent.Registry, coordinator string, logf func(string, ...any)) *wakewatch.Watcher {
+func startWakeWatch(ctx context.Context, cfg config.WakeWatchConfig, ev config.EventsConfig, reg *agent.Registry, coordinator string, logf func(string, ...any)) *wakewatch.Watcher {
 	if !cfg.Enabled {
 		logf("pogod: wake-watch DISABLED by [wake_watch] enabled = false — no pointer nudges, re-nudges or bounces (mg-e00c)")
 		return nil
@@ -146,7 +149,7 @@ func startWakeWatch(ctx context.Context, cfg config.WakeWatchConfig, reg *agent.
 		logf("pogod: wake-watch not armed: no agent registry")
 		return nil
 	}
-	w := newWakeWatcher(cfg, reg, coordinator)
+	w := newWakeWatcher(cfg, ev, reg, coordinator)
 	go w.Run(ctx)
 	logf("%s", wakeWatchArmedBanner(w.Params(), coordinator))
 	return w

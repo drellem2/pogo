@@ -1600,6 +1600,16 @@ Flags:
 	// empty repo list makes the gate inert. Wired unconditionally anyway, so
 	// whether it enforces is a question about this host's config.toml and not
 	// about which branch of pogod's startup ran.
+	// Mail -> work item correlation (drellem2/pogo#307): the tag prefix whose
+	// value pogod copies onto a polecat's lifecycle events as details.corr.
+	// Configuration, not code — the shipped default is "mail:" and
+	// `corr_tag_prefix = ""` turns it off.
+	agentRegistry.SetCorrTagPrefix(cfg.Events.CorrTagPrefix)
+	if cfg.Events.CorrEnabled() {
+		log.Printf("event correlation: work-item tag %q<value> -> details.corr on spawn/exit events; wake_pointer_sent carries corr=msg_id ([events] corr_tag_prefix)", cfg.Events.CorrTagPrefix)
+	} else {
+		log.Printf("event correlation: OFF ([events] corr_tag_prefix is empty) — no event carries corr")
+	}
 	agentRegistry.SetDispatchPairingGate(agent.MGDispatchPairingGate{
 		Cfg: cfg.DispatchPairing,
 	})
@@ -3634,7 +3644,7 @@ Flags:
 	// is not running is bounced. ACTS — see docs/CONFIGURATION.md's "What runs by
 	// default" table. Polecats have no mail-check timer since phase 2
 	// (mg-aa74); crew timers are the agents' own registrations (mg-a2ff).
-	startWakeWatch(hbCtx, cfg.WakeWatch, agentRegistry, coordinator, log.Printf)
+	startWakeWatch(hbCtx, cfg.WakeWatch, cfg.Events, agentRegistry, coordinator, log.Printf)
 
 	// Crew context reset (mg-5b58d): a crew agent whose session has run
 	// [crew_reset] after (4h) is mailed once, and reminded once an hour later,
