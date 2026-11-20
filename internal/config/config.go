@@ -992,6 +992,9 @@ type Config struct {
 	DeafWatch DeafWatchConfig
 	// WakeWatch is the pointer-nudge waker (mg-e00c). See WakeWatchConfig.
 	WakeWatch WakeWatchConfig
+	// Events configures what pogod writes into the event spine — today the
+	// work-item tag -> `corr` mapping (drellem2/pogo#307). See EventsConfig.
+	Events EventsConfig
 	// Conditions configures the mail sent by pogod's condition annunciator
 	// (drellem2/pogo#238). See ConditionsConfig.
 	Conditions ConditionsConfig
@@ -2653,6 +2656,11 @@ type parsedConfig struct {
 	ackWatchEnabledSet       bool
 	deafWatchEnabledSet      bool
 	wakeWatchEnabledSet      bool
+	// corrTagPrefixSet exists because `corr_tag_prefix = ""` is the documented
+	// way to turn the tag->corr mapping off: without it an explicit empty value
+	// would be indistinguishable from an absent key and the merge would restore
+	// the shipped "mail:" default (drellem2/pogo#307).
+	corrTagPrefixSet bool
 	// conditionsMailSet / conditionsOutOfBandSet / conditionsDisableSet exist
 	// because both switches default to TRUE and `disable = []` must be able to
 	// clear an earlier layer's list.
@@ -2837,6 +2845,10 @@ func Load() *Config {
 		Conditions: ConditionsConfig{
 			Mail:      true,
 			OutOfBand: true,
+		},
+		// The vanilla convention (drellem2/pogo#307): configuration, not code.
+		Events: EventsConfig{
+			CorrTagPrefix: DefaultCorrTagPrefix,
 		},
 		WakeWatch: WakeWatchConfig{
 			Enabled:          true,
@@ -3171,6 +3183,9 @@ func Load() *Config {
 		}
 		if fileCfg.wakeWatchEnabledSet {
 			cfg.WakeWatch.Enabled = fileCfg.WakeWatch.Enabled
+		}
+		if fileCfg.corrTagPrefixSet {
+			cfg.Events.CorrTagPrefix = fileCfg.Events.CorrTagPrefix
 		}
 		if fileCfg.conditionsMailSet {
 			cfg.Conditions.Mail = fileCfg.Conditions.Mail
@@ -4444,6 +4459,12 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "disable":
 				cfg.Conditions.Disable = parseStringArray(val)
 				cfg.conditionsDisableSet = true
+			}
+		case "events":
+			switch key {
+			case "corr_tag_prefix":
+				cfg.Events.CorrTagPrefix = unquotedVal
+				cfg.corrTagPrefixSet = true
 			}
 		case "wake_watch":
 			switch key {
