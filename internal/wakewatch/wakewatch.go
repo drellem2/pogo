@@ -135,7 +135,9 @@ type Params struct {
 	// Corr, when true, adds `details.corr` equal to msg_id on
 	// wake_pointer_sent (drellem2/pogo#307), so a pointer joins on the same key
 	// as the lifecycle events of a worker filed from that mail. pogod sets it
-	// exactly when `[events] corr_tag_prefix` is configured; false (the zero
+	// exactly when `[events] corr_tag_prefix` is configured AND
+	// `corr_is_msg_id` declares its tag values MSG-IDs (drellem2/pogo#310) —
+	// otherwise corr=msg_id could never join the workers' corr; false (the zero
 	// value) leaves the event as it was. msg_id itself is always kept.
 	Corr bool
 }

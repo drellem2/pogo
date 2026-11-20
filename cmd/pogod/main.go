@@ -1604,12 +1604,7 @@ Flags:
 	// value pogod copies onto a polecat's lifecycle events as details.corr.
 	// Configuration, not code — the shipped default is "mail:" and
 	// `corr_tag_prefix = ""` turns it off.
-	agentRegistry.SetCorrTagPrefix(cfg.Events.CorrTagPrefix)
-	if cfg.Events.CorrEnabled() {
-		log.Printf("event correlation: work-item tag %q<value> -> details.corr on spawn/exit events; wake_pointer_sent carries corr=msg_id ([events] corr_tag_prefix)", cfg.Events.CorrTagPrefix)
-	} else {
-		log.Printf("event correlation: OFF ([events] corr_tag_prefix is empty) — no event carries corr")
-	}
+	log.Print(wireEventCorrelation(agentRegistry, cfg.Events))
 	agentRegistry.SetDispatchPairingGate(agent.MGDispatchPairingGate{
 		Cfg: cfg.DispatchPairing,
 	})

@@ -63,6 +63,54 @@ func TestCorrTagPrefixLayers(t *testing.T) {
 	}
 }
 
+// drellem2/pogo#310: corr_is_msg_id is a claim about what the tag values MEAN,
+// so it stays with the prefix it was made about. Vanilla: on. A layer naming
+// its own prefix drops it unless the same layer restates it.
+func TestCorrIsMsgIDFollowsThePrefixItWasMadeAbout(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"no config", "", true},
+		{"non-default prefix alone", "[events]\ncorr_tag_prefix = \"src:\"\n", false},
+		{"non-default prefix restated", "[events]\ncorr_tag_prefix = \"src:\"\ncorr_is_msg_id = true\n", true},
+		// No prefix value is special-cased: writing the default explicitly
+		// is still a layer stating its own convention.
+		{"default prefix written explicitly", "[events]\ncorr_tag_prefix = \"mail:\"\n", false},
+		{"switch off alone", "[events]\ncorr_is_msg_id = false\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeCapConfig(t, dir, tc.body)
+			ev := loadWithConfigDir(t, dir).Events
+			if ev.CorrIsMsgID != tc.want || ev.PointerCorr() != tc.want {
+				t.Errorf("CorrIsMsgID = %v, PointerCorr = %v; want %v", ev.CorrIsMsgID, ev.PointerCorr(), tc.want)
+			}
+		})
+	}
+}
+
+// Across layers: a lower layer's prefix change drops the claim, and an upper
+// layer that only restates corr_is_msg_id brings it back.
+func TestCorrIsMsgIDLayers(t *testing.T) {
+	dir := t.TempDir()
+	xdg := filepath.Join(dir, "xdg", "pogo")
+	if err := os.MkdirAll(xdg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "config.toml"), []byte("[events]\ncorr_tag_prefix = \"src:\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeCapConfig(t, dir, "")
+	if ev := loadWithConfigDir(t, dir).Events; ev.PointerCorr() {
+		t.Fatalf("lower layer src: with empty upper layer: PointerCorr = true, want false (%+v)", ev)
+	}
+	writeCapConfig(t, dir, "[events]\ncorr_is_msg_id = true\n")
+	if ev := loadWithConfigDir(t, dir).Events; !ev.PointerCorr() || ev.CorrTagPrefix != "src:" {
+		t.Errorf("upper layer restating corr_is_msg_id: %+v, want src: with PointerCorr", ev)
+	}
+}
+
 func TestCorrFromTags(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

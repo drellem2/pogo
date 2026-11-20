@@ -2661,6 +2661,10 @@ type parsedConfig struct {
 	// would be indistinguishable from an absent key and the merge would restore
 	// the shipped "mail:" default (drellem2/pogo#307).
 	corrTagPrefixSet bool
+	// corrIsMsgIDSet tells "this layer said nothing about corr_is_msg_id"
+	// apart from an explicit value, so a layer that names its own
+	// corr_tag_prefix can drop the inherited claim (drellem2/pogo#310).
+	corrIsMsgIDSet bool
 	// conditionsMailSet / conditionsOutOfBandSet / conditionsDisableSet exist
 	// because both switches default to TRUE and `disable = []` must be able to
 	// clear an earlier layer's list.
@@ -2849,6 +2853,7 @@ func Load() *Config {
 		// The vanilla convention (drellem2/pogo#307): configuration, not code.
 		Events: EventsConfig{
 			CorrTagPrefix: DefaultCorrTagPrefix,
+			CorrIsMsgID:   true,
 		},
 		WakeWatch: WakeWatchConfig{
 			Enabled:          true,
@@ -3186,6 +3191,19 @@ func Load() *Config {
 		}
 		if fileCfg.corrTagPrefixSet {
 			cfg.Events.CorrTagPrefix = fileCfg.Events.CorrTagPrefix
+		}
+		// corr_is_msg_id is a claim about what the tag values under
+		// corr_tag_prefix MEAN, so it is only as good as the prefix it was
+		// made about. A layer that names its own prefix names its own
+		// convention; unless the same layer also states corr_is_msg_id, the
+		// inherited claim is dropped rather than carried onto tags it was
+		// never made about (drellem2/pogo#310). This compares no prefix
+		// value: writing even the default prefix explicitly drops it.
+		switch {
+		case fileCfg.corrIsMsgIDSet:
+			cfg.Events.CorrIsMsgID = fileCfg.Events.CorrIsMsgID
+		case fileCfg.corrTagPrefixSet:
+			cfg.Events.CorrIsMsgID = false
 		}
 		if fileCfg.conditionsMailSet {
 			cfg.Conditions.Mail = fileCfg.Conditions.Mail
@@ -4465,6 +4483,9 @@ func parseConfigFileInto(cfg *parsedConfig, path string) error {
 			case "corr_tag_prefix":
 				cfg.Events.CorrTagPrefix = unquotedVal
 				cfg.corrTagPrefixSet = true
+			case "corr_is_msg_id":
+				cfg.Events.CorrIsMsgID = val == "true"
+				cfg.corrIsMsgIDSet = true
 			}
 		case "wake_watch":
 			switch key {

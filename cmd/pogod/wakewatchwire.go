@@ -15,11 +15,12 @@ import (
 )
 
 // wakeWatchParams maps [wake_watch] onto the watcher's thresholds, and
-// [events] corr_tag_prefix onto whether wake_pointer_sent carries `corr`
-// (drellem2/pogo#307): set iff the tag->corr mapping is configured.
+// [events] onto whether wake_pointer_sent carries `corr` (drellem2/pogo#307,
+// #310): set iff a tag->corr mapping is configured AND its tag values are
+// declared MSG-IDs (corr_is_msg_id), the only case in which corr=msg_id joins.
 func wakeWatchParams(c config.WakeWatchConfig, ev config.EventsConfig) wakewatch.Params {
 	return wakewatch.Params{
-		Corr:             ev.CorrEnabled(),
+		Corr:             ev.PointerCorr(),
 		Coalesce:         c.Coalesce,
 		RecoveryInterval: c.RecoveryInterval,
 		RenudgeAfter:     c.RenudgeAfter,
@@ -27,6 +28,27 @@ func wakeWatchParams(c config.WakeWatchConfig, ev config.EventsConfig) wakewatch
 		MaxRenudges:      c.MaxRenudges,
 		Lookback:         c.Lookback,
 	}
+}
+
+// wireEventCorrelation hands [events] corr_tag_prefix to the registry, which
+// stamps details.corr on worker lifecycle events, and returns pogod's startup
+// banner describing which events carry corr (drellem2/pogo#307, #310). The
+// pointer's half is wired separately, through wakeWatchParams.
+func wireEventCorrelation(reg *agent.Registry, ev config.EventsConfig) string {
+	reg.SetCorrTagPrefix(ev.CorrTagPrefix)
+	return corrBanner(ev)
+}
+
+// corrBanner is the startup line for event correlation.
+func corrBanner(ev config.EventsConfig) string {
+	if !ev.CorrEnabled() {
+		return "event correlation: OFF ([events] corr_tag_prefix is empty) — no event carries corr"
+	}
+	pointer := "wake_pointer_sent carries corr=msg_id ([events] corr_is_msg_id)"
+	if !ev.PointerCorr() {
+		pointer = "wake_pointer_sent carries no corr ([events] corr_is_msg_id is off: tag values are not declared MSG-IDs)"
+	}
+	return fmt.Sprintf("event correlation: work-item tag %q<value> -> details.corr on spawn/exit events; %s", ev.CorrTagPrefix, pointer)
 }
 
 // newWakeWatcher builds the pointer waker (mg-e00c) against pogod's real seams.

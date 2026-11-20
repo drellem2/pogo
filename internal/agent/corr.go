@@ -31,6 +31,9 @@ func (r *Registry) SetCorrTagPrefix(prefix string) {
 	r.corrTagPrefix = prefix
 }
 
+// CorrTagPrefix returns the prefix SetCorrTagPrefix last set ("" = off).
+func (r *Registry) CorrTagPrefix() string { return r.getCorrTagPrefix() }
+
 func (r *Registry) getCorrTagPrefix() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

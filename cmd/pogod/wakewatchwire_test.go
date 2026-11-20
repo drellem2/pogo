@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drellem2/pogo/internal/agent"
 	"github.com/drellem2/pogo/internal/config"
 	"github.com/drellem2/pogo/internal/wakewatch"
 )
@@ -101,15 +102,76 @@ func TestWakeWatchArmedBanner(t *testing.T) {
 	}
 }
 
-// drellem2/pogo#307: wake_pointer_sent carries corr exactly when the
-// tag->corr mapping is configured, whatever the prefix.
+// drellem2/pogo#307, #310: wake_pointer_sent carries corr (= msg_id) only
+// when a mapping is configured AND its tag values are declared MSG-IDs. Under
+// a non-default prefix the pointer's corr would be a msg_id while the
+// workers' corr is a `src:` value, so it must be absent, not wrong.
 func TestWakeWatchParamsCorrFollowsEventsConfig(t *testing.T) {
 	for _, tc := range []struct {
-		prefix string
-		want   bool
-	}{{config.DefaultCorrTagPrefix, true}, {"src:", true}, {"", false}} {
-		if got := wakeWatchParams(config.WakeWatchConfig{}, config.EventsConfig{CorrTagPrefix: tc.prefix}).Corr; got != tc.want {
-			t.Errorf("corr_tag_prefix %q: Params.Corr = %v, want %v", tc.prefix, got, tc.want)
+		name string
+		ev   config.EventsConfig
+		want bool
+	}{
+		{"vanilla", config.EventsConfig{CorrTagPrefix: config.DefaultCorrTagPrefix, CorrIsMsgID: true}, true},
+		{"non-default prefix, not msg ids", config.EventsConfig{CorrTagPrefix: "src:"}, false},
+		{"non-default prefix declared msg ids", config.EventsConfig{CorrTagPrefix: "src:", CorrIsMsgID: true}, true},
+		{"mapping off", config.EventsConfig{CorrTagPrefix: "", CorrIsMsgID: true}, false},
+	} {
+		if got := wakeWatchParams(config.WakeWatchConfig{}, tc.ev).Corr; got != tc.want {
+			t.Errorf("%s (%+v): Params.Corr = %v, want %v", tc.name, tc.ev, got, tc.want)
+		}
+	}
+}
+
+// End to end from config.toml: a non-default prefix with nothing else said
+// loads to a pointer with no corr; the vanilla config keeps it.
+func TestWakeWatchParamsCorrFromLoadedConfig(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{"", true},
+		{"[events]\ncorr_tag_prefix = \"src:\"\n", false},
+		{"[events]\ncorr_tag_prefix = \"src:\"\ncorr_is_msg_id = true\n", true},
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// HOME and XDG_CONFIG_HOME too: POGO_HOME alone does not isolate
+		// config.toml (mg-cf9e), and POGO_HOME must not equal HOME (mg-3dc3).
+		t.Setenv("HOME", filepath.Join(dir, "home"))
+		t.Setenv("POGO_HOME", dir)
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+		cfg := config.Load()
+		if got := wakeWatchParams(cfg.WakeWatch, cfg.Events).Corr; got != tc.want {
+			t.Errorf("config %q: Params.Corr = %v, want %v", tc.body, got, tc.want)
+		}
+	}
+}
+
+// The registry half of the wiring (main.go): the configured prefix reaches
+// the registry that stamps worker lifecycle events, and the banner says
+// truthfully whether the pointer carries corr.
+func TestWireEventCorrelation(t *testing.T) {
+	reg, err := agent.NewRegistry(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		ev       config.EventsConfig
+		wantLine string
+	}{
+		{config.EventsConfig{CorrTagPrefix: "mail:", CorrIsMsgID: true}, "wake_pointer_sent carries corr=msg_id"},
+		{config.EventsConfig{CorrTagPrefix: "src:"}, "wake_pointer_sent carries no corr"},
+		{config.EventsConfig{}, "event correlation: OFF"},
+	} {
+		line := wireEventCorrelation(reg, tc.ev)
+		if got := reg.CorrTagPrefix(); got != tc.ev.CorrTagPrefix {
+			t.Errorf("%+v: registry prefix = %q, want %q", tc.ev, got, tc.ev.CorrTagPrefix)
+		}
+		if !strings.Contains(line, tc.wantLine) {
+			t.Errorf("%+v: banner %q lacks %q", tc.ev, line, tc.wantLine)
 		}
 	}
 }

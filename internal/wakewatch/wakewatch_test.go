@@ -1139,7 +1139,7 @@ func TestCoordinatorIsNotMailedAboutItself(t *testing.T) {
 }
 
 // drellem2/pogo#307: with Params.Corr set (pogod sets it exactly when
-// [events] corr_tag_prefix is configured), wake_pointer_sent carries
+// [events] corr_tag_prefix is configured and corr_is_msg_id holds, #310), wake_pointer_sent carries
 // details.corr equal to its msg_id, keeping msg_id. Unset, there is no corr;
 // and a pointer about an assignment, which has no msg_id, has no corr either.
 func TestPointerSentCorr(t *testing.T) {

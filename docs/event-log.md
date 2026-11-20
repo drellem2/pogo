@@ -82,13 +82,16 @@ Since drellem2/pogo#66 a mail's `Message-Id` equals its MSG-ID, and several even
 `corr` is a `details` key, not an envelope field. pogod writes it on these events only:
 
 - `agent_spawn_requested`, `agent_spawned`, `agent_stopped`, `agent_crashed` and `agent_restarted`. Here `corr` is the value of the worker's work-item tag that starts with `[events] corr_tag_prefix`. If several tags match, the first one wins. pogod reads the tag once, when the spawn is requested.
-- `wake_pointer_sent`. Here `corr` equals the event's `msg_id` (the last mail the pointer covers). `msg_id` and `msg_ids` are unchanged. A pointer about an assignment and not a mail has no `msg_id`, so it has no `corr` either.
+- `wake_pointer_sent`, only while `[events] corr_is_msg_id` is on. Here `corr` equals the event's `msg_id` (the last mail the pointer covers). `msg_id` and `msg_ids` are unchanged. A pointer about an assignment and not a mail has no `msg_id`, so it has no `corr` either.
 
 The prefix is configuration (see [CONFIGURATION.md](CONFIGURATION.md) §"Event correlation"). The default is `mail:`, which matches the shipped coordinator prompt: it tags an item it files from mail `mail:<MSG-ID>`, using the first mail that caused it. With that default, `corr` on a worker's events is a MSG-ID, and it joins to `wake_pointer_sent`, `mail.sent` and `mail.read` on the same value. An install that tags differently sets its own prefix, and then `corr` means whatever that install's tags mean.
+
+The pointer's `corr` is a msg_id, so it joins only when the tag values are msg_ids too. pogod cannot know that from the prefix, so `[events] corr_is_msg_id` states it (drellem2/pogo#310). It is on in the vanilla config. A config layer that sets `corr_tag_prefix` without also setting `corr_is_msg_id` turns it off, so moving to `src:` leaves `wake_pointer_sent` without `corr` instead of with one that can never join. An install whose own tags do carry MSG-IDs sets `corr_is_msg_id = true` next to its prefix.
 
 `corr` is absent, never wrong, in each of these cases:
 
 - `corr_tag_prefix = ""`. Then no event carries `corr`, `wake_pointer_sent` included.
+- `corr_is_msg_id` is off (including a layer that set its own prefix and did not restate it). Then `wake_pointer_sent` carries no `corr`; worker events still do.
 - The item has no matching tag. For example, it was not filed from mail, or the coordinator did not tag it.
 - pogod could not read the item when the spawn was requested.
 - The record was written before drellem2/pogo#307. It does not mean the work had no source mail.

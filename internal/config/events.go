@@ -18,16 +18,34 @@ type EventsConfig struct {
 	// (drellem2/pogo#307). When a polecat's work item carries a tag
 	// `<CorrTagPrefix><value>`, pogod adds `details.corr = <value>` to that
 	// item's agent_spawn_requested, agent_spawned, agent_stopped,
-	// agent_crashed and agent_restarted events; and while it is set,
-	// wake_pointer_sent carries `details.corr` equal to its msg_id.
+	// agent_crashed and agent_restarted events.
 	//
 	// Empty means UNSET: no event carries `corr` at all. Default
 	// DefaultCorrTagPrefix.
 	CorrTagPrefix string
+
+	// CorrIsMsgID (`corr_is_msg_id`) states that the values of tags under
+	// CorrTagPrefix are mail MSG-IDs. Only then can wake_pointer_sent carry
+	// `details.corr` equal to its msg_id and have it join the workers' corr
+	// (drellem2/pogo#310). pogod cannot know what an install's tags mean, so
+	// this is the install's claim, not something pogod infers from the prefix.
+	//
+	// Default true, paired with DefaultCorrTagPrefix, because the shipped
+	// coordinator prompt tags items `mail:<MSG-ID>`. A config layer that sets
+	// corr_tag_prefix without also setting corr_is_msg_id resets it to false
+	// (see config.Load), so moving to another prefix never leaves the
+	// pointer's corr asserting the mail convention.
+	CorrIsMsgID bool
 }
 
 // CorrEnabled reports whether a tag->corr mapping is configured.
 func (c EventsConfig) CorrEnabled() bool { return c.CorrTagPrefix != "" }
+
+// PointerCorr reports whether wake_pointer_sent carries `corr` (= its
+// msg_id): only while a mapping is configured AND its tag values are
+// declared to be MSG-IDs. Otherwise the pointer's corr could never equal a
+// worker's corr, so it is left out rather than written wrong.
+func (c EventsConfig) PointerCorr() bool { return c.CorrEnabled() && c.CorrIsMsgID }
 
 // CorrFromTags returns the correlation id carried by tags under prefix: the
 // value after prefix on the FIRST tag that starts with it and has a non-empty
