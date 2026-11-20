@@ -75,6 +75,24 @@ This means v1 readers can consume future v1 logs even after we add new event typ
 - **Polecats:** `cat-<work-item-id>` for polecats spawned from a work item, `cat-<id>` for free polecats. Examples: `cat-mg-0241`, `cat-a3f`.
 - **System actors:** `refinery`, `mg`, `pogod`, `human` for events not attributable to a Claude Code agent.
 
+### Correlating a mail with the work it caused
+
+Since drellem2/pogo#66 a mail's `Message-Id` equals its MSG-ID, and several events already carry it. In macguffin's `events.jsonl`, `mail.sent` and `mail.read` carry it as `msg_id`, and a reply's `mail.sent` carries it as `in_reply_to`. In pogod's events.log, `wake_pointer_sent` carries it as `msg_id`. What none of them records is which work item a mail caused. `corr` fills that gap (drellem2/pogo#307).
+
+`corr` is a `details` key, not an envelope field. pogod writes it on these events only:
+
+- `agent_spawn_requested`, `agent_spawned`, `agent_stopped`, `agent_crashed` and `agent_restarted`. Here `corr` is the value of the worker's work-item tag that starts with `[events] corr_tag_prefix`. If several tags match, the first one wins. pogod reads the tag once, when the spawn is requested.
+- `wake_pointer_sent`. Here `corr` equals the event's `msg_id` (the last mail the pointer covers). `msg_id` and `msg_ids` are unchanged. A pointer about an assignment and not a mail has no `msg_id`, so it has no `corr` either.
+
+The prefix is configuration (see [CONFIGURATION.md](CONFIGURATION.md) §"Event correlation"). The default is `mail:`, which matches the shipped coordinator prompt: it tags an item it files from mail `mail:<MSG-ID>`, using the first mail that caused it. With that default, `corr` on a worker's events is a MSG-ID, and it joins to `wake_pointer_sent`, `mail.sent` and `mail.read` on the same value. An install that tags differently sets its own prefix, and then `corr` means whatever that install's tags mean.
+
+`corr` is absent, never wrong, in each of these cases:
+
+- `corr_tag_prefix = ""`. Then no event carries `corr`, `wake_pointer_sent` included.
+- The item has no matching tag. For example, it was not filed from mail, or the coordinator did not tag it.
+- pogod could not read the item when the spawn was requested.
+- The record was written before drellem2/pogo#307. It does not mean the work had no source mail.
+
 ## Event Catalog (v1)
 
 Event types are grouped below. For each: required envelope fields, `details` schema, and an example JSON line.
@@ -95,6 +113,7 @@ A crew or polecat process has been started by pogod (PTY allocated, Claude Code 
   - `pid` (int, required): operating system PID
   - `prompt_file` (string, required): absolute path to the prompt markdown
   - `worktree` (string, optional): absolute path to the polecat worktree, if applicable
+  - `corr` (string, optional): the work item's correlation id, from a tag matching `[events] corr_tag_prefix`. Absent when the prefix is unset or the item has no matching tag. See [Correlating a mail with the work it caused](#correlating-a-mail-with-the-work-it-caused).
 
 ```json
 {"schema_version":1,"timestamp":"2026-04-25T10:00:00.000000000Z","event_type":"agent_spawned","agent":"cat-mg-0241","work_item_id":"mg-0241","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","pid":48213,"prompt_file":"/Users/daniel/.pogo/agents/templates/polecat.md","worktree":"/Users/daniel/.pogo/polecats/pc-0241"}}
@@ -118,6 +137,7 @@ Identity follows `agent_spawn_failed`: `agent` names the polecat that was *inten
   - `agent_type` (string, required): always `"polecat"`
   - `agent_name` (string, required): the intended agent name, as requested
   - `template` (string, required): the template the caller named explicitly; empty when the template is left to the work item's `type` routing (resolved later, and named on the `gates passed` log line)
+  - `corr` (string, optional): the work item's correlation id, from a tag matching `[events] corr_tag_prefix`. Absent when the prefix is unset or the item has no matching tag. See [Correlating a mail with the work it caused](#correlating-a-mail-with-the-work-it-caused).
 
 ```json
 {"schema_version":1,"timestamp":"2026-11-03T15:30:00.000000000Z","event_type":"agent_spawn_requested","agent":"cat-a3aa1","work_item_id":"mg-a3aa1","repo":"/Users/daniel/dev/pogo","details":{"agent_type":"polecat","agent_name":"a3aa1","template":"polecat-build-pr"}}
@@ -162,6 +182,7 @@ An agent process exited cleanly (received stop signal, completed task, or `pogo 
     - `"done_reap"` — pogod reaping a polecat whose work item is done and which has gone idle
     - `"gate_reap"` — the same reaper stopping a polecat whose work item is parked at `stage: gated`, the gh-issue workflow's human decision gate. The item is **not** closed: this record says the worker was released, never that the work finished (mg-9af1)
   - `duration_seconds` (number, optional): wall-clock seconds since `agent_spawned`
+  - `corr` (string, optional): the work item's correlation id, from a tag matching `[events] corr_tag_prefix`. Absent when the prefix is unset or the item has no matching tag. See [Correlating a mail with the work it caused](#correlating-a-mail-with-the-work-it-caused).
 
 ```json
 {"schema_version":1,"timestamp":"2026-04-25T10:23:14.555000000Z","event_type":"agent_stopped","agent":"cat-mg-0241","work_item_id":"mg-0241","details":{"pid":48213,"exit_code":0,"reason":"task_complete","duration_seconds":1394.555}}
@@ -185,6 +206,7 @@ An agent process exited unexpectedly (non-zero exit code, killed by signal other
   - `exit_code` (int, required): non-zero, or -1 if killed by signal
   - `signal` (string, optional): signal name if killed (e.g. `"SIGKILL"`, `"SIGSEGV"`)
   - `last_output` (string, optional): tail of PTY ring buffer, truncated to ~512 bytes for log size discipline
+  - `corr` (string, optional): the work item's correlation id, from a tag matching `[events] corr_tag_prefix`. Absent when the prefix is unset or the item has no matching tag. See [Correlating a mail with the work it caused](#correlating-a-mail-with-the-work-it-caused).
 
 ```json
 {"schema_version":1,"timestamp":"2026-04-25T11:02:47.200000000Z","event_type":"agent_crashed","agent":"crew-arch","details":{"pid":47011,"exit_code":-1,"signal":"SIGKILL","last_output":"... claude: out of memory"}}
@@ -223,6 +245,7 @@ A crew agent that crashed has been automatically restarted by pogod's supervisor
   - `previous_pid` (int, required): PID of the crashed process
   - `new_pid` (int, required): PID of the new process
   - `restart_count` (int, required): cumulative restart count for this agent since pogod started
+  - `corr` (string, optional): as for `agent_spawned`, carried over from the original spawn. In practice it is always absent today, because only crew agents are restarted and crew agents have no work item.
 
 ```json
 {"schema_version":1,"timestamp":"2026-04-25T11:02:50.310000000Z","event_type":"agent_restarted","agent":"crew-arch","details":{"previous_pid":47011,"new_pid":47089,"restart_count":2}}

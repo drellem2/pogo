@@ -967,6 +967,17 @@ For each message, read it with `mg mail read {{.Coordinator}} <msg-id>` — this
 
    against your last recorded activity — your last `pogo turn-done` line in `~/.pogo/agents/turnlog/{{.Coordinator}}.log`, or your last `~/.pogo/agents/{{.Coordinator}}/sweep.log` entry. Anything that landed between that timestamp and the bounce is suspect **regardless of read state**. `--all` is not a convenience: the unread filter cannot surface a read-but-unhandled mail by construction, which is the whole failure mode. On the 2026-08-12 03:01 bounce two agents each recovered a mail this way that the unread filter had already lost permanently — both had bullets 1–3 above in their prompts, which is why the restart case is spelled out here rather than left to follow from "interruption".
 
+**Filing a work item from a mail? Tag it with the mail's id.** When a mail causes you to file an `mg` item (disposition 2 above), add the tag `mail:<MSG-ID>`, using the id of the **first** mail that caused the item. Add one tag only, even when later mail adds to the same request:
+
+```bash
+mg new --type=<type> --tags=mail:<MSG-ID> --title="<title>" --body-file - <<'EOF'
+...
+EOF
+# already filed? mg edit <id> --add-tags=mail:<MSG-ID>
+```
+
+This is the default convention, and it works because the default config matches it: `[events] corr_tag_prefix = "mail:"`. With that setting pogod copies the tag's value onto the item's worker spawn and exit events as `details.corr`. Anyone reading the logs can then join the mail to the work it caused without guessing (drellem2/pogo#307). pogod does not require the tag. An item without it simply has no `corr`. If this install sets a different `corr_tag_prefix`, use that prefix instead. If it sets `corr_tag_prefix = ""`, the tag does nothing.
+
 Your inbox is for **coordination only**. If you have something for the user, send it to `human` (not to your own thread). Do not summarize or forward mail addressed to other agents into your own inbox — the apple-side notifier polls `human/new/` and delivers user-facing mail directly.
 
 Agents and the refinery mail you when things need attention:

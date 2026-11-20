@@ -78,6 +78,7 @@ cap and `load_gate_fleet_share = 0` for the host load gate.
 | `[conditions]` | `out_of_band` | on | observes | `off`: no mail from this watcher to [agents] escalation_box; the coordinator and events.log are unchanged. See [pogod's own conditions](#pogods-own-conditions-conditions). |
 | `[conditions]` | `disable` | inert | observes | Lists conditions by id whose mail is off, for example `["scheduler_load_failed", "autostart_failed"]`. A disabled condition has no reader but events.log. See [pogod's own conditions](#pogods-own-conditions-conditions). |
 | `[wake_watch]` | `enabled` | on | ACTS | Types a pointer of at most 100 characters into an agent's terminal when mail or an assignment arrives for it, re-points work left unconsumed and then mails `mayor`, and mails the sender and `mayor` when mail goes to an agent that is not running. For a polecat the pointer is the only wake: pogod registers no mail-check timer for it. See [wake-watch](#the-pointer-waker-wake-watch). Code: `internal/wakewatch`. |
+| `[events]` | `corr_tag_prefix` | on | observes | Copies a work item's correlation id onto its worker's lifecycle events. When the item carries a tag `<prefix><value>` (default prefix `mail:`, first match wins), pogod adds `details.corr = <value>` to `agent_spawn_requested`, `agent_spawned`, `agent_stopped`, `agent_crashed` and `agent_restarted`, and `wake_pointer_sent` carries `corr` equal to its `msg_id`. `""` turns it off and no event carries `corr`. See [Event correlation](#event-correlation-events-corr_tag_prefix). |
 | `[heart_watch]` | `enabled` | on | observes | Mails when a crew heartbeat goes stale. `restart_after` is a threshold in the notice; heart-watch restarts nothing. See [heart-watch](#who-reads-the-crew-heartbeat-when-the-coordinator-is-dark-heart-watch). |
 | `[crew_reset]` | `enabled` | on | ACTS | Mails a crew agent whose session has run 4h, asking it to write a handoff note at its next safe point and run `pogo agent stop` on itself, so restart_on_crash brings it back in a fresh session. It asks at most twice per session and stops nothing itself. See [crew-reset](#crew-context-reset-crew-reset). Code: `internal/crewreset`. |
 | `[blind_watch]` | `enabled` | on | observes | Mails when wedge-watch keeps declining to judge an agent. See [blind-watch](#who-reads-a-detector-that-says-it-cannot-answer-blind-watch). |
@@ -834,6 +835,37 @@ directions — see [docs/customizing.md](customizing.md) §"Declare how an agent
 is woken". pogod logs the value at startup, and logs an unrecognised value as an
 error; agents are then judged as `mail-check`. This is the one switch wakewatch
 phase 3 (mg-a2ff) uses to take crew off their timers.
+
+## Event correlation (`[events] corr_tag_prefix`)
+
+Which work-item tag pogod reads as the item's correlation id, so a mail can be
+joined to the worker it caused (drellem2/pogo#307):
+
+```toml
+[events]
+corr_tag_prefix = "mail:"   # the default; "" turns correlation off
+```
+
+When a worker's work item carries a tag that starts with this prefix, pogod
+copies the rest of the tag onto that worker's `agent_spawn_requested`,
+`agent_spawned`, `agent_stopped`, `agent_crashed` and `agent_restarted` events
+as `details.corr`. If the item has more than one such tag, the first one wins.
+While the prefix is set, `wake_pointer_sent` also carries `details.corr`, equal
+to its `msg_id`. See [docs/event-log.md](event-log.md) §"Correlating a mail
+with the work it caused".
+
+This is a **convention, not a rule pogod enforces.** pogod does not know what
+the value means. The `mail:` default matches the shipped coordinator prompt,
+which tags an item it files from mail `mail:<MSG-ID>` with the id of the first
+mail that caused it. If your coordinator tags items another way, set your own
+prefix (for example `corr_tag_prefix = "src:"`). Then a `mail:` tag is ignored.
+To turn correlation off, set `corr_tag_prefix = ""`. Then no event carries
+`corr`, whatever tags an item has.
+
+pogod never guesses a value. If the item has no matching tag, or pogod cannot
+read the item, `corr` is left out. The tag is read once, when the spawn is
+requested, and a respawned worker keeps the same `corr`. pogod logs the prefix
+at startup, or logs that correlation is off.
 
 ## Agent PATH (extra_path)
 
@@ -3250,7 +3282,9 @@ Every decision is an event in `events.log`, the silent ones included:
 `wake_pointer_skipped` (self-sent, self-assigned, not an agent's box, pogod's own
 mail), `wake_watch_armed`, `wake_watch_blind` and `wake_watch_sighted`. Each
 carries the recipient, the trigger event, the msg id or item id, and `text_len`,
-the length of the text sent.
+the length of the text sent. While `[events] corr_tag_prefix` is set,
+`wake_pointer_sent` also carries `corr`, equal to its msg id (see
+[Event correlation](#event-correlation-events-corr_tag_prefix)).
 
 **A missing `events.jsonl` means no data, never no mail.** While the file is
 absent, wake-watch is blind: it records `wake_watch_blind` once and suspends
